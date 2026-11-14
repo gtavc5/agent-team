@@ -199,22 +199,24 @@ button {
   cursor: not-allowed;
 }
 
-.ws-report-btn {
+.report-switch {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   white-space: nowrap;
-  margin-right: 6px;
 }
-.ws-report-btn::before {
+.report-switch::before {
   content: "";
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--text-muted);
 }
-.ws-report-btn.on::before {
+.report-switch.on::before {
   background: var(--success);
+}
+.ws-report-btn {
+  margin-right: 6px;
 }
 
 /* ---- Sidebar ------------------------------------------------------------ */
@@ -2828,7 +2830,8 @@ button.action-target:hover {
   .pr-closed .pr-number {
     color: var(--error);
   }
-  .ws-archive-btn {
+  .ws-archive-btn,
+  .ws-report-btn {
     display: none;
   }
   .archived-banner {

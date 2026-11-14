@@ -9,12 +9,14 @@ import { AgentTasks, hasWork, soon, workCount, type TaskActions } from "./Sessio
 import { Icon } from "./Icon";
 import { InlineMd } from "../chat/markdown";
 import { RoleTag } from "../workspace/RoleTag";
+import { ReportSwitch } from "../workspace/ReportSwitch";
 
 export interface AgentsPanelActions extends TaskActions {
   onOpen: (workspaceId: string) => void;
   onStop: (workspaceId: string) => void;
   onArchive: (workspaceId: string) => void;
   onRestore: (workspaceId: string) => void;
+  onSetReporting: (workspaceId: string, reports: boolean) => void;
   onAddAgent: (workspaceId: string) => void;
   onClearContext: (workspaceId: string, agentId: string) => void;
   onRemoveAgent: (workspaceId: string, agentId: string) => void;
@@ -226,6 +228,11 @@ function SessionCard({
                   Stop everything
                 </button>
               )}
+              <ReportSwitch
+                link={w.projectLink}
+                className="panel-btn"
+                onSet={(reports) => actions.onSetReporting(w.id, reports)}
+              />
               {state === "archived" ? (
                 <button className="panel-btn" onClick={() => actions.onRestore(w.id)}>
                   Restore

@@ -52,6 +52,7 @@ const actions = (): AgentsPanelActions => ({
   onStop: vi.fn(),
   onArchive: vi.fn(),
   onRestore: vi.fn(),
+  onSetReporting: vi.fn(),
   onAddAgent: vi.fn(),
   onClearContext: vi.fn(),
   onRemoveAgent: vi.fn(),

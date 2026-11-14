@@ -5,15 +5,17 @@ import type { ProjectLink } from "../state/useServer";
 export function ReportSwitch({
   link,
   onSet,
+  className = "btn-ghost ws-report-btn",
 }: {
   link?: ProjectLink;
   onSet: (reports: boolean) => void;
+  className?: string;
 }) {
   if (link?.role !== "worker") return null;
   const reports = !link.unreported;
   return (
     <button
-      className={`btn-ghost ws-report-btn${reports ? " on" : ""}`}
+      className={`${className} report-switch${reports ? " on" : ""}`}
       aria-pressed={reports}
       title={
         reports

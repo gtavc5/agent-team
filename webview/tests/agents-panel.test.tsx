@@ -118,6 +118,7 @@ describe("AgentsPanel", () => {
     onStop: vi.fn(),
     onArchive: vi.fn(),
     onRestore: vi.fn(),
+    onSetReporting: vi.fn(),
     onAddAgent: vi.fn(),
     onClearContext: vi.fn(),
     onRemoveAgent: vi.fn(),
@@ -285,6 +286,18 @@ describe("AgentsPanel", () => {
     for (const h of heads) expect(h.lastElementChild!.className).toBe("ap-when");
   });
 
+  it("switches whether a session reports to the lead, the lead having no switch", () => {
+    const { container, a } = panel();
+    const card = (name: string) => container.querySelector(`[aria-label="${name}"]`)!;
+    expect(card("clice · lead").querySelector(".report-switch")).toBeNull();
+    const own = card("modules").querySelector<HTMLButtonElement>(
+      ".ap-session-foot .report-switch",
+    )!;
+    expect(own.textContent).toBe("Reports to lead");
+    fireEvent.click(own);
+    expect(a.onSetReporting).toHaveBeenCalledWith("w1", false);
+  });
+
   it("keeps archived sessions folded away, restorable", () => {
     const { container, a } = panel();
     const archived = container.querySelector(".ap-archived")!;
@@ -308,6 +321,7 @@ describe("a session's actions by its state", () => {
           onStop: vi.fn(),
           onArchive: vi.fn(),
           onRestore: vi.fn(),
+          onSetReporting: vi.fn(),
           onAddAgent: vi.fn(),
           onClearContext: vi.fn(),
           onRemoveAgent: vi.fn(),
@@ -675,6 +689,7 @@ describe("an agent's state line", () => {
           onStop: vi.fn(),
           onArchive: vi.fn(),
           onRestore: vi.fn(),
+          onSetReporting: vi.fn(),
           onAddAgent: vi.fn(),
           onClearContext: vi.fn(),
           onRemoveAgent: vi.fn(),
@@ -773,6 +788,7 @@ describe("switching an agent's model and effort", () => {
           onStop: vi.fn(),
           onArchive: vi.fn(),
           onRestore: vi.fn(),
+          onSetReporting: vi.fn(),
           onAddAgent: vi.fn(),
           onClearContext: vi.fn(),
           onRemoveAgent: vi.fn(),
