@@ -223,10 +223,11 @@ describe("copying a selection from a reply", () => {
       <MessageItem msg={message({ content: "intro\n\n```\nls\n```\n\noutro" })} agents={agents} />,
     ).container;
     const content = c.querySelector(".message-content")!;
-    const pre = content.querySelector("pre")!;
-    const before = rangeOver(content, 0, pre, 0);
+    // Split around the button, the code block's first child.
+    const block = content.querySelector(".code-block")!;
+    const before = rangeOver(content, 0, block, 0);
     const after = document.createRange();
-    after.setStart(pre, 1);
+    after.setStart(block, 1);
     after.setEndAfter(content.lastChild!);
     vi.stubGlobal("getSelection", () => ({
       isCollapsed: false,
@@ -339,6 +340,10 @@ describe("Copy buttons", () => {
     const texts = stubExecCommand();
     const { container } = render(<MdBlock>{"```sh\nls foo_bar/\n```"}</MdBlock>);
     const button = container.querySelector(".copy-btn")!;
+    // Beside the block, not inside what scrolls sideways.
+    expect(button.parentElement!.className).toBe("code-block");
+    expect(button.nextElementSibling!.tagName).toBe("PRE");
+    expect(container.querySelector("pre .copy-btn")).toBeNull();
     await click(button);
     expect(texts).toEqual(["ls foo_bar/"]);
     expect(button.textContent).toBe("Copied");

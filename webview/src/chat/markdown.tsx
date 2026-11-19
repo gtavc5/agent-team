@@ -43,11 +43,15 @@ export function CodeBlock({ children, node: _node, ...rest }: ComponentProps<"pr
     const code = preRef.current?.querySelector("code");
     return code ? codeText(code) : "";
   };
+  // The button sits outside the <pre>: inside, it scrolled away with a wide
+  // block's lines.
   return (
-    <pre {...rest} ref={preRef}>
+    <div className="code-block">
       <CopyButton text={text} />
-      {children}
-    </pre>
+      <pre {...rest} ref={preRef}>
+        {children}
+      </pre>
+    </div>
   );
 }
 

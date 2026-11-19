@@ -277,20 +277,24 @@ describe("the transcript's rules", () => {
   });
 
   it("float a code block's Copy over its corner, taking no room from the code", () => {
-    const copy = rule("pre .copy-btn");
+    const copy = rule(".code-block .copy-btn");
     expect(copy.body).toMatch(/float:\s*right/);
-    // Positioned, so it is drawn above the text it overlaps.
+    // Positioned and stacked, so it is drawn above the code it overlaps.
     expect(copy.body).toMatch(/position:\s*sticky/);
-    // No width or height left for the text to wrap around.
-    expect(copy.body).toMatch(/margin:\s*-4px -6px -100% -100%/);
-    // On touch it stays faintly visible; nothing moves it off the code.
+    expect(copy.body).toMatch(/z-index:\s*1/);
+    // No width or height left for the code to wrap around.
+    expect(copy.body).toMatch(/margin:\s*6px 6px -100% -100%/);
+    // On touch it stays faintly visible and grows to a finger's size; nothing
+    // moves it off the code.
     const touch = all.filter((r) => r.selectors.some((s) => s.includes(".copy-btn")) && r.media);
-    expect(touch.map((r) => r.body.trim())).toEqual(["opacity: 0.6;"]);
+    expect(touch.map((r) => r.body.replace(/\s+/g, " ").trim())).toEqual([
+      "opacity: 1; font-size: 12.5px; padding: 4px 11px;",
+    ]);
   });
 
   it("give a tool's path block the same Copy, the path wrapping around it", () => {
     const copy = rule(".event-summary-line .copy-btn");
-    expect(copy).toBe(rule("pre .copy-btn"));
+    expect(copy).toBe(rule(".code-block .copy-btn"));
     expect(copy.body).toMatch(/user-select:\s*none/);
     // Its own margins after the shared ones: the first line makes room.
     const own = all.filter(
@@ -303,7 +307,7 @@ describe("the transcript's rules", () => {
     const touch = all.find(
       (r) => r.selectors.includes(".event-summary-line .copy-btn") && r.media,
     )!;
-    expect(touch.body).toMatch(/opacity:\s*0\.6/);
+    expect(touch.body).toMatch(/opacity:\s*1;/);
   });
 
   it("keep images their own shape, and a queued message's ✕ a target bigger than its glyph", () => {
