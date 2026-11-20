@@ -237,8 +237,9 @@ export const MODEL_OPTIONS: ModelOption[] = [
     cursorParams: { effort: "reasoning_effort" },
   },
   // Gemini through agy on the user's Google AI Ultra plan (`agy acp`
-  // session/new: model and thought_level options; defaultEffort is the
-  // level agy starts the model on).
+  // session/new: model and thought_level options). The session sets the
+  // level for every prompt, defaultEffort when the agent names none (agy
+  // 1.5.13 starts a new session on Neon at high).
   {
     id: "agy/gemini-4-carbon",
     label: "Gemini 4 Carbon",
