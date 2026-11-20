@@ -47,5 +47,8 @@ export default fixture({
     // usage, which sums the turn's model calls.
     expect(first.context?.window).toBe(1048576);
     expect(first.context!.tokens).toBeLessThan(15_000);
+    // A prompt's inputTokens leave out the cached reads: nothing is taken
+    // off them.
+    expect(r.sessions[0].usage.input_tokens).toBeGreaterThan(0);
   },
 });

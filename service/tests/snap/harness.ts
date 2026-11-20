@@ -241,7 +241,7 @@ class SnapHost extends LocalHost {
   }
 }
 
-function makeWorkspace(model: string) {
+function makeWorkspace(model: string, effort: string | undefined) {
   const host = new SnapHost("local", "Local");
   const registry = new HostRegistry();
   registry.register(host);
@@ -254,7 +254,11 @@ function makeWorkspace(model: string) {
   const backend = backendForModel(model);
   // The recording's agent stands in for the SDK, so no real key is read.
   const providerEnv = backend === "cursor" ? { CURSOR_API_KEY: "replay" } : undefined;
-  ws.addAgent("A", model, "🤖", "#888", { backend, providerEnv, effort: RECORD_EFFORT[backend] });
+  ws.addAgent("A", model, "🤖", "#888", {
+    backend,
+    providerEnv,
+    effort: effort ?? RECORD_EFFORT[backend],
+  });
   return { ws, host };
 }
 
@@ -278,7 +282,7 @@ function restart(ws: Workspace, host: SnapHost, tools: PanelToolset | null): voi
 
 export async function replay(backend: Backend, rec: Recording, fixture: Fixture): Promise<Replay> {
   const model = rec.header.model || DEFAULT_MODEL[backend];
-  const { ws, host } = makeWorkspace(model);
+  const { ws, host } = makeWorkspace(model, fixture.effort);
   const tools = fixture.tools ? panelTools(fixture.tools, fixture.instructions) : null;
   for (const entry of ws.agents.values()) entry.session.setPanelTools?.(tools);
   const events: StreamEvent[] = [];

@@ -702,7 +702,7 @@ async function agyDriver(tape: Tape, model: string, fixture: Fixture): Promise<D
     cwd: RECORD_CWD,
     backend: "agy",
     model,
-    effort: RECORD_EFFORT.agy,
+    effort: fixture.effort ?? RECORD_EFFORT.agy,
   });
   if (fixture.tools) session.setPanelTools(panelTools(fixture.tools, fixture.instructions));
   session.on("event", (e: { kind: string }) => {

@@ -65,6 +65,8 @@ export interface CodexTool {
 export interface Fixture {
   description: string;
   model?: string;
+  // agy: the thought level, when not RECORD_EFFORT's.
+  effort?: string;
   // Extra options for the recording: Claude SDK options (e.g.
   // perTaskStopAffordance), codex thread/start params, Cursor agent options
   // (local.customTools).

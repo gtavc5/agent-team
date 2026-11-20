@@ -11,7 +11,7 @@ Frame shapes and order from the Claude CLI, `codex app-server`, the Cursor SDK a
 
 Every recording is a real session on the user's account. Bursts of sessions can get the account **banned**. Record only the fixture the current bug needs (one or two), never "all of them"; the recorder refuses more than 4 per run and pauses 30 s between them — do not shorten that; never loop recordings to "try again". Reuse an existing recording whenever one shows the frames you need (`ls service/tests/snap/{claude,codex,cursor,agy}`).
 
-agy recordings spend the user's limited Gemini quota (Google AI Ultra, shared with other projects' agy runs and the user's own): before each, `pgrep -a agy` in a call of its own, and wait while another `agy -p`/`--print` run is going; recordings run on `agy/gemini-3.8-flash` at thought level low.
+agy recordings spend the user's limited Gemini quota (Google AI Ultra, shared with other projects' agy runs and the user's own): before each, `pgrep -a agy` in a call of its own, and wait while another `agy -p`/`--print` run is going; recordings run on `agy/gemini-3.8-flash` at thought level low (`effort:` in a fixture that needs thoughts, which low does not stream). At high Flash thinks long, and asking it to write out a list of number words tripped Gemini's recitation filter into minutes of retries: keep what a recording asks for short and original.
 
 ## Anatomy
 

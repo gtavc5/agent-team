@@ -57,8 +57,11 @@ export const AGY_INSTRUCTIONS =
 // something is followed by another after `followUpMs`, and while
 // background work runs a load comes every `pollMs` in case neither says
 // anything.
-// A subagent's load that takes longer found it mid model call.
-const CHILD_BUSY_MS = 1_000;
+// A load that takes longer found agy mid model call (agy answers it as the
+// call ends, or in 2 s; at rest in ~0.1 s, a 2.6 MB conversation too).
+const BUSY_LOAD_MS = 1_000;
+// How long a load waits for the end of a message agy is streaming.
+const MESSAGE_WAIT_MS = 30_000;
 
 export const IDLE_TIMINGS = { settleMs: 3_000, followUpMs: 10_000, pollMs: 60_000 };
 const MODEL_CALL = /streamGenerateContent/;
@@ -74,6 +77,9 @@ const IDLE_WORK = new Set<SessionUpdate["sessionUpdate"]>([
 // message (a reply's text comes whole, not in its streamed pieces) and per
 // tool call, in its latest state.
 type Item = { kind: "user" | "agent" | "thought"; text: string } | { kind: "tool"; call: ToolCall };
+
+// What a turn streamed of its own, by message kind.
+type Own = { agent: string; thought: string };
 
 // A subagent agy started (invoke_subagent): a card of the call's, its
 // conversation, once found, loaded with the main one's.
@@ -144,6 +150,14 @@ export class AgySession extends EventEmitter {
   private logOffset = 0;
   // agy's log showed a model call while idle since the last load began.
   private idleActivity = false;
+  // agy streams a message while idle and has not ended the model call yet
+  // (each ends with a usage_update): a load now would replay pieces of it
+  // among the stored messages (agy/idle-stream), so loads wait for the end.
+  private midMessage = false;
+  private messageAt = 0;
+  private messageWaiters: Array<() => void> = [];
+  // A model call ended while a load ran.
+  private callEndedInLoad = false;
   private agyPid: number | undefined;
   // When this agy process started: a subagent of its was created after.
   private startedAt = 0;
@@ -159,13 +173,18 @@ export class AgySession extends EventEmitter {
   // Follow-up loads still owed to a background command whose end a load
   // showed before agy's reply to it.
   private awaitReply = 0;
-  // The text the running turn streamed, as agy sent it, and whether it
-  // streamed thoughts; at its end, for the load after it, which finds all
-  // that stored and must not take it for idle work (kept until a load
-  // succeeds).
+  // Background commands a load showed ending before anything agy did after:
+  // the wake-up that shows it names them, up to the load that settles the
+  // next turn.
+  private endedUnshown: string[] = [];
+  // The text and thoughts the running turn streamed, as agy sent them; at
+  // its end, for the load after it, which finds all that stored and must
+  // not take it for idle work (kept until a load succeeds).
   private ownText = "";
-  private ownThought = false;
-  private ownTurn: { text: string; thought: boolean } | null = null;
+  private ownThought = "";
+  private ownTurn: Own | null = null;
+  // A load before this turn's prompt showed what agy did meanwhile.
+  private wokeInline = false;
   private textEmitted = false;
   private afterText = false;
   private thinking = "";
@@ -428,9 +447,11 @@ export class AgySession extends EventEmitter {
     this.known = null;
     this.ownTurn = null;
     this.idleActivity = false;
+    this.messageEnded();
     this.childReplay.clear();
     this.questionPending = false;
     this.awaitReply = 0;
+    this.endedUnshown = [];
     this.stopCalls();
     this.calls.clear();
     this.answers = [];
@@ -502,7 +523,8 @@ export class AgySession extends EventEmitter {
     this.turnStartedAt = Date.now();
     this.interruptRequested = false;
     this.ownText = "";
-    this.ownThought = false;
+    this.ownThought = "";
+    this.wokeInline = false;
     this.promptSent = false;
     this.resetTurn();
     this.stopIdleTimers();
@@ -523,7 +545,15 @@ export class AgySession extends EventEmitter {
       // to one is awaited, or there is no log to tell. The load after this
       // turn tells the turn's own items from the rest by the last one.
       // Subagents' cards wait for the loads after it.
-      if (this.known && this.mayHaveWorked()) await this.startLoad(false);
+      if (this.known && this.mayHaveWorked()) {
+        await this.untilMessageEnds();
+        if (generation !== this.generation) return;
+        if (this.interruptRequested) {
+          this.endTurn({ kind: "result", content: "", interrupted: true });
+          return;
+        }
+        await this.startLoad(false);
+      }
       if (generation !== this.generation) return;
       // agy waits on a question in this process: the answer goes to a new
       // one, unless that would end work still running here (agy then only
@@ -599,6 +629,7 @@ export class AgySession extends EventEmitter {
   interrupt(): Promise<boolean> {
     if (!this.busy) return Promise.resolve(false);
     this.interruptRequested = true;
+    for (const done of this.messageWaiters.splice(0)) done();
     if (this.prompting && this.client) {
       this.client.notify("session/cancel", { sessionId: this.sessionId });
     }
@@ -647,6 +678,8 @@ export class AgySession extends EventEmitter {
 
   private completeTurn(res: PromptResponse): void {
     this.prompting = false;
+    // agy ends the model call it was in before it takes a prompt.
+    this.messageEnded();
     this.flushThought();
     const u = res.usage ?? {};
     const input = u.inputTokens ?? 0;
@@ -712,6 +745,8 @@ export class AgySession extends EventEmitter {
   // idle shows against it.
   private afterTurn(): void {
     if (!this.client || !this.sessionId) return;
+    // Stopped while waiting on a message agy streams: its end loads.
+    if (this.streamingMessage()) return;
     void this.startLoad();
   }
 
@@ -720,7 +755,13 @@ export class AgySession extends EventEmitter {
   private noteOwnTurn(): void {
     if (!this.promptSent) return;
     this.promptSent = false;
-    this.ownTurn = { text: this.ownText, thought: this.ownThought };
+    // One a load has not taken yet (it failed) goes on with this one: the
+    // next load finds both turns.
+    const prev = this.ownTurn;
+    this.ownTurn = {
+      agent: (prev?.agent ?? "") + this.ownText,
+      thought: (prev?.thought ?? "") + this.ownThought,
+    };
   }
 
   // --- updates ---------------------------------------------------------------
@@ -746,7 +787,15 @@ export class AgySession extends EventEmitter {
     // The context after each model call, also in a load's replay; the
     // prompt's usage sums the turn's calls and is no context figure.
     if (u.sessionUpdate === "usage_update") {
+      // Each model call ends with one, of the context it left; a load's
+      // repeats the last.
+      const callEnd = !!u.used && u.used !== this.context?.tokens;
       if (u.used && u.size) this.context = { tokens: u.used, window: u.size };
+      if (this.replay && callEnd) this.callEndedInLoad = true;
+      if (!this.prompting && this.midMessage && (callEnd || !this.replay)) {
+        this.messageEnded();
+        this.idleWork();
+      }
       return;
     }
     if (this.replay) {
@@ -757,7 +806,35 @@ export class AgySession extends EventEmitter {
     // What agy does while no prompt runs streams as it happens (1.5.13,
     // agy/background), a sign it works as its log's model calls are; loads
     // show it.
-    else if (IDLE_WORK.has(u.sessionUpdate)) this.idleWork();
+    else if (IDLE_WORK.has(u.sessionUpdate)) {
+      if (u.sessionUpdate === "agent_message_chunk" || u.sessionUpdate === "agent_thought_chunk") {
+        this.midMessage = true;
+        this.messageAt = Date.now();
+      }
+      this.idleWork();
+    }
+  }
+
+  private streamingMessage(): boolean {
+    return this.midMessage && Date.now() - this.messageAt < MESSAGE_WAIT_MS;
+  }
+
+  private messageEnded(): void {
+    this.midMessage = false;
+    for (const done of this.messageWaiters.splice(0)) done();
+  }
+
+  // Until the message agy is streaming ends, Stop, or MESSAGE_WAIT_MS.
+  private untilMessageEnds(): Promise<void> {
+    if (!this.streamingMessage()) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(done, MESSAGE_WAIT_MS - (Date.now() - this.messageAt));
+      function done() {
+        clearTimeout(timer);
+        resolve();
+      }
+      this.messageWaiters.push(done);
+    });
   }
 
   // agy (1.5.13+) does not echo the prompt: all a prompt streams is its
@@ -771,7 +848,7 @@ export class AgySession extends EventEmitter {
         break;
       }
       case "agent_thought_chunk":
-        this.ownThought = true;
+        this.ownThought += str(u.content?.text);
         this.thought(str(u.content?.text));
         break;
       case "tool_call":
@@ -1114,6 +1191,10 @@ export class AgySession extends EventEmitter {
   // own, as a Claude wake-up is.
   checkIdle(): void {
     if (!this.client || !this.sessionId || this.busy || this.loading) return;
+    if (this.streamingMessage()) {
+      this.idleWork();
+      return;
+    }
     AgySession.hooks?.onIdleCheck?.(this);
     void this.startLoad();
   }
@@ -1124,6 +1205,7 @@ export class AgySession extends EventEmitter {
   private mayHaveWorked(): boolean {
     return (
       this.idleActivity ||
+      this.midMessage ||
       this.awaitReply > 0 ||
       this.answers.length > 0 ||
       this.ownTurn !== null ||
@@ -1147,13 +1229,17 @@ export class AgySession extends EventEmitter {
     if (!client) return;
     const updates: SessionUpdate[] = [];
     this.idleActivity = false;
+    const params = {
+      sessionId: this.sessionId,
+      cwd: this.config.cwd,
+      ...(await this.sessionParams()),
+    };
+    if (client !== this.client) return;
     this.replay = updates;
+    this.callEndedInLoad = false;
+    const asked = Date.now();
     try {
-      await client.request("session/load", {
-        sessionId: this.sessionId,
-        cwd: this.config.cwd,
-        ...(await this.sessionParams()),
-      });
+      await client.request("session/load", params);
     } catch {
       return;
     } finally {
@@ -1163,6 +1249,17 @@ export class AgySession extends EventEmitter {
     const items = conversation(updates);
     const known = this.known;
     this.known = items;
+    // One that found agy mid model call and ends on a message new to it
+    // may have caught a piece of one agy is still streaming: the next
+    // load waits for that call's end.
+    const last = items.at(-1);
+    const slow = Date.now() - asked >= BUSY_LOAD_MS;
+    if (slow && !this.callEndedInLoad && (last?.kind === "agent" || last?.kind === "thought")) {
+      if (messageCount(items) > messageCount(known ?? [])) {
+        this.midMessage = true;
+        this.messageAt = Date.now();
+      }
+    }
     // Calls still open here that agy has finished, even before the load
     // after their turn (that one is the baseline for the rest).
     const completed: ToolCall[] = [];
@@ -1179,6 +1276,8 @@ export class AgySession extends EventEmitter {
     if (own) {
       fresh = this.notOwn(fresh, own);
       this.ownTurn = null;
+      // What agy did about a command's end by the turn's end was the turn's.
+      this.endedUnshown = [];
     }
     fresh = fresh.filter((i) => i.kind !== "tool" || !this.calls.has(i.call.toolCallId));
     this.dropGone(items);
@@ -1229,7 +1328,7 @@ export class AgySession extends EventEmitter {
       if (client !== this.client || child.done) continue;
       // agy answers a load of a subagent mid model call in seconds, of one
       // at rest at once (agy/subagent: ~2 s and ~0.1 s).
-      const idle = Date.now() - asked < CHILD_BUSY_MS;
+      const idle = Date.now() - asked < BUSY_LOAD_MS;
       const items = conversation(updates);
       const shown = this.showChildWork(id, child, items);
       if (shown) changed = true;
@@ -1332,14 +1431,15 @@ export class AgySession extends EventEmitter {
 
   // Of what the load after a turn has new, what is not the turn's own: its
   // prompt (the first new user message), the calls it streamed, and the
-  // text it streamed, stored whole per message in the order streamed, on
-  // either side of the prompt (with no echo, the stream does not tell where
-  // agy took the prompt). A prompt agy stores no user message for (a slash
-  // command) leaves only the reply to tell.
-  private notOwn(fresh: Item[], turn: { text: string; thought: boolean }): Item[] {
+  // text and thoughts it streamed, stored whole per message in the order
+  // streamed (agy/idle-stream), on either side of the prompt (with no echo,
+  // the stream does not tell where agy took the prompt). A prompt agy
+  // stores no user message for (a slash command) leaves only the reply to
+  // tell.
+  private notOwn(fresh: Item[], turn: Own): Item[] {
     const out: Item[] = [];
     let prompt = !fresh.some((i) => i.kind === "user");
-    let own = turn.text;
+    const own = { ...turn };
     for (const item of fresh) {
       if (item.kind === "tool") {
         if (!this.calls.has(item.call.toolCallId)) out.push(item);
@@ -1353,16 +1453,11 @@ export class AgySession extends EventEmitter {
         out.push(item);
         continue;
       }
-      // Thoughts: the turn's own after its prompt, and before it when it
-      // streamed any.
-      if (item.kind === "thought") {
-        if (!prompt && !turn.thought) out.push(item);
-        continue;
-      }
-      if (own && own.startsWith(item.text)) own = own.slice(item.text.length);
-      else if (own && item.text.startsWith(own)) {
-        out.push({ kind: "agent", text: item.text.slice(own.length) });
-        own = "";
+      const left = own[item.kind];
+      if (left && left.startsWith(item.text)) own[item.kind] = left.slice(item.text.length);
+      else if (left && item.text.startsWith(left)) {
+        out.push({ kind: item.kind, text: item.text.slice(left.length) });
+        own[item.kind] = "";
       } else out.push(item);
     }
     return out;
@@ -1391,17 +1486,18 @@ export class AgySession extends EventEmitter {
   // a turn of its own, or the start of the reply to a message waiting on
   // this load.
   private showIdleWork(completed: ToolCall[], fresh: Item[]): void {
-    const ended: string[] = [];
     for (const u of completed) {
       const call = this.calls.get(u.toolCallId);
       if (!call || call.done) continue;
-      if (call.background) ended.push(call.command ?? call.name);
+      if (call.background) this.endedUnshown.push(call.command ?? call.name);
       this.finish(u, call);
     }
     if (!fresh.some((i) => i.kind !== "user")) {
       this.settleState();
       return;
     }
+    const ended = this.endedUnshown;
+    this.endedUnshown = [];
     const inline = this.busy;
     if (!inline) {
       this.busy = true;
@@ -1411,7 +1507,11 @@ export class AgySession extends EventEmitter {
     const why = ended.length
       ? `${ended.map((c) => `\`${c}\``).join(", ")} finished`
       : "agy carried on by itself";
-    this.emit("event", { kind: "notice", level: "wakeup", content: why });
+    // Loads before one prompt can each find more: one banner says it.
+    if (ended.length || !this.wokeInline) {
+      this.emit("event", { kind: "notice", level: "wakeup", content: why });
+    }
+    if (inline) this.wokeInline = true;
     for (const item of fresh) {
       if (item.kind === "agent") {
         this.text(item.text);
@@ -1450,11 +1550,12 @@ function conversation(updates: SessionUpdate[]): Item[] {
         else items.push({ kind: "user", text: str(u.content?.text) });
         break;
       }
+      // An empty one says nothing (and would match anything).
       case "agent_message_chunk":
-        items.push({ kind: "agent", text: str(u.content?.text) });
+        if (str(u.content?.text)) items.push({ kind: "agent", text: str(u.content?.text) });
         break;
       case "agent_thought_chunk":
-        items.push({ kind: "thought", text: str(u.content?.text) });
+        if (str(u.content?.text)) items.push({ kind: "thought", text: str(u.content?.text) });
         break;
       case "tool_call":
       case "tool_call_update": {
@@ -1476,6 +1577,8 @@ function conversation(updates: SessionUpdate[]): Item[] {
 
 const finished = (c: ToolCall) => c.status === "completed" || c.status === "failed";
 
+const messageCount = (items: Item[]) => items.filter((i) => i.kind !== "tool").length;
+
 // What the second of two loads of one conversation has that the first had
 // not, in the second's order. Calls are matched by id, as a load lists a
 // background command still running ahead of everything (agy/background);
@@ -1496,12 +1599,31 @@ function diff(before: Item[], after: Item[]): Item[] {
       if (!calls.has(a.call.toolCallId)) fresh.push(a);
       continue;
     }
-    const b = messages[next++];
-    if (!b) fresh.push(a);
-    else if (b.kind !== a.kind || !a.text.startsWith(b.text)) return [];
-    else if (next === messages.length && a.text.length > b.text.length) {
-      fresh.push({ kind: a.kind, text: a.text.slice(b.text.length) });
+    const b = messages[next];
+    if (!b) {
+      fresh.push(a);
+      continue;
     }
+    if (b.kind !== a.kind || !a.text.startsWith(b.text)) return [];
+    // The first's last messages may be pieces agy streamed of one during
+    // that load, which the second has whole (agy/idle-stream), or the
+    // first's last one grew since: the rest of it is new.
+    let joined = b.text;
+    let end = next + 1;
+    while (
+      end < messages.length &&
+      messages[end].kind === a.kind &&
+      a.text.startsWith(joined + messages[end].text)
+    ) {
+      joined += messages[end++].text;
+    }
+    if (end < messages.length) {
+      next++;
+      continue;
+    }
+    next = end;
+    if (a.text.length > joined.length)
+      fresh.push({ kind: a.kind, text: a.text.slice(joined.length) });
   }
   return fresh;
 }

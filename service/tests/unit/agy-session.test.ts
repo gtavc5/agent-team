@@ -83,6 +83,20 @@ class FakeAgy {
     return () => release();
   }
 
+  // The next load finds agy mid model call: it replays the conversation,
+  // then streams `live` before it answers (agy/idle-stream), `ms` later
+  // (a test that sets it fakes Date).
+  busyNextLoad(live: Update[], ms = 0): void {
+    const load = this.handlers["session/load"];
+    this.handlers["session/load"] = async (p) => {
+      this.handlers["session/load"] = load;
+      const res = await load(p);
+      for (const u of live) this.update(u);
+      if (ms) vi.setSystemTime(Date.now() + ms);
+      return res;
+    };
+  }
+
   // A subagent's conversation, by its id, and what a load of one waits on.
   children = new Map<string, Update[]>();
   childLoad: (() => Promise<void>) | null = null;
@@ -131,6 +145,10 @@ const user = (text: string) => ({
 });
 const agent = (text: string) => ({
   sessionUpdate: "agent_message_chunk",
+  content: { type: "text", text },
+});
+const thought = (text: string) => ({
+  sessionUpdate: "agent_thought_chunk",
   content: { type: "text", text },
 });
 const command = (id: string, line: string, status: string, output?: string) => ({
@@ -451,9 +469,11 @@ describe("AgySession", () => {
     await flush();
     fake.turn([user("go"), agent("one")]);
     await flush();
-    // agy streams what it does by itself as it happens (agy/background).
+    // agy streams what it does by itself as it happens (agy/background),
+    // each model call ending with a usage_update.
     fake.update(agent("Woke up."));
     fake.stored.push(agent("Woke up."));
+    fake.update({ sessionUpdate: "usage_update", used: 9, size: 99 });
     void s.send("two");
     await flush();
     expect(fake.sent("session/load")).toHaveLength(2);
@@ -587,6 +607,19 @@ describe("AgySession", () => {
     expect(events.find((e) => e.kind === "subagent_done")?.subagent?.status).toBe("failed");
   });
 
+  it("takes an empty message agy stores for nothing new", async () => {
+    const { s, events } = session();
+    void s.send("go");
+    await flush();
+    fake.turn([user("go"), agent("one"), agent("")]);
+    await flush();
+    s.checkIdle();
+    await flush();
+    s.checkIdle();
+    await flush();
+    expect(events.filter((e) => e.kind === "notice")).toEqual([]);
+  });
+
   it("shows the reply to a slash command", async () => {
     const { s, events } = session();
     void s.send("/goal finish it");
@@ -703,6 +736,303 @@ describe("AgySession", () => {
     void s.send("four");
     await flush();
     expect(loads()).toBe(4);
+  });
+
+  // The turn's thoughts, stored after the prompt or before it; a thought
+  // stored before it that the turn never streamed is agy's own.
+  it.each([
+    ["after the prompt", [user("two"), thought("Weighing it."), agent("ok")]],
+    ["before the prompt", [thought("Weighing it."), user("two"), agent("ok")]],
+  ])("takes a thought the turn streamed, stored %s, for the turn's own", async (_, stored) => {
+    const { s, events } = session();
+    void s.send("go");
+    await flush();
+    fake.turn([user("go"), agent("one")]);
+    await flush();
+    void s.send("two");
+    await flush();
+    events.length = 0;
+    fake.turn([thought("Weighing it."), agent("ok")]);
+    fake.stored = [user("go"), agent("one"), ...stored];
+    await flush();
+    expect(events.map((e) => [e.kind, e.content])).toEqual([
+      ["thinking_delta", "Weighing it."],
+      ["thinking", "Weighing it."],
+      ["text_delta", "ok"],
+      ["result", ""],
+    ]);
+  });
+
+  it("tells agy's own thought from the turn's by text", async () => {
+    const { s, events } = session();
+    void s.send("go");
+    await flush();
+    fake.turn([user("go"), agent("one")]);
+    await flush();
+    void s.send("two");
+    await flush();
+    events.length = 0;
+    fake.turn([thought("Mine."), agent("ok")]);
+    fake.stored = [
+      user("go"),
+      agent("one"),
+      thought("Its own."),
+      user("two"),
+      thought("Mine."),
+      agent("ok"),
+    ];
+    await flush();
+    expect(events.map((e) => [e.kind, e.content])).toEqual([
+      ["thinking_delta", "Mine."],
+      ["thinking", "Mine."],
+      ["text_delta", "ok"],
+      ["result", ""],
+      ["notice", "agy carried on by itself"],
+      ["thinking_delta", "Its own."],
+      ["thinking", "Its own."],
+      ["result", ""],
+    ]);
+  });
+
+  it("shows a thought stored before the prompt that the turn never streamed as agy's own", async () => {
+    const { s, events } = session();
+    void s.send("go");
+    await flush();
+    fake.turn([user("go"), agent("one")]);
+    await flush();
+    void s.send("two");
+    await flush();
+    events.length = 0;
+    fake.turn([agent("ok")]);
+    fake.stored = [user("go"), agent("one"), thought("Unseen."), user("two"), agent("ok")];
+    await flush();
+    expect(events.map((e) => [e.kind, e.content])).toEqual([
+      ["text_delta", "ok"],
+      ["result", ""],
+      ["notice", "agy carried on by itself"],
+      ["thinking_delta", "Unseen."],
+      ["thinking", "Unseen."],
+      ["result", ""],
+    ]);
+  });
+
+  it.each([
+    ["text", agent("Woke up."), 2],
+    ["a thought", thought("Hm."), 2],
+    ["a call", command("c5", "ls", "in_progress"), 2],
+    ["a plan", { sessionUpdate: "plan", entries: [] }, 2],
+    ["a usage update", { sessionUpdate: "usage_update", used: 9, size: 99 }, 1],
+    ["a title", { sessionUpdate: "session_info_update", title: "T" }, 1],
+  ])(
+    "loads before the next prompt for work agy streams while idle, not for any update: %s",
+    async (_, u, n) => {
+      const { s } = session();
+      void s.send("go");
+      await flush();
+      fake.turn([user("go"), agent("one")]);
+      await flush();
+      fake.update(u);
+      fake.update({ sessionUpdate: "usage_update", used: 9, size: 99 });
+      void s.send("two");
+      await flush();
+      expect(fake.sent("session/load")).toHaveLength(n);
+    },
+  );
+
+  it("takes a call a prompt streams for the turn's own, stored before the prompt", async () => {
+    const { s, events } = session();
+    void s.send("go");
+    await flush();
+    fake.turn([user("go"), agent("one")]);
+    await flush();
+    void s.send("two");
+    await flush();
+    events.length = 0;
+    const ls = command(
+      "c9",
+      "ls",
+      "completed",
+      "Command exited with code 0.\n\nCommand output:\na.txt\r\n",
+    );
+    fake.turn([ls, agent("ok")]);
+    fake.stored = [user("go"), agent("one"), ls, user("two"), agent("ok")];
+    await flush();
+    expect(events.map((e) => [e.kind, e.content])).toEqual([
+      ["tool_use", "**Bash**\n```bash\nls\n```"],
+      ["tool_result", "a.txt"],
+      ["text_delta", "ok"],
+      ["result", ""],
+    ]);
+  });
+
+  describe("a message agy streams while idle", () => {
+    const texts = (events: StreamEvent[]) =>
+      events.filter((e) => e.kind === "text_delta").map((e) => e.content);
+    // A model call's end (agy/idle-stream).
+    const callEnd = { sessionUpdate: "usage_update", used: 10287, size: 1048576 };
+
+    it("is loaded once the model call ended, whole", async () => {
+      const { s, events } = session();
+      void s.send("go");
+      await flush();
+      fake.turn([user("go"), agent("one")]);
+      await flush();
+      fake.update(agent("All tests "));
+      s.checkIdle();
+      await flush();
+      expect(fake.sent("session/load")).toHaveLength(1);
+      fake.update(agent("passed."));
+      fake.stored.push(agent("All tests passed."));
+      fake.update(callEnd);
+      s.checkIdle();
+      await flush();
+      expect(fake.sent("session/load")).toHaveLength(2);
+      expect(texts(events)).toEqual(["one", "All tests passed."]);
+    });
+
+    it("holds the next prompt until the model call ended, and opens its reply", async () => {
+      const { s, events } = session();
+      void s.send("go");
+      await flush();
+      fake.turn([user("go"), agent("one")]);
+      await flush();
+      fake.update(agent("Building"));
+      void s.send("two");
+      await flush();
+      expect(fake.sent("session/load")).toHaveLength(1);
+      expect(fake.sent("session/prompt")).toHaveLength(1);
+      fake.stored.push(agent("Building now."));
+      fake.update(callEnd);
+      await flush();
+      expect(fake.sent("session/load")).toHaveLength(2);
+      expect(fake.sent("session/prompt")).toHaveLength(2);
+      fake.turn([user("two"), agent("here")]);
+      await flush();
+      expect(events.slice(2).map((e) => [e.kind, e.content])).toEqual([
+        ["notice", "agy carried on by itself"],
+        ["text_delta", "Building now."],
+        ["text_delta", "\n\nhere"],
+        ["result", ""],
+      ]);
+    });
+
+    it("stops holding the prompt on Stop", async () => {
+      const { s, events } = session();
+      void s.send("go");
+      await flush();
+      fake.turn([user("go"), agent("one")]);
+      await flush();
+      fake.update(agent("Building"));
+      void s.send("two");
+      await flush();
+      expect(await s.interrupt()).toBe(true);
+      await flush();
+      expect(fake.sent("session/prompt")).toHaveLength(1);
+      expect(events.at(-1)).toMatchObject({ kind: "result", interrupted: true });
+    });
+
+    it("streamed during a load that came first shows in pieces, never twice", async () => {
+      const { s, events } = session();
+      void s.send("go");
+      await flush();
+      fake.turn([user("go"), command("c1", "sleep 5", "in_progress"), agent("started")]);
+      fake.stored = [command("c1", "sleep 5", "in_progress"), user("go"), agent("started")];
+      await flush();
+      fake.stored = [user("go"), command("c1", "sleep 5", "completed", "done"), agent("started")];
+      fake.busyNextLoad([agent("It "), agent("fini")]);
+      s.checkIdle();
+      await flush();
+      expect(events.find((e) => e.kind === "subagent_done")?.subagent?.status).toBe("completed");
+      fake.update(agent("shed."));
+      fake.stored.push(agent("It finished."), agent("\n\nNext."));
+      fake.update(callEnd);
+      s.checkIdle();
+      await flush();
+      expect(texts(events)).toEqual(["started", "It ", "fini", "shed.", "\n\nNext."]);
+    });
+
+    describe("with Date faked", () => {
+      beforeEach(() => vi.useFakeTimers({ toFake: ["Date"] }));
+      afterEach(() => vi.useRealTimers());
+
+      it("caught by a load that found agy mid call, holds the next load till the call's end", async () => {
+        const { s, events } = session();
+        void s.send("go");
+        await flush();
+        fake.turn([user("go"), agent("one")]);
+        await flush();
+        fake.busyNextLoad([agent("It ")], 2_000);
+        s.checkIdle();
+        await flush();
+        void s.send("two");
+        await flush();
+        expect(fake.sent("session/load")).toHaveLength(2);
+        fake.update(agent("fini"));
+        fake.update(agent("shed."));
+        fake.stored.push(agent("It finished."));
+        fake.update(callEnd);
+        await flush();
+        expect(fake.sent("session/load")).toHaveLength(3);
+        fake.turn([user("two"), agent("here")]);
+        await flush();
+        expect(texts(events)).toEqual(["one", "It ", "finished.", "\n\nhere"]);
+      });
+
+      it("knows the call ended when its usage_update comes within a load", async () => {
+        const { s } = session();
+        void s.send("go");
+        await flush();
+        fake.turn([user("go"), agent("one")]);
+        await flush();
+        fake.busyNextLoad([agent("It finished."), callEnd], 2_000);
+        s.checkIdle();
+        await flush();
+        fake.stored.push(agent("It finished."));
+        s.logActivity();
+        void s.send("two");
+        await flush();
+        expect(fake.sent("session/prompt")).toHaveLength(2);
+      });
+    });
+
+    it("stopped while it held the prompt, loads at the call's end, not before", async () => {
+      const { s, events } = session();
+      void s.send("go");
+      await flush();
+      fake.turn([user("go"), agent("one")]);
+      await flush();
+      fake.update(agent("Building "));
+      void s.send("two");
+      await flush();
+      await s.interrupt();
+      await flush();
+      expect(fake.sent("session/load")).toHaveLength(1);
+      fake.update(agent("the app."));
+      fake.stored.push(agent("Building the app."));
+      fake.update(callEnd);
+      s.checkIdle();
+      await flush();
+      expect(fake.sent("session/load")).toHaveLength(2);
+      expect(texts(events)).toEqual(["one", "Building the app."]);
+    });
+
+    it("streamed during the load after a turn is agy's own, not the turn's", async () => {
+      const { s, events } = session();
+      void s.send("one");
+      await flush();
+      fake.turn([user("one"), agent("first")]);
+      await flush();
+      void s.send("two");
+      await flush();
+      fake.busyNextLoad([agent("Also ")]);
+      fake.turn([user("two"), agent("second")]);
+      await flush();
+      fake.stored.push(agent("Also done."));
+      fake.update(callEnd);
+      s.checkIdle();
+      await flush();
+      expect(texts(events)).toEqual(["first", "second", "Also ", "done."]);
+    });
   });
 
   it("takes all a prompt streams for the turn's own, stored before the prompt or after it", async () => {
