@@ -93,10 +93,10 @@ class FakeAgy {
   }
 
   // Streams updates into the running prompt (and the stored conversation),
-  // then ends it.
+  // then ends it. agy (1.5.13) stores the prompt but does not echo it.
   turn(updates: Update[], stopReason = "end_turn"): void {
     for (const u of updates) {
-      this.update(u);
+      if (u.sessionUpdate !== "user_message_chunk") this.update(u);
       const same = this.stored.findIndex((x) => x.toolCallId && x.toolCallId === u.toolCallId);
       if (same >= 0) this.stored[same] = u;
       else this.stored.push(u);
@@ -248,7 +248,6 @@ describe("AgySession", () => {
     const { s, events } = session();
     void s.send("go");
     await flush();
-    fake.update(user("go"));
     fake.update(command("c1", "sleep 30", "in_progress"));
     expect(await s.interrupt()).toBe(true);
     expect(fake.sent("session/cancel")).toEqual([{ sessionId: "s1" }]);
@@ -341,21 +340,29 @@ describe("AgySession", () => {
     expect(events[4].content).toBe("\n\nok");
   });
 
-  it("shows text agy streams before the prompt's echo when no load caught it", async () => {
+  it("shows each reply once when turns follow one another in one agy", async () => {
     const { s, events } = session();
-    void s.send("go");
+    void s.send("one");
     await flush();
-    fake.turn([user("go"), agent("one")]);
+    fake.turn([user("one"), agent("first")]);
     await flush();
     void s.send("two");
     await flush();
-    events.length = 0;
-    fake.turn([agent("Woke up."), user("two"), agent("ok")]);
+    fake.turn([user("two"), agent("sec"), agent("ond")]);
+    // As agy stores it: each message once, whole.
+    fake.stored = [user("one"), agent("first"), user("two"), agent("second")];
+    await flush();
+    void s.send("three");
+    await flush();
+    fake.turn([user("three"), agent("third")]);
     await flush();
     expect(events.map((e) => [e.kind, e.content])).toEqual([
-      ["notice", "agy carried on while idle"],
-      ["text_delta", "Woke up."],
-      ["text_delta", "\n\nok"],
+      ["text_delta", "first"],
+      ["result", ""],
+      ["text_delta", "sec"],
+      ["text_delta", "ond"],
+      ["result", ""],
+      ["text_delta", "third"],
       ["result", ""],
     ]);
   });
@@ -379,7 +386,6 @@ describe("AgySession", () => {
       args: { text: "hi", toolSummary: "Report" },
       status: "in_progress",
     };
-    fake.update(user("go"));
     fake.update(call);
     // The same tool answered for other arguments first (a call agy runs
     // alongside), then for this call's.
@@ -399,7 +405,6 @@ describe("AgySession", () => {
     const { s, events } = session();
     void s.send("go");
     await flush();
-    fake.update(user("go"));
     fake.update(command("c1", "sleep 30", "in_progress"));
     s.noteToolAnswer("report", {}, "Refused.", true);
     s.abort();
@@ -412,7 +417,6 @@ describe("AgySession", () => {
       name: "mcp_panel_report",
       status: "in_progress",
     };
-    fake.update(user("next"));
     fake.update(call);
     s.noteToolAnswer("report", {}, "Reported.", false);
     fake.update({ ...call, sessionUpdate: "tool_call_update", status: "completed" });
@@ -437,32 +441,23 @@ describe("AgySession", () => {
     expect(events.find((e) => e.kind === "subagent_done")?.subagent?.status).toBe("completed");
   });
 
-  it("shows a later wake-up's text agy streams before the prompt's echo, after one a load showed, once", async () => {
+  it("loads before the next prompt once agy streams text while idle, and shows it once", async () => {
     const { s, events } = session();
     void s.send("go");
     await flush();
     fake.turn([user("go"), agent("one")]);
     await flush();
-    fake.stored.push(agent("First wake."));
-    s.checkIdle();
-    await flush();
+    // agy streams what it does by itself as it happens (agy/background).
+    fake.update(agent("Woke up."));
+    fake.stored.push(agent("Woke up."));
     void s.send("two");
     await flush();
-    events.length = 0;
-    fake.turn([agent("First "), agent("wake."), agent("Second wake."), user("two"), agent("ok")]);
-    // As agy stores it: each message once, whole.
-    fake.stored = [
-      user("go"),
-      agent("one"),
-      agent("First wake."),
-      agent("Second wake."),
-      user("two"),
-      agent("ok"),
-    ];
+    expect(fake.sent("session/load")).toHaveLength(2);
+    fake.turn([user("two"), agent("ok")]);
     await flush();
-    expect(events.map((e) => [e.kind, e.content])).toEqual([
-      ["notice", "agy carried on while idle"],
-      ["text_delta", "Second wake."],
+    expect(events.slice(2).map((e) => [e.kind, e.content])).toEqual([
+      ["notice", "agy carried on by itself"],
+      ["text_delta", "Woke up."],
       ["text_delta", "\n\nok"],
       ["result", ""],
     ]);
@@ -472,7 +467,6 @@ describe("AgySession", () => {
     const { s, events } = session();
     void s.send("go");
     await flush();
-    fake.update(user("go"));
     fake.update(command("c2", "make", "in_progress"));
     fake.exit();
     await flush();
@@ -589,7 +583,7 @@ describe("AgySession", () => {
     expect(events.find((e) => e.kind === "subagent_done")?.subagent?.status).toBe("failed");
   });
 
-  it("takes the reply to a slash command agy does not echo for the reply", async () => {
+  it("shows the reply to a slash command", async () => {
     const { s, events } = session();
     void s.send("/goal finish it");
     await flush();
@@ -707,32 +701,21 @@ describe("AgySession", () => {
     expect(loads()).toBe(4);
   });
 
-  it("shows what agy streams before the prompt's echo once, when no load came before it", async () => {
+  it("takes all a prompt streams for the turn's own, stored before the prompt or after it", async () => {
     const { s, events } = session();
     void s.send("go");
     await flush();
     fake.turn([user("go"), agent("one")]);
     await flush();
-    // agy carried on unseen (its log told nothing): the next prompt's stream
-    // starts with that, as agy streams a backlog.
     void s.send("two");
     await flush();
     events.length = 0;
-    const idle = command(
-      "c9",
-      "ls",
-      "completed",
-      "Command exited with code 0.\n\nCommand output:\na.txt\r\n",
-    );
-    fake.turn([idle, agent("Woke up."), user("two"), agent("ok")]);
-    fake.stored = [user("go"), agent("one"), idle, agent("Woke up."), user("two"), agent("ok")];
+    fake.turn([agent("Still checking. "), agent("ok")]);
+    fake.stored = [user("go"), agent("one"), agent("Still checking. "), user("two"), agent("ok")];
     await flush();
     expect(events.map((e) => [e.kind, e.content])).toEqual([
-      ["notice", "agy carried on while idle"],
-      ["tool_use", "**Bash**\n```bash\nls\n```"],
-      ["tool_result", "a.txt"],
-      ["text_delta", "Woke up."],
-      ["text_delta", "\n\nok"],
+      ["text_delta", "Still checking. "],
+      ["text_delta", "ok"],
       ["result", ""],
     ]);
   });
@@ -792,7 +775,6 @@ describe("AgySession", () => {
     void s.send("one");
     await flush();
     fake.update({ sessionUpdate: "usage_update", used: 0, size: 1048576 });
-    fake.update(user("one"));
     fake.update({ sessionUpdate: "usage_update", used: 9079, size: 1048576 });
     fake.turn([agent("ok")]);
     await flush();

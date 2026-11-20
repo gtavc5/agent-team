@@ -15,6 +15,9 @@ export default fixture({
     wait("idle"),
   ],
   verify(r) {
+    // Each reply once: agy (1.5.13) does not echo the prompt, and the load
+    // after the second turn finds its reply stored.
+    expect(agentMessages(r)).toHaveLength(2);
     const [stopped, next] = agentMessages(r);
     expect(stopped.content).toContain("interrupted");
     // The command never ran on: its call closed with the turn.

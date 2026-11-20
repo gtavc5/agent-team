@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 // The conversation agy runs a subagent in. ACP names none (invoke_subagent
 // returns at once, session/list leaves subagents out), but agy keeps each
 // conversation as `~/.gemini/antigravity-cli/conversations/<id>.db`, and a
-// subagent's first step holds the call that started it (agy 1.5.8, snap
+// subagent's first step holds the call that started it (agy 1.5.13, snap
 // fixture agy/subagent). Read only; a conversation found is then loaded
 // over ACP like any other.
 const CONVERSATIONS = () => path.join(os.homedir(), ".gemini", "antigravity-cli", "conversations");

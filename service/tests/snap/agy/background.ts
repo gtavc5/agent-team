@@ -15,6 +15,7 @@ export default fixture({
     wait("idle"),
   ],
   verify(r) {
+    expect(agentMessages(r)).toHaveLength(3);
     const [first, here, woken] = agentMessages(r);
     expect(first.content.trim()).toBe("started");
     const card = first.events!.find((e) => e.kind === "subagent_start");
