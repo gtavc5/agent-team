@@ -237,7 +237,8 @@ export const MODEL_OPTIONS: ModelOption[] = [
     cursorParams: { effort: "reasoning_effort" },
   },
   // Gemini through agy on the user's Google AI Ultra plan (`agy acp`
-  // session/new: model and thought_level options; agy defaults to medium).
+  // session/new: model and thought_level options; defaultEffort is the
+  // level agy starts the model on).
   {
     id: "agy/gemini-4-carbon",
     label: "Gemini 4 Carbon",
@@ -245,6 +246,13 @@ export const MODEL_OPTIONS: ModelOption[] = [
     effort: "high",
     defaultEffort: "medium",
     effortLevels: ["low", "medium", "high"],
+  },
+  {
+    id: "agy/gemini-4-neon",
+    label: "Gemini 4 Neon",
+    backend: "agy",
+    defaultEffort: "high",
+    effortLevels: ["low", "medium", "high", "xhigh"],
   },
   {
     id: "agy/gemini-4-argon",

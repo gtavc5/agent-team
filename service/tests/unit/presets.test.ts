@@ -93,6 +93,7 @@ describe("the model list", () => {
   it("knows agy's Gemini models by their agy/ prefix, effort as agy's thought level", () => {
     expect(MODEL_OPTIONS.filter((m) => m.backend === "agy").map((m) => m.id)).toEqual([
       "agy/gemini-4-carbon",
+      "agy/gemini-4-neon",
       "agy/gemini-4-argon",
       "agy/gemini-4-hydrogen",
       "agy/gemini-3.8-flash",
@@ -102,6 +103,8 @@ describe("the model list", () => {
     expect(agyModelId("agy/gemini-3.8-flash")).toBe("gemini-3.8-flash");
     expect(defaultEffortForModel("agy/gemini-4-carbon")).toBe("high");
     expect(defaultEffortForModel("agy/gemini-4-argon")).toBe("medium");
+    expect(defaultEffortForModel("agy/gemini-4-neon")).toBe("high");
+    expect(effortLevelsForModel("agy/gemini-4-neon")).toEqual(["low", "medium", "high", "xhigh"]);
     expect(effortLevelsForModel("agy/gemini-4-hydrogen")).toEqual([
       "low",
       "medium",
