@@ -651,7 +651,9 @@ export class AgySession extends EventEmitter {
     const u = res.usage ?? {};
     const input = u.inputTokens ?? 0;
     const cached = u.cachedReadTokens ?? 0;
-    this.usage.input_tokens += input - cached;
+    // A prompt's inputTokens leave out the cached reads (agy/turn: input,
+    // cached and output add up to totalTokens).
+    this.usage.input_tokens += input;
     this.usage.output_tokens += u.outputTokens ?? 0;
     this.usage.cache_read_tokens += cached;
     this.usage.cache_creation_tokens += u.cachedWriteTokens ?? 0;

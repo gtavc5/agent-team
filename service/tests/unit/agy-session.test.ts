@@ -94,14 +94,18 @@ class FakeAgy {
 
   // Streams updates into the running prompt (and the stored conversation),
   // then ends it. agy (1.5.13) stores the prompt but does not echo it.
-  turn(updates: Update[], stopReason = "end_turn"): void {
+  turn(
+    updates: Update[],
+    stopReason = "end_turn",
+    usage: Record<string, number> = { inputTokens: 100, outputTokens: 5 },
+  ): void {
     for (const u of updates) {
       if (u.sessionUpdate !== "user_message_chunk") this.update(u);
       const same = this.stored.findIndex((x) => x.toolCallId && x.toolCallId === u.toolCallId);
       if (same >= 0) this.stored[same] = u;
       else this.stored.push(u);
     }
-    this.prompt?.({ stopReason, usage: { inputTokens: 100, outputTokens: 5 } });
+    this.prompt?.({ stopReason, usage });
     this.prompt = null;
   }
 
@@ -768,6 +772,24 @@ describe("AgySession", () => {
     await flush();
     expect(events.some((e) => e.kind === "notice")).toBe(false);
     expect(events.filter((e) => e.content === "second reply")).toHaveLength(1);
+  });
+
+  it("counts a turn's input apart from its cached reads, as agy reports them", async () => {
+    const { s } = session();
+    void s.send("one");
+    await flush();
+    fake.turn([agent("ok")], "end_turn", {
+      inputTokens: 2267,
+      outputTokens: 3,
+      cachedReadTokens: 8134,
+      totalTokens: 10404,
+    });
+    await flush();
+    expect(s.usage).toMatchObject({
+      input_tokens: 2267,
+      output_tokens: 3,
+      cache_read_tokens: 8134,
+    });
   });
 
   it("puts agy's last usage_update on a turn's result as the context", async () => {
