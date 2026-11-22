@@ -1,6 +1,11 @@
 import * as fs from "fs";
 import * as path from "path";
-import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
+import {
+  DatabaseSync,
+  type SQLInputValue,
+  type SQLOutputValue,
+  type StatementSync,
+} from "node:sqlite";
 import type { StreamEvent } from "../session/claude";
 import type { Message } from "./workspace";
 
@@ -536,6 +541,15 @@ export class HistoryIndex {
     return this.source;
   }
 
+  // FTS5 writes rows of its own, some with ids past 2^53, and can leave the
+  // connection's last insert id at one: run() throws making it a number, which
+  // rolled back every message indexed after on a long-lived index.
+  private write(sql: string): StatementSync {
+    const s = this.db.prepare(sql);
+    s.setReadBigInts(true);
+    return s;
+  }
+
   private indexMessage(session: string, message: string): void {
     const row = this.openSource()
       ?.prepare("select body, hash, ts from messages where session = ? and id = ?")
@@ -544,15 +558,15 @@ export class HistoryIndex {
     const db = this.db;
     db.exec("begin immediate");
     try {
-      db.prepare(
+      this.write(
         "delete from entries_fts where rowid in (select id from entries where session = ? and message = ?)",
       ).run(session, message);
-      db.prepare("delete from entries where session = ? and message = ?").run(session, message);
+      this.write("delete from entries where session = ? and message = ?").run(session, message);
       if (row) {
-        const insert = db.prepare(
+        const insert = this.write(
           "insert into entries (session, message, ts, kind, role, tool, depth, lines, call, duration_ms, text) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
-        const fts = db.prepare("insert into entries_fts (rowid, text) values (?, ?)");
+        const fts = this.write("insert into entries_fts (rowid, text) values (?, ?)");
         const ids: Array<number | bigint> = [];
         for (const e of entries) {
           const lines = e.text.split("\n").length;
@@ -572,13 +586,13 @@ export class HistoryIndex {
           ids.push(lastInsertRowid);
           fts.run(lastInsertRowid, e.text);
         }
-        db.prepare("insert or replace into docs (session, message, hash) values (?, ?, ?)").run(
+        this.write("insert or replace into docs (session, message, hash) values (?, ?, ?)").run(
           session,
           message,
           row.hash,
         );
       } else {
-        db.prepare("delete from docs where session = ? and message = ?").run(session, message);
+        this.write("delete from docs where session = ? and message = ?").run(session, message);
       }
       db.exec("commit");
     } catch (e) {
