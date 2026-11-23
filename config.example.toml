@@ -1,5 +1,7 @@
-# Agent Team Configuration
-# Copy this file to config.toml and fill in your values:
+# Agent Team / YAAT Configuration
+# Recommended: generate config.toml automatically with random auth secrets:
+#   ./scripts/yaat-service.sh init-config
+# Or copy this file manually:
 #   cp config.example.toml config.toml
 
 # Server settings
@@ -7,7 +9,8 @@
 # URL for remote image/file uploads (optional)
 # remote_uploads_url = "http://your-server/uploads"
 # Explicit service-manager restart command. Required to enable self-restart on macOS.
-# restart_command = ["launchctl", "kickstart", "-k", "gui/501/com.example.agent-team"]
+# Replace 501 with your `id -u` (`yaat-service.sh init-config` fills this in automatically).
+# restart_command = ["launchctl", "kickstart", "-k", "gui/501/com.yaat.server"]
 
 # Authentication (optional — remove this section to disable auth)
 [auth]
@@ -33,13 +36,14 @@ archive_after_days = 14
 label = "Local"
 type = "local"
 
-# Pi (optional)
-# [pi]
-# packages = []
+# Pi (optional — keeping [pi] present populates the Pi model picker at startup)
+# Omit `packages` (or leave it empty) to auto-discover packages from ~/.pi/agent.
+# Use `exclude_packages` to block specific packages. `offline` defaults to true.
+[pi]
 # exclude_packages = []
 # default_model = "provider/model"
 # default_effort = "medium"
-# offline = false
+# offline = false  # allow Pi to access npm on startup (default: true)
 
 # Projects (optional): the model a new project's lead runs on, and the
 # workers it starts without naming one. Any model from the picker; effort if

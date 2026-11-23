@@ -98,14 +98,24 @@ model ids are rejected.
 
 ## Getting started
 
+For a guided single-command service setup (macOS `launchd` and Linux
+`systemd --user`), see [docs/DEPLOY.md](docs/DEPLOY.md):
+
 ```bash
 git clone https://github.com/16bit-ykiko/agent-team.git
 cd agent-team
+./scripts/setup-prereqs.sh --install   # check/install Node.js 26+, Python/pip, Pi runtime & packages
 npm install
+./scripts/yaat-service.sh install
+```
 
+Or run directly in the foreground:
+
+```bash
 cp config.example.toml config.toml
 $EDITOR config.toml          # see "Configuration" below
 
+npm install
 npm run build                # webview, then service
 node dist/server.js          # http://localhost:9800
 ```
@@ -172,16 +182,15 @@ base_url = "https://api.deepseek.com/anthropic"
 model = "gpt-6-astra"         # any model in the picker
 effort = "high"
 
-[pi]                         # optional Pi runtime defaults
-packages = []
-exclude_packages = []
+[pi]                         # keeping [pi] present populates the Pi model picker at startup
+exclude_packages = []        # omit `packages` to auto-discover ~/.pi/agent
 default_model = "provider/model"
 default_effort = "medium"
-offline = false
+offline = true               # set false to allow Pi npm access on startup
 
 [server]
-# Enables self-restart on macOS when explicitly configured:
-# restart_command = ["launchctl", "kickstart", "-k", "gui/501/com.example.agent-team"]
+# Enables self-restart on macOS (`yaat-service.sh init-config` fills this in automatically):
+# restart_command = ["launchctl", "kickstart", "-k", "gui/501/com.yaat.server"]
 ```
 
 A provider name must be a prefix of the model ids routed to it, so
@@ -214,22 +223,20 @@ Agent identities (name, avatar, colour) are presets in the same file.
 
 ## Running it as a service
 
-`scripts/start-server.sh` builds a `PATH` that works under systemd. A user unit
-is enough:
-
-```ini
-[Service]
-ExecStart=%h/workspace/agent-team/scripts/start-server.sh
-Restart=always
-```
+`scripts/yaat-service.sh` installs and manages the server on both macOS
+(`launchd` under `~/Library/LaunchAgents/com.yaat.server.plist`) and Linux
+(`systemd --user` under `~/.config/systemd/user/agent-team-server.service`),
+backed by `scripts/start-server.sh`. See [docs/DEPLOY.md](docs/DEPLOY.md) for
+full details, including `launchd` `Aqua` Keychain behaviour and dev instances.
 
 If you expose it beyond localhost, put it behind TLS and keep `[auth]` on —
 agents here run with full filesystem access to the folders you give them.
 
 To redeploy from inside a session — an agent working on this repo cannot
-restart the server mid-turn without killing itself —
-`scripts/deploy-deferred.sh [seconds]` builds and restarts after a delay,
-detached from the caller; it logs to `~/.cache/agent-team-deploy.log`.
+restart the server mid-turn without killing itself — run
+`scripts/yaat-service.sh deploy-deferred 10` (or `scripts/deploy-deferred.sh 10`
+detached), which builds and restarts after a delay on both macOS and Linux and
+logs to `~/.cache/agent-team-deploy.log`.
 
 ## Layout
 
