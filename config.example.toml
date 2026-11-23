@@ -6,6 +6,8 @@
 [server]
 # URL for remote image/file uploads (optional)
 # remote_uploads_url = "http://your-server/uploads"
+# Explicit service-manager restart command. Required to enable self-restart on macOS.
+# restart_command = ["launchctl", "kickstart", "-k", "gui/501/com.example.agent-team"]
 
 # Authentication (optional — remove this section to disable auth)
 [auth]
@@ -31,24 +33,20 @@ archive_after_days = 14
 label = "Local"
 type = "local"
 
-# Additional Claude accounts (optional)
-# Generate a long-lived token on the other account with `claude setup-token`,
-# then pick the account per agent in the Add Agent dialog. The locally
-# logged-in account is always available as "local".
-# [accounts.work]
-# oauth_token = "sk-ant-oat01-..."
+# Pi (optional)
+# [pi]
+# packages = []
+# exclude_packages = []
+# default_model = "provider/model"
+# default_effort = "medium"
+# offline = false
 
 # Projects (optional): the model a new project's lead runs on, and the
-# workers it starts without naming one; Claude Opus 5.5 when unset. Any
-# model from the picker; effort if the model has it.
+# workers it starts without naming one. Any model from the picker; effort if
+# the model has it.
 # [projects]
-# model = "cursor/gemini-4-argon"
-# effort = "high"
-
-# Cursor (optional): the key the cursor/ models run on, a user API key
-# (cursor.com/dashboard/api) or a service account key; runs bill to its plan.
-# [cursor]
-# api_key = "key_..."
+# model = "provider/model"
+# effort = "medium"
 
 # External LLM providers (optional)
 # The provider name must be a prefix of the model ID you want to route.

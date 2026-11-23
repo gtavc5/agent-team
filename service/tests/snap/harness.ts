@@ -1,21 +1,27 @@
-// Snap fixtures: a scripted interaction with a real backend, recorded once
-// (scripts/capture-sdk.ts) and replayed here through the real session,
-// workspace and client aggregation. One fixture = <name>.ts (script, intent,
-// assertions) + <name>.jsonl (recording) + <name>.snap.md (pinned transcript).
+// Snap fixtures: scripted Codex recordings and synthetic Pi tapes replayed
+// through the real session, workspace and client aggregation.
+import { ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
+import { PassThrough, Writable } from "node:stream";
+import { crc32, deflateSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { expect, vi } from "vitest";
-import type { Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { ClaudeSession, type StreamEvent } from "../../src/session/claude";
+import type { SessionConfig, StreamEvent } from "../../src/session/types";
+import { PiSession } from "../../src/session/pi";
+import { PiRpcClient, type PiRpcSpawnOptions } from "../../src/session/pi-rpc";
+import { PanelHttpServer, type PanelReadyReport } from "../../src/session/panel-http";
+import { ProjectManager, type ProjectHost } from "../../src/project/manager";
+import { ObjectiveStore } from "../../src/project/objectives";
+import { ProjectStore } from "../../src/project/store";
+import { ReportJournalStore } from "../../src/project/report-journal";
+import { HistoryService } from "../../src/workspace/history-service";
 import { CodexSession } from "../../src/session/codex";
 import type { RpcMessage, Transport } from "../../src/session/codex-rpc";
-import { CursorSession, type CursorSdk } from "../../src/session/cursor";
-import { AgySession } from "../../src/session/agy";
 import { LocalHost, HostRegistry, type HostSessionHandle } from "../../src/session/host";
 import type { PanelToolset } from "../../src/project/tools";
 import { Workspace, type Message, type WorkspaceCallbacks } from "../../src/workspace/workspace";
-import { backendForModel } from "../../src/config/presets";
 import { applyEventsToMessage } from "../../../webview/src/state/stream";
 
 import {
@@ -24,12 +30,12 @@ import {
   type Fixture,
   type Header,
   type Recording,
+  type PiFrame,
+  type PiCheckpoint,
   type Replay as BaseReplay,
   DEFAULT_MODEL,
   RECORD_CWD,
-  RECORD_EFFORT,
   panelTools,
-  tapeTrim,
 } from "./fixture.ts";
 
 export * from "./fixture.ts";
@@ -67,69 +73,16 @@ export async function loadFixture(backend: Backend, name: string): Promise<Fixtu
   return mod.default;
 }
 
-// --- replay -----------------------------------------------------------------
-
 export interface Replay extends BaseReplay {
   sessions: HostSessionHandle[];
 }
 
-// Hands recorded frames to the session's for-await loop one at a time.
-class Feeder<T> {
-  private queue: T[] = [];
-  private waiting: {
-    resolve: (r: IteratorResult<T>) => void;
-    reject: (e: unknown) => void;
-  } | null = null;
-  private done = false;
-  private failure: unknown = null;
-
-  next(): Promise<IteratorResult<T>> {
-    if (this.queue.length) return Promise.resolve({ value: this.queue.shift()!, done: false });
-    if (this.failure)
-      return Promise.reject(
-        this.failure instanceof Error ? this.failure : new Error(JSON.stringify(this.failure)),
-      );
-    if (this.done) return Promise.resolve({ value: undefined as T, done: true });
-    return new Promise((resolve, reject) => (this.waiting = { resolve, reject }));
-  }
-  push(v: T): void {
-    const w = this.waiting;
-    if (w) {
-      this.waiting = null;
-      w.resolve({ value: v, done: false });
-    } else this.queue.push(v);
-  }
-  end(): void {
-    this.done = true;
-    const w = this.waiting;
-    if (w) {
-      this.waiting = null;
-      w.resolve({ value: undefined as T, done: true });
-    }
-  }
-  fail(e: unknown): void {
-    this.failure = e;
-    const w = this.waiting;
-    if (w) {
-      this.waiting = null;
-      w.reject(e);
-    }
-  }
-  iterable(): AsyncIterable<T> {
-    return { [Symbol.asyncIterator]: () => ({ next: () => this.next() }) };
-  }
-}
-
-// Let the session's async loop consume what was pushed.
 async function flush(): Promise<void> {
   for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
 }
 
-// A codex or agy recording's backend, one connection per process the
-// recorder started. Each line the recorder wrote is the next one the session must
-// write: the same method (an answer to a server request: the same id) and
-// the same thread and turn ids; the recorded responses go back under the
-// session's request ids. Nothing else may be written.
+// One connection per app-server process. Each recorded write must be the
+// session's next write; recorded responses are mapped to its request ids.
 class AppServerPlayer {
   private conn: {
     listeners: Array<(m: RpcMessage) => void>;
@@ -137,14 +90,8 @@ class AppServerPlayer {
   } | null = null;
   private written: RpcMessage[] = [];
   private ids = new Map<number | string, number | string>();
-  // The recorder's steer tags and the session's, which codex echoes back
-  // as a userMessage's clientId.
   private tags = new Map<unknown, unknown>();
   sent: RpcMessage[] = [];
-
-  // agy: the requests' parameters must be the recorder's too, but for the
-  // panel MCP server's command (its socket path is the recording's).
-  constructor(private strict = false) {}
 
   connect(): Transport {
     const conn = {
@@ -164,9 +111,7 @@ class AppServerPlayer {
     };
   }
 
-  // The recorder wrote `rec`: the session's next line must be its like.
   async expect(rec: RpcMessage, where: string): Promise<void> {
-    // The session may write it from a timer (the queue moves on a setTimeout).
     for (let i = 0; i < 40 && this.written.length === 0; i++) {
       await flush();
       if (i >= 10) await new Promise((r) => setTimeout(r, 2));
@@ -182,26 +127,15 @@ class AppServerPlayer {
     }
     const ids = (x: RpcMessage) => {
       const p = (x.params ?? {}) as Record<string, unknown>;
-      return [p.threadId, p.turnId, p.expectedTurnId, p.sessionId];
+      return [p.threadId, p.turnId, p.expectedTurnId];
     };
     expect(ids(m), `ids of ${what(m)} (${where})`).toEqual(ids(rec));
-    if (this.strict && rec.method) {
-      const params = (x: RpcMessage) => {
-        const p = tapeTrim(JSON.parse(JSON.stringify(x.params ?? {}))) as Record<string, unknown>;
-        if (Array.isArray(p.mcpServers)) {
-          p.mcpServers = p.mcpServers.map((s: { name?: string }) => ({ name: s.name }));
-        }
-        return p;
-      };
-      expect(params(m), `params of ${what(m)} (${where})`).toEqual(params(rec));
-    }
     if (rec.method && rec.id != null && m.id != null) this.ids.set(rec.id, m.id);
     const tag = (x: RpcMessage) =>
       (x.params as { clientUserMessageId?: unknown })?.clientUserMessageId;
     if (tag(rec) !== undefined) this.tags.set(tag(rec), tag(m));
   }
 
-  // The recording is over: the session wrote nothing the recorder did not.
   finish(): void {
     expect(
       this.written.map((m) => m.method ?? `answer ${String(m.id)}`),
@@ -241,30 +175,23 @@ class SnapHost extends LocalHost {
   }
 }
 
-function makeWorkspace(model: string, effort: string | undefined) {
-  const host = new SnapHost("local", "Local");
-  const registry = new HostRegistry();
-  registry.register(host);
-  const cb: WorkspaceCallbacks = {
+function makeWorkspace(
+  model: string,
+  effort: string | undefined,
+  cb: WorkspaceCallbacks = {
     onNewMessage: () => {},
     onStreamEvent: () => {},
     onMessageDone: () => {},
-  };
+  },
+) {
+  const host = new SnapHost("local", "Local");
+  const registry = new HostRegistry();
+  registry.register(host);
   const ws = new Workspace("ws", "t", "p", "local", RECORD_CWD, registry, cb);
-  const backend = backendForModel(model);
-  // The recording's agent stands in for the SDK, so no real key is read.
-  const providerEnv = backend === "cursor" ? { CURSOR_API_KEY: "replay" } : undefined;
-  ws.addAgent("A", model, "🤖", "#888", {
-    backend,
-    providerEnv,
-    effort: effort ?? RECORD_EFFORT[backend],
-  });
+  ws.addAgent("A", model, "🤖", "#888", { backend: "codex", effort });
   return { ws, host };
 }
 
-// A server restart: the process is gone and the session comes back from
-// its persisted state, exactly as Workspace.fromState rebuilds it (and the
-// project manager gives it its tools again).
 function restart(ws: Workspace, host: SnapHost, tools: PanelToolset | null): void {
   const attach = (
     ws as unknown as {
@@ -280,9 +207,15 @@ function restart(ws: Workspace, host: SnapHost, tools: PanelToolset | null): voi
   }
 }
 
-export async function replay(backend: Backend, rec: Recording, fixture: Fixture): Promise<Replay> {
+export async function replay(
+  backend: Backend,
+  rec: Recording,
+  fixture: Fixture,
+  cb?: WorkspaceCallbacks,
+): Promise<Replay> {
+  if (backend === "pi") return replayPi(rec, fixture, cb);
   const model = rec.header.model || DEFAULT_MODEL[backend];
-  const { ws, host } = makeWorkspace(model, fixture.effort);
+  const { ws, host } = makeWorkspace(model, fixture.effort, cb);
   const tools = fixture.tools ? panelTools(fixture.tools, fixture.instructions) : null;
   for (const entry of ws.agents.values()) entry.session.setPanelTools?.(tools);
   const events: StreamEvent[] = [];
@@ -296,304 +229,533 @@ export async function replay(backend: Backend, rec: Recording, fixture: Fixture)
       s.on("event", (e: StreamEvent) => events.push(JSON.parse(JSON.stringify(e)) as StreamEvent));
       s.on("runState", (st: string) => states.push(st));
       s.on("rateLimit", (info: Replay["limits"][number]) => limits.push(info));
-      // Where the workspace starts the reply to a steered message.
       s.on("steered", () => events.push({ kind: "steered" as StreamEvent["kind"], content: "" }));
     }
   };
 
-  const live = { feeder: null as Feeder<unknown> | null };
-  const player = new AppServerPlayer(backend === "agy");
-  if (backend === "agy" && rec.entries.some((e) => "error" in e)) {
-    throw new Error(
-      `the recording of ${rec.header.fixture} failed (it has an error entry): re-record it`,
-    );
-  }
-  const cursor = new CursorPlayer();
-  // The recording's own clock, so times in the transcript (wake-ups) are
-  // the same on every run. recordedAt is stamped when the capture ends.
+  const player = new AppServerPlayer();
   const end = rec.entries.at(-1)?.t ?? 0;
   const base = (Date.parse(rec.header.recordedAt) || Date.now()) - end;
   const at = (t: number) => {
     if (vi.isFakeTimers()) vi.setSystemTime(base + t);
   };
 
-  if (backend === "claude") {
-    ClaudeSession.sdk = {
-      query: () => {
-        const feeder = new Feeder<unknown>();
-        live.feeder = feeder;
-        const it = feeder.iterable() as AsyncIterable<SDKMessage>;
-        const q = {
-          [Symbol.asyncIterator]: () => it[Symbol.asyncIterator](),
-          close: () => feeder.end(),
-          supportedCommands: () => Promise.resolve([]),
-          stopTask: () => Promise.resolve(),
-          getContextUsage: () => Promise.resolve(null),
-          interrupt: () => Promise.resolve(),
-        };
-        return q as unknown as Query;
-      },
-    };
-  } else if (backend === "cursor") {
-    CursorSession.sdk = cursor.sdk;
-  } else if (backend === "agy") {
-    const found = new Map<string, unknown[]>();
-    for (const e of rec.entries) {
-      if (!("control" in e) || e.control.op !== "subagent" || !e.control.taskId) continue;
-      found.set(e.control.taskId, [...(found.get(e.control.taskId) ?? []), e.control.response]);
-    }
-    AgySession.hooks = {
-      transport: (session) => {
-        if (!host.created.includes(session)) throw new Error("a session from another replay");
-        return player.connect();
-      },
-      mcpServer: () => ({ name: "panel", command: "node", args: [], env: [] }),
-      idleTimers: false,
-      // The subagents' conversations as the recorder found them, in order.
-      findSubagent: (callId) => (found.get(callId)?.shift() as string | null | undefined) ?? null,
-    };
-  } else {
-    // Only this replay's sessions: one a failed replay left behind must not
-    // write into the next one's recording.
-    CodexSession.hooks = {
-      transport: (session) => {
-        if (!host.created.includes(session)) throw new Error("a session from another replay");
-        return player.connect();
-      },
-    };
-  }
-
-  // The user's controls, as the panel sends them: Stop (the turn only) and a
-  // background task's own stop. Applied at their step, when the request went
-  // out: frames the CLI sent before acknowledging it come after.
-  const control = async (c: Extract<Entry, { control: unknown }>["control"]) => {
-    if (c.error) return;
-    if (c.op === "interrupt") await ws.interruptAll();
-    if (c.op === "stop_task" && c.taskId) ws.cancelSubagent([...ws.agents.keys()][0], c.taskId);
-    await flush();
+  CodexSession.hooks = {
+    transport: (session) => {
+      if (!host.created.includes(session)) throw new Error("a session from another replay");
+      return player.connect();
+    },
   };
-  let pending: Promise<void> | null = null;
+
+  const running: Promise<unknown>[] = [];
   try {
-    if (backend === "codex" || backend === "agy") {
-      await replayRpc(rec, ws, host, player, tools, at, attach);
-      return {
-        messages: ws.messages,
-        events,
-        states,
-        limits,
-        sessions: host.created,
-        sent: player.sent,
-        sdkCalls: [],
-        sends: [],
-      };
-    }
     for (const [i, e] of rec.entries.entries()) {
       at(e.t);
       if ("step" in e) {
-        if (e.step.op === "send") {
-          pending = ws.sendMessage(e.step.text);
-          // Claude's send resolves once the query is up, cursor's only
-          // when its run has ended.
-          if (backend === "claude") await pending;
-          await flush();
-          attach();
-        } else if (e.step.op === "end") {
-          live.feeder?.end();
-          await flush();
-          restart(ws, host, null);
-        } else if (e.step.op === "abort") {
-          for (const s of host.created) s.abort();
-          await flush();
-        } else if (e.step.op === "interrupt" || e.step.op === "stopTask") {
-          const next = rec.entries.slice(i + 1).find((x) => "control" in x || "step" in x);
-          if (next && "control" in next) await control(next.control);
-        }
-      } else if ("frame" in e) {
-        if (backend === "cursor") cursor.play(e.frame as Record<string, unknown>);
-        else live.feeder?.push(e.frame);
+        const op = e.step.op;
+        if (op === "send" && !e.step.requeued) running.push(ws.sendMessage(e.step.text));
+        else if (op === "compact") running.push(ws.sendMessage("/compact"));
+        else if (op === "interrupt" || op === "abort") running.push(ws.interruptAll());
+        else if (op === "end") restart(ws, host, tools);
         await flush();
-        // The queue moves on a timer after a turn ends: a message it sends
-        // reaches the CLI before the next turn's frames, as it did live.
-        if ((e.frame as { type?: string }).type === "result") {
-          await new Promise((r) => setTimeout(r, 2));
-          await flush();
-        }
-      } else if ("error" in e) {
-        live.feeder?.fail(new Error(e.error));
+        attach();
+      } else if ("sent" in e) {
+        await player.expect(e.sent as RpcMessage, `entry ${i + 1}`);
+      } else if ("frame" in e) {
+        player.play(e.frame as RpcMessage);
         await flush();
       } else if ("close" in e) {
-        live.feeder?.end();
+        player.close();
         await flush();
-        if (pending) await pending;
       }
     }
+    await Promise.all(running);
     await flush();
+    player.finish();
   } finally {
-    // A wake-up still pending when the recording ends must not be sent once
-    // its time comes: through the real SDK, or the next replay's player.
-    for (const s of host.created) s.removeAllListeners("wakeDue");
-    ClaudeSession.sdk = null;
     CodexSession.hooks = null;
-    CursorSession.sdk = null;
-    AgySession.hooks = null;
   }
+
   return {
     messages: ws.messages,
     events,
     states,
     limits,
     sessions: host.created,
-    sent: [],
-    sdkCalls: cursor.calls.filter((c) => c !== "wait"),
-    sends: cursor.sends,
+    sent: player.sent,
   };
 }
 
-// Plays a cursor recording to the session: each SDK call it makes waits for
-// the frame that answered it (created/resumed, run, result) or threw, and a
-// frame answers only the call that produced it in the recording.
-class CursorPlayer {
-  readonly calls: string[] = [];
-  readonly sends: Array<{ model?: unknown; local?: Record<string, unknown> }> = [];
-  private pending: Partial<
-    Record<
-      "agent" | "run" | "wait",
-      { op: string; resolve(v: unknown): void; reject(e: unknown): void }
-    >
-  > = {};
-  private onDelta: ((args: { update: never }) => unknown) | undefined;
+// A real PiRpcClient reads LF-delimited stdout and writes to a controlled stdin.
+// Only startup replies are supplied by the player; turn traffic is tape-ordered.
+// This does not launch Pi or verify extension registration in a real process.
+class PiRpcPlayer {
+  readonly sent: PiFrame[] = [];
+  readonly connections: Array<{ restored: boolean }> = [];
+  private readonly written: PiFrame[] = [];
+  private readonly awaiting = new Map<string, string>();
+  private readonly anchors = new Map<string, PiFrame>();
+  private readonly streams: PassThrough[] = [];
+  private readonly ready: Promise<unknown>[] = [];
+  private route?: { url: string; token: string };
+  private stdout?: PassThrough;
+  private exit?: (code: number) => void;
+  image?: Buffer;
 
-  private call<T>(slot: "agent" | "run" | "wait", op: string): Promise<T> {
-    this.calls.push(op);
-    return new Promise<T>((resolve, reject) => {
-      this.pending[slot] = { op, resolve, reject };
+  constructor(
+    private readonly dir: string,
+    private readonly model: string,
+  ) {}
+
+  connect = (opts: PiRpcSpawnOptions): PiRpcClient => {
+    const arg = (name: string) => {
+      const i = opts.args!.indexOf(name);
+      return i < 0 ? undefined : opts.args![i + 1];
+    };
+    const saved = arg("--session");
+    const sessionFile = path.join(this.dir, "session.jsonl");
+    if (saved)
+      expect(saved === sessionFile, "restore reopens the synthetic session file").toBe(true);
+    const sessionId = saved
+      ? (JSON.parse(fs.readFileSync(saved, "utf8")) as { id: string }).id
+      : arg("--session-id")!;
+    if (!saved)
+      fs.writeFileSync(sessionFile, JSON.stringify({ type: "session", id: sessionId }) + "\n");
+    this.connections.push({ restored: Boolean(saved) });
+    this.route = {
+      url: `${opts.env!.YAAT_PANEL_URL}/v1/sessions/${encodeURIComponent(opts.env!.YAAT_PANEL_KEY!)}`,
+      token: opts.env!.YAAT_PANEL_TOKEN!,
+    };
+    const ready: PanelReadyReport = {
+      sessionProof: {
+        sessionId,
+        sessionFile,
+        cwd: opts.cwd!,
+        headerCwd: opts.cwd!,
+        entryCount: 0,
+        leafId: null,
+        anchorOnActiveBranch: true,
+        anchorExistsInFile: true,
+      },
+      ownerToolNames: [],
+      requiredExtensionsRegistered: true,
+      subagentsRpcReady: true,
+      subagentsSessionId: sessionId,
+    };
+    const bridge = this.post("ready", ready);
+    void bridge.catch(() => undefined);
+    this.ready.push(bridge);
+    const stdout = new PassThrough();
+    this.stdout = stdout;
+    this.streams.push(stdout);
+    const [provider, id] = this.model.split("/");
+    const model = { provider, id, contextWindow: 1000 };
+    const startup = [
+      ["get_state", { model, sessionId, sessionFile, thinkingLevel: "low" }],
+      ["get_available_models", { models: [model] }],
+      ["get_commands", { commands: [] }],
+      ["get_available_thinking_levels", { levels: ["low"] }],
+    ] as const;
+    let next = 0;
+    const stdin = new Writable({
+      write: (chunk: Buffer, _, done) => {
+        const command = JSON.parse(chunk.toString()) as PiFrame;
+        const boot = startup[next];
+        if (boot && boot[0] === command.type) {
+          next++;
+          this.play({
+            type: "response",
+            id: command.id,
+            command: command.type,
+            success: true,
+            data: boot[1],
+          });
+        } else {
+          this.sent.push(command);
+          this.written.push(command);
+        }
+        done();
+      },
+    });
+    // Deliver the actual child exit notification without launching a process.
+    const child = new ChildProcess();
+    const exit = (code: number) => {
+      if (child.exitCode !== null) return;
+      Object.assign(child, { exitCode: code });
+      child.emit("exit", code, null);
+      stdout.end();
+    };
+    this.exit = exit;
+    stdin.on("finish", () => exit(0));
+    return new PiRpcClient({ stdin, stdout, child }, { requestTimeoutMs: 1500 });
+  };
+
+  private async post(endpoint: string, body: unknown): Promise<unknown> {
+    const { url, token } = this.route!;
+    const response = await fetch(`${url}/${endpoint}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(1500),
+    });
+    expect(response.status, `Panel HTTP ${endpoint}`).toBe(200);
+    return response.json();
+  }
+
+  async expect(expected: PiFrame): Promise<void> {
+    await expect
+      .poll(() => this.written.length, {
+        timeout: 1000,
+        interval: 5,
+        message: `waiting for Pi ${expected.type} ${typeof expected.message === "string" ? expected.message : ""}`,
+      })
+      .toBeGreaterThan(0);
+    const { id, ...frame } = this.written.shift()!;
+    if (frame.type === "extension_ui_response") frame.id = id;
+    else {
+      expect(typeof id).toBe("string");
+      expect(this.awaiting.has(frame.type)).toBe(false);
+      this.awaiting.set(frame.type, id as string);
+    }
+    if (frame.images && this.image) {
+      const images = frame.images as Array<{ type?: string; mimeType?: string; data?: string }>;
+      expect(images).toHaveLength(1);
+      expect(images.map(({ type, mimeType }) => ({ type, mimeType }))).toEqual([
+        { type: "image", mimeType: "image/png" },
+      ]);
+      expect(
+        images[0].data === this.image.toString("base64"),
+        "Pi sends the exact seeded image bytes",
+      ).toBe(true);
+      frame.images = [{ type: "image", mimeType: "image/png", data: "generated-png" }];
+    }
+    expect(frame).toEqual(expected);
+  }
+
+  play(frame: PiFrame): void {
+    if (frame.type === "response" && frame.id === undefined) {
+      const command = String(frame.command);
+      const id = this.awaiting.get(command);
+      expect(id, `request before response to ${command}`).toBeDefined();
+      this.awaiting.delete(command);
+      frame = { success: true, ...frame, id };
+    }
+    if (frame.type === "tool_execution_start") this.anchors.set(String(frame.toolCallId), frame);
+    if (frame.type === "tool_execution_end") this.anchors.delete(String(frame.toolCallId));
+    this.stdout!.write(JSON.stringify(frame) + "\n");
+  }
+
+  async panelCall(callId: string): Promise<void> {
+    const call = this.anchors.get(callId);
+    expect(call, "open Pi tool call before Panel HTTP dispatch").toBeDefined();
+    const { text, isError } = (await this.post("call", {
+      name: call!.toolName,
+      params: call!.args,
+      callId,
+    })) as { text: string; isError: boolean };
+    expect(isError, `Panel tool ${JSON.stringify(call!.toolName)} failed`).toBe(false);
+    this.play({
+      type: "tool_execution_end",
+      toolName: call!.toolName,
+      toolCallId: callId,
+      result: { content: [{ type: "text", text }] },
+      isError,
     });
   }
 
-  private settle(slot: "agent" | "run" | "wait", value: unknown, failed = false): void {
-    const p = this.pending[slot];
-    delete this.pending[slot];
-    if (failed) p?.reject(value);
-    else p?.resolve(value);
+  crash(): void {
+    this.finishWrites();
+    this.awaiting.clear(); // a process can die with a request outstanding
+    this.anchors.clear();
+    this.exit!(1);
   }
 
-  readonly sdk: CursorSdk = {
-    Agent: {
-      create: () => this.call("agent", "create"),
-      resume: (id: string) => this.call("agent", `resume ${id}`),
+  private finishWrites(): void {
+    expect(
+      this.written.map((m) => m.type),
+      "unrecorded Pi writes",
+    ).toEqual([]);
+  }
+
+  async finish(): Promise<void> {
+    await Promise.all(this.ready);
+    this.finishWrites();
+    expect([...this.awaiting.keys()], "unanswered Pi requests").toEqual([]);
+  }
+
+  close(): void {
+    for (const stream of this.streams) stream.destroy();
+  }
+}
+
+function seededPng(seed: number): Buffer {
+  const chunk = (name: string, data: Buffer) => {
+    const typeAndData = Buffer.concat([Buffer.from(name), data]);
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const checksum = Buffer.alloc(4);
+    checksum.writeUInt32BE(crc32(typeAndData));
+    return Buffer.concat([length, typeAndData, checksum]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 8;
+  header[9] = 2;
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(Buffer.from([0, seed, seed * 3, seed * 7]))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+// Resolve only explicit artifact slots. No host paths appear in the tape.
+function piArtifacts(value: unknown, dir: string): unknown {
+  if (value === "$child-session") return path.join(dir, "child.jsonl");
+  if (value === "$async-dir") return path.join(dir, "async");
+  if (Array.isArray(value)) return value.map((v) => piArtifacts(v, dir));
+  if (value && typeof value === "object")
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, piArtifacts(v, dir)]));
+  return value;
+}
+
+async function replayPi(
+  rec: Recording,
+  fixture: Fixture,
+  cb?: WorkspaceCallbacks,
+): Promise<Replay> {
+  const base = Date.parse(rec.header.recordedAt) - (rec.entries.at(-1)?.t ?? 0);
+  if (vi.isFakeTimers()) vi.setSystemTime(base);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yaat-pi-snap-"));
+  const panel = new PanelHttpServer();
+  const player = new PiRpcPlayer(dir, rec.header.model || DEFAULT_MODEL.pi);
+  const sessions: PiSession[] = [];
+  const events: StreamEvent[] = [];
+  const states: string[] = [];
+  const pi: NonNullable<Replay["pi"]> = {
+    checkpoints: {},
+    dialogs: [],
+    sent: player.sent,
+    connections: player.connections,
+  };
+  const uploadsDir = path.join(dir, "uploads");
+  fs.mkdirSync(uploadsDir);
+  const registry = new HostRegistry();
+  registry.register(
+    new (class extends LocalHost {
+      override createSession(agentId: string, config: SessionConfig) {
+        const session = new PiSession(
+          { ...config, agentId, piAgentDir: dir, uploadsDir },
+          { panelHttp: panel, rpcFactory: player.connect, readyTimeoutMs: 1500 },
+        );
+        sessions.push(session);
+        session.on("event", (event: StreamEvent) => events.push(structuredClone(event)));
+        session.on("runState", (state: string) => states.push(state));
+        return session;
+      }
+    })("local", "Local"),
+  );
+  const callbacks: WorkspaceCallbacks = {
+    onNewMessage: () => {},
+    onStreamEvent: () => {},
+    onMessageDone: () => {},
+    ...cb,
+    onUiDialogRequest: (dialog) => {
+      pi.dialogs.push({ kind: "request", id: dialog.requestId });
+      cb?.onUiDialogRequest?.(dialog);
+    },
+    onUiDialogResolved: (dialog) => {
+      pi.dialogs.push({ kind: "resolved", id: dialog.requestId });
+      cb?.onUiDialogResolved?.(dialog);
     },
   };
-
-  private agent(agentId: string) {
-    return {
-      agentId,
-      [Symbol.asyncDispose]: () => Promise.resolve(),
-      send: (
-        _message: unknown,
-        options?: {
-          model?: unknown;
-          local?: Record<string, unknown>;
-          onDelta?: (args: { update: never }) => unknown;
-        },
-      ) => {
-        this.onDelta = options?.onDelta;
-        const { customTools: _, ...local } = options?.local ?? {};
-        this.sends.push({ model: options?.model, local });
-        return this.call("run", "send");
-      },
-    };
-  }
-
-  private run(id: string) {
-    return {
-      id,
-      wait: () => this.call("wait", "wait"),
-      cancel: () => {
-        this.calls.push("cancel");
-        return Promise.resolve();
-      },
-    };
-  }
-
-  play(frame: Record<string, unknown>): void {
-    const [source] = Object.keys(frame);
-    const v = frame[source] as Record<string, unknown>;
-    switch (source) {
-      case "created":
-      case "resumed": {
-        const asked = this.pending.agent?.op;
-        const recorded = source === "created" ? "create" : `resume ${v.agentId as string}`;
-        if (asked !== recorded) {
-          this.settle("agent", new Error(`recorded ${recorded}, the session asked ${asked}`), true);
-          return;
+  const ws = new Workspace("ws", "t", "p", "local", dir, registry, callbacks);
+  const agent = ws.addAgent("A", rec.header.model || DEFAULT_MODEL.pi, "🤖", "#888", {
+    backend: "pi",
+    workspaceId: ws.id,
+  });
+  const session = sessions[0];
+  const running: Promise<unknown>[] = [];
+  let project: ReturnType<typeof makePiProject> | undefined;
+  try {
+    if (fixture.piProject) project = makePiProject(dir, registry, ws, session);
+    if (fixture.files?.["child.jsonl"]) {
+      const child = fixture.files["child.jsonl"];
+      if (typeof child !== "string") throw new Error("Pi child session must be synthetic JSONL");
+      fs.writeFileSync(path.join(dir, "child.jsonl"), child);
+    }
+    const steps = rec.entries.flatMap((e) => ("step" in e ? [e.step] : []));
+    expect(steps).toEqual(fixture.steps.map((step, i) => ({ ...step, i })));
+    for (const entry of rec.entries) {
+      if (vi.isFakeTimers()) vi.setSystemTime(base + entry.t);
+      if ("step" in entry) {
+        const step = entry.step;
+        switch (step.op) {
+          case "send":
+            running.push(ws.sendMessage(step.text));
+            break;
+          case "image": {
+            const name = "pixel.png";
+            const file = path.join(uploadsDir, name);
+            player.image = seededPng(step.seed);
+            fs.writeFileSync(file, player.image);
+            running.push(
+              ws.sendMessage(step.text, undefined, [{ name, url: `/uploads/${name}`, path: file }]),
+            );
+            break;
+          }
+          case "interrupt":
+            running.push(ws.interruptAll());
+            break;
+          case "uiDialogResponse": {
+            const dialog = ws.getPendingDialogs()[0];
+            expect(dialog?.requestId).toBe(step.requestId);
+            ws.respondToUiDialog(agent.id, dialog.processGeneration, step.requestId, step);
+            break;
+          }
+          case "panelCall":
+            expect(project, "real project toolset").toBeDefined();
+            await player.panelCall(step.callId);
+            break;
+          case "check": {
+            const checkpoint: PiCheckpoint = {
+              canSteer: session.canSteer,
+              runState: session.runState,
+              userStatuses: ws.messages.filter((m) => m.kind === "user").map((m) => m.status),
+              prompts: player.sent.filter((m) => m.type === "prompt").map((m) => String(m.message)),
+              terminalCount: events.filter((e) => e.kind === "result" || e.kind === "error").length,
+              thinkingClosed: events.some(
+                (e) =>
+                  e.kind === "thinking_delta" && e.content === "" && e.durationMs !== undefined,
+              ),
+              pendingDialogIds: ws.getPendingDialogs().map((d) => d.requestId),
+              contextUsage: await session.getContextUsage(),
+              backgroundTasks: session.backgroundTaskList,
+              lastEnvelope: ws.agents.get(agent.id)?.lastEnvelope,
+              generation: ws.messages.filter((m) => m.kind === "user").at(-1)?.dispatchAttempt
+                ?.generation,
+            };
+            pi.checkpoints[step.name] = structuredClone(checkpoint);
+            break;
+          }
+          default:
+            throw new Error(`Unsupported Pi step ${step.op}`);
         }
-        return this.settle("agent", this.agent(v.agentId as string));
-      }
-      case "run":
-        return this.settle("run", this.run(v.id as string));
-      case "delta":
-        void this.onDelta?.({ update: v as never });
-        return;
-      case "result":
-        return this.settle("wait", v);
-      case "thrown": {
-        const error = Object.assign(new Error(v.message as string), v);
-        const slot = v.where === "send" ? "run" : v.where === "wait" ? "wait" : "agent";
-        return this.settle(slot, error, true);
-      }
+      } else if ("sent" in entry) await player.expect(entry.sent as PiFrame);
+      else if ("frame" in entry) player.play(piArtifacts(entry.frame, dir) as PiFrame);
+      else if ("close" in entry) player.crash();
+      else throw new Error("Unsupported Pi tape entry");
+      await flush();
+    }
+    await player.finish();
+    await Promise.all(running);
+    project?.verify();
+    return { messages: ws.messages, events, states, sessions, limits: [], sent: [], pi };
+  } finally {
+    try {
+      await Promise.all(sessions.map((s) => s.dispose(1000)));
+      await project?.close();
+    } finally {
+      player.close();
+      await panel.close();
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   }
 }
 
-const AGY_CONTROLS = new Set(["idleCheck", "logActivity", "toolAnswer"]);
+function makePiProject(dir: string, registry: HostRegistry, worker: Workspace, session: PiSession) {
+  const workspaces = new Map([[worker.id, worker]]);
 
-// A codex or agy recording through the workspace: each step as the panel
-// takes it, without waiting on what it starts (the answers are later lines).
-// An agy session's look at what agy did while idle comes where the recorder's
-// did: its timers do not run here.
-async function replayRpc(
-  rec: Recording,
-  ws: Workspace,
-  host: SnapHost,
-  player: AppServerPlayer,
-  tools: PanelToolset | null,
-  at: (t: number) => void,
-  attach: () => void,
-): Promise<void> {
-  const running: Promise<unknown>[] = [];
-  for (const [i, e] of rec.entries.entries()) {
-    at(e.t);
-    if ("step" in e) {
-      const op = e.step.op;
-      if (op === "send" && !e.step.requeued) running.push(ws.sendMessage(e.step.text));
-      else if (op === "compact") running.push(ws.sendMessage("/compact"));
-      else if (op === "interrupt" || op === "abort") running.push(ws.interruptAll());
-      else if (op === "end") restart(ws, host, tools);
-      await flush();
-      attach();
-    } else if ("sent" in e) {
-      await player.expect(e.sent as RpcMessage, `entry ${i + 1}`);
-    } else if ("frame" in e) {
-      player.play(e.frame as RpcMessage);
-      await flush();
-    } else if ("close" in e) {
-      player.close();
-      await flush();
-    } else if ("control" in e && AGY_CONTROLS.has(e.control.op)) {
-      const session = host.created.at(-1);
-      if (!(session instanceof AgySession)) throw new Error(`${e.control.op} outside agy`);
-      if (e.control.op === "idleCheck") session.checkIdle();
-      else if (e.control.op === "logActivity") session.logActivity();
-      else {
-        const answer = e.control.response as { args: unknown; text: string; isError: boolean };
-        session.noteToolAnswer(e.control.taskId ?? "", answer.args, answer.text, answer.isError);
-      }
-      await flush();
-    }
-  }
-  await Promise.all(running);
-  await flush();
-  player.finish();
+  const history = new HistoryService(path.join(dir, "history.db"), path.join(dir, "history.jsonl"));
+  const host: ProjectHost = {
+    workspaces: () => workspaces.values(),
+    workspace: (id) => workspaces.get(id),
+    createWorkspace(name, cwd, link) {
+      const lead = new Workspace("lead", name, "p", "local", cwd, registry, {
+        canDequeue: () => false,
+        onNewMessage: () => {},
+        onStreamEvent: () => {},
+        onMessageDone: () => {},
+      });
+      lead.projectLink = link;
+      workspaces.set(lead.id, lead);
+      return lead;
+    },
+    addAgent: (ws, name, model, avatar, color) => {
+      ws.addAgent(name, model, avatar, color, { backend: "pi" });
+    },
+    removeWorkspace: (id) => {
+      workspaces.delete(id);
+    },
+    archiveWorkspace: () => false,
+    restoreWorkspace: () => false,
+    loadWorkspace: () => true,
+    history,
+    isLeadOnline: () => true,
+    modelIds: () => [DEFAULT_MODEL.pi],
+    persistWorkspace: () => {},
+    saveWorkspaceNow: () => {},
+    workspaceChanged: () => {},
+    broadcast: () => {},
+  };
+  const manager = new ProjectManager(dir, host);
+  const project = manager.create("Synthetic project", null, DEFAULT_MODEL.pi);
+  worker.projectLink = { projectId: project.id, role: "worker" };
+  const projectStore = new ProjectStore(dir);
+  const board = new ObjectiveStore(projectStore.objectivesDir(project.id));
+  board.write({
+    id: "demo/replay",
+    area: "demo",
+    title: "Seed objective",
+    goal: "Exercise a project update.",
+    status: "active",
+    priority: "normal",
+    dependsOn: [],
+    decisions: [],
+    sessions: [worker.id],
+    tasks: [{ id: "t1", text: "Replay a sample.", state: "doing", session: worker.id }],
+    updatedAt: Date.now(),
+  });
+  session.setPanelTools(manager.toolsFor(worker));
+  return {
+    verify() {
+      const store = new ProjectStore(dir);
+      expect(store.get(project.id)).toMatchObject({ name: "Synthetic project", status: "active" });
+      expect(
+        fs.readFileSync(path.join(store.notesDir(project.id), "example.md"), "utf8"),
+      ).toContain("Synthetic note.");
+      expect(manager.list().find((p) => p.id === project.id)?.objectives).toEqual([
+        expect.objectContaining({
+          id: "demo/replay",
+          title: "Replay",
+          context: "After finish",
+          tasks: [{ id: "t1", text: "Replay a sample.", state: "review", session: worker.id }],
+        }),
+      ]);
+      const report = new ReportJournalStore()
+        .load(store.projectDir(project.id))
+        .find((entry) => entry.callId === "report");
+      expect(report).toMatchObject({
+        kind: "final",
+        boardState: "applied",
+        leadDelivery: { state: "enqueued" },
+        payload: { text: "Synthetic work done.", context: "After finish" },
+        frozenPlan: {
+          taskTransitions: [
+            { objectiveId: "demo/replay", taskId: "t1", expectedSession: worker.id },
+          ],
+        },
+      });
+      expect(
+        fs.readFileSync(path.join(store.objectivesDir(project.id), "demo", "replay.toml"), "utf8"),
+      ).toContain("After finish");
+    },
+    async close() {
+      manager.close();
+      await history.close();
+    },
+  };
 }
 
 // --- transcript -------------------------------------------------------------
@@ -603,7 +765,12 @@ const q = (s: string | undefined, max = 100): string => {
   return JSON.stringify(one.length > max ? one.slice(0, max) + "…" : one);
 };
 
-function renderEvents(events: StreamEvent[], indent: string, out: string[]): void {
+function renderEvents(
+  events: StreamEvent[],
+  indent: string,
+  out: string[],
+  backend: Backend,
+): void {
   for (const e of events) {
     switch (e.kind) {
       case "subagent_progress":
@@ -617,15 +784,18 @@ function renderEvents(events: StreamEvent[], indent: string, out: string[]): voi
         out.push(
           `${indent}card ${label} ${sa.status ?? "?"}${ran} ${q(sa.prompt ?? sa.description)}`,
         );
-        renderEvents(sa.events ?? [], indent + "  ", out);
+        renderEvents(sa.events ?? [], indent + "  ", out, backend);
         if (sa.summary) out.push(`${indent}  summary ${q(sa.summary)}`);
         continue;
       }
       case "tool_use": {
+        // A real Notes response includes the filesystem mtime, outside the replay clock.
+        const text =
+          backend === "pi" && e.toolName === "mcp__panel__write_note"
+            ? e.toolResult?.replace(/"updatedAt":\d+(?:\.\d+)?/, '"updatedAt":"<mtime>"')
+            : e.toolResult;
         const result =
-          e.toolResult == null
-            ? " → (pending)"
-            : ` → ${e.toolResultIsError ? "error " : ""}${q(e.toolResult, 80)}`;
+          text == null ? " → (pending)" : ` → ${e.toolResultIsError ? "error " : ""}${q(text, 80)}`;
         const took = e.durationMs != null ? ` ${e.durationMs}ms` : "";
         out.push(`${indent}tool ${e.toolName ?? "?"} ${q(e.content)}${result}${took}`);
         continue;
@@ -637,6 +807,8 @@ function renderEvents(events: StreamEvent[], indent: string, out: string[]): voi
         out.push(`${indent}notice:${e.level ?? "info"} ${q(e.content)}`);
         continue;
       case "text":
+        if (backend === "pi" && indent.length > 2) out.push(`${indent}text ${q(e.content, 80)}`);
+        continue;
       case "text_delta":
       case "thinking_delta":
         continue;
@@ -646,7 +818,7 @@ function renderEvents(events: StreamEvent[], indent: string, out: string[]): voi
   }
 }
 
-export function transcript(messages: Message[]): string {
+export function transcript(messages: Message[], backend: Backend = "codex"): string {
   const out: string[] = [];
   messages.forEach((m, i) => {
     const meta = [
@@ -658,8 +830,15 @@ export function transcript(messages: Message[]): string {
       .filter(Boolean)
       .join(" ");
     out.push(`## ${i + 1} ${meta}`);
-    if (m.content) out.push(`  text ${q(m.content, 200)}`);
-    renderEvents(m.events ?? [], "  ", out);
+    let content = m.content;
+    if (backend === "pi" && m.kind === "system") {
+      for (const [index, input] of messages.entries()) {
+        if (input.status === "outcome_unknown")
+          content = content.replace(input.id, `#${index + 1}`);
+      }
+    }
+    if (content) out.push(`  text ${q(content, 200)}`);
+    renderEvents(m.events ?? [], "  ", out, backend);
   });
   return out.join("\n") + "\n";
 }
@@ -670,12 +849,13 @@ type ClientMessage = Parameters<typeof applyEventsToMessage>[0];
 
 // The client rebuilds the transcript from broadcast events; it must match
 // what the workspace built server-side.
-export function clientView(events: StreamEvent[]): Message[] {
+export function clientView(events: StreamEvent[], backend: Backend = "codex"): Message[] {
   const msgs: ClientMessage[] = [];
   let cur: ClientMessage | null = null;
   // The reply an error finished; the turn's result has nothing left to end.
   let failed = false;
-  for (const e of events) {
+  for (const raw of events) {
+    const e = backend === "pi" && raw.kind === "subagent_done" ? stripChildTranscript(raw) : raw;
     if (e.kind === "text") continue;
     if (e.kind === "result" && !cur && failed) {
       failed = false;
@@ -733,6 +913,13 @@ export function clientView(events: StreamEvent[]): Message[] {
       // longer carry a retry banner once the retried call succeeded.
       cur.events = cur.events!.filter((x) => x.kind !== "retry");
       cur.status = "done";
+      if (backend === "pi") {
+        cur.context = e.context;
+        cur.effort = e.effort;
+        cur.thinking = e.thinking;
+        if (e.interrupted)
+          cur.content = [cur.content, "*\\[interrupted\\]*"].filter(Boolean).join("\n\n");
+      }
       cur = null;
       continue;
     }
@@ -740,6 +927,7 @@ export function clientView(events: StreamEvent[]): Message[] {
     msgs[msgs.indexOf(cur)] = next;
     // An error ends the reply, as the workspace finishes it.
     failed = e.kind === "error";
+    if (failed && backend === "pi") next.status = "error";
     cur = failed ? null : next;
   }
   return msgs as unknown as Message[];
@@ -753,3 +941,14 @@ export const strip = (m: Message): unknown =>
         : v,
     ),
   ) as unknown;
+
+export function stripChildTranscript(event: StreamEvent): StreamEvent {
+  const child = event.subagent;
+  if (!child?.events) return event;
+  const { events, ...summary } = child;
+  const count = Math.max(summary.eventCount ?? 0, events.length);
+  return {
+    ...event,
+    subagent: { ...summary, eventCount: count || (event.kind === "subagent_done" ? 0 : undefined) },
+  };
+}

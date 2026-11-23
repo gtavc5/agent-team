@@ -26,7 +26,7 @@ function setup() {
       onStreamEvent: () => {},
       onMessageDone: () => {},
     });
-    w.addAgent("A", "claude-opus-5-5", "a", "#fff", { backend: "claude" });
+    w.addAgent("A", "gpt-6-astra", "a", "#fff", { backend: "codex" });
     w.lastActivityAt = messages.at(-1)?.timestamp ?? 0;
     if (archived) {
       w.archivedAt = 1;
@@ -49,7 +49,7 @@ describe("a folder's project", () => {
     git("worktree", "add", "-q", path.join(base, "clice-fix"));
 
     const project = manager.ensureFor(repo);
-    expect(project).toMatchObject({ name: "clice", root: repo });
+    expect(project).toMatchObject({ name: "clice", root: fs.realpathSync(repo) });
     expect(workspaces.get(project.leadWorkspaceId!)!.agents.size).toBe(1);
     expect(manager.ensureFor(repo).id).toBe(project.id);
     expect(manager.ensureFor(path.join(base, "clice-fix")).id).toBe(project.id);

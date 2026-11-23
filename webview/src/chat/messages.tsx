@@ -566,7 +566,7 @@ export const SubAgentItem = memo(function SubAgentItem({
           </span>
         )}
         {isRunning && <span className="streaming-dot" />}
-        {isRunning && onCancel && (
+        {isRunning && sa.cancellable !== false && onCancel && (
           <button
             className="btn-cancel-subagent"
             title="Cancel this subagent"
@@ -984,6 +984,16 @@ export const MessageItem = memo(function MessageItem({
   const from = isUser ? msg.from : undefined;
   const agent = !isUser ? agents.find((a) => a.id === msg.agentId) : null;
   const streaming = msg.status === "streaming";
+  const deliveryClass =
+    msg.status === "queued"
+      ? " message-queued"
+      : msg.status === "dispatching"
+        ? " message-dispatching"
+        : msg.status === "outcome_unknown"
+          ? " message-outcome-unknown"
+          : msg.status === "error"
+            ? " message-error"
+            : "";
   const thinkingLive = streaming && msg.liveThinking != null;
 
   const events = msg.events ?? [];
@@ -1076,7 +1086,7 @@ export const MessageItem = memo(function MessageItem({
       <TurnRunningContext.Provider value={streaming}>
         <div
           id={`msg-${msg.id}`}
-          className={`message${isUser ? " message-user" : " message-agent"}${compact ? " message-compact" : ""}${highlight ? " message-highlight" : ""}${msg.status === "queued" ? " message-queued" : ""}${msg.status === "error" ? " message-error" : ""}`}
+          className={`message${isUser ? " message-user" : " message-agent"}${compact ? " message-compact" : ""}${highlight ? " message-highlight" : ""}${deliveryClass}`}
         >
           <div className="message-gutter">
             {compact ? null : from ? (
@@ -1152,6 +1162,19 @@ export const MessageItem = memo(function MessageItem({
               </div>
             )}
             {!isUser && <MessageStatus msg={msg} />}
+
+            {msg.status === "dispatching" && (
+              <div className="delivery-status delivery-dispatching" role="status">
+                <span className="streaming-dot" /> Sending to the agent…
+              </div>
+            )}
+            {msg.status === "outcome_unknown" && (
+              <div className="delivery-status delivery-outcome-unknown" role="alert">
+                <strong>Delivery outcome unknown.</strong> This message may have reached the agent
+                before a crash. Verify what happened before deciding whether to retry manually; it
+                was not retried automatically.
+              </div>
+            )}
 
             {msg.forwardRef && (
               <div className="forward-ref">

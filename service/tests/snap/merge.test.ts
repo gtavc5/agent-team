@@ -2,7 +2,7 @@
 // both must build the same transcript (snap.test.ts asserts it per fixture,
 // these for what no fixture records).
 import { describe, it, expect } from "vitest";
-import type { StreamEvent } from "../../src/session/claude";
+import type { StreamEvent } from "../../src/session/types";
 import { applyEventsToMessage } from "../../../webview/src/state/stream";
 import type { StreamEvent as ClientEvent } from "../../../webview/src/state/useServer";
 

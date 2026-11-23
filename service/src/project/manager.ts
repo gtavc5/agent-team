@@ -1,7 +1,23 @@
+import { randomUUID } from "node:crypto";
+import { ProjectCommitLock } from "./commit-lock";
+import { ProjectNotesStore } from "./notes";
+import {
+  ReportJournalStore,
+  buildReportEnvelope,
+  deliveryStateRank,
+  reconcileReportDeliveryState,
+  type FrozenReportPlan,
+  type ReportLeadDelivery,
+} from "./report-journal";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { AGENT_PRESETS, MODEL_OPTIONS, effortLevelsForModel } from "../config/presets";
+import {
+  AGENT_PRESETS,
+  MODEL_OPTIONS,
+  backendForModel,
+  effortLevelsForModel,
+} from "../config/presets";
 import { resolveWorkspacePath } from "../repo/dirs";
 import { gitCommitsSince, gitHead, gitStatus, gitWorktrees, repositoryRoot } from "../repo/git";
 import type { EntryInfo, EntryKind, SessionRow, SqlValue } from "../workspace/history-index";
@@ -59,7 +75,7 @@ const TASK_ISSUES_SHOWN = 10;
 const AGES_COUNTED = 40;
 
 // A long-lived lead has the whole project in its context.
-export const LEAD_MODEL = "claude-opus-5-5";
+export const LEAD_MODEL = "gpt-6-astra";
 
 // A lead asked to start everything at once must not spawn a burst of CLI
 // sessions on the user's account: worker tasks go out this far apart.
@@ -90,6 +106,8 @@ export interface ProjectHost {
     effort?: string,
   ): void;
   // config.toml's [projects]: the model and effort leads default to.
+  isLeadOnline?(project: Project): boolean;
+  modelIds?(): string[];
   projectDefaults?(): { model?: string; effort?: string };
   // Deletes a workspace without the project bookkeeping of a user delete.
   removeWorkspace(id: string): void;
@@ -103,6 +121,7 @@ export interface ProjectHost {
   // Right away: a shutdown drops pending debounced saves of unloaded
   // (archived) workspaces.
   saveWorkspaceNow(workspace: Workspace): void;
+  cancelWorkspaceTimers?(workspace: Workspace): void;
   // Its name or project link changed.
   workspaceChanged(workspace: Workspace): void;
   broadcast(msg: unknown): void;
@@ -116,10 +135,12 @@ export type ProjectInfo = Project & { objectives: Array<Objective | BrokenObject
 // send path, shown with its sender (Message.from).
 export class ProjectManager {
   private store: ProjectStore;
+  private readonly commitLock = new ProjectCommitLock();
+  private readonly journals = new Map<string, ReportJournalStore>();
   // Times handed out by takeStartSlot that are not long past.
   private slots: number[] = [];
   private peerLog = new Map<string, number[]>();
-  private timers = new Set<ReturnType<typeof setTimeout>>();
+  private timers = new Map<ReturnType<typeof setTimeout>, string>();
   private boards = new Map<string, ObjectiveStore>();
   private issueStores = new Map<string, IssueStore>();
   private settling = new Map<string, ReturnType<typeof setTimeout>>();
@@ -128,7 +149,7 @@ export class ProjectManager {
   private closed = false;
 
   constructor(
-    baseDir: string,
+    private readonly baseDir: string,
     private host: ProjectHost,
   ) {
     this.store = new ProjectStore(baseDir);
@@ -139,14 +160,14 @@ export class ProjectManager {
   }
 
   // Where its board's paths lead: the repository and the notes.
-  paths(id: string): { root: string; notesDir: string } | undefined {
+  paths(id: string): { root: string | null; notesDir: string } | undefined {
     const p = this.store.get(id);
     return p && { root: p.root, notesDir: this.store.notesDir(id) };
   }
 
   close(): void {
     this.closed = true;
-    for (const t of this.timers) clearTimeout(t);
+    for (const t of this.timers.keys()) clearTimeout(t);
     this.timers.clear();
     this.settling.clear();
     for (const b of this.boards.values()) b.close();
@@ -177,28 +198,39 @@ export class ProjectManager {
 
   // The model leads, and workers started without one, run on: the
   // configured one where a lead may run on it, its effort where it has it.
-  private defaultModel(): { model: string; effort?: string } {
-    const { model, effort } = this.host.projectDefaults?.() ?? {};
-    if (!model || !panelModels().includes(model)) return { model: LEAD_MODEL };
-    return { model, ...(effort && effortLevelsForModel(model).includes(effort) && { effort }) };
+  private panelModels(): string[] {
+    return this.host.modelIds?.() ?? MODEL_OPTIONS.map((model) => model.id);
   }
 
-  create(name: string, root: string, model?: string): Project {
+  private defaultModel(): { model: string; effort?: string } {
+    const { model, effort } = this.host.projectDefaults?.() ?? {};
+    if (!model || !this.panelModels().includes(model))
+      return { model: this.panelModels()[0] ?? LEAD_MODEL };
+    return {
+      model,
+      ...(effort &&
+        (backendForModel(model) === "pi" || effortLevelsForModel(model).includes(effort)) && {
+          effort,
+        }),
+    };
+  }
+
+  create(name: string, root: string | null, model?: string, cwd?: string): Project {
     const defaults = this.defaultModel();
     model ??= defaults.model;
-    if (!panelModels().includes(model)) {
+    if (!this.panelModels().includes(model)) {
       throw new Error(`Unknown model for a lead: ${model}`);
     }
-    const taken = this.store.list().find((p) => p.root === root);
+    const taken = root !== null && this.store.list().find((p) => sameRoot(p.root, root));
     if (taken) throw new Error(`${root} is already the project "${taken.name}"`);
     const project = this.store.create(name, root);
     let lead: Workspace | undefined;
     try {
-      lead = this.host.createWorkspace(`${name} · lead`, root, {
+      lead = this.host.createWorkspace(`${name} · lead`, root ?? cwd ?? this.baseDir, {
         projectId: project.id,
         role: "lead",
       });
-      project.leadWorkspaceId = lead.id;
+      project.lead = { hostId: lead.hostId, workspaceId: lead.id };
       this.store.save(project);
       this.issues(project.id);
       const preset = AGENT_PRESETS[0];
@@ -219,11 +251,11 @@ export class ProjectManager {
   // folder. The lead runs nothing until it is written to.
   ensureFor(cwd: string, name?: string): Project {
     const root = repositoryRoot(cwd);
-    const project =
-      this.store.list().find((p) => p.root === root) ??
-      this.create(name?.trim() || path.basename(root) || root, root);
+    const existing = this.store.list().find((p) => sameRoot(p.root, root));
+    if (existing?.status === "sealed") throw new Error("Project is sealed");
+    const project = existing ?? this.create(name?.trim() || path.basename(root) || root, root);
     // Work there again brings an archived project back.
-    if (project.archivedAt) this.setArchived(project.id, false);
+    if (project.archivedAt && project.status === "active") this.setArchived(project.id, false);
     return project;
   }
 
@@ -232,6 +264,13 @@ export class ProjectManager {
   // sessions, as they are. A project made only for archived ones starts
   // archived itself.
   adoptAll(): void {
+    for (const project of this.store.list()) {
+      const lead = this.leadOf(project.id);
+      if (lead && project.lead?.hostId !== lead.hostId) {
+        // v1 named a workspace but did not record its host.
+        this.store.save({ ...project, lead: { hostId: lead.hostId, workspaceId: lead.id } });
+      }
+    }
     const byRoot = new Map<string, Workspace[]>();
     const roots = new Map<string, string>();
     for (const w of this.host.workspaces()) {
@@ -241,7 +280,9 @@ export class ProjectManager {
       byRoot.set(root, [...(byRoot.get(root) ?? []), w]);
     }
     for (const [root, list] of byRoot) {
-      let project = this.store.list().find((p) => p.root === root);
+      const existing = this.store.list().find((p) => sameRoot(p.root, root));
+      if (existing?.status === "sealed") continue;
+      let project = existing;
       if (!project) {
         project = this.create(path.basename(root) || root, root);
         if (list.every((w) => w.isArchived)) this.setArchived(project.id, true);
@@ -259,7 +300,7 @@ export class ProjectManager {
   // A project is archived with its sessions, none of which may be busy, and
   // comes back with its lead; its workers stay archived until opened.
   setArchived(id: string, archived: boolean): void {
-    const project = this.require(id);
+    const project = this.requireActive(id);
     const live = this.members(id).filter((w) => !w.isArchived);
     const busy = live.filter((w) => !w.isIdle);
     if (archived && busy.length) {
@@ -289,7 +330,8 @@ export class ProjectManager {
   restored(w: Workspace): void {
     if (w.projectLink) {
       const id = w.projectLink.projectId;
-      if (this.store.get(id)?.archivedAt) this.setArchived(id, false);
+      const project = this.store.get(id);
+      if (project?.status === "active" && project.archivedAt) this.setArchived(id, false);
       return;
     }
     const project = this.ensureFor(w.cwd);
@@ -301,7 +343,7 @@ export class ProjectManager {
   }
 
   rename(id: string, name: string): void {
-    const project = this.require(id);
+    const project = this.requireActive(id);
     const trimmed = name.trim();
     if (!trimmed) throw new Error("A project needs a name");
     project.name = trimmed;
@@ -323,7 +365,7 @@ export class ProjectManager {
   // Deletes the project with its lead and its memory (objectives, notes).
   // Its worker sessions stay, as plain workspaces.
   delete(id: string): void {
-    this.require(id);
+    this.requireActive(id);
     for (const w of this.members(id)) {
       if (w.projectLink?.role === "lead") {
         this.host.removeWorkspace(w.id);
@@ -345,22 +387,33 @@ export class ProjectManager {
 
   // A worker session is being deleted: the objectives stop pointing at it,
   // and what it was doing goes back to todo. Never fails the delete itself.
-  forget(workspace: Workspace): void {
+  async forget(workspace: Workspace): Promise<void> {
     const id = workspace.projectLink?.projectId;
-    if (!id || !this.store.get(id)) return;
-    this.rewrite(
-      id,
-      (o) => o.sessions.includes(workspace.id) || o.tasks.some((t) => t.session === workspace.id),
-      (o) => ({
-        ...o,
-        sessions: o.sessions.filter((s) => s !== workspace.id),
-        tasks: o.tasks.map((t) =>
-          t.session === workspace.id
-            ? { ...t, session: undefined, state: t.state === "doing" ? ("todo" as const) : t.state }
-            : t,
-        ),
-      }),
-    );
+    if (!id || this.store.get(id)?.status !== "active") return;
+    await this.commitLock
+      .run(id, () => {
+        const project = this.store.get(id);
+        if (!project || project.status !== "active" || !this.leadOnline(project)) return;
+        this.rewrite(
+          id,
+          (o) =>
+            o.sessions.includes(workspace.id) || o.tasks.some((t) => t.session === workspace.id),
+          (o) => ({
+            ...o,
+            sessions: o.sessions.filter((s) => s !== workspace.id),
+            tasks: o.tasks.map((t) =>
+              t.session === workspace.id
+                ? {
+                    ...t,
+                    session: undefined,
+                    state: t.state === "doing" ? ("todo" as const) : t.state,
+                  }
+                : t,
+            ),
+          }),
+        );
+      })
+      .catch((error) => console.error("[projects] forget", error));
   }
 
   // Applies `change` to every objective on the board `match` picks, each
@@ -426,7 +479,8 @@ export class ProjectManager {
   // worker's, or the repository for the lead.
   private async stamp(projectId: string, sessionId?: string): Promise<Stamp> {
     const root = this.require(projectId).root;
-    const commit = await gitHead((sessionId && this.host.workspace(sessionId)?.cwd) || root);
+    const commit =
+      root && (await gitHead((sessionId && this.host.workspace(sessionId)?.cwd) || root));
     return { at: Date.now(), ...(commit && { commit }) };
   }
 
@@ -440,7 +494,8 @@ export class ProjectManager {
     const root = this.require(projectId).root;
     const since = new Map<string, number | undefined>();
     const wanted = [...new Set(commits.filter((c): c is string => !!c))].slice(0, AGES_COUNTED);
-    await Promise.all(wanted.map(async (c) => since.set(c, await gitCommitsSince(root, c))));
+    if (root)
+      await Promise.all(wanted.map(async (c) => since.set(c, await gitCommitsSince(root, c))));
     const day = (t: number) => Math.floor(t / 86_400_000);
     const today = day(Date.now());
     return (at, commit) => {
@@ -486,14 +541,14 @@ export class ProjectManager {
   // The archive is read and deleted, never written.
   private saveObjective(projectId: string, o: Objective): void {
     if (o.archived) throw new Error(`${o.id} is in the archive: read-only`);
-    this.board(projectId).write({ ...o, updatedAt: Date.now() });
+    this.board(projectId).write({ ...o, updatedAt: Math.max(Date.now(), o.updatedAt + 1) });
     this.changed(projectId);
   }
 
   // What a lead may start workers on, its default first.
   private workerModels(): string[] {
     const first = this.defaultModel().model;
-    return [first, ...panelModels().filter((m) => m !== first)];
+    return [first, ...this.panelModels().filter((m) => m !== first)];
   }
 
   // The tools a project workspace's agents get: the lead's or a worker's.
@@ -520,6 +575,7 @@ export class ProjectManager {
     const link = w?.projectLink;
     if (!w || link?.role !== "worker")
       throw new Error("Only a project's sessions report to its lead");
+    this.requireActive(link.projectId);
     if (!reports === (link.unreported === true)) return;
     const { unreported: _, ...rest } = link;
     w.projectLink = reports ? rest : { ...rest, unreported: true };
@@ -529,7 +585,7 @@ export class ProjectManager {
       this.dropQueuedFromLead(w, false);
       w.dropLeadRetries();
       this.markAnswered(w);
-      this.forget(w);
+      void this.forget(w);
     }
     const tools = this.toolsFor(w);
     for (const a of w.agents.values()) a.session.setPanelTools?.(tools);
@@ -541,7 +597,11 @@ export class ProjectManager {
   // A worker's turn ended or its agent went idle: the check waits until it
   // has stayed so for SETTLE_MS.
   workerIdle(w: Workspace): void {
-    if (w.projectLink?.role !== "worker") return;
+    if (
+      w.projectLink?.role !== "worker" ||
+      this.store.get(w.projectLink.projectId)?.status !== "active"
+    )
+      return;
     this.showAwaiting(w);
     this.settleAfter(w, SETTLE_MS);
   }
@@ -550,6 +610,7 @@ export class ProjectManager {
   // noted as what they were all last sent: only for what goes to all of
   // them (see showAllAwaiting for one that connects).
   awaitsUser(w: Workspace): boolean {
+    if (w.hasPendingDialogs) return true;
     const awaits = this.waits(w);
     if (awaits) this.awaiting.add(w.id);
     else this.awaiting.delete(w.id);
@@ -558,7 +619,11 @@ export class ProjectManager {
 
   // Tells the clients when it changed.
   showAwaiting(w: Workspace): void {
-    if (this.waits(w) !== this.awaiting.has(w.id)) this.host.workspaceChanged(w);
+    const waiting = this.waits(w);
+    if (waiting === this.awaiting.has(w.id)) return;
+    if (waiting) this.awaiting.add(w.id);
+    else this.awaiting.delete(w.id);
+    this.host.workspaceChanged(w);
   }
 
   // Before a client that connects gets the list: the others are told first
@@ -571,7 +636,10 @@ export class ProjectManager {
 
   private waits(w: Workspace): boolean {
     const link = w.projectLink;
-    return !!link && !this.store.get(link.projectId)?.archivedAt && awaitsUser(w);
+    return (
+      w.hasPendingDialogs ||
+      (!!link && !this.store.get(link.projectId)?.archivedAt && awaitsUser(w))
+    );
   }
 
   // After a restart: workers that still owe their lead a word (a turn the
@@ -615,7 +683,7 @@ export class ProjectManager {
       clearTimeout(pending);
       this.timers.delete(pending);
     }
-    const t = this.later(ms, () => {
+    const t = this.later(w.projectLink!.projectId, ms, () => {
       this.settling.delete(w.id);
       this.tellIfSilent(w.id);
       this.showAwaiting(w);
@@ -695,7 +763,7 @@ export class ProjectManager {
     const delay = this.takeStartSlot();
     if (delay === 0) return this.carryOnNow(w, cut);
     this.carrying.add(w.id);
-    const t = this.later(delay, () => {
+    const t = this.later(w.projectLink!.projectId, delay, () => {
       this.carrying.delete(w.id);
       this.carryOnNow(w, cut);
     });
@@ -738,17 +806,21 @@ export class ProjectManager {
   }
 
   // A throw in a timer would take the server down.
-  private later(ms: number, fn: () => void): ReturnType<typeof setTimeout> | undefined {
-    if (this.closed) return undefined;
+  private later(
+    projectId: string,
+    ms: number,
+    fn: () => void,
+  ): ReturnType<typeof setTimeout> | undefined {
+    if (this.closed || this.store.get(projectId)?.status !== "active") return undefined;
     const t = setTimeout(() => {
       this.timers.delete(t);
       try {
-        fn();
+        if (this.store.get(projectId)?.status === "active") fn();
       } catch (e) {
         console.error("[projects]", e);
       }
     }, ms);
-    this.timers.add(t);
+    this.timers.set(t, projectId);
     return t;
   }
 
@@ -765,6 +837,81 @@ export class ProjectManager {
     const project = this.store.get(id);
     if (!project) throw new Error(`No project ${id}`);
     return project;
+  }
+
+  private requireActive(id: string): Project {
+    const project = this.require(id);
+    if (project.status === "sealed") throw new Error(`Project "${project.name}" is sealed`);
+    return project;
+  }
+
+  private leadOnline(project: Project): boolean {
+    return Boolean(this.leadOf(project.id)) && this.host.isLeadOnline?.(project) !== false;
+  }
+
+  private commitBoard<T>(id: string, commit: () => T | Promise<T>): Promise<T> {
+    return this.commitLock.run(id, async () => {
+      const project = this.requireActive(id);
+      if (!this.leadOnline(project))
+        throw new Error("Project lead is offline; its board and notes are read-only");
+      return await commit();
+    });
+  }
+
+  async sealProject(id: string, reason?: string): Promise<void> {
+    await this.commitLock.run(id, async () => {
+      const project = this.require(id);
+      if (project.status === "active")
+        this.store.save({
+          ...project,
+          status: "sealed",
+          sealedAt: Date.now(),
+          sealedReason: reason ?? null,
+        });
+      for (const [timer, projectId] of this.timers) {
+        if (projectId !== id) continue;
+        clearTimeout(timer);
+        this.timers.delete(timer);
+      }
+      const members = this.members(id);
+      for (const w of members) {
+        this.settling.delete(w.id);
+        this.carrying.delete(w.id);
+        this.host.cancelWorkspaceTimers?.(w);
+        this.host.loadWorkspace(w);
+      }
+      await Promise.all(members.map((w) => w.seal()));
+      this.changed(id);
+    });
+  }
+
+  private journal(id: string): ReportJournalStore {
+    let journal = this.journals.get(id);
+    if (!journal) {
+      journal = new ReportJournalStore();
+      journal.load(this.store.projectDir(id));
+      this.journals.set(id, journal);
+    }
+    return journal;
+  }
+
+  mirrorReportDelivery(
+    workspace: Workspace,
+    reportId: string,
+    state: ReportLeadDelivery["state"],
+    meta?: Omit<ReportLeadDelivery, "state">,
+  ): void {
+    const id = workspace.projectLink?.projectId;
+    if (!id) return;
+    const journal = this.journal(id);
+    const current = journal.getByReportId(reportId)?.leadDelivery.state;
+    if (
+      !current ||
+      deliveryStateRank(state) <= deliveryStateRank(current) ||
+      (state === "settled" && current !== "sent_to_pi")
+    )
+      return;
+    journal.updateLeadDelivery(reportId, { ...meta, state });
   }
 
   private members(id: string): Workspace[] {
@@ -798,6 +945,7 @@ export class ProjectManager {
 
   // A session the lead may send work to, stop or archive.
   private managed(projectId: string, sessionId: string): Workspace {
+    this.requireActive(projectId);
     const w = this.session(projectId, sessionId);
     if (w.projectLink?.unreported) {
       throw new Error(
@@ -835,16 +983,16 @@ export class ProjectManager {
     const project = this.require(projectId);
     const out = [
       `# ${project.name}`,
-      `Repository: ${project.root}`,
+      project.root ? `Repository: ${project.root}` : "No Git repository.",
       `Notes: ${this.store.notesDir(projectId)}`,
       "",
       "## Worktrees",
     ];
     const sessions = this.workers(projectId);
-    for (const wt of await gitWorktrees(project.root)) {
+    for (const wt of project.root ? await gitWorktrees(project.root) : []) {
       const git = await gitStatus(wt);
       // Which live sessions work there: a worktree no one uses can be reused.
-      const users = this.members(projectId).filter((w) => !w.isArchived && w.cwd === wt);
+      const users = this.members(projectId).filter((w) => !w.isArchived && sameRoot(w.cwd, wt));
       const use = users.length
         ? `in use by ${users
             .map(
@@ -897,10 +1045,12 @@ export class ProjectManager {
     const project = this.require(projectId);
     const input =
       a.cwd === "~" || a.cwd.startsWith("~/") ? path.join(os.homedir(), a.cwd.slice(1)) : a.cwd;
-    const cwd = resolveWorkspacePath(path.resolve(project.root, input));
+    const cwd = resolveWorkspacePath(
+      path.resolve(project.root ?? this.leadOf(projectId)?.cwd ?? this.baseDir, input),
+    );
     if (!cwd) {
       throw new Error(
-        `Not a directory: ${a.cwd}. Create it first (a worktree: git -C ${project.root} worktree add <path> -b <branch>).`,
+        `Not a directory: ${a.cwd}. Create it first${project.root ? ` (a worktree: git -C ${project.root} worktree add <path> -b <branch>)` : ""}.`,
       );
     }
     const models = this.workerModels();
@@ -910,7 +1060,7 @@ export class ProjectManager {
     const defaults = this.defaultModel();
     const model = a.model ?? defaults.model;
     const levels = effortLevelsForModel(model);
-    if (a.effort && !levels.includes(a.effort)) {
+    if (a.effort && levels.length > 0 && !levels.includes(a.effort)) {
       throw new Error(
         levels.length
           ? `${model} has no effort ${a.effort}; one of: ${levels.join(", ")}`
@@ -971,13 +1121,16 @@ export class ProjectManager {
       agent.session.isRunning ||
       agent.retryPending ||
       (agent.pausedUntil !== undefined && now < agent.pausedUntil) ||
-      w.messages.some((m) => m.status === "queued" && m.queuedFor === agent.info.id);
+      w.messages.some(
+        (m) =>
+          (m.status === "queued" || m.status === "dispatching") && m.queuedFor === agent.info.id,
+      );
     if (waits) return 0;
     const delay = this.takeStartSlot();
     if (delay > 0) {
       const agentId = agent.info.id;
       w.pauseAgent(agentId, now + delay);
-      this.later(delay, () => {
+      this.later(w.projectLink!.projectId, delay, () => {
         if (this.host.workspace(w.id) === w) w.endPause(agentId);
       });
     }
@@ -994,8 +1147,16 @@ export class ProjectManager {
   // Archived sessions that belong to no project, in the project's folders
   // (the repository, folders in it, its worktrees).
   private async history(projectId: string): Promise<Workspace[]> {
-    const roots = await gitWorktrees(this.require(projectId).root);
-    const inside = (cwd: string) => roots.some((r) => cwd === r || cwd.startsWith(`${r}/`));
+    const root = this.require(projectId).root;
+    if (!root) return [];
+    const roots = await gitWorktrees(root);
+    const inside = (cwd: string) => {
+      const canonical = canonicalPath(cwd);
+      return roots.some((r) => {
+        const root = canonicalPath(r);
+        return canonical === root || canonical.startsWith(`${root}/`);
+      });
+    };
     return [...this.host.workspaces()].filter(
       (w) => w.isArchived && !w.projectLink && inside(w.cwd),
     );
@@ -1032,7 +1193,8 @@ export class ProjectManager {
 
   private async searchHistory(projectId: string, a: HistorySearch): Promise<string> {
     const base = this.target(projectId, a.project) ?? this.require(projectId);
-    const folder = a.folder && path.resolve(base.root, a.folder);
+    const folder =
+      a.folder && path.resolve(base.root ?? this.leadOf(base.id)?.cwd ?? this.baseDir, a.folder);
     const sessions = (await this.scope(projectId, a.project, a.session)).filter(
       (w) => !folder || w.cwd === folder || w.cwd.startsWith(`${folder}/`),
     );
@@ -1051,7 +1213,7 @@ export class ProjectManager {
       message: a.message,
       since: a.since,
       until: a.until,
-      depth: a.level,
+      depth: a.depth,
       limit: a.limit,
       offset: a.offset,
       lines: a.lines,
@@ -1224,15 +1386,15 @@ export class ProjectManager {
     return others
       .map((p) => {
         const lead = this.leadOf(p.id);
-        return `- ${p.id} "${p.name}" — ${p.root} — lead ${lead ? sessionState(lead) : "missing"}${p.archivedAt ? " — archived" : ""}`;
+        return `- ${p.id} "${p.name}" — ${p.root ?? "no Git repository"} — lead ${lead ? sessionState(lead) : "missing"}${p.archivedAt ? " — archived" : ""}`;
       })
       .join("\n");
   }
 
   private messageProject(projectId: string, targetId: string, text: string): string {
     if (targetId === projectId) throw new Error("That is this project; use message_session");
-    const self = this.require(projectId);
-    const other = this.require(targetId);
+    const self = this.requireActive(projectId);
+    const other = this.requireActive(targetId);
     const lead = this.leadOf(targetId);
     if (!lead) throw new Error(`Project "${other.name}" has no lead`);
     const pair = [projectId, targetId].sort().join(" ");
@@ -1642,72 +1804,211 @@ export class ProjectManager {
     );
   }
 
-  // A worker's report to its lead. Finishing writes its objective's new
-  // context first (a refused one sends nothing) and moves the tasks it was
-  // doing to review.
   private async workerReport(
     workspaceId: string,
     text: string,
     final: boolean,
     finish: FinishPatch = {},
+    callId: string = randomUUID(),
   ): Promise<string> {
     const w = this.host.workspace(workspaceId);
-    const projectId = w?.projectLink?.role === "worker" ? w.projectLink.projectId : undefined;
-    const lead = projectId ? this.leadOf(projectId) : undefined;
-    if (!w || !projectId || !lead) throw new Error("This session has no project lead");
-    this.checkReporting(w);
-    // A context too long is refused before anything is sent, to be written
-    // shorter; one with nowhere to go does not hold the report back.
-    let unwritten = "";
-    const notWritten = (e: unknown) =>
-      ` The context was not written: ${e instanceof Error ? e.message : String(e)}.`;
-    // An isolated worker sees no context to rewrite.
-    if (final && finish.context && !w.projectLink?.isolated) {
-      let target: Objective | undefined;
-      try {
-        target = this.contextTarget(projectId, w.id, finish.objectiveId);
-      } catch (e) {
-        unwritten = notWritten(e);
+    const id = w?.projectLink?.role === "worker" ? w.projectLink.projectId : undefined;
+    if (!w || !id) throw new Error("This session has no project lead");
+    const { ack, online } = await this.commitLock.run(id, () => {
+      const project = this.requireActive(id);
+      this.checkReporting(w);
+      const journal = this.journal(id);
+      const online = this.leadOnline(project);
+      if (journal.findByCallId(callId))
+        return { ack: final ? "Reported to the lead." : "Sent to the lead.", online };
+      if (online && !this.leadOf(id)?.resolveAgent()) throw new Error("Project lead has no agent");
+      let frozenPlan: FrozenReportPlan | null = null;
+      let unwritten = "";
+      if (final) {
+        let contextWrite: FrozenReportPlan["contextWrite"] = null;
+        if (finish.context && !w.projectLink?.isolated) {
+          let target: Objective | undefined;
+          try {
+            target = this.contextTarget(id, w.id, finish.objectiveId);
+          } catch (error) {
+            unwritten = ` The context was not written: ${error instanceof Error ? error.message : String(error)}.`;
+          }
+          if (finish.context !== target?.context) {
+            checkLength("The context", finish.context, LIMITS.context);
+            if (target)
+              contextWrite = {
+                objectiveId: target.id,
+                expectedPrevUpdatedAt: target.updatedAt,
+                context: finish.context,
+              };
+          }
+        }
+        frozenPlan = {
+          answeredInputIds: w
+            .lastDelivered()
+            .filter(({ input }) => input.from?.role === "lead" || input.from?.role === "panel")
+            .map(({ input }) => input.id),
+          contextWrite,
+          taskTransitions: this.objectives(id)
+            .filter((o) => !o.archived)
+            .flatMap((o) =>
+              o.tasks
+                .filter((t) => t.session === w.id && t.state === "doing")
+                .map((t) => ({ objectiveId: o.id, taskId: t.id, expectedSession: w.id })),
+            ),
+        };
       }
-      if (target && finish.context !== target.context) {
-        checkLength("The context", finish.context, LIMITS.context);
+      journal.append({
+        reportId: randomUUID(),
+        callId,
+        kind: final ? "final" : "progress",
+        workerWsId: w.id,
+        workerName: w.name,
+        payload: { text, ...finish },
+        frozenPlan,
+        boardState: final ? "pending" : "not_applicable",
+        leadDelivery: { state: "pending" },
+        createdAt: Date.now(),
+      });
+      return {
+        ack: online
+          ? final
+            ? `Reported to the lead.${unwritten}`
+            : "Sent to the lead."
+          : `Report saved for the offline lead.${unwritten}`,
+        online,
+      };
+    });
+    if (online)
+      await this.drainInbox(id).catch((error) =>
+        console.error(`[projects] ${id}: report saved; drain failed`, error),
+      );
+    return ack;
+  }
+
+  private applyFrozenReport(id: string, workerId: string, plan: FrozenReportPlan): void {
+    const worker = this.host.workspace(workerId);
+    if (worker) {
+      for (const inputId of plan.answeredInputIds) worker.markAnswered(inputId);
+      this.host.saveWorkspaceNow(worker);
+    }
+    const board = this.board(id);
+    const ids = new Set(plan.taskTransitions.map((t) => t.objectiveId));
+    if (plan.contextWrite) ids.add(plan.contextWrite.objectiveId);
+    for (const objectiveId of ids) {
+      const current = board.get(objectiveId);
+      if (!current || current.archived || current.status === "dropped") continue;
+      let next = current;
+      const context = plan.contextWrite;
+      if (
+        context?.objectiveId === objectiveId &&
+        current.updatedAt === context.expectedPrevUpdatedAt
+      ) {
+        next = {
+          ...next,
+          context: context.context,
+          contextWritten: Date.now(),
+          contextCommit: undefined,
+        };
       }
-      if (target) {
-        try {
-          await this.writeObjective(projectId, { id: target.id, context: finish.context }, w.id);
-        } catch (e) {
-          unwritten = notWritten(e);
+      const tasks = current.tasks.map((task) =>
+        task.state === "doing" &&
+        plan.taskTransitions.some(
+          (t) =>
+            t.objectiveId === objectiveId &&
+            t.taskId === task.id &&
+            t.expectedSession === task.session,
+        )
+          ? { ...task, state: "review" as const }
+          : task,
+      );
+      if (tasks.some((task, i) => task !== current.tasks[i])) next = { ...next, tasks };
+      if (next !== current) this.saveObjective(id, next);
+    }
+  }
+
+  async drainInbox(id: string, dispatch = true): Promise<void> {
+    const recoveries: Promise<void>[] = [];
+    let lead: Workspace | undefined;
+    await this.commitLock.run(id, () => {
+      const project = this.require(id);
+      const online = this.leadOnline(project);
+      const active = project.status === "active";
+      lead = this.leadOf(id);
+      const journal = this.journal(id);
+      const entries = journal.list();
+      if (!entries.length) return;
+      if (active && online) {
+        for (const report of entries) {
+          if (report.kind !== "final" || report.boardState !== "pending" || !report.frozenPlan)
+            continue;
+          this.applyFrozenReport(id, report.workerWsId, report.frozenPlan);
+          journal.updateBoardState(report.reportId, "applied");
         }
       }
+      if (!lead || !this.host.loadWorkspace(lead)) return;
+      const target = lead;
+      // Flush any dirty Lead history before reconciling in-memory rows against inbox.json.
+      this.host.saveWorkspaceNow(target);
+      const outcomes = entries.map((report) => {
+        const msg = target.findMessage(report.leadMessageId);
+        const reconciliation = reconcileReportDeliveryState(
+          report.leadDelivery.state,
+          msg?.status ?? null,
+        );
+        if (reconciliation.journalNeedsUpdate)
+          journal.updateLeadDelivery(report.reportId, { state: reconciliation.targetState });
+        return { report, msg, reconciliation };
+      });
+      for (const { report, msg, reconciliation } of outcomes) {
+        if (reconciliation.shouldProbeDispatching && msg?.status === "dispatching") {
+          // A probe holds the agent queue, not the project lock. Its result re-enters the lock.
+          recoveries.push(
+            target.recoverDispatchingReport(
+              msg,
+              (settle) => this.commitLock.run(id, settle),
+              active && online,
+            ),
+          );
+        } else if (active && online && reconciliation.shouldEnqueue) {
+          const agent = target.resolveAgent();
+          if (!agent || (target.isArchived && !this.host.restoreWorkspace(target))) continue;
+          const body = `${report.kind === "final" ? "Finished" : "Progress"}:
+
+${report.payload.text}`;
+          target.ensureReportQueued(
+            report.leadMessageId,
+            agent.info.id,
+            buildReportEnvelope(
+              report,
+              `[From session "${report.workerName}" (${report.workerWsId})]
+
+${body}`,
+            ),
+            { workspaceId: report.workerWsId, name: report.workerName, role: "worker" },
+            body,
+          );
+          journal.updateLeadDelivery(report.reportId, { state: "enqueued" });
+        }
+      }
+    });
+    await Promise.all(recoveries);
+    const target = lead;
+    if (
+      dispatch &&
+      target &&
+      this.store.get(id)?.status === "active" &&
+      this.leadOnline(this.require(id)) &&
+      !target.isArchived &&
+      target.messagesLoaded
+    ) {
+      for (const agentId of target.agents.keys()) target.dequeueNext(agentId);
     }
-    // The user may switch it off while the context is written.
-    this.checkReporting(w);
-    if (final) this.markAnswered(w);
-    const body = `${final ? "Finished" : "Progress"}:\n\n${text}`;
-    this.deliver(
-      lead,
-      body,
-      { workspaceId: w.id, name: w.name, role: "worker" },
-      `[From session "${w.name}" (${w.id})]\n\n${body}`,
-    );
-    if (final) {
-      const doing = (t: { session?: string; state: string }) =>
-        t.session === w.id && t.state === "doing";
-      this.rewrite(
-        projectId,
-        (o) => o.tasks.some(doing),
-        (o) => ({
-          ...o,
-          tasks: o.tasks.map((t) => (doing(t) ? { ...t, state: "review" as const } : t)),
-        }),
-      );
-    }
-    return final ? `Reported to the lead.${unwritten}` : "Sent to the lead.";
   }
 
   private api: PanelApi = {
     projectStatus: (pid) => this.status(pid),
-    startSession: (pid, a) => this.startSession(pid, a),
+    startSession: (pid, a) => this.commitBoard(pid, () => this.startSession(pid, a)),
     readSession: (pid, sid, count, around, tools, start) =>
       this.readSession(pid, sid, count, around, tools, start),
     searchHistory: (pid, a) => this.searchHistory(pid, a),
@@ -1754,76 +2055,74 @@ export class ProjectManager {
       return this.readObjective(pid, id);
     },
     currentTask: (wid, oid) => this.currentTask(wid, oid),
-    writeObjective: (pid, patch, sid) => {
-      this.require(pid);
-      return this.writeObjective(pid, patch, sid);
-    },
-    addItems: (pid, oid, tasks, decisions) => {
-      this.require(pid);
-      for (const t of tasks) checkTask(t);
-      for (const d of decisions)
-        checkLength("A question", d, LIMITS.decision, "the question alone");
-      const o = this.objective(pid, oid);
-      if (o.status === "dropped") throw new Error(`${o.id} is dropped: make it active first`);
-      const next = (prefix: string, ids: string[]) => {
-        const n = Math.max(0, ...ids.map((x) => Number(x.slice(1)) || 0));
-        return (i: number) => `${prefix}${n + i + 1}`;
-      };
-      const taskId = next(
-        "t",
-        o.tasks.map((t) => t.id),
-      );
-      const decisionId = next(
-        "d",
-        o.decisions.map((d) => d.id),
-      );
-      const added = {
-        tasks: tasks.map((text, i) => ({ id: taskId(i), text, state: "todo" as const })),
-        decisions: decisions.map((question, i) => ({ id: decisionId(i), question })),
-      };
-      this.saveObjective(pid, {
-        ...o,
-        tasks: [...o.tasks, ...added.tasks],
-        decisions: [...o.decisions, ...added.decisions],
-      });
-      const ids = [...added.tasks, ...added.decisions].map((x) => x.id);
-      return ids.length ? `Added ${ids.join(", ")} to ${o.id}.` : "Nothing to add.";
-    },
-    updateItem: (pid, oid, itemId, patch, sid) => {
-      this.require(pid);
-      return this.updateItem(pid, oid, itemId, patch, sid);
-    },
+    writeObjective: (pid, patch, sid) =>
+      this.commitBoard(pid, () => this.writeObjective(pid, patch, sid)),
+    addItems: (pid, oid, tasks, decisions) =>
+      this.commitBoard(pid, () => {
+        for (const t of tasks) checkTask(t);
+        for (const d of decisions)
+          checkLength("A question", d, LIMITS.decision, "the question alone");
+        const o = this.objective(pid, oid);
+        if (o.status === "dropped") throw new Error(`${o.id} is dropped: make it active first`);
+        const next = (prefix: string, ids: string[]) => {
+          const n = Math.max(0, ...ids.map((x) => Number(x.slice(1)) || 0));
+          return (i: number) => `${prefix}${n + i + 1}`;
+        };
+        const taskId = next(
+          "t",
+          o.tasks.map((t) => t.id),
+        );
+        const decisionId = next(
+          "d",
+          o.decisions.map((d) => d.id),
+        );
+        const added = {
+          tasks: tasks.map((text, i) => ({ id: taskId(i), text, state: "todo" as const })),
+          decisions: decisions.map((question, i) => ({ id: decisionId(i), question })),
+        };
+        this.saveObjective(pid, {
+          ...o,
+          tasks: [...o.tasks, ...added.tasks],
+          decisions: [...o.decisions, ...added.decisions],
+        });
+        const ids = [...added.tasks, ...added.decisions].map((x) => x.id);
+        return ids.length ? `Added ${ids.join(", ")} to ${o.id}.` : "Nothing to add.";
+      }),
+    updateItem: (pid, oid, itemId, patch, sid) =>
+      this.commitBoard(pid, () => {
+        return this.updateItem(pid, oid, itemId, patch, sid);
+      }),
     // What depended on it no longer does: done or a mistake, it is not
     // waited for.
     // What it said goes back in the result, so the call keeps it findable in
     // the history.
-    deleteObjective: (pid, id) => {
-      this.require(pid);
-      const o = this.objective(pid, id);
-      const said = this.describeObjective(pid, o.id, () => "", false);
-      this.board(pid).remove(o.id);
-      const dependents = this.rewrite(
-        pid,
-        (x) => x.dependsOn.includes(o.id),
-        (x) => ({ ...x, dependsOn: x.dependsOn.filter((d) => d !== o.id) }),
-      );
-      this.changed(pid);
-      let links = 0;
-      try {
-        this.changingIssues(pid, (b) => String((links = b.unlink(o.id))));
-      } catch (e) {
-        console.error(`[projects] issues still link ${o.id}`, e);
-      }
-      return (
-        [
-          `Deleted ${o.id}.`,
-          ...(dependents.length
-            ? [`Taken out of the depends_on of ${dependents.join(", ")}.`]
-            : []),
-          ...(links ? [`Taken out of ${links} issue link${links === 1 ? "" : "s"}.`] : []),
-        ].join(" ") + `\n\n${said}`
-      );
-    },
+    deleteObjective: (pid, id) =>
+      this.commitBoard(pid, () => {
+        const o = this.objective(pid, id);
+        const said = this.describeObjective(pid, o.id, () => "", false);
+        this.board(pid).remove(o.id);
+        const dependents = this.rewrite(
+          pid,
+          (x) => x.dependsOn.includes(o.id),
+          (x) => ({ ...x, dependsOn: x.dependsOn.filter((d) => d !== o.id) }),
+        );
+        this.changed(pid);
+        let links = 0;
+        try {
+          this.changingIssues(pid, (b) => String((links = b.unlink(o.id))));
+        } catch (e) {
+          console.error(`[projects] issues still link ${o.id}`, e);
+        }
+        return (
+          [
+            `Deleted ${o.id}.`,
+            ...(dependents.length
+              ? [`Taken out of the depends_on of ${dependents.join(", ")}.`]
+              : []),
+            ...(links ? [`Taken out of ${links} issue link${links === 1 ? "" : "s"}.`] : []),
+          ].join(" ") + `\n\n${said}`
+        );
+      }),
     listIssues: (pid, filter) => this.issueBoard(pid).list(filter),
     readIssue: async (pid, t) => {
       // The commits of the issues the read shows, counted first.
@@ -1845,19 +2144,34 @@ export class ProjectManager {
       );
       return this.issueBoard(pid).read(t.id, t.module, t.group, (x) => age(x.written, x.commit));
     },
-    writeIssues: async (pid, patches, sid) => {
-      this.require(pid);
-      const stamp = await this.stamp(pid, sid);
-      return this.changingIssues(pid, (b) => b.write(patches, stamp));
-    },
-    writeIssueGroup: (pid, patch) => this.changingIssues(pid, (b) => b.writeGroup(patch)),
-    closeIssues: (pid, ids, fixedBy) => this.changingIssues(pid, (b) => b.close(ids, fixedBy)),
+    writeIssues: (pid, patches, sid) =>
+      this.commitBoard(pid, async () => {
+        const stamp = await this.stamp(pid, sid);
+        return this.changingIssues(pid, (b) => b.write(patches, stamp));
+      }),
+    writeIssueGroup: (pid, patch) =>
+      this.commitBoard(pid, () => this.changingIssues(pid, (b) => b.writeGroup(patch))),
+    closeIssues: (pid, ids, fixedBy) =>
+      this.commitBoard(pid, () => this.changingIssues(pid, (b) => b.close(ids, fixedBy))),
     listProjects: (pid) => {
       this.require(pid);
       return this.listProjects(pid);
     },
     messageProject: (pid, target, text) => this.messageProject(pid, target, text),
-    workerReport: (wsId, text, final, finish) => this.workerReport(wsId, text, final, finish),
+    listNotes: (id) => {
+      this.require(id);
+      return new ProjectNotesStore(this.store.notesDir(id)).listNotes();
+    },
+    readNote: (id, slug) => {
+      this.require(id);
+      return new ProjectNotesStore(this.store.notesDir(id)).readNote(slug);
+    },
+    writeNote: (id, slug, content, expected) =>
+      this.commitBoard(id, () =>
+        new ProjectNotesStore(this.store.notesDir(id)).writeNote(slug, content, expected),
+      ),
+    workerReport: (wsId, text, final, finish, callId) =>
+      this.workerReport(wsId, text, final, finish, callId),
     checkReporting: (wsId) => this.checkReporting(this.host.workspace(wsId)),
   };
 }
@@ -1869,6 +2183,7 @@ const INTERRUPTED = "*\\[interrupted\\]*";
 // task or on what the user wrote since, ended without calling finish_task.
 // Not what it answered the lead later, nor a turn that failed or was cut off.
 export function awaitsUser(w: Workspace): boolean {
+  if (w.hasPendingDialogs) return true;
   const link = w.projectLink;
   if (link?.role !== "worker" || link.unreported) return false;
   if (w.isArchived || !w.messagesLoaded || !w.isQuiet) return false;
@@ -1932,9 +2247,6 @@ function fromLead(m: { from?: MessageOrigin }, lead: Workspace | undefined): boo
 
 // The models a project's lead and the workers it starts may run on: every
 // backend's session takes the panel's tools.
-function panelModels(): string[] {
-  return MODEL_OPTIONS.map((m) => m.id);
-}
 
 function taskLine(t: Task): string {
   return `- ${t.id} [${t.state}] ${t.text}`;
@@ -1952,6 +2264,18 @@ function ownTasks(o: Objective, sessionId: string): string {
     "your tasks:",
     ...(tasks.length ? tasks.map(taskLine) : ["(none)"]),
   ].join("\n");
+}
+
+function canonicalPath(dir: string): string {
+  try {
+    return fs.realpathSync.native(dir);
+  } catch {
+    return path.resolve(dir);
+  }
+}
+
+function sameRoot(a: string | null, b: string): boolean {
+  return a !== null && canonicalPath(a) === canonicalPath(b);
 }
 
 function sessionState(w: Workspace): "archived" | "working" | "waiting to start" | "idle" {

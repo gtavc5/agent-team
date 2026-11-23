@@ -40,6 +40,14 @@ export class HistoryDb {
     `);
   }
 
+  hasDispatching(session: string): boolean {
+    return (
+      this.db
+        .prepare("select 1 from messages where session = ? and status = 'dispatching' limit 1")
+        .get(session) !== undefined
+    );
+  }
+
   // Throws when a row cannot be parsed: an empty list would be saved over it.
   load(session: string): Message[] {
     const rows = this.db

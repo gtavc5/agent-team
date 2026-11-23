@@ -68,31 +68,20 @@ function useDialogKeys(focus: RefObject<HTMLElement | null>, onClose: () => void
 }
 
 const BACKEND_GROUPS: Array<[ModelOption["backend"], string]> = [
-  ["claude", "Claude"],
+  ["pi", "Pi"],
   ["codex", "Codex"],
-  ["cursor", "Cursor"],
-  ["agy", "Antigravity"],
 ];
 
 export function AddAgentDialog({
   presets,
   models,
-  accounts,
   onClose,
   onAdd,
 }: {
   presets: AgentPreset[];
   models: ModelOption[];
-  accounts: string[];
   onClose: () => void;
-  onAdd: (
-    name: string,
-    model: string,
-    avatar: string,
-    color: string,
-    account?: string,
-    effort?: string,
-  ) => void;
+  onAdd: (name: string, model: string, avatar: string, color: string, effort?: string) => void;
 }) {
   const [selectedPreset, setSelectedPreset] = useState(0);
   const [model, setModel] = useState(models[0]?.id ?? "");
@@ -103,11 +92,8 @@ export function AddAgentDialog({
     if (!effortOf(models, next).levels.includes(effort)) setEffort("");
   };
   const [customName, setCustomName] = useState("");
-  const [account, setAccount] = useState("");
 
   const preset = presets[selectedPreset];
-  // Accounts are Claude logins; another backend's agent runs on its own.
-  const onAccount = models.find((m) => m.id === model)?.backend === "claude";
   const finalName = customName || preset?.name || "Agent";
   const nameRef = useRef<HTMLInputElement>(null);
   useDialogKeys(nameRef, onClose);
@@ -194,19 +180,6 @@ export function AddAgentDialog({
           </label>
         )}
 
-        {accounts.length > 0 && onAccount && (
-          <label className="dialog-field">
-            <span>Account</span>
-            <select value={account} onChange={(e) => setAccount(e.target.value)}>
-              <option value="">local (default)</option>
-              {accounts.map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
         <div className="dialog-actions">
           <button type="button" className="btn-secondary" onClick={onClose}>
             Cancel
@@ -220,7 +193,6 @@ export function AddAgentDialog({
                 model,
                 preset?.avatar ?? "🤖",
                 preset?.color ?? "#888",
-                (onAccount && account) || undefined,
                 effort || undefined,
               );
               onClose();
@@ -230,6 +202,75 @@ export function AddAgentDialog({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Projects can be organisational-only: no repository or checkout is needed.
+export function CreateProjectDialog({
+  onClose,
+  onCreate,
+}: {
+  onClose: () => void;
+  onCreate: (name: string, root: string | null) => void;
+}) {
+  const [name, setName] = useState("");
+  const [root, setRoot] = useState("");
+  const [withoutGit, setWithoutGit] = useState(false);
+  const nameRef = useRef<HTMLInputElement>(null);
+  useDialogKeys(nameRef, onClose);
+  const canSubmit = name.trim().length > 0 && (withoutGit || root.trim().length > 0);
+  return (
+    <div className="dialog-overlay" onClick={onClose}>
+      <form
+        className="dialog"
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!canSubmit) return;
+          onCreate(name.trim(), withoutGit ? null : root.trim());
+          onClose();
+        }}
+      >
+        <div className="dialog-title">New Project</div>
+        <label className="dialog-field">
+          <span>Name</span>
+          <input
+            ref={nameRef}
+            value={name}
+            placeholder="Project name…"
+            onChange={(e) => setName(e.target.value)}
+          />
+        </label>
+        <label className="dialog-field">
+          <span>Repository path</span>
+          <input
+            value={root}
+            disabled={withoutGit}
+            placeholder={withoutGit ? "No repository" : "/path/to/repository"}
+            onChange={(e) => setRoot(e.target.value)}
+          />
+        </label>
+        <label className="dialog-checkbox">
+          <input
+            type="checkbox"
+            checked={withoutGit}
+            onChange={(e) => setWithoutGit(e.target.checked)}
+          />
+          <span>Create without a Git repository</span>
+        </label>
+        <p className="dialog-help">
+          A project without Git still has objectives, issues, notes and a lead session.
+        </p>
+        <div className="dialog-actions">
+          <button type="button" className="btn-secondary" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="btn-primary" disabled={!canSubmit}>
+            Create
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

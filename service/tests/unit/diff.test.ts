@@ -53,7 +53,7 @@ describe("a branch's changes", () => {
     const { work } = repo();
     const c = await changes(path.join(work));
     expect(c).toMatchObject({
-      top: work,
+      top: fs.realpathSync(work),
       branch: "feature",
       base: "origin/main",
       truncated: false,

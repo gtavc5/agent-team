@@ -8,9 +8,12 @@ import {
   UsageStats,
   SessionConfig,
   SessionState,
+  PromptEnvelope,
+  SendHooks,
+  SendReceipt,
   fenced,
   formatToolUse,
-} from "./claude";
+} from "./types";
 import {
   AppServerClient,
   RpcRequestError,
@@ -325,8 +328,9 @@ export class CodexSession extends EventEmitter {
     };
   }
 
-  async send(message: string): Promise<void> {
+  async send(input: string | PromptEnvelope, hooks?: SendHooks): Promise<SendReceipt | void> {
     if (this.busy) throw new Error("Session is busy");
+    const message = typeof input === "string" ? input : input.text;
     const compact = message.trim() === "/compact";
     this.beginTurn(!compact);
     this.compacting = compact;
@@ -336,7 +340,16 @@ export class CodexSession extends EventEmitter {
     try {
       if (this.client && this.launched !== this.launchKey()) this.closeProcess();
       const client = await this.connect();
-      if (generation !== this.generation) return;
+      if (generation !== this.generation)
+        return { disposition: "rejected", error: "Codex dispatch cancelled" };
+      hooks?.onBeforeWrite?.({
+        inputId: typeof input === "string" ? "codex" : input.inputId,
+        reportId: typeof input === "string" ? undefined : input.reportId,
+        generation,
+        beforeLeafId: null,
+        beforeEntryCount: 0,
+        startedAt: Date.now(),
+      });
       const threadId = this.sessionId;
       if (compact) {
         await client.request("thread/compact/start", { threadId });
@@ -346,6 +359,11 @@ export class CodexSession extends EventEmitter {
     } catch (e) {
       if (generation === this.generation && this.busy) {
         this.failTurn(`[Codex error] ${e instanceof Error ? e.message : String(e)}`);
+      }
+      if (hooks) {
+        if (!this.client || e instanceof RpcRequestError)
+          return { disposition: "rejected", error: e instanceof Error ? e.message : String(e) };
+        throw e;
       }
     }
   }
@@ -475,6 +493,11 @@ export class CodexSession extends EventEmitter {
     if (this.busy) this.endTurn();
   }
 
+  dispose(): Promise<void> {
+    this.abort();
+    return Promise.resolve();
+  }
+
   private closeProcess(): void {
     const client = this.client;
     this.client = null;
@@ -601,7 +624,9 @@ export class CodexSession extends EventEmitter {
     const resetsAt = spent?.resetsAt ?? undefined;
     this.emit("rateLimit", { rateLimitType, resetsAt });
     const label = rateLimitType ? ` (${rateLimitType.replace(/_/g, "-")})` : "";
-    const reset = resetsAt ? ` Resets at ${new Date(resetsAt * 1000).toLocaleString()}.` : "";
+    const reset = resetsAt
+      ? ` Resets at ${new Date(resetsAt * 1000).toLocaleString("en-US")}.`
+      : "";
     return {
       kind: "error",
       content: spent ? `Usage limit reached${label}.${reset}` : `[Codex error] ${error.message}`,
@@ -627,7 +652,7 @@ export class CodexSession extends EventEmitter {
     const args = z.object(tool.shape).safeParse(call.arguments ?? {});
     if (!args.success) return reply(z.prettifyError(args.error), false);
     try {
-      return reply(await tool.handler(args.data), true);
+      return reply(await tool.handler(args.data, undefined, call.callId), true);
     } catch (e) {
       return reply(e instanceof Error ? e.message : String(e), false);
     }

@@ -1,6 +1,16 @@
+import * as fs from "fs";
+import * as path from "path";
 import esbuild from "esbuild";
 
 const watch = process.argv.includes("--watch");
+
+function copyPiBridge() {
+  fs.mkdirSync("../dist", { recursive: true });
+  fs.copyFileSync(
+    path.resolve("src/session/pi-panel-bridge.ts"),
+    path.resolve("../dist/pi-panel-bridge.ts"),
+  );
+}
 
 /** @type {import('esbuild').BuildOptions} */
 const build = {
@@ -16,14 +26,17 @@ const build = {
     "history-worker": "src/workspace/history-worker.ts",
   },
   outdir: "../dist",
-  external: ["@anthropic-ai/claude-agent-sdk", "@cursor/sdk"],
 };
 
 if (watch) {
   esbuild.context(build).then((ctx) => {
+    copyPiBridge();
     ctx.watch();
     console.log("Watching for changes...");
   });
 } else {
-  esbuild.build(build).then(() => console.log("Server built."));
+  esbuild.build(build).then(() => {
+    copyPiBridge();
+    console.log("Server built.");
+  });
 }

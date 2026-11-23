@@ -1,0 +1,45 @@
+{"header":{"backend":"pi","fixture":"single-queue-order","description":"A non-steerable Pi session dispatches queued prompts FIFO only after settlement.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
+{"step":{"op":"send","text":"First prompt.","i":0},"t":0}
+{"sent":{"type":"prompt","message":"First prompt."},"t":5}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
+{"frame":{"type":"agent_start"},"t":15}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":170}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
+{"step":{"op":"send","text":"Second prompt.","i":1},"t":30}
+{"step":{"op":"send","text":"Third prompt.","i":2},"t":35}
+{"frame":{"type":"agent_end"},"t":40}
+{"step":{"op":"check","name":"queued","i":3},"t":45}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Firs"}},"t":50}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"t reply."}},"t":55}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"First reply."}},"t":60}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"text","text":"First reply."}]}},"t":65}
+{"frame":{"type":"agent_settled"},"t":70}
+{"sent":{"type":"get_session_stats"},"t":75}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":80}
+{"sent":{"type":"prompt","message":"Second prompt."},"t":85}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":90}
+{"frame":{"type":"agent_start"},"t":95}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":170}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":105}
+{"frame":{"type":"agent_end"},"t":110}
+{"step":{"op":"check","name":"second","i":4},"t":115}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Seco"}},"t":120}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"nd reply."}},"t":125}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Second reply."}},"t":130}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"text","text":"Second reply."}]}},"t":135}
+{"frame":{"type":"agent_settled"},"t":140}
+{"sent":{"type":"get_session_stats"},"t":145}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":150}
+{"sent":{"type":"prompt","message":"Third prompt."},"t":155}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":160}
+{"frame":{"type":"agent_start"},"t":165}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":170}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":175}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Thir"}},"t":180}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"d reply."}},"t":185}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Third reply."}},"t":190}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"text","text":"Third reply."}]}},"t":195}
+{"frame":{"type":"agent_settled"},"t":200}
+{"sent":{"type":"get_session_stats"},"t":205}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":210}
+{"step":{"op":"check","name":"third","i":5},"t":215}

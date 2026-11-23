@@ -1,0 +1,19 @@
+{"header":{"backend":"pi","fixture":"antigravity-acp-turn","description":"A synthetic Antigravity ACP model projects reasoning, tool use and context.","model":"antigravity-acp/synthetic-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
+{"step":{"op":"send","text":"Run the synthetic ACP turn.","i":0},"t":0}
+{"sent":{"type":"prompt","message":"Run the synthetic ACP turn."},"t":5}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
+{"frame":{"type":"agent_start"},"t":15}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":20}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Consider the example."}},"t":30}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"Consider the example."}},"t":35}
+{"frame":{"type":"tool_execution_start","toolName":"read","toolCallId":"sample","args":{"path":"example.txt"}},"t":40}
+{"frame":{"type":"tool_execution_end","toolName":"read","toolCallId":"sample","result":{"content":[{"type":"text","text":"Example text."}],"details":{}},"isError":false},"t":45}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"ACP "}},"t":50}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"sample complete."}},"t":55}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"ACP sample complete."}},"t":60}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"thinking","thinking":"Consider the example."},{"type":"text","text":"ACP sample complete."}]}},"t":65}
+{"frame":{"type":"agent_settled"},"t":70}
+{"sent":{"type":"get_session_stats"},"t":75}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":80}
+{"step":{"op":"check","name":"stats","i":1},"t":85}

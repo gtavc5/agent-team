@@ -5,8 +5,11 @@ config.toml
 .agent-team/
 .cache/
 .logs/
+pi-agent-home/
+pi-sessions/
 
 # Node
+node_modules
 node_modules/
 dist/
 

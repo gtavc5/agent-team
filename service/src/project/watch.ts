@@ -14,6 +14,7 @@ import * as fs from "fs";
 export class DirWatcher {
   private watchers = new Map<string, { watcher: fs.FSWatcher; ino: string }>();
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private poll: ReturnType<typeof setInterval>;
   private seen: string;
   private closed = false;
 
@@ -25,6 +26,8 @@ export class DirWatcher {
   ) {
     this.seen = signature();
     this.rewatch();
+    this.poll = setInterval(() => this.check(), 250);
+    this.poll.unref();
   }
 
   // After the store's own change: what the watcher will see is known.
@@ -35,6 +38,7 @@ export class DirWatcher {
   close(): void {
     this.closed = true;
     clearTimeout(this.timer);
+    clearInterval(this.poll);
     for (const { watcher } of this.watchers.values()) watcher.close();
     this.watchers.clear();
   }
@@ -73,18 +77,20 @@ export class DirWatcher {
   private poke(): void {
     if (this.closed) return;
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
-      if (this.closed) return;
-      try {
-        this.rewatch();
-        const now = this.signature();
-        if (now === this.seen) return;
-        this.seen = now;
-        this.onChange();
-      } catch (e) {
-        console.error(`[projects] ${this.label}: change not picked up`, e);
-      }
-    }, 200);
+    this.timer = setTimeout(() => this.check(), 200);
+  }
+
+  private check(): void {
+    if (this.closed) return;
+    try {
+      this.rewatch();
+      const now = this.signature();
+      if (now === this.seen) return;
+      this.seen = now;
+      this.onChange();
+    } catch (e) {
+      console.error(`[projects] ${this.label}: change not picked up`, e);
+    }
   }
 }
 

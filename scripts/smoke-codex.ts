@@ -2,7 +2,7 @@
 // pinned @openai/codex binary's app-server, one turn.
 // Usage: npm run smoke:codex -- <slug> [effort]
 import { execFileSync } from "node:child_process";
-import type { StreamEvent } from "../service/src/session/claude.ts";
+import type { StreamEvent } from "../service/src/session/types.ts";
 import { CodexSession } from "../service/src/session/codex.ts";
 import { codexBinary } from "../service/src/session/codex-rpc.ts";
 

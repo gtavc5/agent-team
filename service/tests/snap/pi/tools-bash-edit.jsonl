@@ -1,0 +1,24 @@
+{"header":{"backend":"pi","fixture":"tools-bash-edit","description":"Pi built-ins preserve full Markdown arguments and structured file inputs.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
+{"step":{"op":"send","text":"Inspect and update a sample.","i":0},"t":0}
+{"sent":{"type":"prompt","message":"Inspect and update a sample."},"t":5}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
+{"frame":{"type":"agent_start"},"t":15}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":20}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Consider the example."}},"t":30}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"Consider the example."}},"t":35}
+{"frame":{"type":"tool_execution_start","toolName":"bash","toolCallId":"bash","args":{"command":"printf example","timeout":4}},"t":40}
+{"frame":{"type":"tool_execution_end","toolName":"bash","toolCallId":"bash","result":{"content":[{"type":"text","text":"Synthetic bash result."}],"details":{}},"isError":false},"t":45}
+{"frame":{"type":"tool_execution_start","toolName":"edit","toolCallId":"edit","args":{"path":"example.txt","oldText":"old","newText":"new","dryRun":true}},"t":50}
+{"frame":{"type":"tool_execution_end","toolName":"edit","toolCallId":"edit","result":{"content":[{"type":"text","text":"Synthetic edit result."}],"details":{}},"isError":false},"t":55}
+{"frame":{"type":"tool_execution_start","toolName":"read","toolCallId":"read","args":{"path":"example.txt","offset":2,"limit":5}},"t":60}
+{"frame":{"type":"tool_execution_end","toolName":"read","toolCallId":"read","result":{"content":[{"type":"text","text":"Synthetic read result."}],"details":{}},"isError":false},"t":65}
+{"frame":{"type":"tool_execution_start","toolName":"grep","toolCallId":"grep","args":{"pattern":"example","path":"example.txt","ignoreCase":true}},"t":70}
+{"frame":{"type":"tool_execution_end","toolName":"grep","toolCallId":"grep","result":{"content":[{"type":"text","text":"Synthetic grep result."}],"details":{}},"isError":false},"t":75}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Buil"}},"t":80}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"t-ins complete."}},"t":85}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"Built-ins complete."}},"t":90}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"thinking","thinking":"Consider the example."},{"type":"text","text":"Built-ins complete."}]}},"t":95}
+{"frame":{"type":"agent_settled"},"t":100}
+{"sent":{"type":"get_session_stats"},"t":105}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":110}

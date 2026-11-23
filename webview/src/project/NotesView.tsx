@@ -43,9 +43,11 @@ function fileUrl(project: string, path: string, raw = false): string {
 // Whether the server would read a path the board names: not one climbing
 // out of the repository, nor an absolute one outside it (its notes are
 // named notes/...).
-export function reachable(path: string, root: string): boolean {
+export function reachable(path: string, root: string | null): boolean {
   if (path.startsWith("~")) return false;
-  if (path.startsWith("/")) return path === root || path.startsWith(`${root}/`);
+  if (path.startsWith("/")) {
+    return root !== null && (path === root || path.startsWith(`${root}/`));
+  }
   let depth = 0;
   for (const seg of path.split("/")) {
     if (seg === "..") depth--;

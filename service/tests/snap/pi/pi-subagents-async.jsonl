@@ -1,0 +1,30 @@
+{"header":{"backend":"pi","fixture":"pi-subagents-async","description":"An async Pi subagent waits, then a notify backfills its original card on wake-up.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
+{"step":{"op":"send","text":"Delegate an async sample.","i":0},"t":0}
+{"sent":{"type":"prompt","message":"Delegate an async sample."},"t":5}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
+{"frame":{"type":"agent_start"},"t":15}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":20}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Consider the example."}},"t":30}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"Consider the example."}},"t":35}
+{"frame":{"type":"tool_execution_start","toolName":"subagent","toolCallId":"child","args":{"agent":"reviewer","task":"Review the sample.","async":true}},"t":40}
+{"frame":{"type":"tool_execution_end","toolName":"subagent","toolCallId":"child","result":{"content":[{"type":"text","text":"Child scheduled."}],"details":{"asyncDir":"$async-dir","asyncId":"synthetic-run","mode":"single"}},"isError":false},"t":45}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Asyn"}},"t":50}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"c sample scheduled."}},"t":55}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"Async sample scheduled."}},"t":60}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"thinking","thinking":"Consider the example."},{"type":"text","text":"Async sample scheduled."}]}},"t":65}
+{"frame":{"type":"agent_settled"},"t":70}
+{"sent":{"type":"get_session_stats"},"t":75}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":80}
+{"step":{"op":"check","name":"waiting","i":1},"t":85}
+{"frame":{"type":"agent_start"},"t":90}
+{"frame":{"type":"message_start","message":{"role":"custom","customType":"subagent-notify","details":{"runId":"synthetic-run","status":"completed","children":[{"status":"completed","sessionFile":"$child-session","summary":"Child complete."}]}}},"t":95}
+{"step":{"op":"check","name":"notified","i":2},"t":100}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":105}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Asyn"}},"t":110}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"c sample complete."}},"t":115}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Async sample complete."}},"t":120}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"text","text":"Async sample complete."}]}},"t":125}
+{"frame":{"type":"agent_settled"},"t":130}
+{"sent":{"type":"get_session_stats"},"t":135}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":140}

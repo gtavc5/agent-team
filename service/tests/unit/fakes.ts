@@ -2,7 +2,12 @@
 // what was sent and never start a process.
 import { EventEmitter } from "events";
 import type { Host, HostSessionHandle, HostInfo } from "../../src/session/host";
-import type { SessionConfig, SessionState, UsageStats } from "../../src/session/claude";
+import type {
+  PromptEnvelope,
+  SessionConfig,
+  SessionState,
+  UsageStats,
+} from "../../src/session/types";
 import type { PanelToolset } from "../../src/project/tools";
 
 const emptyUsage: UsageStats = {
@@ -23,8 +28,8 @@ export class FakeSession extends EventEmitter implements HostSessionHandle {
     super();
   }
   sent: string[] = [];
-  send(prompt: string): Promise<void> {
-    this.sent.push(prompt);
+  send(input: string | PromptEnvelope): Promise<void> {
+    this.sent.push(typeof input === "string" ? input : input.text);
     this.isRunning = true;
     return Promise.resolve();
   }
@@ -71,8 +76,9 @@ export class FakeHost implements Host {
     this.lastSession = new FakeSession(config);
     return this.lastSession;
   }
-  destroySession(agentId: string): void {
+  destroySession(agentId: string): Promise<void> {
     this.destroyed.push(agentId);
+    return Promise.resolve();
   }
   restoreSession(_agentId: string, state: SessionState): HostSessionHandle {
     this.lastSession = new FakeSession(state.config);

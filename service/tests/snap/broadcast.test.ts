@@ -1,15 +1,17 @@
-// Replays the recorded Claude fixtures through the real session and
-// workspace, captures what index.ts broadcasts (new_message, stream_event,
-// message_done + patch), and folds those frames with the client's own
-// functions the way useServer does. Unlike snap.test.ts it compares whole
-// messages (content, status, thinking stats) and the live thinking view.
+// Replays recorded Codex and synthetic Pi fixtures through the real session and workspace,
+// captures broadcast frames, and folds them with the client's own functions.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { ClaudeSession, type StreamEvent } from "../../src/session/claude";
-import { LocalHost, HostRegistry, type HostSessionHandle } from "../../src/session/host";
-import { Workspace, type WorkspaceCallbacks } from "../../src/workspace/workspace";
+import type { StreamEvent } from "../../src/session/types";
+import type { WorkspaceCallbacks } from "../../src/workspace/workspace";
 import { summarizeMessages } from "../../src/workspace/summary";
-import { readRecording, recordingPath, RECORD_CWD, DEFAULT_MODEL } from "./harness";
+import {
+  type Backend,
+  readRecording,
+  recordingPath,
+  replay as replaySnap,
+  loadFixture,
+  stripChildTranscript,
+} from "./harness";
 import {
   applyStreamBatch,
   mergeDetailEvents,
@@ -17,45 +19,6 @@ import {
   type PendingEvent,
 } from "../../../webview/src/state/stream";
 import type { Message as ClientMessage } from "../../../webview/src/state/useServer";
-
-const noSdk = {
-  query: (): Query => {
-    throw new Error("real Claude SDK reached from a unit test");
-  },
-};
-
-class Feeder<T> {
-  private queue: T[] = [];
-  private waiting: ((r: IteratorResult<T>) => void) | null = null;
-  private done = false;
-  next(): Promise<IteratorResult<T>> {
-    if (this.queue.length) return Promise.resolve({ value: this.queue.shift()!, done: false });
-    if (this.done) return Promise.resolve({ value: undefined as T, done: true });
-    return new Promise((resolve) => (this.waiting = resolve));
-  }
-  push(v: T): void {
-    const w = this.waiting;
-    if (w) {
-      this.waiting = null;
-      w({ value: v, done: false });
-    } else this.queue.push(v);
-  }
-  end(): void {
-    this.done = true;
-    const w = this.waiting;
-    if (w) {
-      this.waiting = null;
-      w({ value: undefined as T, done: true });
-    }
-  }
-  iterable(): AsyncIterable<T> {
-    return { [Symbol.asyncIterator]: () => ({ next: () => this.next() }) };
-  }
-}
-
-async function flush(): Promise<void> {
-  for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
-}
 
 function stripEventsInnerEvents(events: StreamEvent[]): StreamEvent[] {
   return events.map((e) => {
@@ -70,19 +33,27 @@ function stripEventsInnerEvents(events: StreamEvent[]): StreamEvent[] {
 type Frame = Record<string, unknown> & { type: string; t: number };
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
-async function replayBroadcast(name: string) {
-  const rec = readRecording(recordingPath("claude", name));
+async function replayBroadcast(backend: Backend, name: string) {
+  const rec = readRecording(recordingPath(backend, name));
+  const fixture = await loadFixture(backend, name);
   const frames: Frame[] = [];
-  let now = 0;
+  const at = () => Date.now();
   const cb: WorkspaceCallbacks = {
     onNewMessage: (_ws, message) =>
-      frames.push({ type: "new_message", t: now, message: clone(message) }),
+      frames.push({ type: "new_message", t: at(), message: clone(message) }),
     onStreamEvent: (_ws, msg, event) =>
-      frames.push({ type: "stream_event", t: now, messageId: msg.id, event: clone(event) }),
+      frames.push({
+        type: "stream_event",
+        t: at(),
+        messageId: msg.id,
+        event: clone(
+          backend === "pi" && event.kind === "subagent_done" ? stripChildTranscript(event) : event,
+        ),
+      }),
     onMessageDone: (_ws, messageId, status, content, events, patch) =>
       frames.push({
         type: "message_done",
-        t: now,
+        t: at(),
         messageId,
         status,
         content,
@@ -90,63 +61,8 @@ async function replayBroadcast(name: string) {
         ...clone(patch ?? {}),
       }),
   };
-  const host = new LocalHost("local", "Local");
-  const registry = new HostRegistry();
-  registry.register(host);
-  const ws = new Workspace("ws", "t", "p", "local", RECORD_CWD, registry, cb);
-  const model = rec.header.model || DEFAULT_MODEL.claude;
-  ws.addAgent("A", model, "🤖", "#888", { backend: "claude" });
-
-  const live = { feeder: null as Feeder<unknown> | null };
-  ClaudeSession.sdk = {
-    query: () => {
-      const feeder = new Feeder<unknown>();
-      live.feeder = feeder;
-      const it = feeder.iterable() as AsyncIterable<SDKMessage>;
-      return {
-        [Symbol.asyncIterator]: () => it[Symbol.asyncIterator](),
-        close: () => feeder.end(),
-        supportedCommands: () => Promise.resolve([]),
-        stopTask: () => Promise.resolve(),
-        getContextUsage: () => Promise.resolve(null),
-        interrupt: () => Promise.resolve(),
-      } as unknown as Query;
-    },
-  };
-  const base = Date.now();
-  for (const e of rec.entries) {
-    now = e.t;
-    vi.setSystemTime(base + e.t);
-    if ("step" in e) {
-      if (e.step.op === "send") {
-        await ws.sendMessage(e.step.text);
-        await flush();
-      } else if (e.step.op === "end") {
-        live.feeder?.end();
-        await flush();
-        const attach = (
-          ws as unknown as {
-            attachSession(id: string, s: HostSessionHandle): (e: StreamEvent) => void;
-          }
-        ).attachSession.bind(ws);
-        for (const [id, entry] of ws.agents) {
-          const session = host.restoreSession(id, entry.session.getState());
-          entry.handler = attach(id, session);
-          entry.session = session;
-        }
-      }
-    } else if ("frame" in e) {
-      live.feeder?.push(e.frame);
-      await flush();
-    } else if ("close" in e) {
-      live.feeder?.end();
-      await flush();
-    }
-  }
-  await flush();
-  // Let the setTimeout(dequeueNext) timers run.
-  await new Promise((r) => setTimeout(r, 5));
-  return { frames, messages: ws.messages };
+  const replayed = await replaySnap(backend, rec, fixture, cb);
+  return { frames, messages: replayed.messages };
 }
 
 interface LiveSpan {
@@ -220,22 +136,27 @@ const norm = (m: unknown) =>
     ),
   ) as unknown;
 
-const FIXTURES = ["bash-quick", "agent-bg", "resume-orphan-bg", "skill-tool"];
+const FIXTURES: Array<[Backend, string]> = [
+  ["codex", "tools"],
+  ["pi", "basic-turn"],
+  ["pi", "tools-bash-edit"],
+  ["pi", "pi-subagents-foreground"],
+  ["pi", "pi-subagents-async"],
+  ["pi", "panel-tools-roundtrip"],
+];
 
 describe("broadcast parity", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date"] });
-    ClaudeSession.sdk = noSdk;
   });
   afterEach(() => {
     vi.useRealTimers();
-    ClaudeSession.sdk = noSdk;
   });
 
-  for (const name of FIXTURES) {
+  for (const [backend, name] of FIXTURES) {
     for (const mode of ["each", "hidden"] as const) {
-      it(`${name} (${mode} flush): client converges on the whole message, live view closed`, async () => {
-        const { frames, messages } = await replayBroadcast(name);
+      it(`${backend}/${name} (${mode} flush): client converges on the whole message, live view closed`, async () => {
+        const { frames, messages } = await replayBroadcast(backend, name);
         // Thinking deltas are relayed, never persisted.
         const deltas = frames.filter(
           (f) => f.type === "stream_event" && (f.event as StreamEvent).kind === "thinking_delta",
@@ -252,10 +173,57 @@ describe("broadcast parity", () => {
           expect(cm.status, `status ${i}`).toBe(sm.status);
           expect(cm.content, `content ${i}`).toBe(sm.content);
           expect(cm.thinking, `thinking ${i}`).toEqual(sm.thinking);
-          expect(norm(cm.events ?? []), `events ${i}`).toEqual(norm(sm.events ?? []));
+          expect(cm.context, `context ${i}`).toEqual(sm.context);
+          expect(cm.effort, `effort ${i}`).toEqual(sm.effort);
+          expect(
+            norm(stripEventsInnerEvents((cm.events ?? []) as StreamEvent[])),
+            `events ${i}`,
+          ).toEqual(norm(stripEventsInnerEvents(sm.events ?? [])));
         });
-        // Every live view ends with its thinking block, not at a later event.
-        for (const span of spans) expect(span.closedBy, span.messageId).toBe("thinking_delta");
+        for (const span of spans) expect(span.closedAt, span.messageId).not.toBeNull();
+        if (backend === "pi") {
+          expect(
+            deltas.some((f) => {
+              const event = f.event as StreamEvent;
+              return event.content === "" && event.durationMs !== undefined;
+            }),
+          ).toBe(true);
+          if (mode === "each") {
+            expect(spans.length).toBeGreaterThan(0);
+            expect(spans.every((span) => span.closedBy === "thinking_delta")).toBe(true);
+          }
+        }
+        if (name.startsWith("pi-subagents-")) {
+          const done = frames.filter(
+            (f) => f.type === "stream_event" && (f.event as StreamEvent).kind === "subagent_done",
+          );
+          expect(done).toHaveLength(1);
+          expect((done[0].event as StreamEvent).subagent).toMatchObject({ eventCount: 2 });
+          expect((done[0].event as StreamEvent).subagent?.events).toBeUndefined();
+          const index = messages.findIndex((m) => m.id === done[0].messageId);
+          const taskId = (done[0].event as StreamEvent).subagent!.taskId;
+          const serverEvents = messages[index].events!;
+          // Same payload selection as load_subagent_events, then the client's
+          // detail update followed by a later summary refresh.
+          const detail = serverEvents.find((e) => e.subagent?.taskId === taskId)!.subagent!.events!;
+          const clientEvents = msgs[index].events!;
+          expect(clientEvents.find((e) => e.subagent?.taskId === taskId)?.subagent).toMatchObject({
+            eventCount: detail.length,
+          });
+          const hydrated = clientEvents.map((e) =>
+            e.subagent?.taskId === taskId
+              ? { ...e, subagent: { ...e.subagent, events: detail, eventCount: detail.length } }
+              : e,
+          );
+          const refreshed = mergeDetailEvents(hydrated, stripEventsInnerEvents(serverEvents));
+          expect(refreshed.find((e) => e.kind === "subagent_start")?.subagent?.events).toEqual(
+            detail,
+          );
+          expect(detail).toEqual([
+            { kind: "thinking", content: "Child reasoning." },
+            { kind: "text", content: "Child evidence." },
+          ]);
+        }
         // Summary pages keep the stats.
         const summary = summarizeMessages(messages);
         summary.forEach((m, i) => expect(m.thinking).toEqual(messages[i].thinking));

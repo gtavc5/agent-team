@@ -282,14 +282,21 @@ describe("file previews", () => {
   it("close the file when a download is cancelled", async () => {
     const big = path.join(dir, "big.bin");
     fs.writeFileSync(big, Buffer.alloc(16 * 1024 * 1024));
-    const openOnBig = () =>
-      fs.readdirSync("/proc/self/fd").filter((fd) => {
+    const openOnBig = () => {
+      if (process.platform === "darwin") {
+        const canonical = fs.realpathSync(big);
+        return execFileSync("lsof", ["-p", String(process.pid)], { encoding: "utf8" })
+          .split("\n")
+          .filter((line) => line.endsWith(canonical)).length;
+      }
+      return fs.readdirSync("/proc/self/fd").filter((fd) => {
         try {
           return fs.readlinkSync(`/proc/self/fd/${fd}`) === big;
         } catch {
           return false;
         }
       }).length;
+    };
     for (let i = 0; i < 3; i++) {
       await new Promise<void>((resolve, reject) => {
         const req = http.get(

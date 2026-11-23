@@ -1,0 +1,16 @@
+{"header":{"backend":"pi","fixture":"image-prompt","description":"Pi reads a seeded, temporary 1×1 PNG through the workspace attachment envelope.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
+{"step":{"op":"image","text":"Describe this pixel.","seed":17,"i":0},"t":0}
+{"sent":{"type":"prompt","message":"Describe this pixel.","images":[{"type":"image","mimeType":"image/png","data":"generated-png"}]},"t":5}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
+{"frame":{"type":"agent_start"},"t":15}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":20}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
+{"step":{"op":"check","name":"dispatched","i":1},"t":30}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"One "}},"t":35}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"synthetic pixel."}},"t":40}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"One synthetic pixel."}},"t":45}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"text","text":"One synthetic pixel."}]}},"t":50}
+{"frame":{"type":"agent_settled"},"t":55}
+{"sent":{"type":"get_session_stats"},"t":60}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":65}
+{"step":{"op":"check","name":"retained","i":2},"t":70}

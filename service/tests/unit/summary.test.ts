@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { summarizeEvent, summarizeMessage } from "../../src/workspace/summary";
-import { StreamEvent } from "../../src/session/claude";
+import { StreamEvent } from "../../src/session/types";
 import { Message } from "../../src/workspace/workspace";
 
 const ev = (kind: string, over: Partial<StreamEvent> = {}): StreamEvent =>

@@ -13,7 +13,7 @@ import { boardRef, findBySuffix, resolveProjectPath } from "../project/paths";
 
 // Where a project's board paths lead: its repository and its notes.
 export interface ProjectPaths {
-  root: string;
+  root: string | null;
   notesDir: string;
 }
 

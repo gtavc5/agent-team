@@ -7,23 +7,21 @@ const webDir = process.env.AGENT_TEAM_WEB_DIR ?? path.join(__dirname, "webview")
 
 const server = new Server(port, baseDir, webDir);
 
-function shutdown() {
-  server.close();
-  process.exit(0);
+async function shutdown(code = 0): Promise<void> {
+  await server.close();
+  process.exit(code);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-process.on("SIGHUP", shutdown);
+process.on("SIGINT", () => void shutdown());
+process.on("SIGTERM", () => void shutdown());
+process.on("SIGHUP", () => void shutdown());
 
 process.on("uncaughtException", (err) => {
   console.error("Uncaught exception, saving state before exit:", err);
-  server.close();
-  process.exit(1);
+  void shutdown(1);
 });
 
 process.on("unhandledRejection", (reason) => {
   console.error("Unhandled rejection, saving state before exit:", reason);
-  server.close();
-  process.exit(1);
+  void shutdown(1);
 });

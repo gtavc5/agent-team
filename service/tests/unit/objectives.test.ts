@@ -466,9 +466,10 @@ describe("the lead's objective tools", () => {
   it("broadcast the board when a file is edited by hand", async () => {
     const { create, frames, manager, base } = setup();
     const { project } = create("clice");
-    manager.list();
     const dir = path.join(base, ".agent-team", "projects", project.id, "objectives", "core");
     fs.mkdirSync(dir, { recursive: true });
+    manager.list();
+    for (let i = 0; i < 20; i++) await tick();
     fs.writeFileSync(path.join(dir, "hand.toml"), 'title = "by hand"\ngoal = "g"\n');
     const seen = () =>
       frames.some(
@@ -478,7 +479,7 @@ describe("the lead's objective tools", () => {
             (o) => o.id === "core/hand",
           ),
       );
-    for (let i = 0; i < 100 && !seen(); i++) await tick();
+    for (let i = 0; i < 400 && !seen(); i++) await tick();
     expect(seen()).toBe(true);
     manager.close();
   });

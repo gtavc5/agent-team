@@ -10,7 +10,7 @@ import { HistoryService, sidebarHits } from "../../src/workspace/history-service
 import { closeHistory, historyFile, historyIndexFile, historyOf } from "../../src/workspace/state";
 import { Workspace, type Message, type WorkspaceState } from "../../src/workspace/workspace";
 import { HostRegistry } from "../../src/session/host";
-import type { StreamEvent } from "../../src/session/claude";
+import type { StreamEvent } from "../../src/session/types";
 import { FakeHost } from "./fakes";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -329,7 +329,7 @@ describe("what a workspace marks for the next save", () => {
     const registry = new HostRegistry();
     registry.register(host);
     const ws = new Workspace("ws-1", "t", "p", "local", "/tmp", registry);
-    ws.addAgent("A", "claude-opus-5-5", "a", "#888", { backend: "claude" });
+    ws.addAgent("A", "gpt-6-astra", "a", "#888", { backend: "codex" });
     const emit = (e: Partial<StreamEvent>) => host.lastSession!.emit("event", e);
     return { ws, emit };
   }

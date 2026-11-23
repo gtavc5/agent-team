@@ -75,11 +75,11 @@ export function setupProjects() {
       return w;
     },
     addAgent: (w, name, model, avatar, color, effort) => {
-      const agent = w.addAgent(name, model, avatar, color, { backend: "claude", effort });
+      const agent = w.addAgent(name, model, avatar, color, { backend: "codex", effort });
       w.agents.get(agent.id)!.session.setPanelTools?.(manager.toolsFor(w));
     },
     removeWorkspace: (id) => {
-      workspaces.get(id)?.dispose();
+      void workspaces.get(id)?.dispose();
       workspaces.delete(id);
     },
     archiveWorkspace: (w) => {
@@ -136,7 +136,7 @@ export function setupProjects() {
   // A workspace as a restart brings it back from its saved state.
   const restart = (w: Workspace) => {
     const back = Workspace.fromState(w.getState(), registry, cb);
-    w.dispose();
+    void w.dispose();
     workspaces.set(w.id, back);
     return back;
   };

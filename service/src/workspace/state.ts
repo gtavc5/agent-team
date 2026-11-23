@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { HistoryDb } from "./history-db";
 import { Message, WorkspaceState } from "./workspace";
-import type { CommandInfo, StreamEvent } from "../session/claude";
+import type { CommandInfo, StreamEvent } from "../session/types";
 
 const DATA_DIR = ".agent-team";
 const CACHE_DIR = "cache";
@@ -92,9 +92,9 @@ export function saveWorkspace(
   changed: ReadonlySet<string> | "all" = "all",
 ): boolean {
   const { messages, ...meta } = ws;
-  const wrote = messages ? historyOf(baseDir).save(ws.id, messages, changed) : false;
+  // The first dispatch boundary must not become durable before its allocated session ID.
   writeJson(metaPath(baseDir, ws.id), meta);
-  return wrote;
+  return messages ? historyOf(baseDir).save(ws.id, messages, changed) : false;
 }
 
 // Throws when the history cannot be read: an empty list would be saved
@@ -179,11 +179,8 @@ export function appendLog(baseDir: string, workspaceId: string, entry: unknown):
   fs.appendFileSync(file, JSON.stringify(entry) + "\n");
 }
 
-// Small runtime settings persisted outside config.toml (which stays
-// user-owned): currently just the default-account override.
+// Small runtime settings persisted outside config.toml (which stays user-owned).
 export interface RuntimeSettings {
-  defaultAccount?: string | null;
-  // Last slash-command list reported by the Claude SDK (see Server.commands).
   commands?: CommandInfo[];
 }
 

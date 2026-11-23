@@ -4,6 +4,7 @@ import TOML from "@iarna/toml";
 
 export interface ServerConfig {
   remote_uploads_url?: string;
+  restart_command?: string[];
 }
 
 export interface WorkspaceConfig {
@@ -22,12 +23,6 @@ export interface AuthConfig {
   max_age_days: number;
 }
 
-// A named Claude account backed by a long-lived OAuth token from
-// `claude setup-token`. The locally logged-in account needs no entry.
-export interface AccountConfig {
-  oauth_token: string;
-}
-
 export interface HostConfig {
   label: string;
   type: "local";
@@ -38,6 +33,14 @@ export interface ProviderConfig {
   base_url: string;
 }
 
+export interface PiConfig {
+  packages?: string[];
+  exclude_packages?: string[];
+  default_model?: string;
+  default_effort?: string;
+  offline?: boolean;
+}
+
 // The model, and its effort, a new project's lead runs on, and the workers
 // it starts without naming one.
 export interface ProjectsConfig {
@@ -45,21 +48,20 @@ export interface ProjectsConfig {
   effort?: string;
 }
 
-// The Cursor API key the cursor/ models run on (a user or service account
-// key, billed to its plan).
-export interface CursorConfig {
-  api_key: string;
-}
-
 export interface AppConfig {
   server: ServerConfig;
   workspace: WorkspaceConfig;
   auth: AuthConfig | null;
-  accounts: Record<string, AccountConfig>;
   hosts: Record<string, HostConfig>;
   providers: Record<string, ProviderConfig>;
-  cursor: CursorConfig | null;
   projects: ProjectsConfig;
+  pi?: PiConfig;
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? value
+    : undefined;
 }
 
 export function loadConfig(baseDir: string): AppConfig {
@@ -75,6 +77,7 @@ export function loadConfig(baseDir: string): AppConfig {
   const serverSection = parsed.server as Record<string, unknown> | undefined;
   const server: ServerConfig = {
     remote_uploads_url: (serverSection?.remote_uploads_url as string) || undefined,
+    restart_command: stringArray(serverSection?.restart_command),
   };
 
   const wsSection = parsed.workspace as Record<string, unknown> | undefined;
@@ -131,21 +134,6 @@ export function loadConfig(baseDir: string): AppConfig {
     };
   }
 
-  const accounts: Record<string, AccountConfig> = {};
-  const rawAccounts = parsed.accounts;
-  if (rawAccounts && typeof rawAccounts === "object") {
-    for (const [name, val] of Object.entries(rawAccounts as Record<string, unknown>)) {
-      const c = val as Record<string, string>;
-      if (c?.oauth_token) accounts[name] = { oauth_token: c.oauth_token };
-    }
-  }
-
-  const rawCursor = parsed.cursor as Record<string, unknown> | undefined;
-  const cursor =
-    typeof rawCursor?.api_key === "string" && rawCursor.api_key
-      ? { api_key: rawCursor.api_key }
-      : null;
-
   const rawProjects = parsed.projects as Record<string, unknown> | undefined;
   const projects: ProjectsConfig = {
     ...(typeof rawProjects?.model === "string" &&
@@ -154,32 +142,16 @@ export function loadConfig(baseDir: string): AppConfig {
       rawProjects.effort && { effort: rawProjects.effort }),
   };
 
-  return { server, workspace, auth, hosts, providers, accounts, cursor, projects };
-}
+  const rawPi = parsed.pi as Record<string, unknown> | undefined;
+  const pi: PiConfig | undefined = rawPi
+    ? {
+        packages: stringArray(rawPi.packages),
+        exclude_packages: stringArray(rawPi.exclude_packages),
+        default_model: typeof rawPi.default_model === "string" ? rawPi.default_model : undefined,
+        default_effort: typeof rawPi.default_effort === "string" ? rawPi.default_effort : undefined,
+        offline: typeof rawPi.offline === "boolean" ? rawPi.offline : undefined,
+      }
+    : undefined;
 
-// Which account a session should run on: an explicit per-agent account wins,
-// otherwise the runtime default (when it still exists in config), otherwise
-// the local login.
-export function effectiveAccount(
-  explicit: string | undefined,
-  defaultAccount: string | null,
-  accounts: Record<string, AccountConfig>,
-): string | undefined {
-  if (explicit && accounts[explicit]) return explicit;
-  if (explicit) return undefined; // stale explicit account: fall back to local
-  if (defaultAccount && accounts[defaultAccount]) return defaultAccount;
-  return undefined;
-}
-
-// Where to fail over when `current` (undefined = local) hits a weekly-type
-// limit: the first other configured account, else back to local, else
-// nowhere (returns undefined). null = local login.
-export function pickFailoverAccount(
-  current: string | undefined,
-  accounts: Record<string, AccountConfig>,
-): string | null | undefined {
-  const others = Object.keys(accounts).filter((a) => a !== current);
-  if (others.length > 0) return others[0];
-  if (current !== undefined) return null;
-  return undefined;
+  return { server, workspace, auth, hosts, providers, projects, pi };
 }

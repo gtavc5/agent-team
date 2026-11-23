@@ -1,6 +1,6 @@
 import * as http from "http";
 import type { AddressInfo } from "net";
-import * as os from "os";
+import * as os from "node:os";
 import * as fs from "fs";
 import * as path from "path";
 import { execFile, spawn } from "child_process";
@@ -18,33 +18,37 @@ import {
   saveIndex,
   loadAll,
   loadWorkspaceMessages,
+  historyOf,
   historyFile,
   historyIndexFile,
   closeHistory,
   appendLog,
   isLoggedEvent,
-  loadSettings,
-  saveSettings,
-  RuntimeSettings,
 } from "../workspace/state";
-import { loadConfig, AppConfig, effectiveAccount, pickFailoverAccount } from "../config/config";
+import { loadConfig, AppConfig } from "../config/config";
 import {
   AGENT_PRESETS,
   MODEL_OPTIONS,
+  availableModelOptions,
   backendForModel,
   effortLevelsForModel,
+  type ModelOption,
 } from "../config/presets";
-import { CommandInfo, StreamEvent } from "../session/claude";
+import {
+  CommandInfo,
+  StreamEvent,
+  type PiAvailableModel,
+  type SessionConfig,
+} from "../session/types";
 import { HostRegistry, LocalHost } from "../session/host";
 import { completeDirs, resolveWorkspacePath } from "../repo/dirs";
 import { GitScanner } from "../repo/scanner";
 import { HistoryService, sidebarHits, type SearchHit } from "../workspace/history-service";
-import { summarizeMessages } from "../workspace/summary";
+import { summarizeMessages, toWireMessage } from "../workspace/summary";
 import { ProjectManager, type ProjectHost } from "../project/manager";
 import { Auth } from "./auth";
 import { mergeLocalCommands } from "./commands";
 import { HttpHandler } from "./http";
-import { QuotaMonitor } from "./quota";
 import { SystemMonitor } from "./system";
 
 function stripEventsInnerEvents(events: StreamEvent[]): StreamEvent[] {
@@ -73,15 +77,18 @@ export class Server {
   private baseDir: string;
   private statusTimer: ReturnType<typeof setInterval> | null = null;
   private branchTimer: ReturnType<typeof setInterval> | null = null;
-  private commands: CommandInfo[] = mergeLocalCommands([]);
+  private readonly commandsByAgent = new Map<string, Map<string, CommandInfo[]>>();
+  private catalogModels: PiAvailableModel[] = [];
+  private catalogRevision = 0;
+  private models: ModelOption[] = availableModelOptions([]);
+  private readonly restoring: Promise<void>;
+  private closing = false;
+  private restored = false;
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private sendOrder = new Map<string, Promise<void>>();
   private uploadsDir: string;
   private hostRegistry: HostRegistry;
-  private quotaTimer: ReturnType<typeof setInterval> | null = null;
-  private defaultAccount: string | null = null;
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private lastAccountSwitchAt = 0;
   private archiveTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   // Clients that answered the last protocol-level ping. Mobile browsers drop
@@ -90,7 +97,6 @@ export class Server {
   private alive = new WeakSet<WebSocket>();
   private auth: Auth;
   private http: HttpHandler;
-  private quota: QuotaMonitor;
   private system = new SystemMonitor();
   private git: GitScanner<Workspace>;
   private projects: ProjectManager;
@@ -102,22 +108,8 @@ export class Server {
     this.uploadsDir = path.join(baseDir, "uploads");
     if (!fs.existsSync(this.uploadsDir)) fs.mkdirSync(this.uploadsDir, { recursive: true });
     this.config = loadConfig(baseDir);
-    const settings = loadSettings(baseDir);
-    this.defaultAccount = settings.defaultAccount ?? null;
-    if (this.defaultAccount && !this.config.accounts[this.defaultAccount]) {
-      this.defaultAccount = null;
-    }
-    // The SDK only reports its slash commands once a Claude session runs a
-    // turn; until then (and forever on codex-only teams) the list would be
-    // empty, so start from the last one seen.
-    this.commands = mergeLocalCommands(settings.commands ?? []);
     this.hostRegistry = this.initHosts();
     this.auth = new Auth(() => this.config.auth);
-    this.quota = new QuotaMonitor(
-      () => this.config.accounts,
-      undefined,
-      () => this.hasAgyAgents(),
-    );
     this.git = new GitScanner(
       () => [...this.workspaces.values()].filter((w) => !w.isArchived),
       (w) =>
@@ -151,7 +143,9 @@ export class Server {
     this.wss.on("connection", (ws) => this.onConnect(ws));
     this.heartbeatTimer = setInterval(() => this.sweepDeadClients(), HEARTBEAT_INTERVAL_MS);
 
-    this.restoreState();
+    this.restoring = this.restoreState().finally(() => {
+      this.restored = true;
+    });
     // The search index catches up with the history in the background.
     this.history.changed();
     this.statusTimer = setInterval(() => this.broadcastSystemStatus(), 3000);
@@ -159,18 +153,26 @@ export class Server {
       void this.git.scan();
     }, 3000);
     void this.git.scan();
-    this.quotaTimer = setInterval(() => this.refreshQuotaIfStale(), 60_000);
     this.sweepArchives();
     this.archiveTimer = setInterval(() => this.sweepArchives(), 3600_000);
 
     const host = process.env.AGENT_TEAM_HOST || "0.0.0.0";
-    this.listening = new Promise((resolve) =>
-      this.httpServer.listen(port, host, () => {
-        const bound = (this.httpServer.address() as AddressInfo).port;
-        console.log(`Agent Team server listening on http://${host}:${bound}`);
-        resolve(bound);
-      }),
-    );
+    this.listening = this.restoring
+      .then(() => this.refreshPiCatalog())
+      .then(
+        () =>
+          new Promise<number>((resolve) => {
+            if (this.closing) {
+              resolve(port);
+              return;
+            }
+            this.httpServer.listen(port, host, () => {
+              const bound = (this.httpServer.address() as AddressInfo).port;
+              console.log(`Agent Team server listening on http://${host}:${bound}`);
+              resolve(bound);
+            });
+          }),
+      );
   }
 
   private initHosts(): HostRegistry {
@@ -187,31 +189,13 @@ export class Server {
     return registry;
   }
 
-  private hasAgyAgents(): boolean {
-    for (const ws of this.workspaces.values()) {
-      if (ws.isArchived) continue;
-      for (const a of ws.agents.values()) if (backendForModel(a.info.model) === "agy") return true;
-    }
-    return false;
-  }
-
-  private refreshQuotaIfStale(): void {
-    if (this.uiClients.size > 0) this.quota.refreshIfStale();
-  }
-
   private getSystemStatus(): Record<string, unknown> {
-    return { type: "system_status", ...this.system.snapshot(), quota: this.quota.entries };
+    return { type: "system_status", ...this.system.snapshot() };
   }
 
   private broadcastSystemStatus(): void {
     if (this.uiClients.size === 0) return;
     this.broadcastUI(this.getSystemStatus());
-  }
-
-  // settings.json holds several independent values; patch rather than
-  // overwrite so one writer does not wipe the others.
-  private updateSettings(patch: Partial<RuntimeSettings>): void {
-    saveSettings(this.baseDir, { ...loadSettings(this.baseDir), ...patch });
   }
 
   private sendJson(ws: WebSocket, msg: unknown): void {
@@ -263,19 +247,32 @@ export class Server {
     });
 
     this.projects.showAllAwaiting();
+    const commandsByAgent = Object.fromEntries(
+      [...this.workspaces.values()].map((w) => [
+        w.id,
+        Object.fromEntries(
+          (this.isProjectSealed(w) ? [] : [...w.agents.keys()]).map((id) => [
+            id,
+            this.commandsByAgent.get(w.id)?.get(id) ?? mergeLocalCommands([]),
+          ]),
+        ),
+      ]),
+    );
+    const commands = mergeLocalCommands([]);
     this.sendJson(ws, {
       type: "init",
       // Identifies the served bundle; a client that reconnects and sees a
       // different id reloads itself (home-screen apps never reload on their own).
       buildId: this.http.buildId(),
       workspaces: [...this.workspaces.values()].map((w) => this.listInfo(w)),
+      models: this.models,
+      commands,
+      commandsByAgent,
+      pendingDialogs: [...this.workspaces.values()].flatMap((w) => w.getPendingDialogs()),
       config: {
-        accounts: Object.keys(this.config.accounts),
-        defaultAccount: this.defaultAccount,
         presets: AGENT_PRESETS,
-        // Each with the effort levels /effort and add_agent accept for it.
-        models: MODEL_OPTIONS.map((m) => ({ ...m, effortLevels: effortLevelsForModel(m.id) })),
-        commands: this.commands,
+        models: this.models,
+        commands,
         hosts: this.config.hosts,
         archiveAfterDays: this.config.workspace.archive_after_days,
       },
@@ -284,11 +281,40 @@ export class Server {
       issues: this.projects.issueSets(),
     });
     this.sendJson(ws, this.getSystemStatus());
-    this.refreshQuotaIfStale();
+  }
+
+  private isProjectSealed(w: Workspace): boolean {
+    return !!w.projectLink && this.projects.get(w.projectLink.projectId)?.status === "sealed";
   }
 
   private handleMessage(ws: WebSocket, msg: Record<string, unknown>): void {
+    const workspace = this.workspaces.get(msg.workspaceId as string);
+    if (
+      workspace &&
+      this.isProjectSealed(workspace) &&
+      [
+        "send_message",
+        "forward_message",
+        "clear_context",
+        "add_agent",
+        "remove_agent",
+        "set_reporting",
+        "delete_workspace",
+        "cancel_queued",
+        "debug_rate_limit",
+        "archive_workspace",
+        "unarchive_workspace",
+        "cancel_subagent",
+        "abort",
+        "interrupt",
+        "cancel_wakeup",
+      ].includes(String(msg.type))
+    ) {
+      this.sendJson(ws, { type: "error", message: "Project is sealed" });
+      return;
+    }
     switch (msg.type) {
+      case "open_workspace":
       case "load_messages": {
         const workspace = this.workspaces.get(msg.workspaceId as string);
         if (workspace && this.ensureLoaded(workspace)) {
@@ -307,6 +333,7 @@ export class Server {
             workspaceId: workspace.id,
             messages: summarizeMessages(page),
             hasMore: older.length > limit,
+            pendingDialogs: workspace.getPendingDialogs(),
             // Echoed so the client can tell an older page from a resync of
             // the newest one (the latter replaces, the former prepends).
             before: before === Infinity ? null : before,
@@ -359,10 +386,37 @@ export class Server {
         this.createProject(
           ws,
           msg.name as string,
-          msg.path as string,
+          (msg.root === undefined ? msg.path : msg.root) as string | null,
           msg.model as string | undefined,
+          msg.cwd as string | undefined,
         );
         return;
+
+      case "seal_project":
+        this.projectAction(ws, async () => {
+          const id = msg.projectId as string;
+          const sealing = this.projects.sealProject(id, msg.reason as string | undefined);
+          await sealing;
+          this.removeProjectRuntimeCaches(id);
+        });
+        return;
+
+      case "ui_dialog_response": {
+        const { agentId, processGeneration, requestId, value, confirmed, cancelled } = msg;
+        if (
+          typeof agentId !== "string" ||
+          typeof processGeneration !== "number" ||
+          typeof requestId !== "string"
+        )
+          return;
+        workspace?.respondToUiDialog(agentId, processGeneration, requestId, {
+          requestId,
+          value: typeof value === "string" ? value : undefined,
+          confirmed: typeof confirmed === "boolean" ? confirmed : undefined,
+          cancelled: cancelled === true,
+        });
+        return;
+      }
 
       case "rename_project":
         this.projectAction(ws, () =>
@@ -407,7 +461,6 @@ export class Server {
           msg.avatar as string,
           msg.color as string,
           msg.permissionMode as string | undefined,
-          msg.account as string | undefined,
           (msg.effort as string | undefined) || undefined,
         );
         return;
@@ -495,17 +548,19 @@ export class Server {
         return;
       }
 
-      case "set_default_account":
-        this.setDefaultAccount(ws, (msg.account as string | null) ?? null);
-        return;
-
       case "archive_workspace":
         this.archiveWorkspace(msg.workspaceId as string, false);
         return;
 
       case "unarchive_workspace": {
         const workspace = this.workspaces.get(msg.workspaceId as string);
-        if (workspace) this.unarchiveWorkspace(workspace);
+        if (
+          workspace &&
+          this.unarchiveWorkspace(workspace) &&
+          workspace.projectLink?.role === "lead"
+        ) {
+          this.projectAction(ws, () => this.projects.drainInbox(workspace.projectLink!.projectId));
+        }
         return;
       }
 
@@ -526,9 +581,11 @@ export class Server {
       }
 
       case "archive_project":
-        this.projectAction(ws, () =>
-          this.projects.setArchived(msg.projectId as string, msg.archived !== false),
-        );
+        this.projectAction(ws, async () => {
+          const id = msg.projectId as string;
+          this.projects.setArchived(id, msg.archived !== false);
+          if (msg.archived === false) await this.projects.drainInbox(id);
+        });
         return;
 
       case "set_reporting":
@@ -541,7 +598,7 @@ export class Server {
         const workspace = this.workspaces.get(msg.workspaceId as string);
         if (!workspace || !this.ensureLoaded(workspace)) return;
         if (workspace.cancelQueued(msg.messageId as string)) {
-          this.persistWorkspace(workspace.id);
+          this.persistWorkspaceNow(workspace.id);
           this.broadcastUI({
             type: "message_removed",
             workspaceId: workspace.id,
@@ -569,7 +626,12 @@ export class Server {
           return;
         }
         try {
-          workspace.cancelSubagent(msg.agentId as string, msg.taskId as string);
+          void workspace.cancelSubagent(msg.agentId as string, msg.taskId as string).catch((e) => {
+            this.sendJson(ws, {
+              type: "error",
+              message: `${e instanceof Error ? e.message : String(e)}`,
+            });
+          });
         } catch (e) {
           this.sendJson(ws, {
             type: "error",
@@ -581,9 +643,8 @@ export class Server {
 
       case "clear_context": {
         const workspace = this.workspaces.get(msg.workspaceId as string);
-        if (workspace) {
-          workspace.clearContext(msg.agentId as string);
-          this.persistWorkspace(workspace.id);
+        if (workspace && workspace.clearContext(msg.agentId as string)) {
+          this.persistWorkspaceNow(workspace.id);
         }
         return;
       }
@@ -597,7 +658,7 @@ export class Server {
         return;
 
       case "restart_server":
-        this.restartServer();
+        void this.restartServer();
         return;
 
       // Application-level liveness probe: browsers cannot see ws ping/pong
@@ -650,7 +711,8 @@ export class Server {
       resolvedHostId,
       cwd,
       this.hostRegistry,
-      this.makeCallbacks(),
+      this.makeCallbacks(id),
+      { dataDir: this.baseDir, uploadsDir: this.uploadsDir },
     );
 
     // Same-folder workspaces share the scanner's cache; seed from it so the
@@ -667,7 +729,7 @@ export class Server {
       this.persistIndex();
     } catch (e) {
       this.workspaces.delete(id);
-      workspace.dispose();
+      void workspace.dispose();
       throw e;
     }
     this.broadcastUI({ type: "workspace_created", workspace: workspace.getInfo() });
@@ -684,18 +746,23 @@ export class Server {
       this.projects.delete(link.projectId);
       return;
     }
-    this.projects.forget(ws);
+    if (link && this.projects.get(link.projectId)?.status === "sealed")
+      throw new Error("Project is sealed");
+    void this.projects.forget(ws);
     this.removeWorkspace(workspaceId);
   }
 
   private removeWorkspace(workspaceId: string): void {
     const ws = this.workspaces.get(workspaceId);
     if (!ws) return;
-    ws.dispose();
+    this.cancelWorkspaceRetries(ws);
+    void ws.dispose();
     const timer = this.persistTimers.get(workspaceId);
     if (timer) clearTimeout(timer);
     this.persistTimers.delete(workspaceId);
     this.workspaces.delete(workspaceId);
+    this.commandsByAgent.delete(workspaceId);
+    this.refreshModels();
     deleteWorkspaceState(this.baseDir, workspaceId);
     this.history.changed();
     this.persistIndex();
@@ -710,7 +777,6 @@ export class Server {
     avatar: string,
     color: string,
     permissionMode?: string,
-    account?: string,
     effort?: string,
   ): void {
     const workspace = this.workspaces.get(workspaceId);
@@ -720,15 +786,15 @@ export class Server {
     }
 
     try {
-      if (account && !this.config.accounts[account]) {
-        this.sendJson(ws, { type: "error", message: `Unknown account: ${account}` });
-        return;
-      }
-      if (effort && !effortLevelsForModel(model).includes(effort)) {
+      if (
+        effort &&
+        backendForModel(model) === "codex" &&
+        !effortLevelsForModel(model).includes(effort)
+      ) {
         this.sendJson(ws, { type: "error", message: `${model} has no effort ${effort}` });
         return;
       }
-      this.addAgentTo(workspace, name, model, avatar, color, permissionMode, account, effort);
+      this.addAgentTo(workspace, name, model, avatar, color, permissionMode, effort);
     } catch (e) {
       this.sendJson(ws, {
         type: "error",
@@ -744,29 +810,23 @@ export class Server {
     avatar: string,
     color: string,
     permissionMode?: string,
-    account?: string,
     effort?: string,
   ): void {
     const preset = MODEL_OPTIONS.find((m) => m.id === model);
     const backend = backendForModel(model);
-    const agent = workspace.addAgent(
-      name,
-      model,
-      avatar,
-      color,
-      {
-        backend,
-        effort: effort ?? preset?.effort,
-        permissionMode: backend === "claude" ? (permissionMode ?? "bypassPermissions") : undefined,
-        providerEnv: this.sessionEnv(model, account),
-      },
-      account,
-    );
+    const agent = workspace.addAgent(name, model, avatar, color, {
+      backend,
+      effort: effort ?? preset?.effort,
+      permissionMode,
+      providerEnv: this.resolveProviderEnv(model),
+      ...(backend === "pi" && this.piConfig()),
+    });
     const tools = this.projects.toolsFor(workspace);
     if (tools) workspace.agents.get(agent.id)?.session.setPanelTools?.(tools);
     this.persistWorkspaceNow(workspace.id);
     // With its runtime state (effort, the levels it takes), as agent_updated sends it.
     const entry = workspace.agents.get(agent.id);
+    this.agentCommands(workspace.id, agent.id, []);
     this.broadcastUI({
       type: "agent_added",
       workspaceId: workspace.id,
@@ -774,53 +834,16 @@ export class Server {
     });
   }
 
-  // Long-lived OAuth token (from `claude setup-token`) for a named account;
-  // the env var takes precedence over the locally logged-in credentials in
-  // the spawned session, which is exactly the multi-account switch we want.
-  private resolveAccountEnv(account?: string): Record<string, string> | undefined {
-    const token = account ? this.config.accounts[account]?.oauth_token : undefined;
-    return token ? { CLAUDE_CODE_OAUTH_TOKEN: token } : undefined;
-  }
-
-  private sessionEnv(model: string, account?: string): Record<string, string> | undefined {
-    // agy runs on its own Google login.
-    if (backendForModel(model) === "agy") return undefined;
-    if (backendForModel(model) === "cursor") {
-      const key = this.config.cursor?.api_key;
-      return key ? { CURSOR_API_KEY: key } : undefined;
-    }
-    const resolved = effectiveAccount(account, this.defaultAccount, this.config.accounts);
-    const provider = this.resolveProviderEnv(model);
-    const acct = this.resolveAccountEnv(resolved);
-    if (!provider && !acct) return undefined;
-    return { ...provider, ...acct };
-  }
-
-  // Re-resolve credentials for every live session (after a config reload or a
-  // default-account switch). Idle Claude sessions restart their query on the
-  // next message, resuming the same session id under the new account.
-  private reapplyAccountEnv(): void {
+  private reapplyProviderEnv(): void {
     for (const ws of this.workspaces.values()) {
       for (const entry of ws.agents.values()) {
-        entry.session.setProviderEnv?.(this.sessionEnv(entry.info.model, entry.info.account));
+        entry.session.setProviderEnv?.(this.resolveProviderEnv(entry.info.model));
       }
     }
   }
 
-  private setDefaultAccount(ws: WebSocket, account: string | null): void {
-    if (account && !this.config.accounts[account]) {
-      this.sendJson(ws, { type: "error", message: `Unknown account: ${account}` });
-      return;
-    }
-    this.defaultAccount = account;
-    this.updateSettings({ defaultAccount: account });
-    this.reapplyAccountEnv();
-    this.broadcastUI({ type: "default_account", account });
-  }
-
-  // Hot-reload config.toml: accounts/providers/presets apply live (the port
-  // and auth cookie secret need a restart). watchFile (polling) survives the
-  // atomic rename-writes editors do, unlike fs.watch.
+  // Hot-reload provider settings (the port and auth cookie secret need a
+  // restart). watchFile (polling) survives atomic rename-writes editors do.
   private watchConfig(): void {
     const configPath = path.join(this.baseDir, "config.toml");
     fs.watchFile(configPath, { interval: 2000 }, () => {
@@ -833,19 +856,8 @@ export class Server {
         });
         return;
       }
-      if (this.defaultAccount && !this.config.accounts[this.defaultAccount]) {
-        this.defaultAccount = null;
-        this.updateSettings({ defaultAccount: null });
-        this.broadcastUI({ type: "default_account", account: null });
-      }
-      this.reapplyAccountEnv();
-      this.quota.invalidate();
-      this.refreshQuotaIfStale();
-      this.broadcastUI({
-        type: "config_update",
-        accounts: Object.keys(this.config.accounts),
-        defaultAccount: this.defaultAccount,
-      });
+      this.reapplyProviderEnv();
+      void this.refreshPiCatalog();
       console.log("[config] reloaded config.toml");
     });
   }
@@ -954,25 +966,27 @@ export class Server {
     }
   }
 
-  private restartServer(): void {
+  private async restartServer(): Promise<void> {
+    const command =
+      this.config.server.restart_command ??
+      (process.platform === "darwin"
+        ? undefined
+        : ["systemctl", "--user", "restart", "agent-team-server"]);
+    if (!command?.length) {
+      this.broadcastUI({
+        type: "error",
+        message: "Server restart is disabled: set server.restart_command in config.toml",
+      });
+      return;
+    }
+
     console.log("[restart] Persisting all state before restart...");
     this.persistAll();
     this.broadcastUI({ type: "error", message: "Server is restarting..." });
-
-    const script = `#!/bin/bash
-sleep 1
-systemctl --user restart agent-team-server
-`;
-    const tmpScript = path.join(os.tmpdir(), "agent-team-restart.sh");
-    fs.writeFileSync(tmpScript, script, { mode: 0o755 });
-
-    const child = spawn("bash", [tmpScript], {
-      detached: true,
-      stdio: "ignore",
-    });
+    await this.close();
+    const child = spawn(command[0], command.slice(1), { detached: true, stdio: "ignore" });
     child.unref();
-
-    console.log("[restart] Detached restart script launched, shutting down...");
+    console.log("[restart] Restart command launched after server shutdown...");
     setTimeout(() => process.exit(0), 500);
   }
 
@@ -1045,15 +1059,19 @@ systemctl --user restart agent-team-server
     this.persistIndex();
   }
 
-  private restoreState(): void {
+  private async restoreState(): Promise<void> {
     const states = loadAll(this.baseDir);
-    if (states.length === 0) return;
 
     for (const wsState of states) {
       for (const agent of wsState.agents) {
-        agent.session.config.providerEnv = this.sessionEnv(agent.model, agent.account);
+        agent.session.config.providerEnv = this.resolveProviderEnv(agent.model);
       }
-      const workspace = Workspace.fromState(wsState, this.hostRegistry, this.makeCallbacks());
+      const workspace = Workspace.fromState(
+        wsState,
+        this.hostRegistry,
+        this.makeCallbacks(wsState.id),
+        { dataDir: this.baseDir, uploadsDir: this.uploadsDir },
+      );
       if (workspace.isArchived) workspace.unloadMessages();
       this.workspaces.set(workspace.id, workspace);
       // Turns the stop cut short are written (and searchable) right away.
@@ -1061,11 +1079,30 @@ systemctl --user restart agent-team-server
       const tools = this.projects.toolsFor(workspace);
       if (tools) for (const a of workspace.agents.values()) a.session.setPanelTools?.(tools);
     }
+    for (const workspace of this.workspaces.values()) {
+      if (!workspace.messagesLoaded && !historyOf(this.baseDir).hasDispatching(workspace.id))
+        continue;
+      if (this.ensureLoaded(workspace)) workspace.settlePlainDispatchingOnRestore();
+      if (workspace.isArchived) workspace.unloadMessages();
+    }
+    try {
+      this.projects.adoptAll();
+    } catch (e) {
+      console.error("[projects] workspaces from before projects stay on their own", e);
+    }
+    for (const project of this.projects.list()) {
+      await this.projects.drainInbox(project.id, false);
+      if (project.status === "sealed") {
+        await this.projects.sealProject(project.id, project.sealedReason ?? undefined);
+        this.removeProjectRuntimeCaches(project.id);
+      }
+    }
+    if (this.closing) return;
     // Messages still queued when the server went down, and retries of turns
     // a rate limit paused; spaced out so a restart does not start many CLI
     // sessions at once.
     for (const workspace of this.workspaces.values()) {
-      if (workspace.isArchived) continue;
+      if (workspace.isArchived || this.isProjectSealed(workspace)) continue;
       for (const [agentId, entry] of workspace.agents) {
         if (entry.retryPending) {
           this.scheduleRetry(workspace.id, agentId, (entry.pausedUntil ?? 0) - Date.now());
@@ -1077,11 +1114,6 @@ systemctl --user restart agent-team-server
       }
     }
 
-    try {
-      this.projects.adoptAll();
-    } catch (e) {
-      console.error("[projects] workspaces from before projects stay on their own", e);
-    }
     this.projects.archiveShelved();
     this.projects.recheckWorkers();
     const archived = [...this.workspaces.values()].filter((w) => w.isArchived).length;
@@ -1090,20 +1122,36 @@ systemctl --user restart agent-team-server
 
   // ---- Projects ---------------------------------------------------------
 
-  private createProject(ws: WebSocket, name: string, pathInput: string, model?: string): void {
-    const root = resolveWorkspacePath(pathInput ?? "");
-    if (!root) {
+  private createProject(
+    ws: WebSocket,
+    name: string,
+    pathInput: string | null,
+    model?: string,
+    cwdInput?: string,
+  ): void {
+    const root = pathInput === null ? null : resolveWorkspacePath(pathInput ?? "");
+    const cwd = cwdInput === undefined ? undefined : resolveWorkspacePath(cwdInput);
+    if ((pathInput !== null && !root) || (cwdInput !== undefined && !cwd)) {
       this.sendJson(ws, { type: "error", message: `Not a directory: ${pathInput}` });
       return;
     }
     this.projectAction(ws, () =>
-      this.projects.create(name?.trim() || path.basename(root), root, model || undefined),
+      this.projects.create(
+        name?.trim() || (root ? path.basename(root) : "Untitled project"),
+        root ?? null,
+        model || undefined,
+        cwd ?? undefined,
+      ),
     );
   }
 
   private projectAction(ws: WebSocket, action: () => unknown): void {
     try {
-      action();
+      const result = action();
+      if (result instanceof Promise)
+        void result.catch((e: unknown) =>
+          this.sendJson(ws, { type: "error", message: e instanceof Error ? e.message : String(e) }),
+        );
     } catch (e) {
       this.sendJson(ws, { type: "error", message: e instanceof Error ? e.message : String(e) });
     }
@@ -1127,8 +1175,14 @@ systemctl --user restart agent-team-server
       workspace: (id) => this.workspaces.get(id),
       createWorkspace: (name, cwd, link) => this.makeWorkspace(name, cwd, undefined, link),
       addAgent: (w, name, model, avatar, color, effort) =>
-        this.addAgentTo(w, name, model, avatar, color, undefined, undefined, effort),
-      projectDefaults: () => this.config.projects,
+        this.addAgentTo(w, name, model, avatar, color, undefined, effort),
+      projectDefaults: () =>
+        this.config.projects.model
+          ? this.config.projects
+          : { model: this.config.pi?.default_model, effort: this.config.pi?.default_effort },
+      modelIds: () => this.models.map((model) => model.id),
+      isLeadOnline: (project) =>
+        Boolean(project.lead && this.hostRegistry.get(project.lead.hostId)?.connected),
       removeWorkspace: (id) => this.removeWorkspace(id),
       archiveWorkspace: (w) => {
         if (!w.isIdle) return false;
@@ -1140,6 +1194,7 @@ systemctl --user restart agent-team-server
       history: this.history,
       persistWorkspace: (w) => this.persistWorkspace(w.id),
       saveWorkspaceNow: (w) => this.persistWorkspaceNow(w.id),
+      cancelWorkspaceTimers: (w) => this.cancelWorkspaceRetries(w),
       workspaceChanged: (w) =>
         this.broadcastUI({ type: "workspace_updated", workspace: this.listInfo(w) }),
       broadcast: (msg) => this.broadcastUI(msg),
@@ -1270,80 +1325,129 @@ systemctl --user restart agent-team-server
     const entry = ws?.agents.get(agentId);
     if (!ws || !entry) return;
     const agentName = entry.info.name;
-    // A limit on a turn the CLI started itself: no prompt of ours to retry.
-    if (!entry.currentMsg && !entry.retryPending) entry.lastPrompt = undefined;
+    if (!entry.currentMsg && !entry.retryPending) entry.lastEnvelope = undefined;
 
-    // The accounts below are Claude logins: a Codex limit of any window
-    // waits for its reset.
-    const codex = backendForModel(entry.info.model) === "codex";
-    if (!info.rateLimitType || info.rateLimitType === "five_hour" || codex) {
-      // A wake-up or a task's report the same limit refused while the
-      // retry waits: that retry stands, its time and start slot too.
-      const now = Date.now();
-      if (entry.retryPending && (entry.pausedUntil ?? 0) > now) return;
-      // Retry one minute after the reset; a reset already past (clock skew,
-      // a limit lifting late) or none named, in half an hour. Never sooner
-      // than 1 min, nor later than 6 h from now unless a weekly reset is
-      // named: then at that reset, every refused try in between being lost.
-      const reset = info.resetsAt ? info.resetsAt * 1000 + 60_000 : 0;
-      const retryAt = reset > now ? reset : now + 31 * 60_000;
-      const cap = codex && info.rateLimitType === "seven_day" ? 8 * 86400_000 : 6 * 3600_000;
-      const delay = Math.min(Math.max(retryAt - now, 60_000), cap);
-      ws.pauseAgent(agentId, now + delay, true);
-      const at = new Date(now + delay).toLocaleTimeString();
-      const limit = info.rateLimitType === "seven_day" ? "weekly" : "5-hour";
-      ws.postSystemMessage(
-        entry.lastPrompt
-          ? `⏳ **${agentName}** hit the ${limit} limit — auto-retrying at ${at}.`
-          : `⏳ **${agentName}** hit the ${limit} limit — it will be told to carry on at ${at}.`,
-      );
-      this.persistWorkspace(wsId);
-      this.scheduleRetry(wsId, agentId, delay);
-      return;
-    }
-
-    // Weekly-type limit.
-    if (entry.info.account) {
-      ws.postSystemMessage(
-        `🚫 **${agentName}** hit the ${info.rateLimitType.replace(/_/g, "-")} limit on its pinned account \`${entry.info.account}\`. Switch its account manually if needed.`,
-      );
-      return;
-    }
-    // Debounce: if both credentials are exhausted the rotations would
-    // ping-pong; allow one auto-switch per 5 minutes.
-    if (Date.now() - this.lastAccountSwitchAt < 5 * 60_000) return;
-
-    const current = effectiveAccount(undefined, this.defaultAccount, this.config.accounts);
-    const next = pickFailoverAccount(current, this.config.accounts);
-    if (next === undefined) return; // nowhere to go — the error message stands
-
-    this.lastAccountSwitchAt = Date.now();
-    this.defaultAccount = next;
-    this.updateSettings({ defaultAccount: next });
-    this.reapplyAccountEnv();
-    this.broadcastUI({ type: "default_account", account: next });
+    const now = Date.now();
+    if (entry.retryPending && (entry.pausedUntil ?? 0) > now) return;
+    const reset = info.resetsAt ? info.resetsAt * 1000 + 60_000 : 0;
+    const retryAt = reset > now ? reset : now + 31 * 60_000;
+    const cap = info.rateLimitType === "seven_day" ? 8 * 86400_000 : 6 * 3600_000;
+    const delay = Math.min(Math.max(retryAt - now, 60_000), cap);
+    ws.pauseAgent(agentId, now + delay, true);
+    const at = new Date(now + delay).toLocaleTimeString();
+    const limit = info.rateLimitType === "seven_day" ? "weekly" : "5-hour";
     ws.postSystemMessage(
-      `🔁 ${info.rateLimitType.replace(/_/g, "-")} limit on \`${current ?? "local"}\` — switched the default account to \`${next ?? "local"}\` and retrying.`,
+      entry.lastEnvelope
+        ? `⏳ **${agentName}** hit the ${limit} limit — auto-retrying at ${at}.`
+        : `⏳ **${agentName}** hit the ${limit} limit — it will be told to carry on at ${at}.`,
     );
-    ws.pauseAgent(agentId, Date.now() + 1000, true);
-    setTimeout(() => {
-      const w = this.workspaces.get(wsId);
-      if (!w) return;
-      // The old query was started with the previous account's credentials
-      // (setProviderEnv couldn't abort it because the turn was still
-      // processing). Kill it so the retry starts a fresh query; unless the
-      // retry already went (the user wrote meanwhile) or was dropped.
-      const e = w.agents.get(agentId);
-      if (!e?.retryPending) return;
-      e.session.abort();
-      if (!w.retryLast(agentId)) w.dequeueNext(agentId);
-    }, 1000);
+    this.persistWorkspace(wsId);
+    this.scheduleRetry(wsId, agentId, delay);
   }
 
-  private makeCallbacks(): WorkspaceCallbacks {
+  private piConfig(): Partial<SessionConfig> {
+    return {
+      piPackages: this.config.pi?.packages,
+      piExcludePackages: this.config.pi?.exclude_packages,
+      piOffline: this.config.pi?.offline,
+    };
+  }
+
+  private async refreshPiCatalog(): Promise<void> {
+    const revision = ++this.catalogRevision;
+    if (this.closing) return;
+    // A configured Pi backend is discoverable even before the first workspace turn.
+    // Other installs obtain catalogs from their running Pi sessions.
+    const host = this.hostRegistry.getDefault();
+    if (!this.config.pi || !host?.discoverPiModels) {
+      this.catalogModels = [];
+      this.refreshModels();
+      return;
+    }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yaat-pi-catalog-"));
+    try {
+      const models = await host.discoverPiModels({
+        ...this.piConfig(),
+        backend: "pi",
+        cwd: dir,
+        dataDir: this.baseDir,
+        piSessionDir: path.join(dir, "sessions"),
+        workspaceId: "model-catalog",
+      });
+      if (this.closing || revision !== this.catalogRevision) return;
+      this.catalogModels = models;
+      this.refreshModels();
+    } catch (error) {
+      if (!this.closing && revision === this.catalogRevision)
+        console.error("[models] Pi catalog unavailable", error);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  private refreshModels(): void {
+    const models = availableModelOptions([
+      ...this.catalogModels,
+      ...[...this.workspaces.values()].flatMap((w) =>
+        w.projectLink && this.projects.get(w.projectLink.projectId)?.status === "sealed"
+          ? []
+          : [...w.agents.values()].flatMap((entry) => entry.session.getAvailableModels?.() ?? []),
+      ),
+    ]);
+    if (JSON.stringify(models) === JSON.stringify(this.models)) return;
+    this.models = models;
+    this.broadcastUI({ type: "models_update", models });
+  }
+
+  private agentCommands(wsId: string, agentId: string, list: CommandInfo[]): void {
+    let workspace = this.commandsByAgent.get(wsId);
+    const current = this.workspaces.get(wsId);
+    if (!current?.agents.has(agentId)) {
+      workspace?.delete(agentId);
+      if (workspace?.size === 0) this.commandsByAgent.delete(wsId);
+      if (current)
+        this.broadcastUI({
+          type: "agent_commands_update",
+          workspaceId: wsId,
+          agentId,
+          commands: [],
+        });
+      this.refreshModels();
+      return;
+    }
+    if (!workspace) this.commandsByAgent.set(wsId, (workspace = new Map<string, CommandInfo[]>()));
+    const commands = mergeLocalCommands(list);
+    workspace.set(agentId, commands);
+    this.broadcastUI({ type: "agent_commands_update", workspaceId: wsId, agentId, commands });
+  }
+
+  private cancelWorkspaceRetries(workspace: Workspace): void {
+    for (const agentId of workspace.agents.keys()) {
+      const key = `${workspace.id}:${agentId}`;
+      clearTimeout(this.retryTimers.get(key));
+      this.retryTimers.delete(key);
+    }
+  }
+
+  private removeProjectRuntimeCaches(projectId: string): void {
+    for (const workspace of this.workspaces.values()) {
+      if (workspace.projectLink?.projectId !== projectId) continue;
+      this.commandsByAgent.delete(workspace.id);
+      for (const agentId of workspace.agents.keys())
+        this.broadcastUI({
+          type: "agent_commands_update",
+          workspaceId: workspace.id,
+          agentId,
+          commands: [],
+        });
+    }
+    this.refreshModels();
+  }
+
+  private makeCallbacks(id: string): WorkspaceCallbacks {
     return {
       onNewMessage: (wsId, msg) => {
-        this.broadcastUI({ type: "new_message", workspaceId: wsId, message: msg });
+        this.broadcastUI({ type: "new_message", workspaceId: wsId, message: toWireMessage(msg) });
       },
       onStreamEvent: (wsId, agentMsg, event) => {
         if (isLoggedEvent(event)) {
@@ -1387,13 +1491,33 @@ systemctl --user restart agent-team-server
         const ws = this.workspaces.get(wsId);
         if (ws && state === "idle") this.projects.workerIdle(ws);
       },
-      onCommandsChanged: (_wsId, commands) => {
-        this.commands = mergeLocalCommands(commands);
-        this.updateSettings({ commands });
-        this.broadcastUI({ type: "commands_update", commands: this.commands });
+      onSaveNow: () => this.persistWorkspaceNow(id),
+      canDequeue: () => this.restored,
+      canDispatch: (w) => !this.closing && !this.isProjectSealed(w),
+      ensureLoaded: (w) => this.ensureLoaded(w),
+      onReportDeliveryState: (reportId, state, meta) => {
+        const w = this.workspaces.get(id);
+        if (w) this.projects.mirrorReportDelivery(w, reportId, state, meta);
+      },
+      onUiDialogRequest: (dialog) => {
+        this.broadcastUI({ type: "ui_dialog_request", dialog });
+        const w = this.workspaces.get(id);
+        if (w) this.projects.showAwaiting(w);
+      },
+      onUiDialogResolved: (dialog) => {
+        this.broadcastUI({ type: "ui_dialog_resolved", ...dialog });
+        const w = this.workspaces.get(id);
+        if (w) this.projects.showAwaiting(w);
+      },
+      onCommandsUpdate: (agentId, commands) => this.agentCommands(id, agentId, commands),
+      onSessionCapabilities: (wsId, agentId) => {
+        this.refreshModels();
+        const w = this.workspaces.get(wsId);
+        const agent = w?.agents.get(agentId);
+        if (w && agent)
+          this.broadcastUI({ type: "agent_updated", workspaceId: wsId, agent: w.agentInfo(agent) });
       },
       onRateLimit: (wsId, agentId, info) => this.handleRateLimit(wsId, agentId, info),
-      onCodexQuota: (limits) => this.quota.noteCodex(limits),
       onMessageRemoved: (wsId, messageId) =>
         this.broadcastUI({ type: "message_removed", workspaceId: wsId, messageId }),
       onAgentUpdated: (wsId, agent, transient) => {
@@ -1406,11 +1530,13 @@ systemctl --user restart agent-team-server
       onUnhandled: (wsId, agentId, msg) => {
         appendLog(this.baseDir, wsId, { timestamp: Date.now(), agentId, unhandled: msg });
       },
-      sessionEnv: (model, account) => this.sessionEnv(model, account),
+      sessionEnv: (model) => this.resolveProviderEnv(model),
     };
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    this.closing = true;
+    if (!this.restored) await this.restoring.catch(() => undefined);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.projects.close();
     fs.unwatchFile(path.join(this.baseDir, "config.toml"));
@@ -1418,8 +1544,6 @@ systemctl --user restart agent-team-server
     if (this.statusTimer) clearInterval(this.statusTimer);
     if (this.branchTimer) clearInterval(this.branchTimer);
     if (this.archiveTimer) clearInterval(this.archiveTimer);
-    if (this.quotaTimer) clearInterval(this.quotaTimer);
-    // Turns cut short are saved as such.
     for (const ws of this.workspaces.values()) {
       try {
         ws.abortAll("restart");
@@ -1428,10 +1552,20 @@ systemctl --user restart agent-team-server
       }
     }
     this.persistAll();
-    void this.history.close();
+    await Promise.allSettled([...this.workspaces.values()].map((ws) => ws.dispose()));
+    const hosts = await Promise.allSettled(
+      this.hostRegistry.getAll().map((host) => Promise.resolve(host.close?.())),
+    );
+    await this.history.close();
     closeHistory(this.baseDir);
-    this.wss.close();
-    this.httpServer.close();
+    for (const ws of this.uiClients) ws.terminate();
+    await Promise.all([
+      new Promise<void>((resolve) => this.wss.close(() => resolve())),
+      new Promise<void>((resolve) => this.httpServer.close(() => resolve())),
+    ]);
+    for (const result of hosts)
+      if (result.status === "rejected")
+        console.error("[close] host shutdown failed", result.reason);
   }
 }
 

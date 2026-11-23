@@ -365,7 +365,7 @@ describe("the agents panel in the app", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  const opus = { id: "claude-opus-5-5", label: "Opus", backend: "claude" };
+  const opus = { id: "claude-opus-5-5", label: "Opus", backend: "pi" };
   const boot = (active = "lead", workspaces = [lead, w1, w2], models: object[] = [opus]) => {
     localStorage.setItem("activeWsId", active);
     render(<App />);
@@ -593,10 +593,10 @@ describe("the agents panel in the app", () => {
     });
   });
 
-  it("offers Cursor's models in their own group, and moves a Cursor agent only among them", () => {
+  it("groups Pi provider models together and keeps a Pi agent among them", () => {
     const cursor = [
-      { id: "cursor/composer-2.5", label: "Composer 2.5", backend: "cursor" },
-      { id: "cursor/grok-4.7", label: "Grok 4.7", backend: "cursor" },
+      { id: "cursor/composer-2.5", label: "Composer 2.5", backend: "pi" },
+      { id: "cursor/grok-4.7", label: "Grok 4.7", backend: "pi" },
     ];
     const w3 = ws("w3", {
       name: "parser",
@@ -607,23 +607,20 @@ describe("the agents panel in the app", () => {
     fireEvent.click(document.querySelector(".agents-chip")!);
     const card = document.querySelector('[aria-label="parser"]')!;
     const options = [...card.querySelectorAll(".ap-model option")].map((o) => o.textContent);
-    expect(options).toEqual(["composer 2.5", "grok 4.7"]);
+    expect(options).toEqual(["opus 5.5", "composer 2.5", "grok 4.7"]);
     fireEvent.click(within(card as HTMLElement).getByText("+ Agent"));
     const groups = [...document.querySelectorAll(".dialog optgroup")].map((g) => [
       g.getAttribute("label"),
       [...g.querySelectorAll("option")].map((o) => o.textContent),
     ]);
-    expect(groups).toEqual([
-      ["Claude", ["Opus"]],
-      ["Cursor", ["Composer 2.5", "Grok 4.7"]],
-    ]);
+    expect(groups).toEqual([["Pi", ["Opus", "Composer 2.5", "Grok 4.7"]]]);
   });
 
-  it("offers the Claude accounts only for a Claude model", () => {
+  it("ignores legacy account updates and offers no account control", () => {
     const sock = boot(
       "lead",
       [lead, w1, w2],
-      [opus, { id: "cursor/composer-2.5", label: "Composer 2.5", backend: "cursor" }],
+      [opus, { id: "cursor/composer-2.5", label: "Composer 2.5", backend: "pi" }],
     );
     act(() => sock.receive({ type: "config_update", accounts: ["work"], defaultAccount: null }));
     fireEvent.click(document.querySelector(".agents-chip")!);
@@ -632,10 +629,8 @@ describe("the agents panel in the app", () => {
     fireEvent.click(leadCard.getByText("+ Agent"));
     const fields = () =>
       [...document.querySelectorAll(".dialog-field > span")].map((e) => e.textContent);
-    expect(fields()).toContain("Account");
-    const [modelSelect, accountSelect] =
-      document.querySelectorAll<HTMLSelectElement>(".dialog select");
-    fireEvent.change(accountSelect, { target: { value: "work" } });
+    expect(fields()).not.toContain("Account");
+    const [modelSelect] = document.querySelectorAll<HTMLSelectElement>(".dialog select");
     fireEvent.change(modelSelect, { target: { value: "cursor/composer-2.5" } });
     expect(fields()).not.toContain("Account");
     fireEvent.click(document.querySelector(".dialog .btn-primary")!);
@@ -644,20 +639,18 @@ describe("the agents panel in the app", () => {
     expect(added.account).toBeUndefined();
   });
 
-  it("adds a Claude agent on the account picked for it", () => {
+  it("adds a Pi agent without an account after a legacy account update", () => {
     const sock = boot("lead", [lead, w1, w2], [opus]);
     act(() => sock.receive({ type: "config_update", accounts: ["work"], defaultAccount: null }));
     fireEvent.click(document.querySelector(".agents-chip")!);
     fireEvent.click(document.querySelector('[aria-label="clice · lead"] .ap-toggle')!);
     const leadCard = within(document.querySelector('[aria-label="clice · lead"]') as HTMLElement);
     fireEvent.click(leadCard.getByText("+ Agent"));
-    const [, accountSelect] = document.querySelectorAll<HTMLSelectElement>(".dialog select");
-    fireEvent.change(accountSelect, { target: { value: "work" } });
+    expect(document.querySelectorAll<HTMLSelectElement>(".dialog select")).toHaveLength(1);
     fireEvent.click(document.querySelector(".dialog .btn-primary")!);
-    expect(sock.frames().find((f) => f.type === "add_agent")).toMatchObject({
-      model: "claude-opus-5-5",
-      account: "work",
-    });
+    const added = sock.frames().find((f) => f.type === "add_agent")!;
+    expect(added).toMatchObject({ model: "claude-opus-5-5" });
+    expect(added.account).toBeUndefined();
   });
 
   it("adds an agent to the session it was asked from", () => {
@@ -749,8 +742,8 @@ describe("the summary of a workspace on its own", () => {
 describe("switching an agent's model and effort", () => {
   const five = ["low", "medium", "high", "xhigh", "max"];
   const models = [
-    { id: "claude-opus-5-5", label: "Opus 5.5", backend: "claude" as const, effortLevels: five },
-    { id: "claude-fable-5-1", label: "Fable 5.1", backend: "claude" as const, effortLevels: five },
+    { id: "claude-opus-5-5", label: "Opus 5.5", backend: "pi" as const, effortLevels: five },
+    { id: "claude-fable-5-1", label: "Fable 5.1", backend: "pi" as const, effortLevels: five },
     {
       id: "gpt-6-astra",
       label: "GPT-6 Astra",
@@ -759,17 +752,17 @@ describe("switching an agent's model and effort", () => {
       defaultEffort: "high",
     },
     { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", backend: "codex" as const, effortLevels: ["low"] },
-    { id: "cursor/composer-2.5", label: "Composer", backend: "cursor" as const, effortLevels: [] },
+    { id: "cursor/composer-2.5", label: "Composer", backend: "pi" as const, effortLevels: [] },
     {
       id: "agy/gemini-4-carbon",
       label: "Gemini 4 Carbon",
-      backend: "agy" as const,
+      backend: "pi" as const,
       effortLevels: ["low", "medium", "high"],
     },
     {
       id: "agy/gemini-3.8-flash",
       label: "Gemini 3.8 Flash",
-      backend: "agy" as const,
+      backend: "pi" as const,
       effortLevels: ["low", "medium", "high"],
     },
   ];
@@ -805,23 +798,29 @@ describe("switching an agent's model and effort", () => {
   const options = (el: Element | null) =>
     [...(el as HTMLSelectElement).options].map((o) => o.textContent);
 
-  it("offers the Claude models, the current one first when the list has dropped it", () => {
+  it("offers the Pi models, the current one first when the list has dropped it", () => {
     const { container, onSetModel } = render1(agent("a", { model: "claude-opus-4-6" }));
     const select = container.querySelector(".ap-model") as HTMLSelectElement;
     expect([...select.options].map((o) => o.value)).toEqual([
       "claude-opus-4-6",
       "claude-opus-5-5",
       "claude-fable-5-1",
+      "cursor/composer-2.5",
+      "agy/gemini-4-carbon",
+      "agy/gemini-3.8-flash",
     ]);
     fireEvent.change(select, { target: { value: "claude-fable-5-1" } });
     expect(onSetModel).toHaveBeenCalledWith("s", "a", "claude-fable-5-1");
   });
 
-  it("moves an agy conversation between agy models, one the list lacks first", () => {
+  it("moves a Pi conversation between provider models, one the list lacks first", () => {
     const { container, onSetModel } = render1(agent("g", { model: "agy/gemini-4-argon" }));
     const select = container.querySelector(".ap-model:not(.ap-effort)") as HTMLSelectElement;
     expect([...select.options].map((o) => o.value)).toEqual([
       "agy/gemini-4-argon",
+      "claude-opus-5-5",
+      "claude-fable-5-1",
+      "cursor/composer-2.5",
       "agy/gemini-4-carbon",
       "agy/gemini-3.8-flash",
     ]);

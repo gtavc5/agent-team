@@ -16,14 +16,14 @@ import { ProjectStore } from "../service/src/project/store";
 import { ObjectiveStore, type Objective } from "../service/src/project/objectives";
 import { closeHistory, saveIndex, saveWorkspace } from "../service/src/workspace/state";
 import { LEAD_MODEL } from "../service/src/project/manager";
-import { MODEL_OPTIONS } from "../service/src/config/presets";
+import { backendForModel, defaultEffortForModel } from "../service/src/config/presets";
 import type {
   AgentState,
   Message,
   MessageOrigin,
   WorkspaceState,
 } from "../service/src/workspace/workspace";
-import type { StreamEvent } from "../service/src/session/claude";
+import type { StreamEvent } from "../service/src/session/types";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 if (!process.argv[2]) throw new Error("usage: npm run demo -- <base dir of a dev instance>");
@@ -128,7 +128,7 @@ function seed(): void {
   // As the server adds them: the lead's model (workers inherit it), its
   // default effort, permissions bypassed.
   const model = LEAD_MODEL;
-  const effort = MODEL_OPTIONS.find((m) => m.id === model)?.effort;
+  const effort = defaultEffortForModel(model) ?? undefined;
   const agent = (name: string, avatar: string, color: string, cwd: string): AgentState => ({
     id: id("agent"),
     name,
@@ -138,7 +138,7 @@ function seed(): void {
     isDefault: true,
     session: {
       sessionId: null,
-      config: { cwd, backend: "claude", model, effort, permissionMode: "bypassPermissions" },
+      config: { cwd, backend: backendForModel(model), model, effort },
       usage,
     },
   });
@@ -306,7 +306,7 @@ function seed(): void {
   const routesAgent = agent("Alice", "avatars/Alice.jpg", "#F0D264", tree("file-routes"));
   const routes = session("file routes", tree("file-routes"), routesAgent, "worker", 200);
   routes.archivedAt = ago(120);
-  project.leadWorkspaceId = lead.id;
+  project.lead = { hostId: lead.hostId, workspaceId: lead.id };
   store.save(project);
 
   lead.messages = [
@@ -324,7 +324,7 @@ function seed(): void {
         "1. **mobile panels** — `webview/src/panels/SidePanel.tsx` 的 sheet 头部按钮只有 26px，" +
           "`webview/src/styles.css:3588` 的 body 内边距在手机上也偏小。worktree 在 `ui/mobile-panels`。",
         "2. **wake-up time** — CLI 把唤醒时间向上取整到整分钟，结果面板比实际早 30–90 秒。" +
-          "见 `service/src/session/claude.ts:1461` 的 `noteSchedule`。",
+          "见 `service/src/session/codex.ts` 的 `noteSchedule`。",
         "",
         "看板上记为 `ui/mobile-panels` 和 `session/wake-time`。",
       ].join("\n"),
@@ -333,7 +333,7 @@ function seed(): void {
         read("webview/src/panels/SidePanel.tsx", "export function SidePanel({ … }) {\n  …\n}", 2),
         ...explore(
           "Find where the wake-up time is computed",
-          "service/src/session/claude.ts:1461 noteSchedule: at = now + delaySeconds; the CLI's result says the real delay.",
+          "service/src/session/codex.ts noteSchedule: at = now + delaySeconds; the CLI's result says the real delay.",
         ),
         {
           kind: "tool_use",
@@ -361,10 +361,10 @@ function seed(): void {
       [
         "Finished:",
         "",
-        "唤醒时间修好了：`service/src/session/claude.ts:1470-1476` 改成读 CLI 的 tool result（`in 93s`），" +
+        "唤醒时间修好了：`service/src/session/codex.ts` 改成读 CLI 的 tool result（`in 93s`），" +
           "被拒绝的调用不再算作已安排。",
         "",
-        "测试：`service/tests/unit/claude-session.test.ts`，snap `service/tests/snap/claude/wakeup-interrupt.snap.md` 两行时间变了，" +
+        "测试：`service/tests/unit/codex-session.test.ts`，snap `service/tests/snap/codex/interrupt.snap.md` 两行时间变了，" +
           "和 CLI 自己说的 12:51 / 12:53 对得上。",
       ].join("\n"),
       origin(wake, "worker"),
@@ -373,7 +373,7 @@ function seed(): void {
       leadAgent,
       39,
       "收到。`session/wake-time` 做完了，已从看板删掉。改动在 worktree `fix/wake-time`，可以直接看 " +
-        "[claude.ts](service/src/session/claude.ts:1461) 的 diff。",
+        "[claude.ts](service/src/session/codex.ts) 的 diff。",
       [panelTool("delete_objective", { id: "session/wake-time" }, "Deleted session/wake-time.", 1)],
       52_900,
     ),
@@ -459,11 +459,11 @@ function seed(): void {
     reply(
       wakeAgent,
       41,
-      "改好了，`noteSchedule` 现在读 tool result 里的 `(in 93s)`，读不到再退回 delaySeconds。见 `service/src/session/claude.ts:1461`。",
+      "改好了，`noteSchedule` 现在读 tool result 里的 `(in 93s)`，读不到再退回 delaySeconds。见 `service/src/session/codex.ts`。",
       [
-        read("service/src/session/claude.ts", "…", 1),
+        read("service/src/session/codex.ts", "…", 1),
         edit(
-          "service/src/session/claude.ts",
+          "service/src/session/codex.ts",
           "const delay = Number(input.delaySeconds ?? 0);",
           "const delay = Number(/\\(in (\\d+)s\\)/.exec(result)?.[1] ?? input.delaySeconds ?? 0);",
           2,

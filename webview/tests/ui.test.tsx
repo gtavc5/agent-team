@@ -285,8 +285,6 @@ describe("Sidebar archived section", () => {
     searchQuery: "",
     searchHits: null,
     systemStatus: null,
-    accounts: [],
-    defaultAccount: null,
     now: NOW,
     onSelect: vi.fn(),
     onDelete: vi.fn(),
@@ -298,7 +296,6 @@ describe("Sidebar archived section", () => {
     onReplayDemo: vi.fn(),
     onDebugSnapshot: vi.fn(),
     onPurgeArchived: vi.fn(),
-    onSetDefaultAccount: vi.fn(),
     ...over,
   });
 
@@ -465,8 +462,6 @@ describe("Sidebar group quick-create", () => {
       searchQuery: "",
       searchHits: null,
       systemStatus: null,
-      accounts: [],
-      defaultAccount: null,
       now: NOW,
       onSelect: vi.fn(),
       onDelete: vi.fn(),
@@ -478,7 +473,6 @@ describe("Sidebar group quick-create", () => {
       onReplayDemo: vi.fn(),
       onDebugSnapshot: vi.fn(),
       onPurgeArchived: vi.fn(),
-      onSetDefaultAccount: vi.fn(),
     };
     const { getByTitle } = render(<Sidebar {...props} />);
     fireEvent.click(getByTitle("New workspace in /home/me/repo"));
@@ -897,54 +891,24 @@ describe("live thinking", () => {
   });
 });
 
-describe("SystemStatusPanel quota", () => {
-  const status = (quota: SystemStatus["quota"]): SystemStatus =>
-    ({ cpuUsage: 10, memUsed: 1, memTotal: 4, quota }) as SystemStatus;
-  const labels = (quota: SystemStatus["quota"]) =>
-    [
-      ...render(
-        <SystemStatusPanel
-          status={status(quota)}
-          accounts={[]}
-          defaultAccount={null}
-          onSetDefault={() => {}}
-        />,
-      ).container.querySelectorAll(".status-label"),
-    ].map((e) => e.textContent);
-  const week = { utilization: 0.12, resetsAt: 1794204562 };
-
-  it("names the Codex and agy rows by their pools, alone or beside one Claude login", () => {
-    const codex = { label: "Codex", fiveHour: null, sevenDay: week, fetchedAt: 0 };
-    const local = { label: "local", fiveHour: week, sevenDay: week, fetchedAt: 0 };
-    expect(labels([codex])).toEqual(["CPU", "Mem", "Codex 7d"]);
-    expect(labels([local, codex])).toEqual(["CPU", "Mem", "Opus 5h", "Opus 7d", "Codex 7d"]);
-    const gemini = {
-      label: "Gemini",
-      source: "agy" as const,
-      fiveHour: week,
-      sevenDay: week,
-      fetchedAt: 0,
-    };
-    const pool = { ...gemini, label: "agy Claude/GPT" };
-    expect(labels([local, codex, gemini, pool])).toEqual([
+describe("SystemStatusPanel", () => {
+  it("shows CPU and memory without account or quota controls", () => {
+    const status = {
+      osName: "macOS",
+      osArch: "arm64",
+      cpuModel: "Test CPU",
+      cpuCores: 8,
+      cpuUsage: 10,
+      memUsed: 1,
+      memTotal: 4,
+      uptime: 1,
+      hostname: "test",
+    } satisfies SystemStatus;
+    const { container } = render(<SystemStatusPanel status={status} />);
+    expect([...container.querySelectorAll(".status-label")].map((e) => e.textContent)).toEqual([
       "CPU",
       "Mem",
-      "Opus 5h",
-      "Opus 7d",
-      "Codex 7d",
-      "Gemini 5h",
-      "Gemini 7d",
-      "agy Claude/GPT 5h",
-      "agy Claude/GPT 7d",
     ]);
-    expect(labels([local, { ...local, label: "work" }, codex])).toEqual([
-      "CPU",
-      "Mem",
-      "local 5h",
-      "local 7d",
-      "work 5h",
-      "work 7d",
-      "Codex 7d",
-    ]);
+    expect(container.querySelector("select")).toBeNull();
   });
 });

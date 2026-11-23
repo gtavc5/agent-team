@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { z } from "zod";
 import { CodexSession } from "../../src/session/codex";
 import type { RpcMessage, Transport } from "../../src/session/codex-rpc";
-import type { StreamEvent } from "../../src/session/claude";
+import type { StreamEvent } from "../../src/session/types";
 import { HostRegistry, LocalHost } from "../../src/session/host";
 import { Workspace } from "../../src/workspace/workspace";
 import type { PanelToolset } from "../../src/project/tools";

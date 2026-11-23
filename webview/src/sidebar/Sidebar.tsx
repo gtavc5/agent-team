@@ -9,7 +9,7 @@ import {
 import { isAgentActive } from "../workspace/agents";
 import { Icon } from "../panels/Icon";
 import { DEFAULT_BRANCH } from "../panels/scope";
-import { formatBytes, formatRelative, formatResetTime } from "../format";
+import { formatBytes, formatRelative } from "../format";
 import { RoleTag } from "../workspace/RoleTag";
 import { NameInput } from "../project/NameInput";
 
@@ -44,37 +44,11 @@ function StatusBar({ label, pct, extra }: { label: string; pct: number; extra?: 
   );
 }
 
-export function SystemStatusPanel({
-  status,
-  accounts,
-  defaultAccount,
-  onSetDefault,
-}: {
-  status: SystemStatus;
-  accounts: string[];
-  defaultAccount: string | null;
-  onSetDefault: (account: string | null) => void;
-}) {
+export function SystemStatusPanel({ status }: { status: SystemStatus }) {
   const memPct = Math.round((status.memUsed / status.memTotal) * 100);
 
   return (
     <div className="system-status-panel">
-      {accounts.length > 0 && (
-        <div className="default-account-row" title="Account used by agents without an explicit one">
-          <span>Account</span>
-          <select
-            value={defaultAccount ?? ""}
-            onChange={(e) => onSetDefault(e.target.value || null)}
-          >
-            <option value="">local</option>
-            {accounts.map((a) => (
-              <option key={a} value={a}>
-                {a}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
       <div className="system-status-grid">
         <StatusBar label="CPU" pct={status.cpuUsage} />
         <StatusBar
@@ -82,38 +56,6 @@ export function SystemStatusPanel({
           pct={memPct}
           extra={`${formatBytes(status.memUsed)} / ${formatBytes(status.memTotal)}`}
         />
-        {status.quota.flatMap((q) => {
-          // One Claude login is "Opus"; several go by their account names.
-          // Codex and agy's pools by theirs.
-          const isClaude = (e: typeof q) =>
-            (e.source ?? "claude") === "claude" && e.label !== "Codex";
-          const claude = status.quota.filter(isClaude).length;
-          const tag = !isClaude(q) || claude > 1 ? q.label : "Opus";
-          const items = [];
-          if (q.fiveHour) {
-            const pct = Math.round(q.fiveHour.utilization * 100);
-            items.push(
-              <StatusBar
-                key={`${q.label}-5h`}
-                label={`${tag} 5h`}
-                pct={pct}
-                extra={`${pct}% · ${formatResetTime(q.fiveHour.resetsAt)}`}
-              />,
-            );
-          }
-          if (q.sevenDay) {
-            const pct = Math.round(q.sevenDay.utilization * 100);
-            items.push(
-              <StatusBar
-                key={`${q.label}-7d`}
-                label={`${tag} 7d`}
-                pct={pct}
-                extra={`${pct}% · ${formatResetTime(q.sevenDay.resetsAt)}`}
-              />,
-            );
-          }
-          return items;
-        })}
       </div>
     </div>
   );
@@ -129,8 +71,6 @@ export interface SidebarProps {
   searchQuery: string;
   searchHits: SearchHit[] | null;
   systemStatus: SystemStatus | null;
-  accounts: string[];
-  defaultAccount: string | null;
   now?: number;
   onSelect: (wsId: string) => void;
   onDelete: (wsId: string) => void;
@@ -140,6 +80,7 @@ export interface SidebarProps {
   onSearchChange: (q: string) => void;
   onJump: (wsId: string, msgId: string) => void;
   onCreate: () => void;
+  onCreateProject?: () => void;
   // Create a workspace in a group's folder (the "+" on the group header).
   onCreateIn: (cwd: string) => void;
   onReplayDemo: () => void;
@@ -150,7 +91,6 @@ export interface SidebarProps {
   onArchiveProject?: (projectId: string) => void;
   onRenameProject?: (projectId: string, name: string) => void;
   onRestoreProject?: (projectId: string) => void;
-  onSetDefaultAccount: (account: string | null) => void;
 }
 
 export const Sidebar = memo(function Sidebar(p: SidebarProps) {
@@ -160,6 +100,8 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
   // project.json unreadable) is just a workspace.
   const deleteButton = (ws: Workspace) => {
     const link = ws.projectLink;
+    const owner = link && p.projects?.find((project) => project.id === link.projectId);
+    if (owner?.status === "sealed") return null;
     const project = link?.role === "lead" && known.has(link.projectId) ? link.projectId : null;
     return (
       <button
@@ -236,7 +178,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           <span className="events-toggle">{open ? "▾" : "▸"}</span>
           <span>Archived</span>
           {open && <span className="ws-group-count">{list.length}</span>}
-          {open && g.project && (
+          {open && g.project && g.project.status !== "sealed" && (
             <button
               className="ws-archived-purge"
               title={`Delete the archived sessions of ${g.label}`}
@@ -288,7 +230,13 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       <div key={g.key} className="ws-group">
         <div
           className={`ws-group-header${g.project ? " ws-group-project" : ""}${lead && lead.id === p.activeWsId ? " active" : ""}${current ? " current" : ""}`}
-          title={lead ? `Open the lead of ${g.label}` : (g.project?.root ?? g.key)}
+          title={
+            lead
+              ? `Open the lead of ${g.label}`
+              : g.project
+                ? (g.project.root ?? "No repository")
+                : g.key
+          }
           onClick={() => (lead ? p.onSelect(lead.id) : toggle())}
         >
           {lead && !hasContent ? (
@@ -323,6 +271,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             <span
               className="ws-group-label"
               {...(g.project &&
+                g.project.status !== "sealed" &&
                 p.onRenameProject && {
                   title: "Double-click to rename",
                   onDoubleClick: (e: React.MouseEvent) => {
@@ -334,6 +283,11 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               {g.label}
             </span>
           )}
+          {g.project?.status === "sealed" && (
+            <span className="ws-group-sealed" title={g.project.sealedReason ?? undefined}>
+              Sealed
+            </span>
+          )}
           {leadUnread > 0 && lead!.id !== p.activeWsId && (
             <span className="unread-badge">{leadUnread}</span>
           )}
@@ -342,19 +296,21 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               {git.branch}
             </span>
           )}
-          <button
-            className="ws-group-add"
-            title={g.project ? `New session in ${g.project.name}` : `New workspace in ${g.key}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              p.onCreateIn(g.project?.root ?? g.key);
-            }}
-          >
-            <Icon name="plus" />
-          </button>
+          {(!g.project || (g.project.root && g.project.status !== "sealed")) && (
+            <button
+              className="ws-group-add"
+              title={g.project ? `New session in ${g.project.name}` : `New workspace in ${g.key}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                p.onCreateIn(g.project?.root ?? g.key);
+              }}
+            >
+              <Icon name="plus" />
+            </button>
+          )}
           {!expanded && items.length > 0 && <span className="ws-group-count">{items.length}</span>}
           {g.running && <span className="streaming-dot" />}
-          {!shelf && g.project && p.onArchiveProject && (
+          {!shelf && g.project && g.project.status !== "sealed" && p.onArchiveProject && (
             <button
               className="ws-group-pill ws-group-archive"
               title={`Archive ${g.label} with its sessions`}
@@ -366,7 +322,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               Archive
             </button>
           )}
-          {shelf && g.project && p.onRestoreProject && (
+          {shelf && g.project && g.project.status !== "sealed" && p.onRestoreProject && (
             <button
               className="ws-group-pill"
               title={`Bring ${g.label} back among the projects`}
@@ -445,6 +401,11 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           <button title="New workspace" onClick={p.onCreate}>
             <Icon name="plus" />
           </button>
+          {p.onCreateProject && (
+            <button title="New project" onClick={p.onCreateProject}>
+              <Icon name="board" />
+            </button>
+          )}
           <button
             className="sidebar-debug"
             title="Save a layout debug snapshot (viewport, geometry, DOM) on the server"
@@ -547,14 +508,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           )}
         </div>
       )}
-      {p.systemStatus && (
-        <SystemStatusPanel
-          status={p.systemStatus}
-          accounts={p.accounts}
-          defaultAccount={p.defaultAccount}
-          onSetDefault={p.onSetDefaultAccount}
-        />
-      )}
+      {p.systemStatus && <SystemStatusPanel status={p.systemStatus} />}
     </>
   );
 });

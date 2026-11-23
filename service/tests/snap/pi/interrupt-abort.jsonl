@@ -1,0 +1,15 @@
+{"header":{"backend":"pi","fixture":"interrupt-abort","description":"An interrupt sends abort alone and settles as interrupted.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
+{"step":{"op":"send","text":"Start a reply.","i":0},"t":0}
+{"sent":{"type":"prompt","message":"Start a reply."},"t":5}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
+{"frame":{"type":"agent_start"},"t":15}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":20}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Partial output."}},"t":30}
+{"step":{"op":"interrupt","i":1},"t":35}
+{"sent":{"type":"abort"},"t":40}
+{"frame":{"type":"response","command":"abort","data":{}},"t":45}
+{"step":{"op":"check","name":"aborting","i":2},"t":50}
+{"frame":{"type":"agent_settled"},"t":55}
+{"sent":{"type":"get_session_stats"},"t":60}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":65}

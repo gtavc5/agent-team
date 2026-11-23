@@ -7,27 +7,37 @@ import * as path from "path";
 // project's notes (./notes/... is the repository's), other relative paths
 // in its repository, absolute ones as they are. Null when it lands outside
 // both, by .. or through a symlink: the board reads and opens nothing else.
-export function resolveProjectPath(input: string, root: string, notesDir: string): string | null {
+export function resolveProjectPath(
+  input: string,
+  root: string | null,
+  notesDir: string,
+): string | null {
   const p = input.trim();
   if (p.length > MAX_PATH) return null;
   const abs = /^notes(\/|$)/.test(p)
     ? path.resolve(notesDir, p.slice("notes".length).replace(/^\/+/, "") || ".")
     : p === "~" || p.startsWith("~/")
       ? path.join(os.homedir(), p.slice(1))
-      : path.resolve(root, p);
-  const reals = [root, notesDir].map(realOr);
-  const base = [root, notesDir, ...reals].find((b) => within(b, abs));
+      : root
+        ? path.resolve(root, p)
+        : path.isAbsolute(p)
+          ? path.resolve(p)
+          : null;
+  if (!abs) return null;
+  const bases = root ? [root, notesDir] : [notesDir];
+  const reals = bases.map(realOr);
+  const base = [...bases, ...reals].find((b) => within(b, abs));
   const real = base && realNear(base, abs);
   return real && reals.some((b) => within(b, real)) ? abs : null;
 }
 
 // How the board writes a path inside the project, read back by
 // resolveProjectPath to the same file.
-export function boardRef(abs: string, root: string, notesDir: string): string {
+export function boardRef(abs: string, root: string | null, notesDir: string): string {
   for (const notes of [notesDir, realOr(notesDir)]) {
     if (within(notes, abs)) return path.join("notes", path.relative(notes, abs));
   }
-  for (const repo of [root, realOr(root)]) {
+  for (const repo of root ? [root, realOr(root)] : []) {
     if (!within(repo, abs)) continue;
     const rel = path.relative(repo, abs) || ".";
     return /^(notes|~)(\/|$)/.test(rel) ? `./${rel}` : rel;
@@ -45,7 +55,7 @@ const MAX_PATH = 4096;
 // match is the file, several a choice.
 export async function findBySuffix(
   input: string,
-  root: string,
+  root: string | null,
   notesDir: string,
   limit = 20,
 ): Promise<Array<{ ref: string; abs: string }>> {
@@ -67,7 +77,7 @@ export async function findBySuffix(
     }
   };
   const inRepo = (rel: string) => (/^(notes|~)(\/|$)/.test(rel) ? `./${rel}` : rel);
-  look(root, inRepo, await repoFiles(root));
+  if (root) look(root, inRepo, await repoFiles(root));
   if (found.size <= limit) look(notesDir, (rel) => `notes/${rel}`, listFiles(notesDir));
   return [...found]
     .filter(([ref, abs]) => fs.existsSync(abs) && resolveProjectPath(ref, root, notesDir) === abs)

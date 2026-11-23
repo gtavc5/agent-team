@@ -1,0 +1,38 @@
+{"header":{"backend":"pi","fixture":"crash-and-restore","description":"A Pi crash closes open work and does not re-send an unaccepted prompt; the saved session resumes.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
+{"step":{"op":"send","text":"Establish a saved session.","i":0},"t":0}
+{"sent":{"type":"prompt","message":"Establish a saved session."},"t":5}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
+{"frame":{"type":"agent_start"},"t":15}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":145}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Save"}},"t":30}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"d turn."}},"t":35}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Saved turn."}},"t":40}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"text","text":"Saved turn."}]}},"t":45}
+{"frame":{"type":"agent_settled"},"t":50}
+{"sent":{"type":"get_session_stats"},"t":55}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":60}
+{"step":{"op":"send","text":"Start uncertain work.","i":1},"t":65}
+{"sent":{"type":"prompt","message":"Start uncertain work."},"t":70}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":75}
+{"frame":{"type":"agent_start"},"t":80}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":85}
+{"frame":{"type":"tool_execution_start","toolName":"bash","toolCallId":"open-bash","args":{"command":"printf example"}},"t":90}
+{"frame":{"type":"tool_execution_start","toolName":"subagent","toolCallId":"child","args":{"agent":"reviewer","task":"Review the sample."}},"t":95}
+{"step":{"op":"check","name":"beforeCrash","i":2},"t":100}
+{"close":true,"t":105}
+{"step":{"op":"check","name":"afterCrash","i":3},"t":110}
+{"step":{"op":"send","text":"Continue explicitly.","i":4},"t":115}
+{"sent":{"type":"prompt","message":"Continue explicitly."},"t":120}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":125}
+{"frame":{"type":"agent_start"},"t":130}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":135}
+{"step":{"op":"check","name":"restored","i":5},"t":140}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":145}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Rest"}},"t":150}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"ored turn."}},"t":155}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Restored turn."}},"t":160}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"text","text":"Restored turn."}]}},"t":165}
+{"frame":{"type":"agent_settled"},"t":170}
+{"sent":{"type":"get_session_stats"},"t":175}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":180}

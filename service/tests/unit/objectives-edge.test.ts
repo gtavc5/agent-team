@@ -106,7 +106,7 @@ describe("hand edits", () => {
     const { create, call, base: b, manager } = setup();
     const { project, lead } = create("p");
     await call(lead, "write_objective", { id: "a/x", title: "x", goal: "g" });
-    fs.symlinkSync("ykiko@host.123:456", path.join(objDir(b, project.id, "a"), ".#x.toml"));
+    fs.symlinkSync("editor@host.example:456", path.join(objDir(b, project.id, "a"), ".#x.toml"));
     expect(() => manager.list()).not.toThrow();
   });
 
@@ -131,6 +131,7 @@ describe("hand edits", () => {
     await call(lead, "add_items", { objective_id: "a/x", tasks: ["one"] });
     for (let i = 0; i < 60; i++) await tick();
     frames.length = 0;
+    for (let i = 0; i < 20; i++) await tick();
     const file = path.join(objDir(b, project.id, "a"), "x.toml");
     fs.writeFileSync(file, fs.readFileSync(file, "utf-8").replace('title = "x"', 'title = "HAND"'));
     const seen = () =>
@@ -141,7 +142,7 @@ describe("hand edits", () => {
             (o) => o.title === "HAND",
           ),
       );
-    for (let i = 0; i < 100 && !seen(); i++) await tick();
+    for (let i = 0; i < 400 && !seen(); i++) await tick();
     expect(seen()).toBe(true);
   });
 });

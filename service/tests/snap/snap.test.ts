@@ -11,6 +11,7 @@ import {
   recordingPath,
   replay,
   strip,
+  stripChildTranscript,
   transcript,
   agentMessages,
 } from "./harness";
@@ -18,9 +19,26 @@ import {
 // Every <backend>/<name>.ts is one recorded interaction. The fixture's own
 // verify() states why it exists; the pinned transcript catches everything
 // else; the client aggregation must agree with the server's.
-for (const backend of ["claude", "codex", "cursor", "agy"] as Backend[]) {
+for (const backend of ["codex", "pi"] as Backend[]) {
   const names = listFixtures(backend);
-  if (names.length === 0) continue;
+  if (backend === "pi") {
+    it("has all twelve Pi golden fixtures", () => {
+      expect(names).toEqual([
+        "antigravity-acp-turn",
+        "basic-turn",
+        "compaction-and-retry",
+        "crash-and-restore",
+        "extension-ui-dialog",
+        "image-prompt",
+        "interrupt-abort",
+        "panel-tools-roundtrip",
+        "pi-subagents-async",
+        "pi-subagents-foreground",
+        "single-queue-order",
+        "tools-bash-edit",
+      ]);
+    });
+  }
   const fixtures = await Promise.all(names.map((n) => loadFixture(backend, n)));
   describe(backend, () => {
     beforeEach(() => vi.useFakeTimers({ toFake: ["Date"] }));
@@ -35,18 +53,35 @@ for (const backend of ["claude", "codex", "cursor", "agy"] as Backend[]) {
           );
         }
         const rec = readRecording(file);
+        expect(rec.header).toMatchObject({ backend, fixture: name });
         expect(rec.header.description, "description in the recording header").toBe(
           fixture.description,
         );
         const result = await replay(backend, rec, fixture);
+        if (backend === "pi") expect(fixture.verify).toBeTypeOf("function");
         fixture.verify?.(result);
-        await expect(transcript(result.messages)).toMatchFileSnapshot(
+        await expect(transcript(result.messages, backend)).toMatchFileSnapshot(
           path.join(SNAP_DIR, backend, `${name}.snap.md`),
         );
-        const client = clientView(result.events);
+        const client = clientView(result.events, backend);
         const server = agentMessages(result);
         expect(client.length, "client message count").toBe(server.length);
-        server.forEach((m, j) => expect(strip(client[j]), `message ${j + 1}`).toEqual(strip(m)));
+        server.forEach((m, j) => {
+          const expected =
+            backend === "pi" ? { ...m, events: m.events?.map(stripChildTranscript) } : m;
+          expect(strip(client[j]), `message ${j + 1}`).toEqual(strip(expected));
+          if (backend === "pi") {
+            const projection = ({ content, status, context, effort, thinking }: typeof m) => ({
+              content,
+              status,
+              context,
+              thinking,
+              // Raw error events do not carry the effort from new_message.
+              effort: status === "done" ? effort : undefined,
+            });
+            expect(projection(client[j]), `message ${j + 1} projection`).toEqual(projection(m));
+          }
+        });
       });
     });
   });

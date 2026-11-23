@@ -122,6 +122,7 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
             agentType: ev.subagent.agentType ?? start.agentType,
             prompt: ev.subagent.prompt ?? start.prompt,
             events: start.events,
+            eventCount: Math.max(start.eventCount ?? 0, ev.subagent.eventCount ?? 0) || undefined,
           },
         };
       }
@@ -342,7 +343,7 @@ export function downgradedMessageIds(existing: Message[], merged: Message[]): st
   return merged.filter((m) => m.detail === "summary" && hadBodies.has(m.id)).map((m) => m.id);
 }
 
-const SETTLED = new Set<Message["status"]>(["done", "error"]);
+const SETTLED = new Set<Message["status"]>(["done", "error", "outcome_unknown"]);
 
 // The server sends summaries; keep the client's full bodies only when the
 // message is settled on both sides and its events did not move, so nothing

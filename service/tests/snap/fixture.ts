@@ -2,12 +2,12 @@
 // No test or SDK dependencies, so scripts/capture-sdk.ts can load fixtures
 // under plain node.
 import type { Message } from "../../src/workspace/workspace";
-import type { StreamEvent, UsageStats } from "../../src/session/claude";
+import type { PromptEnvelope, StreamEvent, UsageStats } from "../../src/session/types";
 import type { RpcMessage } from "../../src/session/codex-rpc";
 import type { PanelToolset } from "../../src/project/tools";
 import { z } from "zod";
 
-export type Backend = "claude" | "codex" | "cursor" | "agy";
+export type Backend = "codex" | "pi";
 
 export type Step =
   // Codex: turn/start when no turn runs, turn/steer into the running one.
@@ -24,10 +24,12 @@ export type Step =
   | { op: "abort" }
   // Query.interrupt() / turn/interrupt: stop the running turn, keep the process.
   | { op: "interrupt" }
-  // Query.stopTask() on the latest listed task matching `match`.
-  | { op: "stopTask"; match: { type?: string; ambient?: boolean } }
   // Codex: thread/compact/start, the user's /compact.
-  | { op: "compact" };
+  | { op: "compact" }
+  | { op: "image"; text: string; seed: number }
+  | { op: "uiDialogResponse"; requestId: string; confirmed: boolean }
+  | { op: "panelCall"; callId: string }
+  | { op: "check"; name: string };
 
 export interface Replay {
   messages: Message[];
@@ -42,17 +44,34 @@ export interface Replay {
     runState?: string;
     backgroundTaskList?: { id: string }[];
   }[];
-  // Codex, agy: every message the sessions wrote to the backend process.
+  // Every message the sessions wrote to the backend process.
   sent: RpcMessage[];
-  // Cursor: the SDK calls the sessions made, in order ("create", "resume
-  // <id>", "send", "cancel"), and what each send passed.
-  sdkCalls: string[];
-  sends: Array<{ model?: unknown; local?: Record<string, unknown> }>;
+  pi?: {
+    sent: PiFrame[];
+    checkpoints: Record<string, PiCheckpoint>;
+    connections: Array<{ restored: boolean }>;
+    dialogs: Array<{ kind: "request" | "resolved"; id: string }>;
+  };
 }
 
-// Codex: a tool the client defines (thread/start dynamicTools) and answers
-// itself when the model calls it (item/tool/call). agy: a panel tool, served
-// by the session's MCP server.
+export type PiFrame = { type: string; [key: string]: unknown };
+
+export interface PiCheckpoint {
+  canSteer: boolean;
+  runState: string;
+  userStatuses: string[];
+  prompts: string[];
+  terminalCount: number;
+  thinkingClosed: boolean;
+  pendingDialogIds: string[];
+  contextUsage: Record<string, unknown> | null;
+  backgroundTasks: { id: string; cancellable?: boolean }[];
+  lastEnvelope?: PromptEnvelope;
+  generation?: number;
+}
+
+// A tool the client defines (thread/start dynamicTools) and answers itself
+// when the model calls it (item/tool/call).
 export interface CodexTool {
   namespace?: string;
   name: string;
@@ -65,13 +84,10 @@ export interface CodexTool {
 export interface Fixture {
   description: string;
   model?: string;
-  // agy: the thought level, when not RECORD_EFFORT's.
   effort?: string;
-  // Extra options for the recording: Claude SDK options (e.g.
-  // perTaskStopAffordance), codex thread/start params, Cursor agent options
-  // (local.customTools).
+  // Extra codex thread/start params for the recording.
   options?: Record<string, unknown>;
-  // Codex, agy: the panel's tools, and the instructions that go with them.
+  // The panel's tools, and the instructions that go with them.
   tools?: CodexTool[];
   instructions?: string;
   // Files materialised in the recording cwd (skills, images).
@@ -81,6 +97,8 @@ export interface Fixture {
   // limit is recorded without spending the account's.
   api?: "usage-limit";
   steps: Step[];
+  // Runs real project tools over Panel HTTP at the tape's tool anchors.
+  piProject?: true;
   verify?: (replay: Replay) => void;
 }
 
@@ -137,21 +155,12 @@ export const end = (): Step => ({ op: "end" });
 export const abort = (): Step => ({ op: "abort" });
 export const interrupt = (): Step => ({ op: "interrupt" });
 export const compact = (): Step => ({ op: "compact" });
-export const stopTask = (match: { type?: string; ambient?: boolean }): Step => ({
-  op: "stopTask",
-  match,
-});
 
 export const DEFAULT_MODEL: Record<Backend, string> = {
-  claude: "claude-sonnet-5",
   codex: "gpt-6-luna",
-  cursor: "cursor/composer-2.5",
-  agy: "agy/gemini-3.8-flash",
+  pi: "synthetic/pi-model",
 };
 export const RECORD_CWD = "/tmp/sdk-capture";
-// agy: the thought level a recording runs at (the replay's agent too, as
-// the requests setting it depend on it).
-export const RECORD_EFFORT: Partial<Record<Backend, string>> = { agy: "low" };
 
 export interface Header {
   backend: Backend;
@@ -165,13 +174,12 @@ export interface Header {
 export type Entry = { t: number } & (
   | { step: Step & { i: number } }
   | { frame: unknown }
-  // Codex, agy: a JSON-RPC message the recorder sent to the backend.
+  // A JSON-RPC message the recorder sent to the backend.
   | { sent: unknown }
   | { error: string }
   // The backend's event stream closed (process exit).
   | { close: true }
   // A control request the recorder made (interrupt, stop_task) and its answer;
-  // agy: "idleCheck", the session looking at what agy did while idle.
   | { control: { op: string; taskId?: string; response?: unknown; error?: string } }
 );
 

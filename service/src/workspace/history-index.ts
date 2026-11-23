@@ -6,7 +6,7 @@ import {
   type SQLOutputValue,
   type StatementSync,
 } from "node:sqlite";
-import type { StreamEvent } from "../session/claude";
+import type { StreamEvent } from "../session/types";
 import type { Message } from "./workspace";
 
 // The search index over the history (history-db.ts): every message cut into
@@ -15,7 +15,7 @@ import type { Message } from "./workspace";
 // so any substring (a path, an identifier, Chinese) is found. Built in a
 // worker thread (history-worker.ts); derived, so a new INDEX_VERSION or a
 // deleted or damaged file just rebuilds it.
-const INDEX_VERSION = 4;
+const INDEX_VERSION = 5;
 
 export type EntryKind = "said" | "thinking" | "tool_call" | "tool_output" | "error" | "subagent";
 export const ENTRY_KINDS: readonly EntryKind[] = [
@@ -34,6 +34,8 @@ export interface Entry {
   tool: string | null;
   // 0 in the conversation itself, 1 and more inside subagents.
   depth: number;
+  // The child whose events produced this entry, including a subagent's own entry.
+  subagentTaskId: string | null;
   text: string;
   // A tool's output: where its call is among the message's entries.
   call?: number;
@@ -45,7 +47,14 @@ export interface Entry {
 export function entriesOf(m: Message): Entry[] {
   const out: Entry[] = [];
   if (m.kind !== "system" && m.content.trim()) {
-    out.push({ kind: "said", role: m.kind, tool: null, depth: 0, text: m.content });
+    out.push({
+      kind: "said",
+      role: m.kind,
+      tool: null,
+      depth: 0,
+      subagentTaskId: null,
+      text: m.content,
+    });
   }
   walk(m.events ?? [], 0, out);
   return out;
@@ -71,7 +80,12 @@ function callText(content: string): string {
 // Terminal colours and cursor moves in command output.
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
-function walk(events: StreamEvent[], depth: number, out: Entry[]): void {
+function walk(
+  events: StreamEvent[],
+  depth: number,
+  out: Entry[],
+  subagentTaskId: string | null = null,
+): void {
   const tools = new Map<string, { tool: string | null; call: number }>();
   // Where the entry went, -1 for none.
   const add = (
@@ -80,6 +94,7 @@ function walk(events: StreamEvent[], depth: number, out: Entry[]): void {
     tool: string | null = null,
     call = -1,
     durationMs?: number,
+    ownerTaskId = subagentTaskId,
   ) => {
     if (!text?.trim()) return -1;
     out.push({
@@ -87,6 +102,7 @@ function walk(events: StreamEvent[], depth: number, out: Entry[]): void {
       role: null,
       tool,
       depth,
+      subagentTaskId: ownerTaskId,
       text,
       ...(call >= 0 && { call }),
       ...(durationMs != null && { durationMs }),
@@ -98,7 +114,14 @@ function walk(events: StreamEvent[], depth: number, out: Entry[]): void {
       case "text":
         // In the conversation itself this is the message's own text.
         if (depth > 0 && e.content.trim()) {
-          out.push({ kind: "said", role: "subagent", tool: null, depth, text: e.content });
+          out.push({
+            kind: "said",
+            role: "subagent",
+            tool: null,
+            depth,
+            subagentTaskId,
+            text: e.content,
+          });
         }
         break;
       case "thinking":
@@ -123,14 +146,16 @@ function walk(events: StreamEvent[], depth: number, out: Entry[]): void {
       case "subagent_start": {
         const sa = e.subagent;
         if (!sa) break;
+        const childTaskId = sa.taskId ?? subagentTaskId;
         add(
           "subagent",
           [sa.description, sa.prompt, sa.summary].filter(Boolean).join("\n\n"),
           sa.agentType ?? null,
           -1,
           sa.durationMs,
+          childTaskId,
         );
-        walk(sa.events ?? [], depth + 1, out);
+        walk(sa.events ?? [], depth + 1, out, childTaskId);
         break;
       }
     }
@@ -154,6 +179,7 @@ export interface SearchQuery {
   since?: number;
   until?: number;
   depth?: "main" | "subagents";
+  subagentTaskId?: string;
   limit: number;
   offset?: number;
   // Matching lines shown per hit, and lines of context around each.
@@ -170,6 +196,7 @@ export interface EntryInfo {
   role: string | null;
   tool: string | null;
   depth: number;
+  subagentTaskId: string | null;
   lineCount: number;
 }
 
@@ -228,6 +255,7 @@ interface Row {
   role: string | null;
   tool: string | null;
   depth: number;
+  subagent_task_id: string | null;
   lines: number;
   call: number | null;
   text?: string;
@@ -270,6 +298,7 @@ function info(r: Row): EntryInfo {
     role: r.role,
     tool: r.tool,
     depth: r.depth,
+    subagentTaskId: r.subagent_task_id,
     lineCount: r.lines,
   };
 }
@@ -386,6 +415,10 @@ function conditions(q: SearchQuery, withKinds = true) {
     params.push(q.until);
   }
   if (q.depth) where.push(q.depth === "main" ? "e.depth = 0" : "e.depth > 0");
+  if (q.subagentTaskId != null) {
+    where.push("e.subagent_task_id = ?");
+    params.push(q.subagentTaskId);
+  }
   return { where: where.length ? `where ${where.join(" and ")}` : "", params };
 }
 
@@ -448,6 +481,7 @@ export class HistoryIndex {
             role text,
             tool text,
             depth integer not null,
+            subagent_task_id text,
             lines integer not null,
             call integer,
             duration_ms integer,
@@ -455,6 +489,7 @@ export class HistoryIndex {
           );
           create index entries_message on entries (session, message);
           create index entries_ts on entries (ts);
+          create index entries_subagent_task_id on entries (subagent_task_id);
           create virtual table entries_fts using fts5 (
             text, content = '', contentless_delete = 1, tokenize = 'trigram'
           );
@@ -523,7 +558,9 @@ export class HistoryIndex {
       .all() as Array<{ session: string; id: string; hash: string; status: string }>) {
       const k = key(r.session, r.id);
       present.add(k);
-      if (r.status === "streaming" || r.status === "queued") continue;
+      if (r.status === "streaming" || r.status === "queued" || r.status === "dispatching") {
+        continue;
+      }
       if (indexed.get(k) !== r.hash) out.push({ session: r.session, message: r.id });
     }
     for (const k of indexed.keys()) {
@@ -564,7 +601,7 @@ export class HistoryIndex {
       this.write("delete from entries where session = ? and message = ?").run(session, message);
       if (row) {
         const insert = this.write(
-          "insert into entries (session, message, ts, kind, role, tool, depth, lines, call, duration_ms, text) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "insert into entries (session, message, ts, kind, role, tool, depth, subagent_task_id, lines, call, duration_ms, text) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         const fts = this.write("insert into entries_fts (rowid, text) values (?, ?)");
         const ids: Array<number | bigint> = [];
@@ -578,6 +615,7 @@ export class HistoryIndex {
             e.role,
             e.tool,
             e.depth,
+            e.subagentTaskId,
             lines,
             e.call !== undefined ? ids[e.call] : null,
             e.durationMs ?? null,
@@ -659,7 +697,7 @@ export class HistoryIndex {
   entries(session: string, messages: string[]): Array<EntryInfo & { head: string }> {
     const rows = this.db
       .prepare(
-        `select id, session, message, ts, kind, role, tool, depth, lines,
+        `select id, session, message, ts, kind, role, tool, depth, subagent_task_id, lines,
            substr(text, 1, 200) as head
          from entries where session = ? and message in (select value from json_each(?))
          order by id`,

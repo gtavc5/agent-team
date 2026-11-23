@@ -54,6 +54,7 @@ export interface SubAgentInfo {
   liveProgress?: string[];
   hasPrompt?: boolean;
   summaryLength?: number;
+  cancellable?: boolean;
 }
 
 export type NoticeLevel = "info" | "notice" | "warning" | "error" | "schedule" | "wakeup" | "skill";
@@ -236,9 +237,14 @@ export type IssueModules = Array<IssueModule | BrokenIssueModule>;
 export interface Project {
   id: string;
   name: string;
-  root: string;
+  root: string | null;
   leadWorkspaceId: string | null;
   createdAt: number;
+  schemaVersion?: number;
+  status?: "active" | "sealed";
+  sealedAt?: number | null;
+  sealedReason?: string | null;
+  lead?: { hostId: string; workspaceId: string } | null;
   // Filed away: listed apart in the sidebar.
   archivedAt?: number | null;
   objectives: Array<Objective | BrokenObjective>;
@@ -250,7 +256,7 @@ export interface Message {
   agentId: string | null;
   content: string;
   timestamp: number;
-  status: "streaming" | "done" | "error" | "queued";
+  status: "streaming" | "done" | "error" | "queued" | "dispatching" | "outcome_unknown";
   events?: StreamEvent[];
   turnId?: string;
   images?: MessageImage[];
@@ -290,13 +296,10 @@ export interface AgentInfo {
   effort?: string | null;
   // The levels /effort takes for its model.
   effortLevels?: string[];
-  // Fast mode on (/fast) and the Codex goal being pursued (/goal).
   fast?: boolean;
-  goal?: string | null;
   // Background work the agent is waiting on (background Bash, subagents,
   // Monitor); the CLI reports back on its own when it finishes.
   backgroundTasks?: BackgroundTask[];
-  account?: string;
   // Context occupancy at the end of its last turn, when known.
   context?: ContextUsage | null;
   // The scheduled wake-up it sleeps until.
@@ -308,6 +311,7 @@ export interface BackgroundTask {
   type: string;
   description: string;
   since: number;
+  cancellable?: boolean;
 }
 
 export interface HostInfo {
@@ -352,20 +356,6 @@ export interface Workspace {
   loadingOlder?: boolean;
 }
 
-export interface QuotaWindow {
-  utilization: number;
-  resetsAt: number;
-}
-
-export interface QuotaEntry {
-  label: string;
-  // Absent: a Claude login (a server from before it was sent).
-  source?: "claude" | "codex" | "agy";
-  fiveHour: QuotaWindow | null;
-  sevenDay: QuotaWindow | null;
-  fetchedAt: number;
-}
-
 export interface SystemStatus {
   osName: string;
   osArch: string;
@@ -376,7 +366,6 @@ export interface SystemStatus {
   memUsed: number;
   uptime: number;
   hostname: string;
-  quota: QuotaEntry[];
 }
 
 export interface AgentPreset {
@@ -388,7 +377,7 @@ export interface AgentPreset {
 export interface ModelOption {
   id: string;
   label: string;
-  backend: "claude" | "codex" | "cursor" | "agy";
+  backend: "pi" | "codex";
   // The effort levels it takes (none: it takes none), and the one it runs at
   // when none is chosen (`effort` the panel sets, else the backend's own).
   effortLevels?: string[];
@@ -401,6 +390,42 @@ export interface CommandInfo {
   description: string;
   argumentHint: string;
   aliases?: string[];
+  source?: "panel" | "pi" | "extension" | "skill" | "prompt";
+}
+
+export type CommandsByAgent = Record<string, Record<string, CommandInfo[]>>;
+
+export type UiDialogMethod = "select" | "confirm" | "input" | "editor";
+
+export interface UiDialogRequest {
+  requestId: string;
+  workspaceId: string;
+  agentId: string;
+  processGeneration: number;
+  method: UiDialogMethod;
+  title: string;
+  message?: string;
+  options?: string[];
+  placeholder?: string;
+  prefill?: string;
+  timeoutMs: number;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface UiDialogAnswer {
+  value?: string;
+  confirmed?: boolean;
+  cancelled?: boolean;
+}
+
+function sameDialog(a: UiDialogRequest, b: UiDialogRequest): boolean {
+  return (
+    a.workspaceId === b.workspaceId &&
+    a.agentId === b.agentId &&
+    a.processGeneration === b.processGeneration &&
+    a.requestId === b.requestId
+  );
 }
 
 export interface SearchHit {
@@ -428,9 +453,13 @@ export function useServer() {
   const [connected, setConnected] = useState(false);
   const [presets, setPresets] = useState<AgentPreset[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
-  const [commands, setCommands] = useState<CommandInfo[]>([]);
-  const [accounts, setAccounts] = useState<string[]>([]);
-  const [defaultAccount, setDefaultAccountState] = useState<string | null>(null);
+  const [globalCommands, setGlobalCommands] = useState<CommandInfo[]>([]);
+  const [commandsByAgent, setCommandsByAgent] = useState<CommandsByAgent>({});
+  const [commandTarget, setCommandTarget] = useState<{
+    workspaceId: string;
+    agentId: string;
+  } | null>(null);
+  const [pendingDialogs, setPendingDialogs] = useState<UiDialogRequest[]>([]);
   const [hosts, setHosts] = useState<HostInfo[]>([]);
   const [hostConfigs, setHostConfigs] = useState<Record<string, HostConfig>>({});
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
@@ -539,20 +568,16 @@ export function useServer() {
           const config = msg.config as {
             presets: AgentPreset[];
             models: ModelOption[];
-            commands: CommandInfo[];
+            commands?: CommandInfo[];
             hosts: Record<string, HostConfig>;
           };
           setPresets(config.presets);
           setModels(config.models);
-          const cfgExtra = config as unknown as {
-            accounts?: string[];
-            defaultAccount?: string | null;
-            archiveAfterDays?: number;
-          };
-          setAccounts(cfgExtra.accounts ?? []);
-          setDefaultAccountState(cfgExtra.defaultAccount ?? null);
+          const cfgExtra = config as unknown as { archiveAfterDays?: number };
           setArchiveAfterDays(cfgExtra.archiveAfterDays ?? 0);
-          if (config.commands) setCommands(config.commands);
+          setGlobalCommands((msg.commands as CommandInfo[] | undefined) ?? config.commands ?? []);
+          setCommandsByAgent((msg.commandsByAgent as CommandsByAgent | undefined) ?? {});
+          setPendingDialogs((msg.pendingDialogs as UiDialogRequest[] | undefined) ?? []);
           if (config.hosts) setHostConfigs(config.hosts);
           if (msg.hosts) setHosts(msg.hosts as HostInfo[]);
           setProjects((msg.projects as Project[] | undefined) ?? []);
@@ -618,11 +643,50 @@ export function useServer() {
           break;
 
         case "commands_update":
-          setCommands(msg.commands as CommandInfo[]);
+          // Older servers have one global command list.
+          setGlobalCommands(msg.commands as CommandInfo[]);
           break;
+
+        case "agent_commands_update": {
+          const wsId = msg.workspaceId as string;
+          const agentId = msg.agentId as string;
+          const commands = msg.commands as CommandInfo[];
+          setCommandsByAgent((prev) => ({
+            ...prev,
+            [wsId]: { ...prev[wsId], [agentId]: commands },
+          }));
+          break;
+        }
+
+        case "models_update":
+          setModels(msg.models as ModelOption[]);
+          break;
+
+        case "ui_dialog_request": {
+          const dialog = msg.dialog as UiDialogRequest;
+          setPendingDialogs((prev) =>
+            prev.some((d) => sameDialog(d, dialog)) ? prev : [...prev, dialog],
+          );
+          break;
+        }
+
+        case "ui_dialog_resolved": {
+          // Current servers replay the request; accepting the identity fields
+          // directly also makes resolution tolerant of older broadcasts.
+          const dialog = (msg.dialog ?? msg) as UiDialogRequest;
+          setPendingDialogs((prev) => prev.filter((d) => !sameDialog(d, dialog)));
+          break;
+        }
 
         case "workspace_messages": {
           const wsId = msg.workspaceId as string;
+          if (Array.isArray(msg.pendingDialogs)) {
+            const dialogs = msg.pendingDialogs as UiDialogRequest[];
+            setPendingDialogs((prev) => [
+              ...prev.filter((d) => d.workspaceId !== wsId),
+              ...dialogs,
+            ]);
+          }
           const incoming = msg.messages as Message[];
           const hasMore = msg.hasMore as boolean;
           // Set on older-page replies; null/absent on a fetch of the newest page.
@@ -678,9 +742,18 @@ export function useServer() {
           setWorkspaces((prev) => [...prev, msg.workspace as Workspace]);
           break;
 
-        case "workspace_deleted":
-          setWorkspaces((prev) => prev.filter((w) => w.id !== msg.workspaceId));
+        case "workspace_deleted": {
+          const wsId = msg.workspaceId as string;
+          setWorkspaces((prev) => prev.filter((w) => w.id !== wsId));
+          setCommandsByAgent((prev) => {
+            if (!(wsId in prev)) return prev;
+            const next = { ...prev };
+            delete next[wsId];
+            return next;
+          });
+          setPendingDialogs((prev) => prev.filter((d) => d.workspaceId !== wsId));
           break;
+        }
 
         case "agent_added": {
           const wsId = msg.workspaceId as string;
@@ -714,6 +787,18 @@ export function useServer() {
             prev.map((w) =>
               w.id === wsId ? { ...w, agents: w.agents.filter((a) => a.id !== agentId) } : w,
             ),
+          );
+          setCommandsByAgent((prev) => {
+            if (!prev[wsId]?.[agentId]) return prev;
+            const agents = { ...prev[wsId] };
+            delete agents[agentId];
+            const next = { ...prev };
+            if (Object.keys(agents).length > 0) next[wsId] = agents;
+            else delete next[wsId];
+            return next;
+          });
+          setPendingDialogs((prev) =>
+            prev.filter((d) => d.workspaceId !== wsId || d.agentId !== agentId),
           );
           break;
         }
@@ -938,15 +1023,6 @@ export function useServer() {
           break;
         }
 
-        case "config_update":
-          setAccounts((msg.accounts as string[]) ?? []);
-          setDefaultAccountState((msg.defaultAccount as string | null) ?? null);
-          break;
-
-        case "default_account":
-          setDefaultAccountState((msg.account as string | null) ?? null);
-          break;
-
         case "search_results":
           setSearchResults({ query: msg.query as string, hits: msg.hits as SearchHit[] });
           break;
@@ -966,7 +1042,6 @@ export function useServer() {
             memUsed: msg.memUsed as number,
             uptime: msg.uptime as number,
             hostname: msg.hostname as string,
-            quota: (msg.quota as QuotaEntry[]) ?? [],
           });
           break;
 
@@ -1106,6 +1181,10 @@ export function useServer() {
     return true;
   }, []);
 
+  const commands = commandTarget
+    ? (commandsByAgent[commandTarget.workspaceId]?.[commandTarget.agentId] ?? globalCommands)
+    : globalCommands;
+
   return {
     workspaces,
     projects,
@@ -1114,6 +1193,12 @@ export function useServer() {
     presets,
     models,
     commands,
+    commandsByAgent,
+    globalCommands,
+    pendingDialogs,
+    selectCommandAgent: useCallback((workspaceId: string | null, agentId: string | null) => {
+      setCommandTarget(workspaceId && agentId ? { workspaceId, agentId } : null);
+    }, []),
     hosts,
     hostConfigs,
     systemStatus,
@@ -1143,6 +1228,18 @@ export function useServer() {
         send({ type: "load_subagent_events", workspaceId: wsId, messageId, taskId }),
       [send],
     ),
+    respondUiDialog: useCallback(
+      (dialog: UiDialogRequest, answer: UiDialogAnswer) =>
+        send({
+          type: "ui_dialog_response",
+          workspaceId: dialog.workspaceId,
+          agentId: dialog.agentId,
+          processGeneration: dialog.processGeneration,
+          requestId: dialog.requestId,
+          ...answer,
+        }),
+      [send],
+    ),
     cancelSubagent: useCallback(
       (wsId: string, agentId: string, taskId: string) => {
         if (wsId === "replay-demo") {
@@ -1169,8 +1266,16 @@ export function useServer() {
         send({ type: "create_workspace", name, path, hostId, projectName }),
       [send],
     ),
+    createProject: useCallback(
+      (name: string, root: string | null) => send({ type: "create_project", name, root }),
+      [send],
+    ),
     renameProject: useCallback(
       (projectId: string, name: string) => send({ type: "rename_project", projectId, name }),
+      [send],
+    ),
+    sealProject: useCallback(
+      (projectId: string, reason?: string) => send({ type: "seal_project", projectId, reason }),
       [send],
     ),
     deleteProject: useCallback(
@@ -1191,22 +1296,8 @@ export function useServer() {
       [send],
     ),
     addAgent: useCallback(
-      (
-        wsId: string,
-        name: string,
-        model: string,
-        avatar: string,
-        color: string,
-        account?: string,
-        effort?: string,
-      ) =>
-        send({ type: "add_agent", workspaceId: wsId, name, model, avatar, color, account, effort }),
-      [send],
-    ),
-    accounts,
-    defaultAccount,
-    setDefaultAccount: useCallback(
-      (account: string | null) => send({ type: "set_default_account", account }),
+      (wsId: string, name: string, model: string, avatar: string, color: string, effort?: string) =>
+        send({ type: "add_agent", workspaceId: wsId, name, model, avatar, color, effort }),
       [send],
     ),
     removeAgent: useCallback(

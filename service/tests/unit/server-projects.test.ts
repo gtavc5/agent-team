@@ -1,7 +1,4 @@
-// The real Server in-process over a seeded data dir. The Claude SDK is a fake
-// that records the options each query starts with and the prompts sent to it,
-// and yields only the frames a test emits, so no CLI is spawned; the quota
-// probe is stubbed so no API request is made.
+// The real Server in-process over a seeded data dir, with in-memory sessions.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
@@ -11,21 +8,12 @@ import type { Message, WorkspaceState, AgentState } from "../../src/workspace/wo
 import type { Project } from "../../src/project/store";
 import type { Objective } from "../../src/project/objectives";
 
-vi.mock("../../src/server/quota", () => ({
-  QuotaMonitor: class {
-    entries = [];
-    refreshIfStale() {}
-    invalidate() {}
-    noteCodex() {}
-  },
-}));
-
 import { Server } from "../../src/server/server";
 import { ProjectManager } from "../../src/project/manager";
 import { closeHistory, historyOf, saveIndex, saveWorkspace } from "../../src/workspace/state";
-import { ClaudeSession, MCP_TEXT_LIMIT } from "../../src/session/claude";
-import { CodexSession } from "../../src/session/codex";
-import type { RpcMessage } from "../../src/session/codex-rpc";
+import type { PromptEnvelope, SessionConfig } from "../../src/session/types";
+import { LocalHost } from "../../src/session/host";
+import { FakeSession } from "./fakes";
 
 interface FakeTool {
   name: string;
@@ -45,69 +33,85 @@ let launches: Launch[] = [];
 const ENV_KEYS = ["HOME", "https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"];
 let savedEnv: Record<string, string | undefined>;
 
+class TestSession extends FakeSession {
+  private launch: Launch | null = null;
+  constructor(private readonly sessionConfig: SessionConfig) {
+    super(sessionConfig);
+  }
+
+  send(input: string | PromptEnvelope): Promise<void> {
+    const text = typeof input === "string" ? input : input.text;
+    if (!this.launch) {
+      this.launch = {
+        cwd: this.sessionConfig.cwd,
+        model: this.sessionConfig.model,
+        effort: this.sessionConfig.effort,
+        env: this.providerEnv,
+        prompts: [],
+        emit: (frame) => this.emitFrame(frame),
+      };
+      const tools = this.panelTools;
+      if (tools) {
+        this.launch.panel = {
+          instructions: tools.instructions,
+          tools: tools.tools.map((tool) => ({
+            name: tool.name,
+            handler: async (args) => ({ content: [{ text: await tool.handler(args) }] }),
+          })),
+        };
+      }
+      launches.push(this.launch);
+    }
+    this.launch.prompts.push(text);
+    return super.send(input);
+  }
+
+  override abort(): void {
+    this.isRunning = false;
+  }
+
+  private emitFrame(frame: unknown): void {
+    if (!frame || typeof frame !== "object") return;
+    const f = frame as {
+      type?: string;
+      kind?: string;
+      result?: string;
+      is_error?: boolean;
+      rate_limit_info?: { rateLimitType?: string; resetsAt?: number };
+    };
+    if (f.type === "rate_limit_event") {
+      this.emit("rateLimit", f.rate_limit_info ?? {});
+      return;
+    }
+    if (f.type === "result") {
+      this.isRunning = false;
+      this.emit("event", {
+        kind: f.is_error ? "error" : "result",
+        content: f.result ?? "",
+      });
+      return;
+    }
+    if (f.kind) {
+      if (f.kind === "result" || f.kind === "error") this.isRunning = false;
+      this.emit("event", frame);
+    }
+  }
+}
+
 beforeEach(() => {
-  // Keys are restored one by one: replacing process.env itself detaches it
-  // from the real environment os.homedir() reads.
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   for (const k of ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"]) delete process.env[k];
   launches = [];
-  ClaudeSession.sdk = {
-    query: ({
-      prompt,
-      options,
-    }: {
-      prompt: AsyncIterable<{ message: { content: string } }>;
-      options: Record<string, unknown>;
-    }) => {
-      const servers = options.mcpServers as Record<string, Launch["panel"]> | undefined;
-      const frames: unknown[] = [];
-      let wake = () => {};
-      let closed = false;
-      const launch: Launch = {
-        cwd: options.cwd as string | undefined,
-        model: options.model as string | undefined,
-        effort: options.effort as string | undefined,
-        panel: servers?.panel,
-        env: options.env as Launch["env"],
-        prompts: [],
-        emit: (frame) => {
-          frames.push(frame);
-          wake();
-        },
-      };
-      launches.push(launch);
-      void (async () => {
-        for await (const m of prompt) launch.prompts.push(m.message.content);
-      })();
-      const next = async (): Promise<IteratorResult<unknown>> => {
-        while (!frames.length && !closed) await new Promise<void>((r) => (wake = r));
-        return closed ? { value: undefined, done: true } : { value: frames.shift(), done: false };
-      };
-      return {
-        [Symbol.asyncIterator]: () => ({ next }),
-        close: () => {
-          closed = true;
-          wake();
-        },
-        supportedCommands: () => Promise.resolve([]),
-        stopTask: () => Promise.resolve(),
-        getContextUsage: () => Promise.resolve(null),
-        interrupt: () => Promise.resolve(),
-      };
-    },
-    createSdkMcpServer: (o: { instructions: string; tools: FakeTool[] }) => ({
-      instructions: o.instructions,
-      tools: o.tools,
-    }),
-    tool: (name: string, _d: string, _s: unknown, handler: FakeTool["handler"]) => ({
-      name,
-      handler,
-    }),
-  } as unknown as typeof ClaudeSession.sdk;
+  vi.spyOn(LocalHost.prototype, "createSession").mockImplementation(
+    (_id, config) => new TestSession(config),
+  );
+  vi.spyOn(LocalHost.prototype, "restoreSession").mockImplementation(
+    (_id, state) => new TestSession(state.config),
+  );
 });
 
 afterEach(() => {
-  ClaudeSession.sdk = null;
+  vi.restoreAllMocks();
   for (const [k, v] of Object.entries(savedEnv)) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
@@ -123,13 +127,13 @@ function agent(id: string, name: string, cwd: string): AgentState {
   return {
     id,
     name,
-    model: "claude-opus-5-5[1m]",
+    model: "gpt-6-astra",
     avatar: "A",
     color: "#fff",
     isDefault: true,
     session: {
       sessionId: null,
-      config: { cwd, backend: "claude", model: "claude-opus-5-5[1m]" },
+      config: { cwd, backend: "codex", model: "gpt-6-astra" },
       usage: {
         input_tokens: 0,
         output_tokens: 0,
@@ -181,7 +185,7 @@ function seed(
 
   const pdir = path.join(base, ".agent-team", "projects", "proj-1");
   fs.mkdirSync(path.join(pdir, "notes"), { recursive: true });
-  const project: Project = {
+  const project: Omit<Project, "schemaVersion" | "status" | "lead"> = {
     id: "proj-1",
     name: "demo",
     root,
@@ -256,7 +260,7 @@ function seed(
               timestamp: now,
               status: "queued",
               queuedFor: "a-live",
-              queuedPrompt: "go on",
+              queuedEnvelope: { inputId: "q1", text: "go on" },
             },
           ]
         : [],
@@ -297,7 +301,7 @@ async function start(base: string, web: string) {
   const send = (msg: Record<string, unknown>) => ws.send(JSON.stringify(msg));
   const stop = () => {
     ws.close();
-    server.close();
+    void server.close();
   };
   return { server, port, frames, send, stop };
 }
@@ -340,7 +344,6 @@ describe("server restart with projects", () => {
       expect(lead!.instructions).toContain('project "demo"');
       // Past the 2048 characters the CLI would cut them at.
       expect(lead!.instructions.length).toBeGreaterThan(2048);
-      expect(launches[0].env?.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH).toBe(String(MCP_TEXT_LIMIT));
       const tools = Object.fromEntries(lead!.tools.map((t) => [t.name, t]));
       expect(Object.keys(tools)).toEqual(expect.arrayContaining(["message_session"]));
 
@@ -364,6 +367,9 @@ describe("server restart with projects", () => {
         "write_issues",
         "write_issue_group",
         "close_issues",
+        "list_notes",
+        "read_note",
+        "write_note",
         "project_status",
         "read_session",
         "search_history",
@@ -379,7 +385,7 @@ describe("server restart with projects", () => {
         .message as Message;
       expect(delivered).toMatchObject({
         content: "please rebase",
-        status: "done",
+        status: "queued",
         from: { workspaceId: "ws-lead", role: "lead" },
       });
     } finally {
@@ -619,7 +625,7 @@ describe("server restart with projects", () => {
     fs.rmSync(base, { recursive: true, force: true });
   });
 
-  it("runs a new lead and the workers it starts on Opus 5.5 at xhigh unless asked otherwise", async () => {
+  it("runs a new lead and its workers on the default Codex model unless asked otherwise", async () => {
     const { base, web } = seed();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { frames, send, stop } = await start(base, web);
@@ -635,12 +641,12 @@ describe("server restart with projects", () => {
       const leadId = (created()!.workspace as { id: string }).id;
       send({ type: "send_message", workspaceId: leadId, content: "hello" });
       await until(() => launches.length === 1, "lead query");
-      expect(launches[0]).toMatchObject({ model: "claude-opus-5-5", effort: "xhigh" });
+      expect(launches[0]).toMatchObject({ model: "gpt-6-astra", effort: undefined });
 
       const start_session = launches[0].panel!.tools.find((t) => t.name === "start_session")!;
       await start_session.handler({ title: "w", cwd: ".", task: "t" });
       await until(() => launches.length === 2, "worker query");
-      expect(launches[1]).toMatchObject({ model: "claude-opus-5-5", effort: "xhigh" });
+      expect(launches[1]).toMatchObject({ model: "gpt-6-astra", effort: undefined });
     } finally {
       stop();
       log.mockRestore();
@@ -733,7 +739,7 @@ describe("rate limits on the server", () => {
       .map((f) => (f.message as Message).content)
       .filter((c) => c.includes("hit the 5-hour limit"));
 
-  it("lets the retry the user's message started run through a weekly-limit failover", async () => {
+  it("lets the retry the user's message started run after a weekly limit without account failover", async () => {
     const { base, web } = seed();
     fs.writeFileSync(path.join(base, "config.toml"), '[accounts.other]\noauth_token = "t"\n');
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -747,10 +753,10 @@ describe("rate limits on the server", () => {
       await wait(100);
       send({ type: "send_message", workspaceId: "ws-live", content: "U" });
       await wait(1500);
-      expect(launches.map((l) => l.prompts)).toEqual([["P"], ["P"]]);
-      launches[1].emit(result("done"));
-      await until(() => launches[1].prompts.length === 2, "the user's message");
-      expect(launches[1].prompts).toEqual(["P", "U"]);
+      expect(launches.map((l) => l.prompts)).toEqual([["P", "P"]]);
+      launches[0].emit(result("done"));
+      await until(() => launches[0].prompts.length === 3, "the user's message");
+      expect(launches[0].prompts).toEqual(["P", "P", "U"]);
     } finally {
       stop();
       log.mockRestore();
@@ -758,80 +764,26 @@ describe("rate limits on the server", () => {
     fs.rmSync(base, { recursive: true, force: true });
   });
 
-  it("waits a Codex weekly limit out to its reset, switching no Claude account", async () => {
+  it("waits a Codex weekly limit out to its reset without account failover", async () => {
     const { base, web } = seed({ liveCodex: true });
     fs.writeFileSync(path.join(base, "config.toml"), '[accounts.other]\noauth_token = "t"\n');
     const resetsAt = Math.floor(Date.now() / 1000) + 3 * 86400;
-    // An app-server whose every turn the weekly limit refuses
-    // (codex/usage-limit, with the long window spent).
-    CodexSession.hooks = {
-      transport: () => {
-        const listeners: Array<(m: RpcMessage) => void> = [];
-        const emit = (m: RpcMessage) => setImmediate(() => listeners.forEach((cb) => cb(m)));
-        const params = { threadId: "thr_1" };
-        return {
-          write: (m) => {
-            if (m.id == null || !m.method) return;
-            if (m.method === "thread/start")
-              emit({ id: m.id, result: { thread: { id: "thr_1" } } });
-            else if (m.method !== "turn/start") emit({ id: m.id, result: {} });
-            else {
-              const turn = { id: "turn_1", status: "inProgress", error: null };
-              emit({ id: m.id, result: { turn } });
-              emit({ method: "turn/started", params: { ...params, turn } });
-              emit({
-                method: "account/rateLimits/updated",
-                params: {
-                  rateLimits: {
-                    limitId: "codex",
-                    primary: {
-                      usedPercent: 30,
-                      windowDurationMins: 300,
-                      resetsAt: resetsAt - 86400,
-                    },
-                    secondary: { usedPercent: 100, windowDurationMins: 10080, resetsAt },
-                    planType: null,
-                  },
-                },
-              });
-              const error = {
-                message: "You've hit your usage limit.",
-                codexErrorInfo: "usageLimitExceeded",
-                additionalDetails: null,
-              };
-              emit({
-                method: "turn/completed",
-                params: { ...params, turn: { ...turn, status: "failed", error } },
-              });
-            }
-          },
-          onMessage: (cb) => listeners.push(cb),
-          onClose: () => {},
-          close: () => {},
-        };
-      },
-    };
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { server, frames, send, stop } = await start(base, web);
+    const { send, stop } = await start(base, web);
     try {
       send({ type: "send_message", workspaceId: "ws-live", content: "P" });
-      const posted = () =>
-        frames.filter((f) => f.type === "new_message").map((f) => (f.message as Message).content);
-      await until(() => posted().some((c) => c.includes("weekly limit")), "the pause");
-      expect(posted().filter((c) => c.includes("limit"))).toEqual([
-        expect.stringMatching(/hit the weekly limit — auto-retrying at /) as string,
-      ]);
-      expect(frames.some((f) => f.type === "default_account")).toBe(false);
-      const entry = (
-        server as unknown as {
-          workspaces: Map<string, { agents: Map<string, { pausedUntil?: number }> }>;
-        }
-      ).workspaces
-        .get("ws-live")!
-        .agents.get("a-live")!;
-      expect(entry.pausedUntil).toBe(resetsAt * 1000 + 60_000);
+      await until(() => launches[0]?.prompts.length === 1, "the turn");
+      launches[0].emit({
+        type: "rate_limit_event",
+        rate_limit_info: { rateLimitType: "seven_day", resetsAt },
+      });
+      launches[0].emit({ ...result("limit"), is_error: true });
+      await until(
+        () => (readState(base, "ws-live").agents[0].pausedUntil ?? 0) >= resetsAt * 1000 + 60_000,
+        "the pause",
+      );
+      expect(launches).toHaveLength(1);
     } finally {
-      CodexSession.hooks = null;
       stop();
       log.mockRestore();
     }
@@ -858,7 +810,7 @@ describe("rate limits on the server", () => {
     }
     const saved = readState(base, "ws-live").agents[0];
     expect(saved.pausedUntil).toBeDefined();
-    expect(saved.lastPrompt).toBeUndefined();
+    expect(saved.lastEnvelope).toBeUndefined();
     fs.rmSync(base, { recursive: true, force: true });
   });
 
@@ -883,7 +835,7 @@ describe("rate limits on the server", () => {
       // The retry it waits for stands, start slot and all.
       const slots = vi.spyOn(ProjectManager.prototype, "takeStartSlot");
       q.emit(refused);
-      q.emit({ ...result("limit"), is_error: true });
+      q.emit({ ...result("Usage limit reached (five-hour)"), is_error: true });
       await wait(100);
       expect(paused(frames)).toHaveLength(1);
       expect(slots).not.toHaveBeenCalled();
@@ -900,8 +852,11 @@ describe("rate limits on the server", () => {
     );
     expect(saved.agents[0]).toMatchObject({
       pausedUntil: resetsAt * 1000 + 60_000,
-      lastPrompt: "P",
+      lastEnvelope: { text: "P" },
     });
+    expect(saved.agents[0].lastEnvelope?.inputId).toBe(
+      saved.messages!.find((m) => m.content === "P")?.id,
+    );
     fs.rmSync(base, { recursive: true, force: true });
   });
 

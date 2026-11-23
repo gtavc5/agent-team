@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { writeAtomicJson } from "./report-journal";
 
 // A project: one repository (with any worktrees, on any disk) that a lead
 // agent looks after. Its external memory lives here, in the server's data
@@ -12,14 +13,26 @@ import * as path from "path";
 //   .agent-team/projects/<id>/notes/*.md
 
 export interface Project {
+  schemaVersion: 2;
+  status: "active" | "sealed";
+  sealedAt?: number | null;
+  sealedReason?: string | null;
+  lead: ProjectLead | null;
+  leadHistory?: ProjectLead[];
+  hostDirs?: Record<string, string[]>;
   id: string;
   name: string;
-  root: string;
+  root: string | null;
   leadWorkspaceId: string | null;
   createdAt: number;
   // Filed away with its sessions: the sidebar keeps it apart, the lead is
   // still there to ask.
   archivedAt?: number | null;
+}
+
+export interface ProjectLead {
+  hostId: string;
+  workspaceId: string;
 }
 
 export class ProjectStore {
@@ -33,8 +46,25 @@ export class ProjectStore {
       const file = path.join(this.dir, id, "project.json");
       if (!fs.existsSync(file)) continue;
       try {
-        const p = JSON.parse(fs.readFileSync(file, "utf-8")) as Project;
-        this.projects.set(p.id, p);
+        const p = JSON.parse(fs.readFileSync(file, "utf-8")) as Omit<Project, "schemaVersion"> & {
+          schemaVersion?: number;
+        };
+        if (p.schemaVersion === undefined || p.schemaVersion === 1) {
+          this.save({
+            ...p,
+            schemaVersion: 2,
+            status: "active",
+            lead: p.leadWorkspaceId ? { hostId: "local", workspaceId: p.leadWorkspaceId } : null,
+          });
+        } else if (p.schemaVersion === 2) {
+          this.projects.set(p.id, {
+            ...p,
+            schemaVersion: 2,
+            leadWorkspaceId: p.lead?.workspaceId ?? null,
+          });
+        } else {
+          throw new Error(`Unsupported project schemaVersion: ${p.schemaVersion}`);
+        }
       } catch (e) {
         console.error(`[projects] ${file} unreadable; the project is skipped`, e);
       }
@@ -61,9 +91,22 @@ export class ProjectStore {
     return path.join(this.dir, id, "issues");
   }
 
-  create(name: string, root: string): Project {
+  projectDir(id: string): string {
+    return path.join(this.dir, id);
+  }
+
+  create(name: string, root: string | null): Project {
     const id = `proj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const project: Project = { id, name, root, leadWorkspaceId: null, createdAt: Date.now() };
+    const project: Project = {
+      schemaVersion: 2,
+      id,
+      name,
+      root,
+      status: "active",
+      lead: null,
+      leadWorkspaceId: null,
+      createdAt: Date.now(),
+    };
     try {
       fs.mkdirSync(this.notesDir(id), { recursive: true });
       fs.mkdirSync(this.objectivesDir(id), { recursive: true });
@@ -76,20 +119,14 @@ export class ProjectStore {
   }
 
   save(project: Project): void {
+    project.leadWorkspaceId = project.lead?.workspaceId ?? null;
+    writeAtomicJson(path.join(this.projectDir(project.id), "project.json"), project);
     this.projects.set(project.id, project);
-    this.write(path.join(this.dir, project.id, "project.json"), project);
   }
 
   // Drops the project with its objectives and notes.
   remove(id: string): void {
     this.projects.delete(id);
     fs.rmSync(path.join(this.dir, id), { recursive: true, force: true });
-  }
-
-  private write(file: string, data: unknown): void {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-    fs.renameSync(tmp, file);
   }
 }

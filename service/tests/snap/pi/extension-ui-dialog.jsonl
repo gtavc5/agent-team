@@ -1,0 +1,20 @@
+{"header":{"backend":"pi","fixture":"extension-ui-dialog","description":"A blocking extension dialog still allows stdout frames before the user responds.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
+{"step":{"op":"send","text":"Ask for confirmation.","i":0},"t":0}
+{"sent":{"type":"prompt","message":"Ask for confirmation."},"t":5}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
+{"frame":{"type":"agent_start"},"t":15}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":20}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
+{"frame":{"type":"extension_ui_request","id":"confirmation","method":"confirm","title":"Continue?","message":"Synthetic confirmation."},"t":30}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Consider the example."}},"t":35}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"Consider the example."}},"t":40}
+{"step":{"op":"check","name":"dialogOpen","i":1},"t":45}
+{"step":{"op":"uiDialogResponse","requestId":"confirmation","confirmed":true,"i":2},"t":50}
+{"sent":{"type":"extension_ui_response","id":"confirmation","confirmed":true},"t":55}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Conf"}},"t":60}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"irmed."}},"t":65}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"Confirmed."}},"t":70}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"thinking","thinking":"Consider the example."},{"type":"text","text":"Confirmed."}]}},"t":75}
+{"frame":{"type":"agent_settled"},"t":80}
+{"sent":{"type":"get_session_stats"},"t":85}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":90}

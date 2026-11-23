@@ -23,6 +23,13 @@ describe("SubAgentItem", () => {
     expect(container.querySelector(".subagent-details")).toBeNull();
   });
 
+  it("hides the cancel button when the running subagent is not cancellable", () => {
+    const { container } = render(
+      <SubAgentItem ev={sa({ status: "running", cancellable: false })} onCancel={() => {}} />,
+    );
+    expect(container.querySelector(".btn-cancel-subagent")).toBeNull();
+  });
+
   it("hides the cancel button once the subagent is done", () => {
     const { container } = render(
       <SubAgentItem ev={sa({ status: "completed" })} onCancel={() => {}} />,
@@ -219,13 +226,13 @@ describe("CreateWorkspaceDialog", () => {
     vi.useFakeTimers();
     try {
       const { onListDirs, pathInput } = setup();
-      fireEvent.change(pathInput, { target: { value: "/home/y" } });
-      fireEvent.change(pathInput, { target: { value: "/home/yk" } });
+      fireEvent.change(pathInput, { target: { value: "/home/e" } });
+      fireEvent.change(pathInput, { target: { value: "/home/ex" } });
       expect(onListDirs).not.toHaveBeenCalled();
       vi.advanceTimersByTime(150);
       // Only the final value survives the debounce.
       expect(onListDirs).toHaveBeenCalledTimes(1);
-      expect(onListDirs).toHaveBeenCalledWith("/home/yk");
+      expect(onListDirs).toHaveBeenCalledWith("/home/ex");
     } finally {
       vi.useRealTimers();
     }
@@ -233,18 +240,18 @@ describe("CreateWorkspaceDialog", () => {
 
   it("shows suggestions matching the current input and completes on click", () => {
     const { pathInput, getByText, rerender, onCreate, onListDirs } = setup();
-    fireEvent.change(pathInput, { target: { value: "/home/yk" } });
+    fireEvent.change(pathInput, { target: { value: "/home/ex" } });
     rerender(
       <CreateWorkspaceDialog
         hosts={hosts}
         onClose={() => {}}
         onCreate={onCreate}
         onListDirs={onListDirs}
-        dirSuggestions={{ prefix: "/home/yk", dirs: ["/home/ykiko/"] }}
+        dirSuggestions={{ prefix: "/home/ex", dirs: ["/home/example/"] }}
       />,
     );
-    fireEvent.mouseDown(getByText("/home/ykiko/"));
-    expect(pathInput.value).toBe("/home/ykiko/");
+    fireEvent.mouseDown(getByText("/home/example/"));
+    expect(pathInput.value).toBe("/home/example/");
   });
 
   it("ignores stale suggestions for older input", () => {
@@ -256,7 +263,7 @@ describe("CreateWorkspaceDialog", () => {
         onClose={() => {}}
         onCreate={onCreate}
         onListDirs={onListDirs}
-        dirSuggestions={{ prefix: "/home/yk", dirs: ["/home/ykiko/"] }}
+        dirSuggestions={{ prefix: "/home/ex", dirs: ["/home/example/"] }}
       />,
     );
     expect(container.querySelector(".dir-suggest")).toBeNull();
@@ -264,9 +271,9 @@ describe("CreateWorkspaceDialog", () => {
 
   it("submits name + path, defaulting the name to the folder basename", () => {
     const { pathInput, onCreate, getByText } = setup();
-    fireEvent.change(pathInput, { target: { value: "/home/ykiko/clice" } });
+    fireEvent.change(pathInput, { target: { value: "/home/example/clice" } });
     fireEvent.click(getByText("Create"));
-    expect(onCreate).toHaveBeenCalledWith("clice", "/home/ykiko/clice", "local", undefined);
+    expect(onCreate).toHaveBeenCalledWith("clice", "/home/example/clice", "local", undefined);
   });
 
   it("names the project a folder outside every project starts, and only that", () => {
@@ -297,14 +304,14 @@ describe("CreateWorkspaceDialog", () => {
     vi.useFakeTimers();
     try {
       const { pathInput, container, onCreate, onListDirs, rerender } = setup();
-      fireEvent.change(pathInput, { target: { value: "/home/yk" } });
+      fireEvent.change(pathInput, { target: { value: "/home/ex" } });
       rerender(
         <CreateWorkspaceDialog
           hosts={hosts}
           onClose={() => {}}
           onCreate={onCreate}
           onListDirs={onListDirs}
-          dirSuggestions={{ prefix: "/home/yk", dirs: ["/home/ykiko/"] }}
+          dirSuggestions={{ prefix: "/home/ex", dirs: ["/home/example/"] }}
         />,
       );
       expect(container.querySelector(".dir-suggest")).not.toBeNull();
@@ -327,14 +334,14 @@ describe("CreateWorkspaceDialog", () => {
     vi.useFakeTimers();
     try {
       const { pathInput, container, onCreate, onListDirs, rerender } = setup();
-      fireEvent.change(pathInput, { target: { value: "/home/yk" } });
+      fireEvent.change(pathInput, { target: { value: "/home/ex" } });
       rerender(
         <CreateWorkspaceDialog
           hosts={hosts}
           onClose={() => {}}
           onCreate={onCreate}
           onListDirs={onListDirs}
-          dirSuggestions={{ prefix: "/home/yk", dirs: ["/home/ykiko/"] }}
+          dirSuggestions={{ prefix: "/home/ex", dirs: ["/home/example/"] }}
         />,
       );
       fireEvent.blur(pathInput);

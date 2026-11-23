@@ -24,7 +24,13 @@ import { isImeKeyEvent } from "./chat/ime";
 import { AgentAvatar } from "./workspace/avatar";
 import { formatRelative, shortModel } from "./format";
 import { MessageItem, MessageBoundary, originLabel, SessionLinkContext } from "./chat/messages";
-import { AddAgentDialog, CreateWorkspaceDialog, ConfirmDialog } from "./workspace/dialogs";
+import {
+  AddAgentDialog,
+  CreateProjectDialog,
+  CreateWorkspaceDialog,
+  ConfirmDialog,
+} from "./workspace/dialogs";
+import { UiDialogModal, uiDialogKey } from "./workspace/UiDialogModal";
 import { Sidebar } from "./sidebar/Sidebar";
 import { GitBar } from "./workspace/GitBar";
 import { ReportSwitch } from "./workspace/ReportSwitch";
@@ -50,7 +56,13 @@ import { uploadSnapshot } from "./dev/debugSnapshot";
 // Re-exported for tests and for anyone importing the old single-file layout.
 export { GitBar } from "./workspace/GitBar";
 export { EventItem, SubAgentItem, StepGroup, MessageItem, BannerItem } from "./chat/messages";
-export { AddAgentDialog, CreateWorkspaceDialog, ConfirmDialog } from "./workspace/dialogs";
+export {
+  AddAgentDialog,
+  CreateProjectDialog,
+  CreateWorkspaceDialog,
+  ConfirmDialog,
+} from "./workspace/dialogs";
+export { UiDialogModal } from "./workspace/UiDialogModal";
 export { Sidebar } from "./sidebar/Sidebar";
 
 function compressToBlob(file: File, maxDim = 1600, quality = 0.85): Promise<Blob> {
@@ -129,10 +141,15 @@ export function App() {
     presets,
     models,
     commands,
+    pendingDialogs,
+    selectCommandAgent,
+    respondUiDialog,
     hosts,
     systemStatus,
     createWorkspace,
+    createProject,
     renameProject,
+    sealProject,
     deleteProject,
     deleteWorkspace,
     addAgent,
@@ -148,9 +165,6 @@ export function App() {
     loadSubagentEvents,
     cancelSubagent,
     cancelQueued,
-    accounts,
-    defaultAccount,
-    setDefaultAccount,
     startReplayDemo,
     lastError,
     clearError,
@@ -301,6 +315,7 @@ export function App() {
   const focusComposerRef = useRef(false);
   const prevWsIdRef = useRef<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showCreateProject, setShowCreateProject] = useState(false);
   const [createInPath, setCreateInPath] = useState<string | undefined>(undefined);
   // The workspace the Add Agent dialog is open for.
   const [addAgentFor, setAddAgentFor] = useState<string | null>(null);
@@ -350,6 +365,7 @@ export function App() {
   const [boardProjectId, setBoardProjectId] = useState<string | null>(null);
   const closeBoard = useCallback(() => setBoardProjectId(null), []);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+  const [sealingProjectId, setSealingProjectId] = useState<string | null>(null);
   const closeDeleteProject = useCallback(() => setDeletingProjectId(null), []);
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
@@ -414,7 +430,7 @@ export function App() {
   useEffect(() => installMacTextKeys(), []);
   const projectFolders = useMemo(
     () => [
-      ...projects.map((p) => p.root),
+      ...projects.flatMap((p) => (p.root ? [p.root] : [])),
       ...workspaces.filter((w) => w.projectLink).map((w) => w.cwd),
     ],
     [projects, workspaces],
@@ -435,6 +451,9 @@ export function App() {
     ? projects.find((p) => p.id === activeWs.projectLink!.projectId)
     : undefined;
   const boardProject = projects.find((p) => p.id === boardProjectId);
+  const activeProjectRef = useRef(activeProject);
+  activeProjectRef.current = activeProject;
+  const projectSealed = activeProject?.status === "sealed";
   const onRenameProject = useCallback(
     (name: string) => {
       if (boardProjectId) renameProject(boardProjectId, name);
@@ -714,6 +733,9 @@ export function App() {
     },
     [boardProjectId, archiveProject],
   );
+  const onSealBoardProject = useCallback(() => {
+    if (boardProjectId) setSealingProjectId(boardProjectId);
+  }, [boardProjectId]);
 
   // The session on screen is read on every device, also when a turn of it
   // ends; a page in the background or out of focus reads nothing.
@@ -1018,6 +1040,10 @@ export function App() {
   const targetBusy = !!targetAgent && agentQueues(targetAgent);
   const othersRunning = activeWs?.agents.some((a) => a.busy && a.id !== targetAgent?.id) ?? false;
 
+  useEffect(() => {
+    selectCommandAgent(activeWs?.id ?? null, targetAgent?.id ?? null);
+  }, [activeWs?.id, targetAgent?.id, selectCommandAgent]);
+
   const onResizeStart = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
@@ -1103,7 +1129,9 @@ export function App() {
   activeWsIdRef.current = activeWsId;
   const askLead = useCallback(
     (objectiveId: string) => {
-      const leadId = projectsRef.current.find((p) => p.id === boardProjectId)?.leadWorkspaceId;
+      const project = projectsRef.current.find((p) => p.id === boardProjectId);
+      if (project?.status === "sealed") return;
+      const leadId = project?.leadWorkspaceId ?? project?.lead?.workspaceId;
       if (!leadId) return;
       // Added to whatever was being written to the lead, not in its place.
       const onLead = activeWsIdRef.current === leadId;
@@ -1176,7 +1204,14 @@ export function App() {
   const handleSend = useCallback(async () => {
     const text = (textareaRef.current?.value ?? "").trim();
     const ws = activeWsRef.current;
-    if ((!text && pendingImages.length === 0) || !ws || sendingRef.current) return;
+    if (
+      (!text && pendingImages.length === 0) ||
+      !ws ||
+      activeProjectRef.current?.status === "sealed" ||
+      sendingRef.current
+    ) {
+      return;
+    }
     sendingRef.current = true;
     let sent = false;
     try {
@@ -1282,6 +1317,18 @@ export function App() {
     }
   };
 
+  const currentDialog = pendingDialogs
+    .filter((dialog) => dialog.workspaceId === activeWsId)
+    .sort((a, b) => a.createdAt - b.createdAt || a.requestId.localeCompare(b.requestId))[0];
+  const otherDialog = pendingDialogs
+    .filter((dialog) => dialog.workspaceId !== activeWsId)
+    .sort((a, b) => a.createdAt - b.createdAt || a.requestId.localeCompare(b.requestId))[0];
+  const otherDialogCount = new Set(
+    pendingDialogs
+      .filter((dialog) => dialog.workspaceId !== activeWsId)
+      .map((dialog) => dialog.workspaceId),
+  ).size;
+
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const el = e.target;
     const val = el.value;
@@ -1325,6 +1372,17 @@ export function App() {
             ⚠ {lastError}
           </div>
         )}
+        {otherDialog && (
+          <div className="ui-dialog-alert" role="alert">
+            <span>
+              {otherDialogCount} other session{otherDialogCount === 1 ? "" : "s"} waiting for your
+              response
+            </span>
+            <button type="button" onClick={() => onSelectWorkspace(otherDialog.workspaceId)}>
+              Open session
+            </button>
+          </div>
+        )}
         {(sidebarOpen || sidebarShield) && (
           <div
             className={`sidebar-overlay${sidebarOpen ? "" : " closing"}`}
@@ -1345,8 +1403,6 @@ export function App() {
             searchQuery={searchQuery}
             searchHits={searchHits}
             systemStatus={systemStatus}
-            accounts={accounts}
-            defaultAccount={defaultAccount}
             onSelect={onSelectWorkspace}
             onDelete={onDeleteWorkspace}
             onDeleteProject={askDeleteProject}
@@ -1354,6 +1410,7 @@ export function App() {
             onSearchChange={setSearchQuery}
             onJump={jumpToMessage}
             onCreate={onCreateWorkspace}
+            onCreateProject={() => setShowCreateProject(true)}
             onCreateIn={onCreateWorkspaceIn}
             onReplayDemo={onReplayDemo}
             onPurgeArchived={onPurgeArchived}
@@ -1361,7 +1418,6 @@ export function App() {
             onRenameProject={renameProject}
             onRestoreProject={onRestoreProject}
             onDebugSnapshot={takeSnapshot}
-            onSetDefaultAccount={setDefaultAccount}
           />
         </div>
 
@@ -1403,15 +1459,24 @@ export function App() {
                     </span>
                   </span>
                   <GitBar git={activeWs.git ?? null} pr={activeWs.pr ?? null} />
+                  {projectSealed && (
+                    <span className="sealed-badge" title={activeProject?.sealedReason ?? undefined}>
+                      Sealed · read-only
+                    </span>
+                  )}
                   <span className="ws-info-spacer" />
                   {/* Phones: the panels' rail shares the branch's line. */}
                   <Rail className="header-rail" items={railItems} />
-                  <ReportSwitch
-                    link={activeWs.projectLink}
-                    onSet={(reports) => setReporting(activeWs.id, reports)}
-                  />
+                  {!projectSealed && (
+                    <ReportSwitch
+                      link={activeWs.projectLink}
+                      onSet={(reports) => setReporting(activeWs.id, reports)}
+                    />
+                  )}
                   {/* A lead goes with its project. */}
-                  {activeWs.archivedAt == null && activeWs.projectLink?.role !== "lead" ? (
+                  {!projectSealed &&
+                  activeWs.archivedAt == null &&
+                  activeWs.projectLink?.role !== "lead" ? (
                     <button
                       className="btn-ghost ws-archive-btn"
                       title="Archive: unload history from memory and stop idle sessions"
@@ -1422,6 +1487,12 @@ export function App() {
                     </button>
                   ) : null}
                 </div>
+                {projectSealed && (
+                  <div className="sealed-banner" role="status">
+                    This project is sealed. History, objectives, issues and notes are read-only.
+                    {activeProject?.sealedReason ? ` Reason: ${activeProject.sealedReason}` : ""}
+                  </div>
+                )}
                 {activeWs.archivedAt != null && (
                   <div className="archived-banner">
                     <span>
@@ -1429,9 +1500,14 @@ export function App() {
                       {archiveAfterDays > 0 ? ` · idle for over ${archiveAfterDays} days` : ""}.
                       Sending a message restores it.
                     </span>
-                    <button className="btn-inline" onClick={() => unarchiveWorkspace(activeWs.id)}>
-                      Restore
-                    </button>
+                    {!projectSealed && (
+                      <button
+                        className="btn-inline"
+                        onClick={() => unarchiveWorkspace(activeWs.id)}
+                      >
+                        Restore
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -1537,7 +1613,7 @@ export function App() {
                   <div className="command-popup">
                     {filteredCmds.map((cmd, i) => (
                       <div
-                        key={cmd.name}
+                        key={`${cmd.source ?? "unknown"}:${cmd.name}:${i}`}
                         className={`command-item ${i === cmdIdx ? "active" : ""}`}
                         onMouseDown={(e) => {
                           e.preventDefault();
@@ -1545,6 +1621,7 @@ export function App() {
                         }}
                       >
                         <span className="command-name">/{cmd.name}</span>
+                        {cmd.source && <span className="command-source">{cmd.source}</span>}
                         {cmd.argumentHint && (
                           <span className="command-hint">{cmd.argumentHint}</span>
                         )}
@@ -1598,7 +1675,7 @@ export function App() {
                   <button
                     className="btn-attach"
                     onClick={() => fileInputRef.current?.click()}
-                    disabled={!hasAgents}
+                    disabled={!hasAgents || projectSealed}
                     title="Attach image"
                   >
                     +
@@ -1629,19 +1706,21 @@ export function App() {
                         ...imgs.map((file) => ({ file, preview: URL.createObjectURL(file) })),
                       ]);
                     }}
-                    disabled={!hasAgents}
+                    disabled={!hasAgents || projectSealed}
                     placeholder={
-                      window.matchMedia?.(PHONE).matches
-                        ? activeWs.agents.length > 1
-                          ? "Message, or @ an agent"
-                          : "Message, or / for commands"
-                        : activeWs.agents.length > 1
-                          ? "Type / for commands, @ to mention an agent..."
-                          : "Type / for commands, or send a message..."
+                      projectSealed
+                        ? "Project sealed · read-only"
+                        : window.matchMedia?.(PHONE).matches
+                          ? activeWs.agents.length > 1
+                            ? "Message, or @ an agent"
+                            : "Message, or / for commands"
+                          : activeWs.agents.length > 1
+                            ? "Type / for commands, @ to mention an agent..."
+                            : "Type / for commands, or send a message..."
                     }
                     rows={1}
                   />
-                  {othersRunning && (
+                  {othersRunning && !projectSealed && (
                     <button
                       className="btn-abort btn-abort-others"
                       title="Stop what every agent is doing now; background tasks keep going"
@@ -1653,7 +1732,7 @@ export function App() {
                       </span>
                     </button>
                   )}
-                  {targetBusy && (
+                  {targetBusy && !projectSealed && (
                     <button
                       className="btn-abort"
                       title={`Stop ${targetAgent.name}'s turn; background tasks keep going`}
@@ -1667,7 +1746,12 @@ export function App() {
                     onClick={() => {
                       void handleSend();
                     }}
-                    disabled={(!hasInput && pendingImages.length === 0) || !hasAgents || uploading}
+                    disabled={
+                      (!hasInput && pendingImages.length === 0) ||
+                      !hasAgents ||
+                      uploading ||
+                      projectSealed
+                    }
                     title={
                       targetBusy
                         ? `${targetAgent.name} is busy — message will run next`
@@ -1780,6 +1864,13 @@ export function App() {
         )}
         {activeWs && <Rail className="side-rail" items={railItems} />}
 
+        {showCreateProject && (
+          <CreateProjectDialog
+            onClose={() => setShowCreateProject(false)}
+            onCreate={createProject}
+          />
+        )}
+
         {showCreate && (
           <CreateWorkspaceDialog
             hosts={hosts}
@@ -1811,14 +1902,29 @@ export function App() {
             onClose={closeBoard}
             onOpenSession={openSessionFromBoard}
             onAskLead={
-              boardProject.leadWorkspaceId &&
-              workspaces.some((w) => w.id === boardProject.leadWorkspaceId)
+              boardProject.status !== "sealed" &&
+              (boardProject.leadWorkspaceId ?? boardProject.lead?.workspaceId) &&
+              workspaces.some(
+                (w) => w.id === (boardProject.leadWorkspaceId ?? boardProject.lead?.workspaceId),
+              )
                 ? askLead
                 : null
             }
             onRename={onRenameProject}
-            onArchive={onArchiveBoardProject}
+            onArchive={boardProject.status === "sealed" ? undefined : onArchiveBoardProject}
+            onSeal={boardProject.status === "sealed" ? undefined : onSealBoardProject}
             onDelete={onDeleteBoardProject}
+          />
+        )}
+
+        {sealingProjectId && (
+          <ConfirmDialog
+            title="Seal project"
+            body="Sealing stops its sessions and makes its history, board and notes permanently read-only."
+            confirmLabel="Seal project"
+            danger
+            onConfirm={() => sealProject(sealingProjectId)}
+            onClose={() => setSealingProjectId(null)}
           />
         )}
 
@@ -1847,14 +1953,21 @@ export function App() {
             );
           })()}
 
-        {addAgentFor && (
+        {currentDialog && (
+          <UiDialogModal
+            key={uiDialogKey(currentDialog)}
+            dialog={currentDialog}
+            onRespond={respondUiDialog}
+          />
+        )}
+
+        {addAgentFor && !projectSealed && (
           <AddAgentDialog
             presets={presets}
             models={models}
-            accounts={accounts}
             onClose={() => setAddAgentFor(null)}
-            onAdd={(name, model, avatar, color, account, effort) =>
-              addAgent(addAgentFor, name, model, avatar, color, account, effort)
+            onAdd={(name, model, avatar, color, effort) =>
+              addAgent(addAgentFor, name, model, avatar, color, effort)
             }
           />
         )}

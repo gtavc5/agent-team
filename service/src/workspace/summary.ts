@@ -1,5 +1,5 @@
 import type { Message } from "./workspace";
-import type { StreamEvent } from "../session/claude";
+import type { StreamEvent } from "../session/types";
 import { PANEL_ACTIONS } from "../project/tools";
 
 // History pages carry only what the collapsed view needs: kinds, chips,
@@ -75,6 +75,7 @@ export function summarizeEvent(e: StreamEvent): StreamEvent {
           ...(sa.lastTool && { lastTool: sa.lastTool }),
           ...(sa.usage && { usage: sa.usage }),
           ...(sa.durationMs != null && { durationMs: sa.durationMs }),
+          ...(sa.cancellable !== undefined && { cancellable: sa.cancellable }),
           eventCount: sa.events?.length ?? sa.eventCount ?? 0,
           ...(sa.prompt && { hasPrompt: true }),
           ...(sa.summary && { summaryLength: sa.summary.length }),
@@ -89,9 +90,19 @@ export function summarizeEvent(e: StreamEvent): StreamEvent {
   return base;
 }
 
+/** Strip persistence-only dispatch fields before broadcasting a message over WS. */
+export function toWireMessage(m: Message): Message {
+  if (m.queuedEnvelope === undefined && m.dispatchAttempt === undefined) return m;
+  const copy = { ...m };
+  delete copy.queuedEnvelope;
+  delete copy.dispatchAttempt;
+  return copy;
+}
+
 export function summarizeMessage(m: Message): Message {
-  if (!m.events?.length) return m;
-  return { ...m, events: m.events.map(summarizeEvent), detail: "summary" };
+  const wire = toWireMessage(m);
+  if (!wire.events?.length) return wire;
+  return { ...wire, events: wire.events.map(summarizeEvent), detail: "summary" };
 }
 
 export function summarizeMessages(messages: Message[]): Message[] {

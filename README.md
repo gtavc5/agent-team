@@ -6,12 +6,9 @@ lead starts **workers** in the repository or a git worktree, and every one of
 them is a conversation you can open and join — from a browser, or from a phone
 where the panel installs as a home-screen app.
 
-It drives the agent CLIs you already have: **Claude** through
-`@anthropic-ai/claude-agent-sdk` and **Codex** through `codex app-server`,
-and **Cursor**'s agents (Composer, Gemini, Grok, ...) through `@cursor/sdk`,
-whose agent loop runs inside the server against Cursor's hosted models.
-There is no model of its own here; this is the orchestration and the UI around
-them.
+The panel runs Pi and Codex (through `codex app-server`). Claude, Cursor and
+agy sessions from older versions remain readable as history but cannot be sent
+new work. The panel provides the orchestration and UI, not a model of its own.
 
 ## How the team works
 
@@ -43,9 +40,8 @@ them.
 - **Across projects** — leads message each other's projects
   (`list_projects`, `message_project`).
 - **Surviving restarts and limits** — a turn a server restart cut off is
-  carried on by the panel itself; a turn stopped by the five-hour limit is
-  retried after the window resets; a weekly limit on the default account
-  fails over to another configured account.
+  carried on by the panel itself; a turn stopped by a usage limit is retried
+  after the window resets.
 - Leads and workers write to you in Simplified Chinese (code, identifiers
   and commits stay English); the instruction is in
   `service/src/project/tools.ts`.
@@ -69,14 +65,11 @@ them.
   - _Objectives_ — the project's board.
 - **Run state per agent** — idle, working, waiting on background work, or
   sleeping until a scheduled wake-up. The context figure is the size of the
-  turn's last request against the model's window (Cursor reports none), not
-  a running total. A message to a working Codex agent goes into its running
-  turn.
-- **Slash commands** handled by the panel itself, on top of whatever the
-  Claude CLI offers: `/effort <level>`, `/fast [on|off]` (Claude fast mode /
-  Codex priority tier / a Cursor model's `fast` parameter), `/goal <objective>` (Codex goals: the agent keeps
-  working toward it across turns; `/goal clear` ends it), `/context`,
-  `/usage`. The CLI's own command list is remembered across restarts.
+  turn's last request against the model's window, not a running total. A
+  message to a working Codex agent goes into its running turn.
+- **Slash commands** handled by the panel itself: `/effort <level>`,
+  `/model <id>`, `/fast [on|off]` (Codex's priority tier), `/context` and
+  `/usage`. `/goal` is disabled.
 - **Scheduled wake-ups** — an agent can put itself to sleep and come back
   later; the banner says what it is waiting for and when it returns.
 - **Git awareness** — branch, dirty count and open PRs per folder.
@@ -93,12 +86,8 @@ them.
 ## Requirements
 
 - Node.js 26+ (the history is stored with `node:sqlite`)
-- [`claude`](https://docs.claude.com/en/docs/claude-code/overview) on `PATH`, if
-  you use Claude
 - A [Codex](https://developers.openai.com/codex/cli) login, if you use Codex
   (`npx codex login` in the repository runs the bundled CLI)
-- For Cursor models, a Cursor API key (`[cursor]` below); the SDK is an npm
-  dependency, nothing to install on `PATH`
 
 Codex runs as the binary of the `@openai/codex` version pinned in
 `service/package.json`, not a `codex` on your `PATH`: bump it there when new
@@ -147,19 +136,19 @@ and pull request. Agent-facing project rules live in `.claude/CLAUDE.md`, with
 task-specific playbooks under `.claude/skills/` (deploy, capture-sdk,
 stream-debug, add-model, review).
 
-Every backend's event mapping is tested against recorded real interactions
-(`service/tests/snap/{claude,codex,cursor}/`): each fixture is a script (`<name>.ts`,
-which also states what it verifies), the recording it produced
-(`<name>.jsonl`) and the transcript the replay pins (`<name>.snap.md`).
-`npm run capture -- <backend> <name>` records a fixture with your own login;
+Codex event mapping is tested against recorded real interactions
+(`service/tests/snap/codex/`): each fixture is a script (`<name>.ts`, which
+also states what it verifies), the recording it produced (`<name>.jsonl`) and
+the transcript the replay pins (`<name>.snap.md`).
+`npm run capture -- codex <name>` records a fixture with your own login;
 `npm run summarize -- <file.jsonl>` prints one line per frame. When a CLI
 changes shape, re-record rather than guess.
 
 ## Configuration
 
 Everything lives in `config.toml` (gitignored — `config.example.toml` is the
-template). Accounts, providers and presets reload live on change; the port and
-the auth cookie secret need a restart.
+template). Providers reload live on change; the port and the auth cookie
+secret need a restart.
 
 ```toml
 [auth]                       # omit the section to disable auth entirely
@@ -175,19 +164,24 @@ archive_after_days = 14      # 0 disables archiving
 label = "Local"
 type = "local"
 
-[accounts.work]              # extra Claude accounts, picked per agent
-oauth_token = "sk-ant-oat01-..."   # from `claude setup-token`
-
 [providers.deepseek]         # any Anthropic-compatible endpoint
 api_key = "..."
 base_url = "https://api.deepseek.com/anthropic"
 
 [projects]                   # what new leads (and workers started without a model) run on
-model = "cursor/gemini-4-argon"   # any model in the picker; Opus 5.5 when unset
+model = "gpt-6-astra"         # any model in the picker
 effort = "high"
 
-[cursor]                     # the cursor/ models
-api_key = "..."              # a Cursor user or service account key, billed to its plan
+[pi]                         # optional Pi runtime defaults
+packages = []
+exclude_packages = []
+default_model = "provider/model"
+default_effort = "medium"
+offline = false
+
+[server]
+# Enables self-restart on macOS when explicitly configured:
+# restart_command = ["launchctl", "kickstart", "-k", "gui/501/com.example.agent-team"]
 ```
 
 A provider name must be a prefix of the model ids routed to it, so
@@ -195,37 +189,26 @@ A provider name must be a prefix of the model ids routed to it, so
 
 ### Environment
 
-| Variable                       | Default   | Meaning                                 |
-| ------------------------------ | --------- | --------------------------------------- |
-| `AGENT_TEAM_PORT`              | `9800`    | HTTP + WebSocket port                   |
-| `AGENT_TEAM_HOST`              | `0.0.0.0` | Address the server listens on           |
-| `AGENT_TEAM_BASE_DIR`          | cwd       | Where `.agent-team/` is stored          |
-| `AGENT_TEAM_WEB_DIR`           | bundled   | Where the built UI is served from       |
-| `AGENT_TEAM_DEBUG`             | unset     | `1` logs raw CLI payloads               |
-| `AGENT_TEAM_CLAUDE_EXECUTABLE` | the SDK's | The `claude` binary Claude sessions run |
+| Variable              | Default   | Meaning                           |
+| --------------------- | --------- | --------------------------------- |
+| `AGENT_TEAM_PORT`     | `9800`    | HTTP + WebSocket port             |
+| `AGENT_TEAM_HOST`     | `0.0.0.0` | Address the server listens on     |
+| `AGENT_TEAM_BASE_DIR` | cwd       | Where `.agent-team/` is stored    |
+| `AGENT_TEAM_WEB_DIR`  | bundled   | Where the built UI is served from |
+| `AGENT_TEAM_DEBUG`    | unset     | `1` logs raw CLI payloads         |
 
 State (workspaces, `history.db` and its search index, projects and their
 boards, debug snapshots) lives under `.agent-team/` in the base directory.
 
 ## Available models
 
-The model list is maintained by hand in
-[`service/src/config/presets.ts`](service/src/config/presets.ts) — ids, labels, backend,
-which reasoning-effort levels each one accepts, the default effort, for
-Codex the context window and fast service tier, and for Cursor the model
-parameters effort and fast mode are sent as. Adding a model means adding
-an entry there **and** making sure the CLI on your `PATH` is new enough to
-know the id.
+The Codex model list is maintained by hand in
+[`service/src/config/presets.ts`](service/src/config/presets.ts) and is empty
+when the pinned Codex binary is unavailable. Other model ids route to Pi;
+`provider/model` is the conventional Pi form.
 
-A `[1m]` suffix selects the large context window: for Claude it is part of
-the model id the CLI accepts; for Codex (`gpt-6-astra[1m]`, `gpt-5.6-*[1m]`)
-the id is stripped and the 872K window is set through `model_context_window`.
-The numbers come from `~/.codex/models_cache.json`.
-
-Cursor models are `cursor/` + the id in Cursor's catalog
-(`Cursor.models.list()`, which also lists each model's parameters and
-default variant); the prefix keeps them apart from the Claude and GPT ids
-that catalog shares.
+For Codex, a `[1m]` suffix selects the 872K context window through
+`model_context_window`; the plain CLI model id has the suffix stripped.
 
 Agent identities (name, avatar, colour) are presets in the same file.
 
@@ -252,8 +235,8 @@ detached from the caller; it logs to `~/.cache/agent-team-deploy.log`.
 
 ```
 service/src/     Node server
-  server/        HTTP + WebSocket, auth, uploads, quota
-  session/       one adapter per backend (claude.ts, codex.ts, cursor.ts)
+  server/        HTTP + WebSocket, auth, uploads
+  session/       codex.ts, shared types, host lifecycle, read-only legacy sessions
   workspace/     message list, event aggregation, persistence, search
   project/       project leads, worker sessions, objectives, the panel's MCP tools
   config/        config.toml, agent + model lists (presets.ts, hand-maintained)

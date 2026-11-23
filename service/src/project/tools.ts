@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ENTRY_KINDS, type EntryKind } from "../workspace/history-index";
+import { NOTE_SLUG_PATTERN, type Note, type NoteSummary } from "./notes";
 import type { Project } from "./store";
 import {
   LIMITS,
@@ -23,7 +24,11 @@ export interface PanelTool {
   name: string;
   description: string;
   shape: z.ZodRawShape;
-  handler: (args: Record<string, unknown>) => Promise<string>;
+  handler: (
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    callId?: string,
+  ) => Promise<string>;
   // Refused to the session's subagents, which inherit its tools, with this
   // as the reason: the call speaks for the session itself.
   subagentRefusal?: string;
@@ -32,6 +37,22 @@ export interface PanelTool {
 export interface PanelToolset {
   instructions: string;
   tools: PanelTool[];
+}
+
+// Gemini rejects a tool schema whose enum contains an empty string. Keep the
+// allowed values in the description instead; calls still use the original schema.
+export function forGemini(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(forGemini);
+  if (!v || typeof v !== "object") return v;
+  const o: Record<string, unknown> = Object.fromEntries(
+    Object.entries(v).map(([k, x]) => [k, forGemini(x)]),
+  );
+  if (Array.isArray(o.enum) && o.enum.includes("")) {
+    const values = o.enum.map((e) => JSON.stringify(e)).join(", ");
+    delete o.enum;
+    o.description = [o.description, `One of ${values}`].filter(Boolean).join(". ");
+  }
+  return o;
 }
 
 export interface StartSessionArgs {
@@ -99,7 +120,7 @@ export interface HistorySearch {
   message?: string;
   since?: number;
   until?: number;
-  level?: "main" | "subagents";
+  depth?: "main" | "subagents";
   caseSensitive?: boolean;
   project?: string;
   limit: number;
@@ -110,7 +131,7 @@ export interface HistorySearch {
 
 export interface PanelApi {
   projectStatus(projectId: string): Promise<string>;
-  startSession(projectId: string, args: StartSessionArgs): string;
+  startSession(projectId: string, args: StartSessionArgs): string | Promise<string>;
   readSession(
     projectId: string,
     sessionId: string,
@@ -138,15 +159,20 @@ export interface PanelApi {
   readObjective(projectId: string, id: string): Promise<string>;
   // sessionId: the worker session that made the call, if one did.
   writeObjective(projectId: string, patch: ObjectivePatch, sessionId?: string): Promise<string>;
-  addItems(projectId: string, objectiveId: string, tasks: string[], decisions: string[]): string;
+  addItems(
+    projectId: string,
+    objectiveId: string,
+    tasks: string[],
+    decisions: string[],
+  ): string | Promise<string>;
   updateItem(
     projectId: string,
     objectiveId: string,
     itemId: string,
     patch: ItemPatch,
     sessionId?: string,
-  ): string;
-  deleteObjective(projectId: string, id: string): string;
+  ): string | Promise<string>;
+  deleteObjective(projectId: string, id: string): string | Promise<string>;
   listIssues(projectId: string, filter: IssueFilter): string;
   readIssue(
     projectId: string,
@@ -154,15 +180,24 @@ export interface PanelApi {
   ): Promise<string>;
   // sessionId: the worker session that made the call, if one did.
   writeIssues(projectId: string, patches: IssuePatch[], sessionId?: string): Promise<string>;
-  writeIssueGroup(projectId: string, patch: GroupPatch): string;
-  closeIssues(projectId: string, ids: string[], fixedBy: string): string;
+  writeIssueGroup(projectId: string, patch: GroupPatch): string | Promise<string>;
+  closeIssues(projectId: string, ids: string[], fixedBy: string): string | Promise<string>;
   listProjects(projectId: string): string;
   messageProject(projectId: string, targetId: string, text: string): string;
+  listNotes(projectId: string): NoteSummary[];
+  readNote(projectId: string, slug: string): Note;
+  writeNote(
+    projectId: string,
+    slug: string,
+    content: string,
+    expectedVersion?: string | null,
+  ): Promise<NoteSummary>;
   workerReport(
     workspaceId: string,
     text: string,
     final: boolean,
     finish?: FinishPatch,
+    callId?: string,
   ): Promise<string>;
   currentTask(workspaceId: string, objectiveId?: string): Promise<string>;
   // Throws when the session no longer reports to the lead: its write tools
@@ -203,7 +238,7 @@ export function leadToolset(
   const id = project.id;
   return {
     instructions: [
-      `You are the lead agent of the project "${project.name}" (repository ${project.root}).`,
+      `You are the lead agent of the project "${project.name}" (${project.root ? `repository ${project.root}` : "no Git repository"}).`,
       LANGUAGE,
       "You keep the whole project in view: from the board and the sessions you discuss with the user what to do. Start worker sessions (start_session) only when the user asks for it: for a piece of work the user decided on, with its objective and task, or for a topic the user wants to go into in depth (then its task says what to discuss, and that it starts no work on its own). A worker is a separate session the user opens and talks to directly. Give it a complete, self-contained task.",
       [
@@ -219,15 +254,16 @@ export function leadToolset(
       ].join(" "),
       LIVE,
       ISSUES,
-      `Notes are markdown files under ${notesDir}, read and written with your file tools: designs and plans that outlive one task, kept as live as the board.`,
+      `Use list_notes, read_note and write_note for designs and plans under ${notesDir} that outlive one task, kept as live as the board.`,
       "Other projects have leads of their own: list_projects shows them, message_project sends one a message without waiting. Its answer arrives later as a message from that project.",
       HISTORY,
     ].join("\n\n"),
     tools: [
       projectStatusTool(api, id),
+      ...notesTools(api, id),
       {
         name: "start_session",
-        description: `Start a worker: a session in cwd whose first message is task. cwd is the repository or a worktree, reused: one whose sessions are idle or archived (project_status), clean, its branch merged or pushed; archive its idle session, then git -C <worktree> switch -c <branch> origin/main. A new worktree only when all are taken, at most four unless the user wants more. Models: ${models.join(", ")}.`,
+        description: `Start a worker: a session in cwd whose first message is task. ${project.root ? "cwd is the repository or a worktree, reused: one whose sessions are idle or archived (project_status), clean, its branch merged or pushed; archive its idle session, then git -C <worktree> switch -c <branch> origin/main. A new worktree only when all are taken, at most four unless the user wants more." : "Use an existing directory; this project has no Git worktrees."} Models: ${models.join(", ")}.`,
         shape: {
           title: z.string(),
           cwd: z.string(),
@@ -376,7 +412,8 @@ function historyTools(api: PanelApi, id: string): PanelTool[] {
         message: z.string().optional().describe("A message id in that session"),
         since: z.string().optional().describe("ISO, UTC unless it says"),
         until: z.string().optional(),
-        level: z.enum(["main", "subagents"]).optional(),
+        depth: z.enum(["main", "subagents"]).optional(),
+        level: z.enum(["main", "subagents"]).optional().describe("Deprecated alias for depth"),
         lines: z.number().int().min(1).max(50).optional().describe("Per hit (3)"),
         context: z.number().int().min(0).max(20).optional().describe("Around each line (0)"),
         case_sensitive: z.boolean().optional(),
@@ -397,7 +434,9 @@ function historyTools(api: PanelApi, id: string): PanelTool[] {
             ...(typeof a.message === "string" && { message: a.message }),
             ...(typeof a.since === "string" && { since: time("since", a.since) }),
             ...(typeof a.until === "string" && { until: time("until", a.until) }),
-            ...((a.level === "main" || a.level === "subagents") && { level: a.level }),
+            ...(a.depth === "main" || a.depth === "subagents"
+              ? { depth: a.depth }
+              : (a.level === "main" || a.level === "subagents") && { depth: a.level }),
             ...(typeof a.lines === "number" && { lines: a.lines }),
             ...(typeof a.context === "number" && { context: a.context }),
             caseSensitive: a.case_sensitive === true,
@@ -704,7 +743,7 @@ function projectView(notesDir: string): string[] {
     "When your work replaces something (a build system, a module, a test suite, an API, a workflow), it is done only when the old one is gone wherever it is described: docs, CLAUDE.md, skills, scripts, comments, tasks, issues, notes, and objectives (name those in finish_task: the lead deletes them). Search by its names; delete what applied only to the old one and keep what still holds. That is part of the task, not scope creep.",
     LIVE,
     ISSUES,
-    `The project's notes are markdown files under ${notesDir}. When unsure what exactly the task is or what was decided (a long task, a compacted context), call current_task. When your work touches what another session did, read it (project_status, read_session) rather than asking the user.`,
+    `Use list_notes and read_note for markdown notes under ${notesDir}. When unsure what exactly the task is or what was decided (a long task, a compacted context), call current_task. When your work touches what another session did, read it (project_status, read_session) rather than asking the user.`,
     HISTORY,
   ];
 }
@@ -724,15 +763,20 @@ export function workerToolset(
   isolated = false,
   unreported = false,
 ): PanelToolset {
-  if (unreported) return ownSessionToolset(api, project, notesDir);
+  if (unreported) return ownSessionToolset(api, project, notesDir, !isolated);
   return {
     instructions: [
-      `You are a session of the project "${project.name}" (repository ${project.root}). Its lead agent coordinates the work there and may have started you with a task; the user may also talk to you directly.`,
+      `You are a session of the project "${project.name}" (${project.root ? `repository ${project.root}` : "no Git repository"}). Its lead agent coordinates the work there and may have started you with a task; the user may also talk to you directly.`,
       LANGUAGE,
       "The task is yours: decide what you can yourself. What is the user's to decide, ask the user, not the lead, here in your reply, and stop: they come to this session to talk it over with you. A task to discuss something with the user is that discussion: start work only when they ask for it.",
       "When the task is done, or the user calls it off, call finish_task once with a concise summary for the lead: what changed, where (branch, commits, PR), what is left, and what your work replaced and where its traces were removed. Use report_progress only for what changes the lead's plans before you finish (the scope changed, the plan proved wrong, a finding that affects other work), not for milestones.",
       "The lead's messages reach you prefixed [From the project lead], the panel's [From the panel]; the rest is the user's. When the lead asks you something after the task, just answer: your reply reaches it once you stop, or at once with report_progress while background work or a scheduled wake-up keeps you going. When the user changes the lead's task, say so in your finish_task summary. Work the lead sends after you finished ends with finish_task too; what the user asks after that needs one only if what you reported no longer holds.",
-      ...(isolated ? [OWN_TASK] : projectView(notesDir)),
+      ...(isolated
+        ? [OWN_TASK]
+        : [
+            ...projectView(notesDir),
+            "Use list_notes, read_note and write_note for project notes.",
+          ]),
     ].join("\n\n"),
     tools: [
       ...reportTools(api, workspaceId, isolated),
@@ -744,6 +788,7 @@ export function workerToolset(
                 (t) => t.name !== "read_objective",
               ),
               ...issueTools(api, project.id, workspaceId),
+              ...notesTools(api, project.id),
             ].map((t) => (READS.has(t.name) ? t : whileReporting(api, workspaceId, t))),
             projectStatusTool(api, project.id),
             ...historyTools(api, project.id),
@@ -752,33 +797,90 @@ export function workerToolset(
   };
 }
 
-const READS = new Set(["list_objectives", "read_objective", "list_issues", "read_issue"]);
+function notesTools(api: PanelApi, id: string): PanelTool[] {
+  const slug = z.string().regex(NOTE_SLUG_PATTERN);
+  return [
+    {
+      name: "list_notes",
+      description: "List project notes and their versions.",
+      shape: {},
+      handler: () => run(() => JSON.stringify(api.listNotes(id))),
+    },
+    {
+      name: "read_note",
+      description: "Read a note and its current version.",
+      shape: { slug },
+      handler: (a) => run(() => JSON.stringify(api.readNote(id, String(a.slug)))),
+    },
+    {
+      name: "write_note",
+      description:
+        "Write a project note. Pass its current expected_version, or null to require a new note.",
+      shape: {
+        slug,
+        content: z.string(),
+        expected_version: z
+          .string()
+          .regex(/^[a-f0-9]{16}$/)
+          .nullable()
+          .optional(),
+      },
+      handler: (a) =>
+        run(async () =>
+          JSON.stringify(
+            await api.writeNote(
+              id,
+              String(a.slug),
+              String(a.content),
+              a.expected_version as string | null | undefined,
+            ),
+          ),
+        ),
+    },
+  ];
+}
+
+const READS = new Set([
+  "list_objectives",
+  "read_objective",
+  "list_issues",
+  "read_issue",
+  "list_notes",
+  "read_note",
+]);
 
 function whileReporting(api: PanelApi, workspaceId: string, t: PanelTool): PanelTool {
   return {
     ...t,
-    handler: (a) =>
+    handler: (a, signal, callId) =>
       run(() => {
         api.checkReporting(workspaceId);
-        return t.handler(a);
+        return t.handler(a, signal, callId);
       }),
   };
 }
 
 // The user's own session (an isolated one the user took over too): it reads
 // the project.
-function ownSessionToolset(api: PanelApi, project: Project, notesDir: string): PanelToolset {
+function ownSessionToolset(
+  api: PanelApi,
+  project: Project,
+  notesDir: string,
+  showNotes: boolean,
+): PanelToolset {
   return {
     instructions: [
-      `You are a session of the project "${project.name}" (repository ${project.root}). The user works with you here directly: you do not report to the project's lead and take no work from it.`,
+      `You are a session of the project "${project.name}" (${project.root ? `repository ${project.root}` : "no Git repository"}). The user works with you here directly: you do not report to the project's lead and take no work from it.`,
       LANGUAGE,
-      `You may read the project: its board (list_objectives, read_objective), its issues (list_issues, read_issue), its sessions (project_status) and their history; you do not write to the board or the issues. The project's notes are markdown files under ${notesDir}. Contexts and issues say when and at which commit they were written: check them against the code before acting on them.`,
+      `You may read the project: its board (list_objectives, read_objective), its issues (list_issues, read_issue), its sessions (project_status) and their history; you do not write to the board or the issues. ${showNotes ? `Use list_notes and read_note for markdown notes under ${notesDir}. ` : ""}Contexts and issues say when and at which commit they were written: check them against the code before acting on them.`,
       HISTORY,
     ].join("\n\n"),
     tools: [
-      ...[...boardTools(api, project.id), ...issueTools(api, project.id)].filter((t) =>
-        READS.has(t.name),
-      ),
+      ...[
+        ...boardTools(api, project.id),
+        ...issueTools(api, project.id),
+        ...(showNotes ? notesTools(api, project.id) : []),
+      ].filter((t) => READS.has(t.name)),
       projectStatusTool(api, project.id),
       ...historyTools(api, project.id),
     ],
@@ -793,7 +895,8 @@ function reportTools(api: PanelApi, workspaceId: string, isolated: boolean): Pan
       name: "report_progress",
       description: "Tell the lead, briefly, what changes its plans; not milestones.",
       shape: { text: z.string() },
-      handler: (a) => run(() => api.workerReport(workspaceId, String(a.text), false)),
+      handler: (a, _signal, callId) =>
+        run(() => api.workerReport(workspaceId, String(a.text), false, undefined, callId)),
       subagentRefusal: REPORT_REFUSAL,
     },
     {
@@ -810,12 +913,18 @@ function reportTools(api: PanelApi, workspaceId: string, isolated: boolean): Pan
           objective_id: z.string().optional().describe("When you work on more than one"),
         }),
       },
-      handler: (a) =>
+      handler: (a, _signal, callId) =>
         run(() =>
-          api.workerReport(workspaceId, String(a.summary), true, {
-            ...(typeof a.context === "string" && { context: a.context }),
-            ...(typeof a.objective_id === "string" && { objectiveId: a.objective_id }),
-          }),
+          api.workerReport(
+            workspaceId,
+            String(a.summary),
+            true,
+            {
+              ...(typeof a.context === "string" && { context: a.context }),
+              ...(typeof a.objective_id === "string" && { objectiveId: a.objective_id }),
+            },
+            callId,
+          ),
         ),
       subagentRefusal: REPORT_REFUSAL,
     },

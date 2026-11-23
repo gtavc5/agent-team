@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { Workspace, Message, WorkspaceCallbacks } from "../../src/workspace/workspace";
 import { HostRegistry } from "../../src/session/host";
-import { StreamEvent } from "../../src/session/claude";
+import { StreamEvent } from "../../src/session/types";
 import { FakeHost, FakeSession } from "./fakes";
 
-function makeWorkspace(model = "claude-fable-5") {
+function makeWorkspace(model = "gpt-5.6-terra") {
   const host = new FakeHost();
   const registry = new HostRegistry();
   registry.register(host);
@@ -190,7 +190,7 @@ describe("Workspace event aggregation", () => {
     });
     const info = ws.addAgent(
       "B",
-      "claude-fable-5",
+      "gpt-5.6-terra",
       "🤖",
       "#888",
       { providerEnv: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-x" } },
@@ -201,9 +201,9 @@ describe("Workspace event aggregation", () => {
     expect(ws.getState().agents[0].account).toBe("work");
   });
 
-  it("cancelSubagent delegates to the owning session's stopTask", () => {
+  it("cancelSubagent delegates to the owning session's stopTask", async () => {
     const { ws, agentInfo, session } = makeWorkspace();
-    ws.cancelSubagent(agentInfo.id, "task-42");
+    await ws.cancelSubagent(agentInfo.id, "task-42");
     expect(session.stoppedTasks).toEqual(["task-42"]);
     expect(() => ws.cancelSubagent("nonexistent", "task-42")).toThrow(/Agent not found/);
   });
@@ -284,9 +284,9 @@ describe("message queue", () => {
     expect(session.sent).toEqual(["after stop"]);
   });
 
-  it("dispose releases every session from the host", () => {
+  it("dispose releases every session from the host", async () => {
     const { ws, host, agentInfo } = makeWorkspace();
-    ws.dispose();
+    await ws.dispose();
     expect(host.destroyed).toEqual([agentInfo.id]);
     expect(ws.agents.size).toBe(0);
   });
@@ -439,7 +439,7 @@ describe("banners, retries and activity", () => {
       onAgentActivity: (_ws, agentId, activity) => seen.push([agentId, activity]),
     };
     const ws = new Workspace("ws-1", "test", "proj", "local", "/tmp", registry, cb);
-    const agent = ws.addAgent("A", "claude-fable-5", "🤖", "#888", {});
+    const agent = ws.addAgent("A", "gpt-5.6-terra", "🤖", "#888", {});
     host.lastSession!.emit("activity", "compacting context");
     expect(seen).toEqual([[agent.id, "compacting context"]]);
     expect(ws.getInfo(false).agents[0].activity).toBe("compacting context");
@@ -459,7 +459,7 @@ describe("banners, retries and activity", () => {
       onUnhandled: (_ws, _agent, msg) => seen.push(msg),
     };
     const ws = new Workspace("ws-1", "test", "proj", "local", "/tmp", registry, cb);
-    ws.addAgent("A", "claude-fable-5", "🤖", "#888", {});
+    ws.addAgent("A", "gpt-5.6-terra", "🤖", "#888", {});
     host.lastSession!.emit("unhandled", { type: "mystery" });
     expect(seen).toEqual([{ type: "mystery" }]);
   });
@@ -562,11 +562,11 @@ describe("effort on the wire", () => {
       onAgentUpdated: (_ws, a) => updates.push({ id: a.id, effort: a.effort }),
     };
     const ws = new Workspace("ws-1", "test", "proj", "local", "/tmp", registry, cb);
-    const agent = ws.addAgent("A", "claude-fable-5-1", "🤖", "#888", { effort: "high" });
+    const agent = ws.addAgent("A", "gpt-5.6-sol", "🤖", "#888", { effort: "high" });
     expect(ws.getInfo(false).agents[0]).toMatchObject({
       effort: "high",
       // What /effort takes, for the panel to offer.
-      effortLevels: ["low", "medium", "high", "xhigh", "max"],
+      effortLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
     });
 
     const session = host.lastSession! as FakeSession & { setEffort?: (l: string) => void };
@@ -591,7 +591,7 @@ describe("per-message effort and context", () => {
       onMessageDone: (_ws, _id, _status, _content, _events, patch) => patches.push(patch),
     };
     const ws = new Workspace("ws-1", "test", "proj", "local", "/tmp", registry, cb);
-    ws.addAgent("A", "claude-fable-5-1", "🤖", "#888", { effort: "xhigh" });
+    ws.addAgent("A", "gpt-5.6-sol", "🤖", "#888", { effort: "xhigh" });
     await ws.sendMessage("hi");
     const session = host.lastSession!;
     session.emit("event", { kind: "text_delta", content: "yo" });
@@ -611,7 +611,7 @@ describe("per-message effort and context", () => {
     });
     const restored = Workspace.fromState(ws.getState(), registry);
     expect(restored.getInfo(false).agents[0].context).toEqual({ tokens: 42000, window: 200000 });
-    expect(patches).toEqual([{ context: { tokens: 42000, window: 200000 } }]);
+    expect(patches.filter(Boolean)).toEqual([{ context: { tokens: 42000, window: 200000 } }]);
   });
 });
 
@@ -628,7 +628,7 @@ describe("agent run state on the wire", () => {
       onAgentState: (_ws, _id, state) => seen.push(state),
     };
     const ws = new Workspace("ws-1", "test", "proj", "local", "/tmp", registry, cb);
-    ws.addAgent("A", "claude-fable-5-1", "🤖", "#888", {});
+    ws.addAgent("A", "gpt-5.6-sol", "🤖", "#888", {});
     expect(ws.getInfo(false).agents[0].state).toBe("idle");
     host.lastSession!.isRunning = true;
     expect(ws.getInfo(false).agents[0].state).toBe("working");
@@ -671,43 +671,12 @@ describe("fast mode and goal commands", () => {
     expect(session.sent).toEqual([]);
   });
 
-  it("/goal records the objective and asks the codex agent to create it", async () => {
+  it("/goal is disabled without sending or changing session state", async () => {
     const { ws, session } = makeWorkspace("gpt-6-astra");
-    await ws.sendMessage("/goal");
-    expect(lastReply(ws).content).toContain("no active goal");
-
     await ws.sendMessage("/goal make the tests green");
-    expect(session.sent).toHaveLength(1);
-    expect(session.sent[0]).toContain("create_goal");
-    expect(session.sent[0]).toContain("make the tests green");
-    expect(session.getState().config.goal).toBe("make the tests green");
-    expect(ws.agentInfo(ws.resolveAgent("A")!).goal).toBe("make the tests green");
-    // The visible user message keeps what was typed, not the rewritten prompt.
-    expect(ws.messages.filter((m) => m.kind === "user").at(-1)!.content).toBe(
-      "/goal make the tests green",
-    );
-
-    session.isRunning = false;
-    await ws.sendMessage("/goal show");
-    expect(lastReply(ws).content).toContain("make the tests green");
-
-    await ws.sendMessage("/goal clear");
-    expect(session.sent).toHaveLength(2);
-    expect(session.sent[1]).toContain("update_goal");
-    expect(session.getState().config.goal).toBeUndefined();
-  });
-
-  it("/goal is a codex feature", async () => {
-    const { ws, session } = makeWorkspace();
-    await ws.sendMessage("/goal anything");
-    expect(lastReply(ws).content).toContain("Codex feature");
+    expect(lastReply(ws).content).toContain("/goal is disabled");
     expect(session.sent).toEqual([]);
-  });
-
-  it("/goal goes to an agy agent as typed: agy keeps goals itself", async () => {
-    const { ws, session } = makeWorkspace("agy/gemini-4-carbon");
-    await ws.sendMessage("/goal make the tests green");
-    expect(session.sent).toEqual(["/goal make the tests green"]);
+    expect(session.getState().config.goal).toBeUndefined();
   });
 });
 
@@ -959,11 +928,12 @@ describe("events between turns and late results", () => {
 describe("messages delivered from a project", () => {
   const lead = { workspaceId: "ws-lead", name: "lead", role: "lead" as const };
 
-  it("shows the text with its sender and sends the model the prompt", () => {
+  it("shows the text with its sender and sends the model the prompt", async () => {
     const { ws, session } = makeWorkspace();
     expect(ws.deliver("fix the parser", lead, "[From the lead]\n\nfix the parser")).toBe("sent");
     expect(session.sent).toEqual(["[From the lead]\n\nfix the parser"]);
     const msg = ws.messages.find((m) => m.kind === "user")!;
+    await Promise.resolve();
     expect(msg).toMatchObject({ content: "fix the parser", from: lead, status: "done" });
   });
 
@@ -1060,46 +1030,46 @@ describe("/model", () => {
   const reply = (ws: Workspace) => ws.messages.filter((m) => m.kind === "agent").at(-1)!.content;
 
   it("shows the model and the ones of its backend it can move to", async () => {
-    const { ws } = makeWorkspace("claude-opus-5-5");
+    const { ws } = makeWorkspace("gpt-6-astra");
     await ws.sendMessage("/model");
-    expect(reply(ws)).toContain("runs on **Claude Opus 5.5**");
-    expect(reply(ws)).toContain("`claude-fable-5-2`");
-    expect(reply(ws)).not.toContain("gpt-");
+    expect(reply(ws)).toContain("runs on **GPT-6 Astra**");
+    expect(reply(ws)).toContain("`gpt-5.6-terra`");
+    expect(reply(ws)).not.toContain("provider/");
   });
 
   it("moves the conversation to another model, with effort and fast mode it takes", async () => {
     const envs: Array<[string, string | undefined]> = [];
-    const { ws, session, agentInfo, emit } = makeWorkspace("claude-opus-5-5");
+    const { ws, session, agentInfo, emit } = makeWorkspace("gpt-6-astra");
     (ws as unknown as { cb: WorkspaceCallbacks }).cb.sessionEnv = (model, account) => {
       envs.push([model, account]);
       return { PROVIDER: model };
     };
     session.getState().config.effort = "xhigh";
     session.getState().config.fast = true;
-    await ws.sendMessage("/model claude-fable-5-2");
-    expect(reply(ws)).toMatch(/moves from Claude Opus 5.5 to \*\*Claude Fable 5.2\*\*/);
-    expect(ws.agents.get(agentInfo.id)!.info.model).toBe("claude-fable-5-2");
+    await ws.sendMessage("/model gpt-5.6-terra");
+    expect(reply(ws)).toMatch(/moves from GPT-6 Astra to \*\*GPT-5.6 Terra\*\*/);
+    expect(ws.agents.get(agentInfo.id)!.info.model).toBe("gpt-5.6-terra");
     expect(session.getState().config).toMatchObject({
-      model: "claude-fable-5-2",
+      model: "gpt-5.6-terra",
       effort: "xhigh",
       fast: true,
     });
-    expect(envs).toEqual([["claude-fable-5-2", undefined]]);
-    expect(session.providerEnv).toEqual({ PROVIDER: "claude-fable-5-2" });
+    expect(envs).toEqual([["gpt-5.6-terra", undefined]]);
+    expect(session.providerEnv).toEqual({ PROVIDER: "gpt-5.6-terra" });
 
     // Replies from here on say which model they ran on.
     await ws.sendMessage("go on");
     emit({ kind: "text_delta", content: "ok" });
     emit({ kind: "result", content: "" });
-    expect(ws.messages.filter((m) => m.kind === "agent").at(-1)!.model).toBe("claude-fable-5-2");
+    expect(ws.messages.filter((m) => m.kind === "agent").at(-1)!.model).toBe("gpt-5.6-terra");
   });
 
   it("drops effort and fast mode a model does not take", async () => {
-    const { ws, session } = makeWorkspace("claude-opus-5-5");
+    const { ws, session } = makeWorkspace("provider/model");
     session.getState().config.effort = "xhigh";
     session.getState().config.fast = true;
-    await ws.sendMessage("/model deepseek-v4-pro");
-    expect(session.getState().config).toMatchObject({ model: "deepseek-v4-pro" });
+    await ws.sendMessage("/model other/model");
+    expect(session.getState().config).toMatchObject({ model: "other/model" });
     expect(session.getState().config.effort).toBeUndefined();
     expect(session.getState().config.fast).toBeUndefined();
     // Nor offered, nor taken by /effort: every path agrees.
@@ -1109,12 +1079,12 @@ describe("/model", () => {
   });
 
   it("stays within its backend, and warns about a model the list does not know", async () => {
-    const { ws, agentInfo } = makeWorkspace("claude-opus-5-5");
-    await ws.sendMessage("/model gpt-6-astra");
-    expect(reply(ws)).toContain("continues only on a Claude model");
-    expect(ws.agents.get(agentInfo.id)!.info.model).toBe("claude-opus-5-5");
-    await ws.sendMessage("/model claude-opus-6");
-    expect(ws.agents.get(agentInfo.id)!.info.model).toBe("claude-opus-6");
+    const { ws, agentInfo } = makeWorkspace("gpt-6-astra");
+    await ws.sendMessage("/model provider/model");
+    expect(reply(ws)).toContain("continues only on a Codex model");
+    expect(ws.agents.get(agentInfo.id)!.info.model).toBe("gpt-6-astra");
+    await ws.sendMessage("/model gpt-7-unknown");
+    expect(ws.agents.get(agentInfo.id)!.info.model).toBe("gpt-7-unknown");
     expect(reply(ws)).toContain("is not in the model list");
   });
 });

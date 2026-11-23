@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { EventEmitter } from "events";
 import { Workspace, WorkspaceCallbacks } from "../../src/workspace/workspace";
 import { HostRegistry, Host, HostSessionHandle, HostInfo, LocalHost } from "../../src/session/host";
-import { SessionConfig, SessionState, UsageStats } from "../../src/session/claude";
+import { PromptEnvelope, SessionConfig, SessionState, UsageStats } from "../../src/session/types";
 
 const emptyUsage: UsageStats = {
   input_tokens: 0,
@@ -22,8 +22,8 @@ class FakeSession extends EventEmitter implements HostSessionHandle {
   constructor(private config: SessionConfig) {
     super();
   }
-  send(prompt: string): Promise<void> {
-    this.sent.push(prompt);
+  send(prompt: string | PromptEnvelope): Promise<void> {
+    this.sent.push(typeof prompt === "string" ? prompt : prompt.text);
     this.isRunning = true;
     return Promise.resolve();
   }
@@ -61,9 +61,10 @@ class FakeHost implements Host {
     this.sessions.set(agentId, s);
     return s;
   }
-  destroySession(agentId: string): void {
+  destroySession(agentId: string): Promise<void> {
     this.sessions.get(agentId)?.abort();
     this.sessions.delete(agentId);
+    return Promise.resolve();
   }
   restoreSession(agentId: string, state: SessionState): HostSessionHandle {
     return this.createSession(agentId, state.config);
@@ -82,8 +83,8 @@ function makeWorkspace(cb: Partial<WorkspaceCallbacks> = {}) {
     onMessageDone: () => {},
     ...cb,
   });
-  const agent = ws.addAgent("A", "claude-fable-5", "a", "#888", {
-    backend: "claude",
+  const agent = ws.addAgent("A", "gpt-5.6-terra", "a", "#888", {
+    backend: "codex",
     providerEnv: { CLAUDE_CODE_OAUTH_TOKEN: "sk-secret" },
   });
   const session = host.sessions.get(agent.id)!;
@@ -95,20 +96,20 @@ describe("Workspace teardown", () => {
     const { ws, host, session } = makeWorkspace();
     await ws.sendMessage("running");
     await ws.sendMessage("queued");
-    ws.dispose();
+    await ws.dispose();
     await tick();
     expect(session.sent).toEqual(["running"]);
     expect(host.sessions.size).toBe(0);
     expect(session.listenerCount("event")).toBe(0);
   });
 
-  it("a real LocalHost forgets the sessions of a disposed workspace", () => {
+  it("a real LocalHost forgets the sessions of a disposed workspace", async () => {
     const host = new LocalHost("local", "Local");
     const registry = new HostRegistry();
     registry.register(host);
     const ws = new Workspace("ws-d", "d", "p", "local", "/tmp", registry);
-    ws.addAgent("A", "claude-fable-5", "a", "#888", { backend: "claude" });
-    ws.dispose();
+    ws.addAgent("A", "gpt-5.6-terra", "a", "#888", { backend: "codex" });
+    await ws.dispose();
     expect((host as unknown as { sessions: Map<string, unknown> }).sessions.size).toBe(0);
   });
 
@@ -152,13 +153,13 @@ describe("Workspace persistence", () => {
     const agent = {
       id: "agent-1",
       name: "A",
-      model: "claude-fable-5",
+      model: "gpt-5.6-terra",
       avatar: "a",
       color: "#888",
       isDefault: true,
       session: {
         sessionId: null,
-        config: { cwd: "/tmp", backend: "claude" as const },
+        config: { cwd: "/tmp", backend: "codex" as const },
         usage: emptyUsage,
       },
     };

@@ -1,47 +1,48 @@
 import { EventEmitter } from "events";
-import {
-  ClaudeSession,
+import type {
+  BackgroundTask,
+  CommandInfo,
+  DispatchedReportProbeResult,
+  PiAvailableModel,
+  UiDialogRequest,
+  UiDialogResponse,
+  PromptEnvelope,
   RunState,
+  SendHooks,
+  SendReceipt,
   SessionConfig,
   SessionState,
   UsageStats,
-  BackgroundTask,
-} from "./claude";
+} from "./types";
 import { CodexSession } from "./codex";
-import { CursorSession } from "./cursor";
-import { AgySession } from "./agy";
+import { ReadOnlyLegacySession } from "./legacy";
+import { PanelHttpServer } from "./panel-http";
+import { PiSession } from "./pi";
 import type { PanelToolset } from "../project/tools";
 
 export interface HostSessionHandle extends EventEmitter {
   sessionId: string | null;
   usage: UsageStats;
   readonly isRunning: boolean;
-  // Richer than isRunning; sessions that don't track it fall back to it.
   readonly runState?: RunState;
-  // Effort in force when none was set explicitly (backend default).
   readonly effectiveEffort?: string | null;
-  // Live background tasks (Claude: background Bash, subagents, Monitor).
   readonly backgroundTaskList?: BackgroundTask[];
-  // Claude: effort/fast the next turn runs with, and whether a changed one
-  // waits for the process to become idle.
   readonly nextTurnOptions?: { model?: string; effort?: string; fast?: boolean };
   readonly optionsPending?: boolean;
-  send(message: string): Promise<void>;
-  // Codex: a message for the running turn; false when no turn takes it.
+  send(input: string | PromptEnvelope, hooks?: SendHooks): Promise<SendReceipt | void>;
   steer?(message: string, inputId: string): Promise<boolean>;
-  // False while the running turn takes no message (it waits to retry).
   readonly canSteer?: boolean;
   abort(): void;
+  resetContext?(): void;
+  dispose?(): Promise<void>;
   setEffort?(level: string): void;
   setFastMode?(on: boolean): void;
   setModel?(model: string, effort: string | undefined, fast: boolean): void;
   setGoal?(goal: string | null): void;
   interrupt?(): Promise<boolean>;
   readonly interruptPending?: boolean;
-  // Null once cancelled, else why it was not.
   cancelWake?(): string | null;
   readonly wake?: { at: number; reason: string } | null;
-  // A wake-up the backend let pass, its prompt for the workspace to send.
   readonly wakeDue?: boolean;
   takeWake?(): { prompt: string; reason: string } | null;
   setPanelTools?(tools: PanelToolset | null): void;
@@ -51,6 +52,17 @@ export interface HostSessionHandle extends EventEmitter {
   getState(): SessionState;
   getContextUsage?(): Promise<Record<string, unknown> | null>;
   getUsageInfo?(): Promise<Record<string, unknown> | null>;
+  readonly pendingUiDialogs?: UiDialogRequest[];
+  respondToUiDialog?(requestId: string, response: UiDialogResponse): void;
+  probeDispatchedReport?(
+    beforeLeafId: string | null,
+    reportId: string,
+    timeoutMs?: number,
+  ): Promise<DispatchedReportProbeResult>;
+  getAvailableModels?(): PiAvailableModel[];
+  getAvailableThinkingLevels?(): string[];
+  getCommands?(): CommandInfo[];
+  reconcileAsyncRuns?(): Promise<void>;
 }
 
 export interface HostInfo {
@@ -67,8 +79,10 @@ export interface Host {
   readonly connected: boolean;
   getInfo(): HostInfo;
   createSession(agentId: string, config: SessionConfig): HostSessionHandle;
-  destroySession(agentId: string): void;
+  destroySession(agentId: string): Promise<void>;
   restoreSession(agentId: string, state: SessionState): HostSessionHandle;
+  discoverPiModels?(config: SessionConfig): Promise<PiAvailableModel[]>;
+  close?(): Promise<void>;
 }
 
 export class LocalHost implements Host {
@@ -76,7 +90,9 @@ export class LocalHost implements Host {
   readonly label: string;
   readonly type = "local" as const;
   readonly connected = true;
-  private sessions = new Map<string, ClaudeSession | CodexSession | CursorSession | AgySession>();
+  private sessions = new Map<string, HostSessionHandle>();
+  private panelHttp?: PanelHttpServer;
+  private closing?: Promise<void>;
 
   constructor(id: string, label: string) {
     this.id = id;
@@ -88,37 +104,74 @@ export class LocalHost implements Host {
   }
 
   createSession(agentId: string, config: SessionConfig): HostSessionHandle {
-    const session =
-      config.backend === "codex"
-        ? new CodexSession(config)
-        : config.backend === "cursor"
-          ? new CursorSession(config)
-          : config.backend === "agy"
-            ? new AgySession(config)
-            : new ClaudeSession(config);
+    if (this.closing) throw new Error("LocalHost is closing");
+    let session: HostSessionHandle;
+    if (config.backend === "codex") {
+      session = new CodexSession(config);
+    } else if (config.backend === "pi") {
+      session = new PiSession(
+        { ...config, agentId },
+        { panelHttp: (this.panelHttp ??= new PanelHttpServer()) },
+      );
+    } else {
+      throw new Error(`Backend "${config.backend ?? "unknown"}" cannot create new sessions`);
+    }
     this.sessions.set(agentId, session);
     return session;
   }
 
-  destroySession(agentId: string): void {
-    const s = this.sessions.get(agentId);
-    if (s) {
-      s.abort();
-      this.sessions.delete(agentId);
-    }
+  async destroySession(agentId: string): Promise<void> {
+    const session = this.sessions.get(agentId);
+    if (!session) return;
+    this.sessions.delete(agentId);
+    if (session.dispose) await session.dispose();
+    else session.abort();
   }
 
   restoreSession(agentId: string, state: SessionState): HostSessionHandle {
-    const session =
-      state.config.backend === "codex"
-        ? CodexSession.fromState(state)
-        : state.config.backend === "cursor"
-          ? CursorSession.fromState(state)
-          : state.config.backend === "agy"
-            ? AgySession.fromState(state)
-            : ClaudeSession.fromState(state);
+    if (this.closing) throw new Error("LocalHost is closing");
+    let session: HostSessionHandle;
+    if (state.config.backend === "codex") {
+      session = CodexSession.fromState(state);
+    } else if (state.config.backend === "pi") {
+      session = PiSession.fromState(
+        { ...state, config: { ...state.config, agentId } },
+        { panelHttp: (this.panelHttp ??= new PanelHttpServer()) },
+      );
+    } else {
+      session = new ReadOnlyLegacySession(state);
+    }
     this.sessions.set(agentId, session);
     return session;
+  }
+
+  async discoverPiModels(config: SessionConfig): Promise<PiAvailableModel[]> {
+    if (this.closing) return [];
+    const agentId = `model-catalog-${Math.random().toString(36).slice(2)}`;
+    const session = new PiSession(
+      { ...config, agentId },
+      { panelHttp: (this.panelHttp ??= new PanelHttpServer()) },
+    );
+    this.sessions.set(agentId, session);
+    try {
+      await session.ensureStarted();
+      return session.getAvailableModels();
+    } finally {
+      await this.destroySession(agentId);
+    }
+  }
+
+  close(): Promise<void> {
+    this.closing ??= Promise.allSettled(
+      [...this.sessions.keys()].map((id) => this.destroySession(id)),
+    ).then(async (results) => {
+      await this.panelHttp?.close();
+      const errors = results.flatMap((result) =>
+        result.status === "rejected" ? [result.reason as unknown] : [],
+      );
+      if (errors.length) throw new AggregateError(errors, "LocalHost failed to close sessions");
+    });
+    return this.closing;
   }
 }
 

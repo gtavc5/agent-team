@@ -1,0 +1,22 @@
+{"header":{"backend":"pi","fixture":"panel-tools-roundtrip","description":"Synthetic Pi tool anchors call real Panel HTTP and persist Notes, Board and Journal effects.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
+{"step":{"op":"send","text":"Record a project update.","i":0},"t":0}
+{"sent":{"type":"prompt","message":"Record a project update."},"t":5}
+{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
+{"frame":{"type":"agent_start"},"t":15}
+{"frame":{"type":"message_end","message":{"role":"user"}},"t":20}
+{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Consider the example."}},"t":30}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"Consider the example."}},"t":35}
+{"frame":{"type":"tool_execution_start","toolName":"write_note","toolCallId":"note","args":{"slug":"example","content":"Synthetic note.","expected_version":null}},"t":40}
+{"step":{"op":"panelCall","callId":"note","i":1},"t":45}
+{"frame":{"type":"tool_execution_start","toolName":"write_objective","toolCallId":"objective","args":{"id":"demo/replay","title":"Replay","goal":"Demonstrate the replay.","context":"Before finish"}},"t":50}
+{"step":{"op":"panelCall","callId":"objective","i":2},"t":55}
+{"frame":{"type":"tool_execution_start","toolName":"finish_task","toolCallId":"report","args":{"summary":"Synthetic work done.","context":"After finish","objective_id":"demo/replay"}},"t":60}
+{"step":{"op":"panelCall","callId":"report","i":3},"t":65}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Proj"}},"t":70}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"ect updated."}},"t":75}
+{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"Project updated."}},"t":80}
+{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"thinking","thinking":"Consider the example."},{"type":"text","text":"Project updated."}]}},"t":85}
+{"frame":{"type":"agent_settled"},"t":90}
+{"sent":{"type":"get_session_stats"},"t":95}
+{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":100}

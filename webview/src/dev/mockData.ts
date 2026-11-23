@@ -173,7 +173,6 @@ export const MOCK_SYSTEM_STATUS: SystemStatus = {
   memUsed: 18253611008,
   uptime: 86400 + 3600 * 3 + 60 * 42,
   hostname: "dev-machine",
-  quota: [],
 };
 
 export const MOCK_PRESETS: AgentPreset[] = [
@@ -183,8 +182,8 @@ export const MOCK_PRESETS: AgentPreset[] = [
 ];
 
 export const MOCK_MODELS: ModelOption[] = [
-  { id: "claude-opus-5-5", label: "Opus 5.5", backend: "claude" },
-  { id: "claude-fable-5-2", label: "Fable 5.2", backend: "claude" },
+  { id: "anthropic/claude-opus-5-5", label: "Opus 5.5", backend: "pi" },
+  { id: "anthropic/claude-fable-5-2", label: "Fable 5.2", backend: "pi" },
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", backend: "codex" },
 ];
 

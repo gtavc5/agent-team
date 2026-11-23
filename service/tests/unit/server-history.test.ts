@@ -1,7 +1,5 @@
-// The real Server in-process saving histories into history.db: what a save
-// writes, the full compare before a history leaves memory, a restart's
-// interrupted turn, and the sidebar's search over it. The Claude SDK is a
-// fake that never yields, so no CLI is spawned.
+// The real Server in-process saving histories into history.db. Sessions are
+// in-memory stand-ins, so no CLI is spawned.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
@@ -11,18 +9,11 @@ import { DatabaseSync } from "node:sqlite";
 import WebSocket from "ws";
 import type { AgentState, Message, WorkspaceState } from "../../src/workspace/workspace";
 
-vi.mock("../../src/server/quota", () => ({
-  QuotaMonitor: class {
-    entries = [];
-    refreshIfStale() {}
-    invalidate() {}
-  },
-}));
-
 import { Server } from "../../src/server/server";
-import { ClaudeSession } from "../../src/session/claude";
+import { LocalHost } from "../../src/session/host";
 import { HistoryDb } from "../../src/workspace/history-db";
 import { historyFile } from "../../src/workspace/state";
+import { FakeSession } from "./fakes";
 
 const ENV_KEYS = ["HOME", "https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"];
 let savedEnv: Record<string, string | undefined>;
@@ -31,26 +22,15 @@ const bases: string[] = [];
 beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   for (const k of ENV_KEYS.slice(1)) delete process.env[k];
-  ClaudeSession.sdk = {
-    query: () => {
-      let finish: (r: IteratorResult<unknown>) => void = () => {};
-      const pending = new Promise<IteratorResult<unknown>>((r) => (finish = r));
-      return {
-        [Symbol.asyncIterator]: () => ({ next: () => pending }),
-        close: () => finish({ value: undefined, done: true }),
-        supportedCommands: () => Promise.resolve([]),
-        stopTask: () => Promise.resolve(),
-        getContextUsage: () => Promise.resolve(null),
-        interrupt: () => Promise.resolve(),
-      };
-    },
-    createSdkMcpServer: (o: unknown) => o,
-    tool: (name: string) => ({ name }),
-  } as unknown as typeof ClaudeSession.sdk;
+  vi.spyOn(LocalHost.prototype, "createSession").mockImplementation(
+    (_id, config) => new FakeSession(config),
+  );
+  vi.spyOn(LocalHost.prototype, "restoreSession").mockImplementation(
+    (_id, state) => new FakeSession(state.config),
+  );
 });
 
 afterEach(() => {
-  ClaudeSession.sdk = null;
   vi.restoreAllMocks();
   for (const [k, v] of Object.entries(savedEnv)) {
     if (v === undefined) delete process.env[k];
@@ -68,13 +48,13 @@ function agent(id: string, cwd: string): AgentState {
   return {
     id,
     name: "A",
-    model: "claude-opus-5-5[1m]",
+    model: "gpt-6-astra",
     avatar: "A",
     color: "#fff",
     isDefault: true,
     session: {
       sessionId: null,
-      config: { cwd, backend: "claude", model: "claude-opus-5-5[1m]" },
+      config: { cwd, backend: "codex", model: "gpt-6-astra" },
       usage: {
         input_tokens: 0,
         output_tokens: 0,
@@ -177,7 +157,7 @@ async function start(base: string, web: string) {
     if (stopped) return;
     stopped = true;
     ws.close();
-    server.close();
+    void server.close();
   };
   return { server, frames, send, search, live, stop };
 }

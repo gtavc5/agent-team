@@ -37,13 +37,15 @@ export function AgentTasks({
             {t.description || t.id}
           </span>
           {t.since > 0 && <span className="tp-when">{elapsed(now - t.since)}</span>}
-          <button
-            className="panel-btn danger tp-stop"
-            aria-label={`Stop ${t.description || t.id}`}
-            onClick={() => actions.onStopTask(w.id, a.id, t.id)}
-          >
-            Stop
-          </button>
+          {t.cancellable !== false && (
+            <button
+              className="panel-btn danger tp-stop"
+              aria-label={`Stop ${t.description || t.id}`}
+              onClick={() => actions.onStopTask(w.id, a.id, t.id)}
+            >
+              Stop
+            </button>
+          )}
         </div>
       ))}
       {a.wake && (

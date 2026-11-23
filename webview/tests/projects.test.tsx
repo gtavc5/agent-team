@@ -65,8 +65,6 @@ describe("project groups", () => {
     searchQuery: "",
     searchHits: null,
     systemStatus: null,
-    accounts: [],
-    defaultAccount: null,
     now: NOW,
     onSelect: vi.fn(),
     onDelete: vi.fn(),
@@ -78,7 +76,6 @@ describe("project groups", () => {
     onReplayDemo: vi.fn(),
     onDebugSnapshot: vi.fn(),
     onPurgeArchived: vi.fn(),
-    onSetDefaultAccount: vi.fn(),
     onDeleteProject: vi.fn(),
   });
 
@@ -428,8 +425,6 @@ describe("archives in the sidebar", () => {
     searchQuery: "",
     searchHits: null,
     systemStatus: null,
-    accounts: [],
-    defaultAccount: null,
     now: NOW,
     onSelect: vi.fn(),
     onDelete: vi.fn(),
@@ -442,7 +437,6 @@ describe("archives in the sidebar", () => {
     onDebugSnapshot: vi.fn(),
     onPurgeArchived: vi.fn(),
     onRestoreProject: vi.fn(),
-    onSetDefaultAccount: vi.fn(),
     onDeleteProject: vi.fn(),
     ...over,
   });

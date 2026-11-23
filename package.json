@@ -14,6 +14,7 @@
     "typecheck": "tsc -p tsconfig.json && npm run typecheck --workspaces",
     "lint": "eslint .",
     "fmt": "prettier --write .",
+    "format": "prettier --write .",
     "fmt:check": "prettier --check .",
     "check": "npm run typecheck && npm run lint && npm run fmt:check",
     "capture": "tsx scripts/capture-sdk.ts",
@@ -22,10 +23,7 @@
     "import-issues": "tsx scripts/import-issues.ts",
     "vscode-icons": "tsx scripts/vscode-icons.ts",
     "sarasa-font": "tsx scripts/sarasa-font.ts",
-    "smoke:claude": "tsx scripts/smoke-claude.ts",
-    "smoke:codex": "tsx scripts/smoke-codex.ts",
-    "smoke:cursor": "tsx scripts/smoke-cursor.ts",
-    "smoke:agy": "tsx scripts/smoke-agy.ts"
+    "smoke:codex": "tsx scripts/smoke-codex.ts"
   },
   "devDependencies": {
     "eslint": "^10.10.0",

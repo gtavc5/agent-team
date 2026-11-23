@@ -107,6 +107,24 @@ describe("a session's background work, in its card", () => {
     expect(panel([quiet]).querySelector(".tp-tasks")).toBeNull();
   });
 
+  it("hides the stop button for a task that cannot be cancelled", () => {
+    const card = ws("readonly", [
+      agent("a", {
+        state: "waiting",
+        backgroundTasks: [
+          {
+            id: "foreground",
+            type: "local_agent",
+            description: "foreground child",
+            since: NOW,
+            cancellable: false,
+          },
+        ],
+      }),
+    ]);
+    expect(panel([card]).querySelector(".tp-stop")).toBeNull();
+  });
+
   it("shows a wake-up past its time as due until it fires", () => {
     const late = ws("late", [
       agent("isla", { state: "sleeping", wake: { at: NOW - 30_000, reason: "check the CI run" } }),

@@ -382,13 +382,13 @@ describe("server websocket", () => {
         type: "add_agent",
         workspaceId: "ws-h",
         name: "G",
-        model: "cursor/gemini-4-argon",
+        model: "gpt-5.5",
         avatar: "x",
         color: "#888",
         effort: "max",
       }),
     );
-    expect((await next("error")).message).toBe("cursor/gemini-4-argon has no effort max");
+    expect((await next("error")).message).toBe("gpt-5.5 has no effort max");
     ws.close();
   });
 
@@ -400,7 +400,7 @@ describe("server websocket", () => {
         type: "add_agent",
         workspaceId: "ws-h",
         name: "G",
-        model: "cursor/gemini-4-argon",
+        model: "gpt-5.6-sol",
         avatar: "x",
         color: "#888",
         effort: "high",
@@ -409,7 +409,7 @@ describe("server websocket", () => {
     expect((await next("agent_added")).agent).toMatchObject({
       name: "G",
       effort: "high",
-      effortLevels: ["low", "medium", "high"],
+      effortLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
     });
     ws.close();
   });
@@ -475,7 +475,7 @@ describe("server websocket", () => {
       cwd: root,
       projectLink: { projectId: project.id, role: "lead" },
     });
-    expect(agent).toMatchObject({ name: "Lead", model: "claude-opus-5-5" });
+    expect(agent).toMatchObject({ name: "Lead", model: "gpt-6-astra" });
     expect(project).toMatchObject({ name: "demo", root, leadWorkspaceId: created.id });
     expect(
       fs.existsSync(path.join(base, ".agent-team", "projects", String(project.id), "notes")),

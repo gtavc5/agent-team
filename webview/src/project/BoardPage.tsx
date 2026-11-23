@@ -99,6 +99,7 @@ export const BoardPage = memo(function BoardPage({
   onAskLead,
   onRename,
   onArchive,
+  onSeal,
   onDelete,
 }: {
   project: Project;
@@ -110,6 +111,7 @@ export const BoardPage = memo(function BoardPage({
   onRename: (name: string) => void;
   // File the project away (true) or bring it back (false).
   onArchive?: (archived: boolean) => void;
+  onSeal?: () => void;
   onDelete: () => void;
 }) {
   const [mode, setMode] = useState<"objectives" | "issues" | "notes">("objectives");
@@ -250,6 +252,7 @@ export const BoardPage = memo(function BoardPage({
     setMode(m);
   };
   const resolveFile = useCallback((path: string) => setNoteFile((f) => f && { ...f, path }), []);
+  const sealed = project.status === "sealed";
   const accept = useCallback((path: string) => reachable(path, project.root), [project.root]);
   // Around the details and the notes: the issues and the files their text
   // names link.
@@ -357,7 +360,12 @@ export const BoardPage = memo(function BoardPage({
         onClick={(e) => e.stopPropagation()}
       >
         <header className={`bp-head${showNotes ? " no-search" : ""}`}>
-          <ProjectName name={project.name} onRename={onRename} />
+          <ProjectName name={project.name} onRename={onRename} readOnly={sealed} />
+          {sealed && (
+            <span className="bp-sealed" title={project.sealedReason ?? undefined}>
+              Sealed · read-only
+            </span>
+          )}
           <div className="bp-views bp-modes" role="group" aria-label="Show">
             <button aria-pressed={mode === "objectives"} onClick={() => choose("objectives")}>
               Objectives
@@ -520,14 +528,21 @@ export const BoardPage = memo(function BoardPage({
                   )}
                 </div>
               </div>
-              {onArchive && (
+              {onArchive && !sealed && (
                 <button className="bp-archive" onClick={() => onArchive(!project.archivedAt)}>
                   {project.archivedAt ? "Restore project" : "Archive project"}
                 </button>
               )}
-              <button className="bp-delete" onClick={onDelete}>
-                Delete project
-              </button>
+              {onSeal && !sealed && (
+                <button className="bp-archive bp-seal" onClick={onSeal}>
+                  Seal project
+                </button>
+              )}
+              {!sealed && (
+                <button className="bp-delete" onClick={onDelete}>
+                  Delete project
+                </button>
+              )}
             </nav>
 
             <main className="bp-main" ref={mainRef}>
@@ -583,7 +598,7 @@ export const BoardPage = memo(function BoardPage({
                   onClose={() => setSelected(null)}
                   onOpenSession={onOpenSession}
                   onOpenIssue={(id) => issueRefs?.open(id)}
-                  onAskLead={onAskLead}
+                  onAskLead={sealed ? null : onAskLead}
                 />,
               )}
           </div>
@@ -1109,8 +1124,17 @@ function ObjectiveDetail({
   );
 }
 
-function ProjectName({ name, onRename }: { name: string; onRename: (name: string) => void }) {
+function ProjectName({
+  name,
+  onRename,
+  readOnly = false,
+}: {
+  name: string;
+  onRename: (name: string) => void;
+  readOnly?: boolean;
+}) {
   const [editing, setEditing] = useState(false);
+  if (readOnly) return <span className="bp-name">{name}</span>;
   if (!editing) {
     return (
       <button className="bp-name" title="Rename" onClick={() => setEditing(true)}>

@@ -6,7 +6,7 @@ import { z } from "zod";
 import { ProjectStore } from "../../src/project/store";
 import { leadToolset, workerToolset, type PanelApi } from "../../src/project/tools";
 import { SETTLE_MS, START_SPACING_MS, awaitsUser } from "../../src/project/manager";
-import { MCP_TEXT_LIMIT } from "../../src/session/claude";
+import { MCP_TEXT_LIMIT } from "../../src/session/types";
 import { Workspace } from "../../src/workspace/workspace";
 import { historyOf, saveIndex, saveWorkspace, loadAll } from "../../src/workspace/state";
 import { summarizeMessages } from "../../src/workspace/summary";
@@ -19,7 +19,7 @@ describe("ProjectStore", () => {
     const base = tmp();
     const store = new ProjectStore(base);
     const p = store.create("clice", "/repo/clice");
-    p.leadWorkspaceId = "ws-lead";
+    p.lead = { hostId: "local", workspaceId: "ws-lead" };
     store.save(p);
     expect(fs.existsSync(store.notesDir(p.id))).toBe(true);
     expect(fs.existsSync(store.objectivesDir(p.id))).toBe(true);
@@ -33,7 +33,16 @@ describe("ProjectStore", () => {
 });
 
 describe("panel tool arguments", () => {
-  const project = { id: "p1", name: "clice", root: "/repo", leadWorkspaceId: "ws-l", createdAt: 1 };
+  const project = {
+    schemaVersion: 2 as const,
+    status: "active" as const,
+    lead: { hostId: "local", workspaceId: "ws-l" },
+    id: "p1",
+    name: "clice",
+    root: "/repo",
+    leadWorkspaceId: "ws-l",
+    createdAt: 1,
+  };
   const calls: unknown[][] = [];
   const record =
     (name: string) =>
@@ -64,6 +73,11 @@ describe("panel tool arguments", () => {
     closeIssues: record("closeIssues"),
     listProjects: record("listProjects"),
     messageProject: record("messageProject"),
+    listNotes: () => [],
+    readNote: () => {
+      throw new Error("Not used in this fixture");
+    },
+    writeNote: () => Promise.reject(new Error("Not used in this fixture")),
     workerReport: (...a) => Promise.resolve(record("workerReport")(...a)),
     currentTask: (...a) => Promise.resolve(record("currentTask")(...a)),
     checkReporting: () => {},
@@ -125,7 +139,7 @@ describe("panel tool arguments", () => {
           in: ["tool_output"],
           tool: "Bash",
           since: Date.parse("2026-09-01"),
-          level: "subagents",
+          depth: "subagents",
           caseSensitive: false,
           project: "clice",
           limit: 5,
@@ -159,9 +173,9 @@ describe("panel tool arguments", () => {
     await t.finish_task.handler({ summary: "merged", blocked: true });
     await t.finish_task.handler({ summary: "done", context: "merged", objective_id: "a/x" });
     expect(calls).toEqual([
-      ["workerReport", "ws-w", "tests pass", false],
-      ["workerReport", "ws-w", "merged", true, {}],
-      ["workerReport", "ws-w", "done", true, { context: "merged", objectiveId: "a/x" }],
+      ["workerReport", "ws-w", "tests pass", false, undefined, undefined],
+      ["workerReport", "ws-w", "merged", true, {}, undefined],
+      ["workerReport", "ws-w", "done", true, { context: "merged", objectiveId: "a/x" }, undefined],
     ]);
     expect(Object.keys(t.finish_task.shape)).toEqual(["summary", "context", "objective_id"]);
   });
@@ -178,7 +192,7 @@ describe("panel tool arguments", () => {
     await t.current_task.handler({});
     expect(calls).toEqual([
       ["startSession", "p1", { title: "w", cwd: "wt", task: "t", isolated: true }],
-      ["workerReport", "ws-w", "done", true, {}],
+      ["workerReport", "ws-w", "done", true, {}, undefined],
       ["currentTask", "ws-w", undefined],
     ]);
     expect(set.instructions).toContain("Write to the user in 简体中文");
@@ -209,6 +223,9 @@ describe("panel tool arguments", () => {
       "write_issues",
       "write_issue_group",
       "close_issues",
+      "list_notes",
+      "read_note",
+      "write_note",
       "project_status",
       "read_session",
       "search_history",
@@ -254,7 +271,7 @@ describe("panel tool arguments", () => {
   });
 
   it("tell the lead and its workers to write to the user in Chinese, and the lead to reuse worktrees", () => {
-    const set = leadToolset(api, project, "/notes", ["claude-opus-5-5"]);
+    const set = leadToolset(api, project, "/notes", ["gpt-6-astra"]);
     const worker = workerToolset(api, "ws-w", project, "/notes").instructions;
     for (const text of [set.instructions, worker]) {
       expect(text).toContain("Write to the user in 简体中文");
@@ -263,7 +280,7 @@ describe("panel tool arguments", () => {
   });
 
   it("tell the lead and its workers to delete what is done or replaced, in a few thousand characters", () => {
-    const lead = leadToolset(api, project, "/notes", ["claude-opus-5-5"]).instructions;
+    const lead = leadToolset(api, project, "/notes", ["gpt-6-astra"]).instructions;
     const worker = workerToolset(api, "ws-w", project, "/notes").instructions;
     for (const text of [lead, worker]) {
       expect(text).toContain("Delete what is obsolete");
@@ -315,7 +332,7 @@ describe("ProjectManager", () => {
     const { lead, project } = create("clice");
     expect(lead.projectLink).toEqual({ projectId: project.id, role: "lead" });
     expect(lead.name).toBe("clice · lead");
-    expect([...lead.agents.values()][0].info.model).toBe("claude-opus-5-5");
+    expect([...lead.agents.values()][0].info.model).toBe("gpt-6-astra");
     const tools = session(lead).panelTools!.tools.map((t) => t.name);
     expect(tools).toEqual(
       expect.arrayContaining(["start_session", "archive_session", "message_project"]),
@@ -358,10 +375,10 @@ describe("ProjectManager", () => {
       title: "w",
       cwd: "wt",
       task: "t",
-      model: "claude-fable-5-2",
+      model: "gpt-5.6-terra",
       effort: "max",
     });
-    expect([...workers()[0].agents.values()][0].info.model).toBe("claude-fable-5-2");
+    expect([...workers()[0].agents.values()][0].info.model).toBe("gpt-5.6-terra");
     expect(session(workers()[0]).getState().config.effort).toBe("max");
     // On the default model too.
     await call(lead, "start_session", { title: "w2", cwd: "wt", task: "t", effort: "low" });
@@ -372,19 +389,19 @@ describe("ProjectManager", () => {
         title: "w3",
         cwd: "wt",
         task: "t",
-        model: "cursor/gemini-4-argon",
+        model: "gpt-5.5",
         effort: "max",
       }),
-    ).rejects.toThrow("cursor/gemini-4-argon has no effort max; one of: low, medium, high");
+    ).rejects.toThrow("gpt-5.5 has no effort max; one of: low, medium, high, xhigh");
     await expect(
       call(lead, "start_session", {
         title: "w4",
         cwd: "wt",
         task: "t",
-        model: "cursor/composer-2.5",
-        effort: "high",
+        model: "gpt-5.5",
+        effort: "ultra",
       }),
-    ).rejects.toThrow("cursor/composer-2.5 takes no effort level");
+    ).rejects.toThrow("gpt-5.5 has no effort ultra; one of: low, medium, high, xhigh");
     expect(workers()).toHaveLength(2);
 
     // An empty effort is none: the model's default stands.
@@ -395,19 +412,19 @@ describe("ProjectManager", () => {
   it("runs leads and unnamed workers on the configured model and effort, if a lead may run on it", async () => {
     const { manager, root, workspaces, call, host, session } = setup();
     fs.mkdirSync(path.join(root, "wt"), { recursive: true });
-    host.projectDefaults = () => ({ model: "cursor/gemini-4-argon", effort: "high" });
+    host.projectDefaults = () => ({ model: "gpt-5.6-sol", effort: "high" });
     const project = manager.create("clice", root);
     const lead = workspaces.get(project.leadWorkspaceId!)!;
-    expect([...lead.agents.values()][0].info.model).toBe("cursor/gemini-4-argon");
+    expect([...lead.agents.values()][0].info.model).toBe("gpt-5.6-sol");
     expect(session(lead).getState().config.effort).toBe("high");
     const start = lead.agents.values().next().value!.session as unknown as {
       panelTools: { tools: Array<{ name: string; description: string }> };
     };
     const tool = start.panelTools.tools.find((t) => t.name === "start_session")!;
-    expect(tool.description).toContain("Models: cursor/gemini-4-argon, claude-opus-5-5");
+    expect(tool.description).toContain("Models: gpt-5.6-sol, gpt-6-astra");
     await call(lead, "start_session", { title: "w", cwd: "wt", task: "t" });
     const worker = [...workspaces.values()].find((w) => w.projectLink?.role === "worker")!;
-    expect([...worker.agents.values()][0].info.model).toBe("cursor/gemini-4-argon");
+    expect([...worker.agents.values()][0].info.model).toBe("gpt-5.6-sol");
     expect(session(worker).getState().config.effort).toBe("high");
 
     // A model no lead runs on, or an effort its model lacks, is not taken.
@@ -415,28 +432,28 @@ describe("ProjectManager", () => {
     const other = path.join(root, "..", "other");
     fs.mkdirSync(other, { recursive: true });
     const next = workspaces.get(manager.create("other", other).leadWorkspaceId!)!;
-    expect([...next.agents.values()][0].info.model).toBe("claude-opus-5-5");
-    host.projectDefaults = () => ({ model: "cursor/gemini-4-argon", effort: "max" });
+    expect([...next.agents.values()][0].info.model).toBe("gpt-6-astra");
+    host.projectDefaults = () => ({ model: "gpt-5.5", effort: "max" });
     await call(lead, "start_session", { title: "w2", cwd: "wt", task: "t" });
     const second = [...workspaces.values()].filter((w) => w.projectLink?.role === "worker")[1];
     expect(session(second).getState().config.effort).toBeUndefined();
   });
 
-  it("takes a Cursor or Codex model for the lead and its workers, not an unknown one", async () => {
+  it("takes a Codex model for the lead and its workers, not an unknown one", async () => {
     const { manager, root, workspaces, call } = setup();
     fs.mkdirSync(path.join(root, "wt"), { recursive: true });
     expect(() => manager.create("x", root, "gpt-5")).toThrow("Unknown model for a lead: gpt-5");
-    const project = manager.create("clice", root, "cursor/composer-2.5");
+    const project = manager.create("clice", root, "gpt-5.5");
     const lead = workspaces.get(project.leadWorkspaceId!)!;
-    expect([...lead.agents.values()][0].info.model).toBe("cursor/composer-2.5");
+    expect([...lead.agents.values()][0].info.model).toBe("gpt-5.5");
     await call(lead, "start_session", {
       title: "w",
       cwd: "wt",
       task: "t",
-      model: "cursor/grok-4.7",
+      model: "gpt-5.6-luna",
     });
     const worker = [...workspaces.values()].find((w) => w.projectLink?.role === "worker")!;
-    expect([...worker.agents.values()][0].info.model).toBe("cursor/grok-4.7");
+    expect([...worker.agents.values()][0].info.model).toBe("gpt-5.6-luna");
     await call(lead, "start_session", { title: "c", cwd: "wt", task: "t", model: "gpt-5.5" });
     const codex = [...workspaces.values()].filter((w) => w.projectLink?.role === "worker")[1];
     expect([...codex.agents.values()][0].info.model).toBe("gpt-5.5");
@@ -732,14 +749,17 @@ describe("ProjectManager", () => {
     expect(status).toMatch(
       /## Size\n- objectives: 0 files, 0 KB\n- issues: 0 modules, 0 KB\n- notes: \d+ files?, \d+ KB/,
     );
-    const line = (dir: string) => status.split("\n").find((l) => l.startsWith(`- ${dir} `))!;
+    const line = (dir: string) =>
+      status.split("\n").find((l) => l.startsWith(`- ${fs.realpathSync(dir)} `))!;
     expect(line(used)).toMatch(new RegExp(`; in use by ${workers()[0].id} \\(`));
     expect(line(free)).toMatch(/; free$/);
     expect(line(root)).toContain(`in use by ${lead.id}`);
     // The user's own session there: the lead is told the worktree is not its to reuse.
     manager.setReporting(workers()[0].id, false);
     expect(
-      (await call(lead, "project_status")).split("\n").find((l) => l.startsWith(`- ${used} `)),
+      (await call(lead, "project_status"))
+        .split("\n")
+        .find((l) => l.startsWith(`- ${fs.realpathSync(used)} `)),
     ).toContain("the user's own: not yours to reuse");
   });
 
@@ -805,7 +825,9 @@ describe("ProjectManager", () => {
         "list_objectives",
         "read_objective",
         "list_issues",
+        "list_notes",
         "read_issue",
+        "read_note",
         "project_status",
         "read_session",
         "search_history",
@@ -933,10 +955,10 @@ describe("ProjectManager", () => {
     Object.assign(agent, {
       input: { id: task.id, replies: [] },
       retryPending: true,
-      lastPrompt: "[From the project lead]\n\nt",
+      lastEnvelope: { inputId: "task", text: "[From the project lead]\n\nt" },
     });
     manager.setReporting(worker.id, false);
-    expect(agent).toMatchObject({ retryPending: false, lastPrompt: undefined });
+    expect(agent).toMatchObject({ retryPending: false, lastEnvelope: undefined });
     expect(session(worker).panelTools!.tools.map((t) => t.name)).toContain("list_objectives");
     expect(worker.projectLink).toMatchObject({ isolated: true, unreported: true });
   });
@@ -975,7 +997,7 @@ describe("ProjectManager", () => {
       task_id: "t1",
     });
     const worker = [...workspaces.values()].find((w) => w.projectLink?.role === "worker")!;
-    manager.forget(worker);
+    await manager.forget(worker);
     expect(objectives()[0].sessions).toEqual([]);
     expect(objectives()[0].tasks[0].session).toBeUndefined();
   });
@@ -1016,7 +1038,7 @@ describe("project messages that must not be lost or looped", () => {
       onStreamEvent: () => {},
       onMessageDone: () => {},
     });
-    const agent = ws.addAgent("A", "claude-opus-5-5[1m]", "a", "c", { backend: "claude" });
+    const agent = ws.addAgent("A", "gpt-6-astra[1m]", "a", "c", { backend: "codex" });
     const s = fake.lastSession!;
     await ws.sendMessage("P1");
     s.isRunning = false;
@@ -1079,26 +1101,22 @@ describe("project edge cases", () => {
     lead.addAgent("Cx", "gpt-6-astra", "c", "c", { backend: "codex" });
     lead.removeAgent(claudeLead);
     const start = manager.toolsFor(lead)!.tools.find((t) => t.name === "start_session")!;
-    expect(await start.handler({ title: "w", cwd: "wt", task: "t" })).toContain(
-      "on claude-opus-5-5",
-    );
-    expect([...workers()[0].agents.values()][0].info.model).toBe("claude-opus-5-5");
+    expect(await start.handler({ title: "w", cwd: "wt", task: "t" })).toContain("on gpt-6-astra");
+    expect([...workers()[0].agents.values()][0].info.model).toBe("gpt-6-astra");
   });
 
   it("default workers to Opus 5.5 whatever model the lead was switched to", async () => {
     const { create, workers, manager } = setup();
     const { lead } = create("a");
     const [agent] = lead.agents.values();
-    agent.info.model = "claude-fable-5-2";
+    agent.info.model = "gpt-5.6-terra";
     const start = manager.toolsFor(lead)!.tools.find((t) => t.name === "start_session")!;
-    expect((start.shape.model as z.ZodString).description).toContain("Default claude-opus-5-5");
-    expect(await start.handler({ title: "w", cwd: "wt", task: "t" })).toContain(
-      "on claude-opus-5-5",
-    );
-    await start.handler({ title: "f", cwd: "wt", task: "t", model: "claude-fable-5-2" });
+    expect((start.shape.model as z.ZodString).description).toContain("Default gpt-6-astra");
+    expect(await start.handler({ title: "w", cwd: "wt", task: "t" })).toContain("on gpt-6-astra");
+    await start.handler({ title: "f", cwd: "wt", task: "t", model: "gpt-5.6-terra" });
     expect(workers().map((w) => [...w.agents.values()][0].info.model)).toEqual([
-      "claude-opus-5-5",
-      "claude-fable-5-2",
+      "gpt-6-astra",
+      "gpt-5.6-terra",
     ]);
   });
 
@@ -1158,7 +1176,8 @@ describe("project messages across a restart", () => {
     expect(summarizeMessages([queued])[0].from).toEqual(queued.from);
     restored.dequeueNext([...restored.agents.keys()][0]);
     const s = [...restored.agents.values()][0].session as FakeSession;
-    expect(s.sent).toEqual([`[From session "w" (${worker.id})]\n\nFinished:\n\ndone`]);
+    expect(s.sent).toEqual([expect.stringMatching(/^\[agent-team:report:[\da-f-]+\]/)]);
+    expect(s.sent[0]).toContain(`[From session "w" (${worker.id})]\n\nFinished:\n\ndone`);
   });
 });
 
@@ -1497,7 +1516,7 @@ describe("worker tasks held back for spacing", () => {
       const task = w1.messages.find((m) => m.kind === "user")!;
       expect(task).toMatchObject({ status: "queued", content: "second", from: { role: "lead" } });
       const restored = Workspace.fromState(w1.getState(), registry);
-      expect(restored.messages.find((m) => m.status === "queued")?.queuedPrompt).toBe(
+      expect(restored.messages.find((m) => m.status === "queued")?.queuedEnvelope?.text).toBe(
         "[From the project lead]\n\nsecond",
       );
       expect(session(w1).sent).toEqual([]);
@@ -1515,7 +1534,7 @@ describe("worker tasks held back for spacing", () => {
       await vi.advanceTimersByTimeAsync(START_SPACING_MS);
       endTurn(w1);
       const saved = w1.getState().agents[0];
-      expect([saved.pausedUntil, saved.lastPrompt]).toEqual([undefined, undefined]);
+      expect([saved.pausedUntil, saved.lastEnvelope]).toEqual([undefined, undefined]);
       const restored = Workspace.fromState(w1.getState(), registry);
       expect([...restored.agents.values()][0].retryPending).toBe(false);
       expect(session(w1).sent).toHaveLength(1);
@@ -1565,7 +1584,7 @@ describe("worker tasks held back for spacing", () => {
   it("pass a queued lead message on to the agent that takes over from a removed one", async () => {
     const { w1 } = await twoStarts();
     const [first] = w1.agents.keys();
-    const b = w1.addAgent("B", "claude-opus-5-5", "b", "c", { backend: "claude" });
+    const b = w1.addAgent("B", "gpt-6-astra", "b", "c", { backend: "codex" });
     expect(w1.removeAgent(first)).toEqual([]);
     await new Promise((r) => setTimeout(r, 5));
     const heir = w1.agents.get(b.id)!.session as FakeSession;
@@ -1575,7 +1594,7 @@ describe("worker tasks held back for spacing", () => {
   it("keep a lead message passed on to the agent that takes over through a crash", async () => {
     const { w1, base, registry } = await twoStarts();
     const [first] = w1.agents.keys();
-    const b = w1.addAgent("B", "claude-opus-5-5", "b", "c", { backend: "claude" });
+    const b = w1.addAgent("B", "gpt-6-astra", "b", "c", { backend: "codex" });
     (w1.agents.get(b.id)!.session as FakeSession).isRunning = true;
     // As the server saves: the messages it was told changed, and new ones.
     const save = () => historyOf(base).save(w1.id, w1.getMessages(), w1.takeChanged());
@@ -1980,7 +1999,7 @@ describe("a worker that goes idle without reporting", () => {
     try {
       const { w, say, told, settle, endTurn, askNext } = await started();
       await askNext("is staging up?");
-      const b = w.addAgent("B", "claude-opus-5-5", "b", "c", { backend: "claude" });
+      const b = w.addAgent("B", "gpt-6-astra", "b", "c", { backend: "codex" });
       const other = w.agents.get(b.id)!.session as FakeSession;
       await w.sendMessage("look at the logs", b.id);
       say("Need the staging URL.");
@@ -2010,7 +2029,7 @@ describe("a worker that goes idle without reporting", () => {
       await settle();
       expect(errors).toHaveBeenCalledWith("[projects]", expect.any(Error));
 
-      host.addAgent(lead, "Lead", "claude-opus-5-5", "l", "c");
+      host.addAgent(lead, "Lead", "gpt-6-astra", "l", "c");
       await ask("again");
       manager.close();
       endTurn(w);
@@ -2256,7 +2275,7 @@ describe("a worker that goes idle without reporting", () => {
     try {
       const { lead, call, host, project, session, endTurn, settle, w } = await started();
       const own = host.createWorkspace("mine", w.cwd, { projectId: project.id, role: "worker" });
-      host.addAgent(own, "A", "claude-opus-5-5", "a", "c");
+      host.addAgent(own, "A", "gpt-6-astra", "a", "c");
       await own.sendMessage("what does this do?");
       endTurn(own);
       await settle();
@@ -2503,7 +2522,7 @@ describe("a worker that goes idle without reporting", () => {
       expect(awaitsUser(w)).toBe(false);
 
       const own = host.createWorkspace("mine", w.cwd, { projectId: project.id, role: "worker" });
-      host.addAgent(own, "A", "claude-opus-5-5", "a", "c");
+      host.addAgent(own, "A", "gpt-6-astra", "a", "c");
       await own.sendMessage("what does this do?");
       session(own).emit("event", { kind: "text_delta", content: "It parses." });
       endTurn(own);

@@ -103,6 +103,7 @@ function SessionCard({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const state = sessionState(w);
+  const readOnly = project?.status === "sealed";
   const work = project ? sessionWork(w.id, project.objectives) : [];
   // Stop ends a running turn; background work has its own stops, and a
   // sleeping session archives like an idle one.
@@ -113,7 +114,7 @@ function SessionCard({
   const branch = w.git?.branch;
   const elsewhere =
     !!project && (w.cwd !== project.root || (!!branch && !DEFAULT_BRANCH.test(branch)));
-  const stop = (
+  const stop = readOnly ? null : (
     <button className="panel-btn danger" onClick={() => actions.onStop(w.id)}>
       Stop
     </button>
@@ -200,54 +201,61 @@ function SessionCard({
                   agent={a}
                   connected={connected}
                   archived={state === "archived"}
+                  readOnly={readOnly}
                   models={models}
                   onClear={() => actions.onClearContext(w.id, a.id)}
                   onRemove={() => actions.onRemoveAgent(w.id, a.id)}
                   onModel={(model) => actions.onSetModel(w.id, a.id, model)}
                   onEffort={(effort) => actions.onSetEffort(w.id, a.id, effort)}
                 />
-                {state !== "archived" && hasWork(a) && (
+                {!readOnly && state !== "archived" && hasWork(a) && (
                   <AgentTasks session={w} agent={a} actions={actions} />
                 )}
               </Fragment>
             ))}
           </div>
           <footer className="ap-session-foot">
-            {state !== "archived" && (
-              <button className="panel-btn ap-add" onClick={() => actions.onAddAgent(w.id)}>
-                + Agent
-              </button>
-            )}
-            <span className="ap-actions">
-              {tasks > 0 && (
-                <button
-                  className="panel-btn danger"
-                  title="Stop the turn, every background task and the wake-ups of this session"
-                  onClick={() => actions.onStopAll(w.id)}
-                >
-                  Stop everything
-                </button>
-              )}
-              <ReportSwitch
-                link={w.projectLink}
-                className="panel-btn"
-                onSet={(reports) => actions.onSetReporting(w.id, reports)}
-              />
-              {state === "archived" ? (
-                <button className="panel-btn" onClick={() => actions.onRestore(w.id)}>
-                  Restore
-                </button>
-              ) : state === "working" ? (
-                stop
-              ) : (
-                !busy &&
-                w.projectLink?.role !== "lead" && (
-                  <button className="panel-btn" onClick={() => actions.onArchive(w.id)}>
-                    Archive
+            {readOnly ? (
+              <span className="ap-readonly">Sealed · read-only</span>
+            ) : (
+              <>
+                {state !== "archived" && (
+                  <button className="panel-btn ap-add" onClick={() => actions.onAddAgent(w.id)}>
+                    + Agent
                   </button>
-                )
-              )}
-            </span>
+                )}
+                <span className="ap-actions">
+                  {tasks > 0 && (
+                    <button
+                      className="panel-btn danger"
+                      title="Stop the turn, every background task and the wake-ups of this session"
+                      onClick={() => actions.onStopAll(w.id)}
+                    >
+                      Stop everything
+                    </button>
+                  )}
+                  <ReportSwitch
+                    link={w.projectLink}
+                    className="panel-btn"
+                    onSet={(reports) => actions.onSetReporting(w.id, reports)}
+                  />
+                  {state === "archived" ? (
+                    <button className="panel-btn" onClick={() => actions.onRestore(w.id)}>
+                      Restore
+                    </button>
+                  ) : state === "working" ? (
+                    stop
+                  ) : (
+                    !busy &&
+                    w.projectLink?.role !== "lead" && (
+                      <button className="panel-btn" onClick={() => actions.onArchive(w.id)}>
+                        Archive
+                      </button>
+                    )
+                  )}
+                </span>
+              </>
+            )}
           </footer>
         </>
       )}
@@ -275,6 +283,7 @@ function AgentRow({
   agent: a,
   connected,
   archived,
+  readOnly = false,
   models,
   onClear,
   onRemove,
@@ -284,6 +293,7 @@ function AgentRow({
   agent: AgentInfo;
   connected: boolean;
   archived: boolean;
+  readOnly?: boolean;
   models: ModelOption[];
   onClear: () => void;
   onRemove: () => void;
@@ -303,7 +313,7 @@ function AgentRow({
             {a.name}
           </span>
           <span className="ap-meta">
-            {archived || !connected || switchable(a, models).length < 2 ? (
+            {archived || readOnly || !connected || switchable(a, models).length < 2 ? (
               shortModel(a.model)
             ) : (
               <select
@@ -320,7 +330,7 @@ function AgentRow({
                 ))}
               </select>
             )}
-            {archived || !connected || !a.effortLevels?.length ? (
+            {archived || readOnly || !connected || !a.effortLevels?.length ? (
               a.effort && ` · ${a.effort}`
             ) : (
               <>
@@ -336,7 +346,6 @@ function AgentRow({
               </>
             )}
             {a.fast ? " · ⚡" : ""}
-            {a.account ? ` · @${a.account}` : ""}
           </span>
         </div>
         {(archived || state !== "idle" || !connected || bg.length > 0) && (
@@ -345,7 +354,6 @@ function AgentRow({
             {bg.length > 0 && state !== "waiting" && ` · ${bg.length} in background`}
           </div>
         )}
-        {a.goal && <div className="ap-goal">🎯 {a.goal}</div>}
         {ctx && pct !== null && (
           <div
             className="ap-context"
@@ -358,7 +366,7 @@ function AgentRow({
           </div>
         )}
       </div>
-      {!archived && (
+      {!archived && !readOnly && (
         <div className="ap-agent-actions">
           <button title="Clear context" aria-label={`Clear ${a.name}'s context`} onClick={onClear}>
             <Icon name="clear" />
@@ -372,16 +380,11 @@ function AgentRow({
   );
 }
 
-// Models an agent can move to mid-session: those of its backend (a Claude
-// transcript, a Codex thread, a Cursor agent, an agy conversation goes on
-// only on its own kind). The current one leads even when the list has
-// dropped it.
+// Models an agent can move to mid-session: a conversation stays on its
+// backend. The current one leads even when the list has dropped it.
 function switchable(a: AgentInfo, models: ModelOption[]): string[] {
-  const prefix = /^(cursor|agy)\//.exec(a.model)?.[1] as "cursor" | "agy" | undefined;
   const backend =
-    models.find((m) => m.id === a.model)?.backend ??
-    prefix ??
-    (a.model.startsWith("gpt-") ? "codex" : "claude");
+    models.find((m) => m.id === a.model)?.backend ?? (a.model.startsWith("gpt-") ? "codex" : "pi");
   const ids = models.filter((m) => m.backend === backend).map((m) => m.id);
   return ids.includes(a.model) ? ids : [a.model, ...ids];
 }

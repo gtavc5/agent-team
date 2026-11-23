@@ -3,7 +3,7 @@
 // worker found by the words of its own task.
 import { describe, it, expect } from "vitest";
 import { setupProjects } from "./projectHarness";
-import type { StreamEvent } from "../../src/session/claude";
+import type { StreamEvent } from "../../src/session/types";
 
 describe("the lead's history tools at their limits", () => {
   it("query_history prints NULL, bytes, escaped tabs and newlines, cut cells, and stops at 200 rows", async () => {
