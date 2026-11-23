@@ -1,0 +1,5 @@
+{"recordType":"message","role":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"sibling-beta-thinking"},{"type":"text","text":"sibling-beta-text"},{"type":"toolCall","id":"beta-grep","name":"grep","arguments":{"pattern":"duplicate-call-is-not-projected","path":"corpus/ignored","glob":"*ignored*","context":0,"ignoreCase":false,"limit":1}}]}}
+{"recordType":"tool_start","toolCallId":"beta-grep","toolName":"grep","argsPayload":"{\"pattern\":\"shared-beta-pattern\",\"path\":\"corpus/sibling-beta-parameter-p3m6\",\"glob\":\"*beta*\",\"context\":1,\"ignoreCase\":true,\"limit\":6}"}
+{"recordType":"tool_end","toolCallId":"beta-grep","toolName":"grep","isError":true}
+{"recordType":"message","role":"toolResult","text":"sibling-beta-output-v8n2\ninner beta output","outputTruncated":true,"message":{"role":"toolResult","toolCallId":"beta-grep","toolName":"grep","content":[{"type":"text","text":"sibling-beta-output-v8n2\ninner beta output"}],"isError":true}}
+{"recordType":"truncated","message":"synthetic child gap notice"}

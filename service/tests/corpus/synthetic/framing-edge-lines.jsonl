@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"synthetic-framing","timestamp":0}
+{"type":"message","id":"frame-root","parentId":null,"timestamp":1,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"合成推理 行分隔 段分隔"},{"type":"text","text":"多字节中文：检索参数精确还原"},{"type":"toolCall","id":"frame-read","name":"read","arguments":{"path":"corpus/中文","offset":3,"limit":9}},{"type":"toolCall","id":"frame-grep","name":"grep","arguments":{"pattern":"首行检索标记","path":"corpus/中文第二参数","glob":"*片段*","context":2,"ignoreCase":true,"limit":4}}]}}
+{"type":"message","id":"frame-read-result","parentId":"frame-root","timestamp":2,"message":{"role":"toolResult","toolCallId":"frame-read","toolName":"read","content":[{"type":"text","text":"中文读取输出 仍然属于同一帧"}]}}
+{"type":"message","id":"frame-grep-result","parentId":"frame-read-result","timestamp":3,"message":{"role":"toolResult","toolCallId":"frame-grep","toolName":"grep","content":[{"type":"text","text":"中文检索输出 不含换行帧"}]}}
+{"type":"message","id":"frame-leaf","parentId":"frame-grep-result","timestamp":4,"message":{"role":"assistant","content":[{"type":"text","text":"最终叶节点无尾换行：汉字🌲"}]}}
