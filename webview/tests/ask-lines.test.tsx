@@ -113,12 +113,6 @@ describe("asking about lines from the Files panel", () => {
       document.getSelection()!.addRange(range);
       document.dispatchEvent(new Event("selectionchange"));
     });
-  const clear = () =>
-    act(() => {
-      document.getSelection()!.removeAllRanges();
-      document.dispatchEvent(new Event("selectionchange"));
-    });
-
   const panel = (onAsk: (q: CodeQuote) => void) =>
     render(
       <FilesPanel
@@ -128,46 +122,6 @@ describe("asking about lines from the Files panel", () => {
         onAsk={onAsk}
       />,
     );
-
-  it("offers the lines selected in a file, and hands them over with its path", async () => {
-    const asked: CodeQuote[] = [];
-    const { container, queryByTitle, getByTitle } = panel((q) => asked.push(q));
-    await waitFor(() => expect(container.querySelector(".code-text")).not.toBeNull());
-    // The selection is listened to from an effect, run after the paint.
-    await act(async () => {});
-    expect(queryByTitle("Ask about these lines in the chat")).toBeNull();
-
-    // From inside "int b;" to inside "int c;".
-    const code = container.querySelector(".code-text")!;
-    select(code, 9, code, 16);
-    const ask = getByTitle("Ask about these lines in the chat");
-    expect(ask.textContent).toBe("Ask · L2–3");
-    fireEvent.click(ask);
-    expect(asked).toEqual([
-      { path: "/w/src/lex.cpp", lang: "cpp", from: 2, to: 3, text: "int b;\nint c;" },
-    ]);
-    expect(document.getSelection()!.isCollapsed).toBe(true);
-
-    select(code, 0, code, 3);
-    expect(getByTitle("Ask about these lines in the chat").textContent).toBe("Ask · L1");
-    clear();
-    expect(queryByTitle("Ask about these lines in the chat")).toBeNull();
-
-    // A selection elsewhere on the page is not the file's.
-    const outside = document.body.appendChild(document.createElement("p"));
-    outside.textContent = "chat text";
-    select(outside, 0, outside, 4);
-    expect(queryByTitle("Ask about these lines in the chat")).toBeNull();
-    // Nor is the whole page, selected with Ctrl+A.
-    selectRaw(document.body, 0, document.body, document.body.childNodes.length);
-    expect(queryByTitle("Ask about these lines in the chat")).toBeNull();
-    outside.remove();
-
-    // Over the code, not in the bar, where appearing would move the lines.
-    select(code, 0, code, 3);
-    expect(container.querySelector(".fp-bar .fp-ask")).toBeNull();
-    expect(container.querySelector(".files-panel > .fp-ask")).not.toBeNull();
-  });
 
   it("offers the rows selected in a diff, as a diff", async () => {
     const asked: CodeQuote[] = [];

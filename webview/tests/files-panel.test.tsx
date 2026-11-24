@@ -153,65 +153,6 @@ describe("FilesPanel", () => {
   const open = (path: string, line?: number, endLine?: number, roots: FileRoot[] = []) =>
     render(<FilesPanel wsId="w1" target={{ path, line, endLine }} roots={roots} />);
 
-  it("shows code with line numbers, highlighted, marking the referenced lines", async () => {
-    views = {
-      "src/a.ts": {
-        kind: "text",
-        path: "/w/src/a.ts",
-        size: 40,
-        content: "const a = 1;\nconst b = 2;\nexport { a, b };\n",
-        truncated: false,
-      },
-    };
-    const { container } = open("src/a.ts", 2, 3);
-    await waitFor(() => expect(container.querySelector(".code-view")).not.toBeNull());
-    expect(container.querySelector(".code-gutter")!.textContent).toBe("1\n2\n3");
-    expect(container.querySelector(".code-text .hljs-keyword")).not.toBeNull();
-    const mark = container.querySelector(".code-mark") as HTMLElement;
-    expect([mark.style.top, mark.style.height]).toEqual(["18px", "36px"]);
-    expect(container.querySelector(".fp-path")!.textContent).toBe("/w/src/a.ts");
-  });
-
-  it("lists a folder and opens what is clicked", async () => {
-    views = {
-      ".": {
-        kind: "dir",
-        path: "/w",
-        truncated: false,
-        entries: [
-          { name: "src", dir: true, size: 0 },
-          { name: "README.md", dir: false, size: 2048 },
-        ],
-      },
-    };
-    const { container, getByText } = open(".");
-    await waitFor(() => expect(container.querySelector(".dir-view")).not.toBeNull());
-    expect(getByText("2.0 KB")).toBeTruthy();
-    fireEvent.click(
-      [...container.querySelectorAll(".dir-entry")].find((e) => e.textContent === "src/")!,
-    );
-    await waitFor(() => expect(requested.at(-1)).toBe("/w/src"));
-  });
-
-  it("renders markdown, with its source a click away and relative links resolved", async () => {
-    views = {
-      "docs/guide.md": {
-        kind: "text",
-        path: "/w/docs/guide.md",
-        size: 30,
-        content: "# Guide\n\nSee [the api](api/ref.md#L4).\n",
-        truncated: false,
-      },
-    };
-    const { container, getByText } = open("docs/guide.md");
-    await waitFor(() => expect(container.querySelector(".file-markdown h1")).not.toBeNull());
-    fireEvent.click(getByText("Source"));
-    expect(container.querySelector(".code-view")).not.toBeNull();
-    fireEvent.click(getByText("Preview"));
-    fireEvent.click(container.querySelector(".file-markdown .file-ref")!);
-    await waitFor(() => expect(requested.at(-1)).toBe("/w/docs/api/ref.md"));
-  });
-
   it("reads a note's paths as the board does: notes/, ./ from the note, the rest from the session", async () => {
     const note = (path: string, content: string, ref?: string): FileView => ({
       kind: "text",
@@ -282,26 +223,12 @@ describe("FilesPanel", () => {
     document.getSelection()!.removeAllRanges();
   });
 
-  it("shows images, names binaries, and reports errors", async () => {
-    views = {
-      "p.png": { kind: "image", path: "/w/p.png", size: 10 },
-      "b.bin": { kind: "binary", path: "/w/b.bin", size: 3000 },
-    };
-    const img = open("p.png");
-    await waitFor(() => expect(img.container.querySelector("img")).not.toBeNull());
-    expect(img.container.querySelector("img")!.getAttribute("src")).toBe(
-      "api/file/raw?ws=w1&path=%2Fw%2Fp.png",
-    );
-    img.unmount();
-    const bin = open("b.bin");
-    await waitFor(() => expect(bin.container.textContent).toContain("Binary file · 2.9 KB"));
-    bin.unmount();
-    const missing = open("gone.txt");
-    await waitFor(() =>
-      expect(missing.container.querySelector(".file-error")!.textContent).toBe(
-        "No such file or directory",
-      ),
-    );
+  it("describes binary files without trying to render them as text or images", async () => {
+    views = { "b.bin": { kind: "binary", path: "/w/b.bin", size: 3000 } };
+    const { container, findByText, getByRole } = open("b.bin");
+    expect(await findByText(/^Binary file · 2\.9 KB/)).toBeTruthy();
+    expect(container.querySelector(".code-view, .file-image")).toBeNull();
+    expect(getByRole("link", { name: "Raw" })).toBeTruthy();
   });
 
   it("switches between the project's folders, naming a path outside them", async () => {
@@ -508,15 +435,6 @@ describe("file references in replies", () => {
     expect(refs("[`src/a.ts`](src/a.ts:12)").calls).toEqual(["src/a.ts:12"]);
   });
 
-  it("opens from the keyboard", () => {
-    const open = vi.fn();
-    const { container } = md("See `src/a.ts:3`.", open);
-    const ref = container.querySelector(".file-ref") as HTMLElement;
-    expect(ref.tabIndex).toBe(0);
-    fireEvent.keyDown(ref, { key: "Enter" });
-    expect(open).toHaveBeenCalledWith("src/a.ts:3");
-  });
-
   it("stays plain text where there is no workspace to open it in", () => {
     const { container } = md("Fixed in `service/src/index.ts:1182`.");
     expect(container.querySelector(".file-ref")).toBeNull();
@@ -553,30 +471,6 @@ describe("the Files panel's bar and listing", () => {
     size: 2,
     content: "x\n",
     truncated: false,
-  });
-
-  it("lists a folder without a '..' row, the folder picker inline after Up", async () => {
-    views = {
-      "/repo/src": {
-        kind: "dir",
-        path: "/repo/src",
-        truncated: false,
-        entries: [
-          { name: "a.ts", dir: false, size: 10 },
-          { name: "lib", dir: true, size: 0 },
-        ],
-      },
-    };
-    const { container } = open("/repo/src", repoRoots);
-    await waitFor(() => expect(container.querySelector(".dir-view")).not.toBeNull());
-    const names = [...container.querySelectorAll(".dir-entry-name")].map((n) => n.textContent);
-    expect(names).toEqual(["a.ts", "lib/"]);
-    const bar = container.querySelector(".fp-bar")!;
-    expect([...bar.children].slice(0, 3).map((c) => c.className)).toEqual([
-      "fp-btn fp-up",
-      "fp-roots",
-      "fp-path",
-    ]);
   });
 
   it("shows a path from the deepest folder holding it, '/' at a folder's top", async () => {

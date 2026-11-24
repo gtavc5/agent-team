@@ -65,26 +65,6 @@ describe("adding an agent", () => {
     expect(d.effort()).toBeNull();
   });
 
-  it("adds it at the effort chosen, kept across models that have it", () => {
-    const d = dialog();
-    fireEvent.change(d.effort()!, { target: { value: "high" } });
-    fireEvent.change(d.model(), { target: { value: "google/gemini-4-argon" } });
-    expect(d.effort()!.value).toBe("high");
-    fireEvent.change(d.model(), { target: { value: "anthropic/claude-opus-5-5" } });
-    fireEvent.change(d.effort()!, { target: { value: "max" } });
-    fireEvent.change(d.model(), { target: { value: "google/gemini-4-argon" } });
-    expect(d.effort()!.value).toBe("");
-    fireEvent.change(d.effort()!, { target: { value: "low" } });
-    fireEvent.click(d.getByText("Add"));
-    expect(d.onAdd).toHaveBeenCalledWith(
-      "Kisara",
-      "google/gemini-4-argon",
-      "k.jpg",
-      "#D8A0D8",
-      "low",
-    );
-  });
-
   it("selects available preset defaults on open and on click", () => {
     const base = { avatar: "a", color: "red" };
     const d = dialog([

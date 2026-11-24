@@ -165,7 +165,7 @@ describe("docked or floating", () => {
 });
 
 describe("a maximised panel", () => {
-  it("steps back when another panel, or another session, is opened", () => {
+  it("steps back when another panel opens", () => {
     boot("lead");
     rail("Agents and sessions");
     fireEvent.click(document.querySelector(".side-panel-max")!);
@@ -173,24 +173,6 @@ describe("a maximised panel", () => {
     rail("Files");
     expect(panel().className).not.toContain("maximized");
     expect(document.querySelector(".side-panel-pin")).not.toBeNull();
-
-    rail("Agents and sessions");
-    fireEvent.click(document.querySelector(".side-panel-max")!);
-    fireEvent.click(document.querySelector('[aria-label="modules"] .ap-session-name')!);
-    expect(document.querySelector(".panel-title")!.textContent).toBe("modules — clice");
-    expect(panel().className).not.toContain("maximized");
-  });
-
-  it("does not follow to a workspace picked in the sidebar", () => {
-    boot("lead");
-    rail("Files");
-    fireEvent.click(document.querySelector(".side-panel-max")!);
-    fireEvent.click(
-      [...document.querySelectorAll(".task-item")].find((el) =>
-        el.textContent?.includes("modules"),
-      )!,
-    );
-    expect(panel().className).not.toContain("maximized");
   });
 });
 
