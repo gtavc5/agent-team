@@ -17,6 +17,8 @@ describe("math in the source", () => {
       ["长度为$n$的数组", "长度为$$n$$的数组"],
       ["SiO$_2$ at 25$^\\circ$C", "SiO$$_2$$ at 25$$^\\circ$$C"],
       ["0.20$\\sim$0.25 cm$^3$/g", "0.20$$\\sim$$0.25 cm$$^3$$/g"],
+      ["H$_2$O and (x+1)$^2$ at 30$\\mu$m", "H$$_2$$O and (x+1)$$^2$$ at 30$$\\mu$$m"],
+      ["$\\{1, 2\\}$ and $x^{n+1}$", "$$\\{1, 2\\}$$ and $$x^{n+1}$$"],
     ]) {
       expect(text(src), src).toBe(out);
     }
@@ -34,6 +36,14 @@ describe("math in the source", () => {
     unchanged('write "$x$" for inline math');
     unchanged("${a} and ${b}");
     unchanged("hash(${pkg.version}_${nodeVersion}_${x})");
+    unchanged('NF==1 && $0 ~ /^[0-9]+\\t[0-9]+\\t/ { split($0, t, "\\t");');
+    unchanged("NF==1 && $0 ~ /^[0-9]+\\t[0-9]+\\t/ { split($0, t, sep);");
+    unchanged("NF==1 && $0 ~ /^[0-9]+/ && $1 == 2");
+    unchanged("awk '{ if ($0 ~ /^[0-9]+$/) print $1 }'");
+    unchanged("($0 ~ /[0-9]+$/) and ($0 ~ /a_b$/)");
+    unchanged("echo $a_1+$b_2 and $HOME/foo_bar/$USER");
+    unchanged("echo $_/$1 and a$_/$1 and foo$\\d+$1");
+    unchanged("unbalanced $a^{2$ and $x_{1$ and $\\frac{1}{$");
   });
 
   it("takes a formula whose CJK text is all in \\text{…}, escaping that text's underscores", () => {

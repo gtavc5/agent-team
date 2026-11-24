@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { z } from "zod";
 import { CodexSession } from "../../src/session/codex";
 import type { RpcMessage, Transport } from "../../src/session/codex-rpc";
 import type { StreamEvent } from "../../src/session/types";
 import { HostRegistry, LocalHost } from "../../src/session/host";
 import { Workspace } from "../../src/workspace/workspace";
+import { summarizeMessage } from "../../src/workspace/summary";
 import type { PanelToolset } from "../../src/project/tools";
 
 // An in-memory `codex app-server`: answers the session's requests from
@@ -153,6 +154,38 @@ const echoTools = (handler: (args: Record<string, unknown>) => Promise<string>):
 });
 
 describe("codex app-server session", () => {
+  it("snapshots reasoning from item start, even before or without a summary", async () => {
+    const host = new LocalHost("local", "Local");
+    const registry = new HostRegistry();
+    registry.register(host);
+    const ws = new Workspace("w", "Workspace", "p", "local", "/tmp", registry);
+    ws.addAgent("A", "gpt-6-astra", "A", "#888", { backend: "codex" });
+    const clock = vi.spyOn(Date, "now");
+    try {
+      await ws.sendMessage("go");
+      const reply = ws.messages.find((m) => m.kind === "agent")!;
+      const item = { id: "r1", type: "reasoning", summary: [], content: [] };
+      clock.mockReturnValue(10_000);
+      server.item("started", item);
+      expect(summarizeMessage(reply).liveThinkingSince).toBe(10_000);
+      clock.mockReturnValue(15_000);
+      server.notify("item/reasoning/summaryTextDelta", {
+        threadId: "thr_1",
+        itemId: "r1",
+        delta: "draft",
+      });
+      expect(summarizeMessage(reply).liveThinkingSince).toBe(10_000);
+      expect(JSON.stringify(summarizeMessage(reply))).not.toContain("draft");
+      clock.mockReturnValue(16_000);
+      server.item("completed", item);
+      expect(summarizeMessage(reply).liveThinkingSince).toBeUndefined();
+      expect(summarizeMessage(reply).waitingSince).toBe(16_000);
+    } finally {
+      clock.mockRestore();
+      await ws.dispose();
+      await host.close();
+    }
+  });
   it("declares the panel tools when the thread starts and answers their calls", async () => {
     const { session } = makeSession();
     session.setPanelTools(

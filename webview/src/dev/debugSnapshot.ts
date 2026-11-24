@@ -84,7 +84,7 @@ export function trimmedHtml(maxMessages = 3): string {
   const clone = document.documentElement.cloneNode(true) as HTMLElement;
   for (const list of clone.querySelectorAll(".messages")) {
     const items = [...list.children].filter((c) => !c.classList.contains("history-hint"));
-    for (const extra of items.slice(maxMessages)) extra.remove();
+    for (const extra of items.slice(0, Math.max(0, items.length - maxMessages))) extra.remove();
   }
   for (const s of clone.querySelectorAll("script")) s.remove();
   return "<!doctype html>\n" + clone.outerHTML;

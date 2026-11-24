@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { PanelToolset } from "../project/tools";
-import type { HostSessionHandle } from "./host";
+import type { BoundarySteer, HostSessionHandle } from "./host";
 import { PanelHttpServer, type PanelHttpAddress } from "./panel-http";
 import { discoverLocalPiPackages, prepareControlledPiAgentHome } from "./pi-agent-home";
 import {
@@ -155,6 +155,7 @@ function firstSessionRecord(file: string): Json {
 }
 
 interface Turn {
+  steer?: { input: BoundarySteer; wireText: string; claimed: boolean; observed: boolean };
   id: string;
   inputId?: string;
   reportId?: string;
@@ -258,6 +259,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private tainted = false;
   private processGeneration = 0;
   private activeTurn: Turn | null = null;
+  private boundarySource?: () => BoundarySteer | undefined;
   private sessionFile: string | null = null;
   private expectedLeafAnchorId: string | null = null;
   private minEntryCount = 0;
@@ -500,6 +502,9 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     const generation = this.processGeneration;
     const token = this.panelHttp.registerSession({
       sessionKey: this.sessionKey,
+      onSteerBoundary: async (open) => {
+        if (generation === this.processGeneration) await this.steerAtBoundary(open);
+      },
       onQuota: this.options.catalogOnly
         ? undefined
         : (snapshot) => {
@@ -791,6 +796,59 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     }
   }
 
+  setBoundarySteerSource(source: () => BoundarySteer | undefined): void {
+    this.boundarySource = source;
+  }
+
+  private async steerAtBoundary(open: () => boolean): Promise<void> {
+    const turn = this.activeTurn;
+    const rpc = this.rpc;
+    if (!turn || !rpc || turn.steer || !turn.started || (turn.inputId && !turn.accepted)) return;
+    const live = () =>
+      this.live(turn) &&
+      open() &&
+      this.rpc === rpc &&
+      !this.interrupting &&
+      !this.tainted &&
+      !this.compactingRpc &&
+      !this.starting;
+    if (!live() || this.model.applied?.startsWith("antigravity-acp/")) return;
+    const input = this.boundarySource?.();
+    if (!input) return;
+    // Pi doesn't echo RPC IDs on user messages. Identical texts (including an old, uncertain
+    // steer delivered on a later run) must never acknowledge each other.
+    const wireText = `[Panel input ${input.envelope.inputId}]\n${input.envelope.text}`;
+    const pending = { input, wireText, claimed: false, observed: false };
+    turn.steer = pending;
+    try {
+      const reply = await rpc.steer(wireText, {
+        images: readPiAttachments(this.config.uploadsDir, input.envelope.attachmentIds),
+        timeoutMs: 1500,
+        onBeforeWrite: () => {
+          if (!live() || turn.steer !== pending || !input.claim())
+            throw new Error("Pi steer cancelled");
+          pending.claimed = true;
+          if (!live()) throw new PiRpcResponseError("steer", "Boundary expired before write");
+        },
+      });
+      if (turn.steer !== pending) return;
+      if (reply?.disposition === "handled") this.finishSteer(turn, "handled");
+      else if (reply?.disposition !== "queued") this.finishSteer(turn, "outcome_unknown");
+    } catch (error) {
+      if (turn.steer === pending)
+        this.finishSteer(
+          turn,
+          error instanceof PiRpcResponseError ? "rejected" : "outcome_unknown",
+        );
+    }
+  }
+
+  private finishSteer(turn: Turn, outcome: Parameters<BoundarySteer["finish"]>[0]): void {
+    const steer = turn.steer;
+    delete turn.steer;
+    if (steer?.claimed) steer.input.finish(outcome);
+  }
+
   setModel(model: string, effort?: string): void {
     this.model.desired = model;
     this.effort.desired = effort;
@@ -886,6 +944,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private finish(turn: Turn, terminal?: StreamEvent): void {
     if (this.activeTurn !== turn || turn.settled) return;
     turn.settled = true;
+    this.finishSteer(turn, "outcome_unknown");
     if (turn.written && !turn.accepted && turn.inputId && terminal?.kind === "error") {
       this.emit("prompt_outcome_unknown", { inputId: turn.inputId, reason: terminal.content });
     }
@@ -986,9 +1045,22 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           turn.error = undefined;
         }
         break;
-      case "message_update":
-        this.updateMessage(turn, object(event.assistantMessageEvent));
+      case "message_update": {
+        const update = object(event.assistantMessageEvent);
+        if (
+          turn.steer?.observed &&
+          !this.interrupting &&
+          ((["text_delta", "thinking_delta"].includes(String(update.type)) &&
+            !!text(update.delta)) ||
+            (["text_end", "thinking_end"].includes(String(update.type)) &&
+              !!text(update.content)) ||
+            update.type === "toolcall_start" ||
+            update.type === "toolcall_end")
+        )
+          this.finishSteer(turn, "read");
+        this.updateMessage(turn, update);
         break;
+      }
       case "message_end": {
         if (msg.role === "user" && turn.written && turn.inputId && !turn.accepted) {
           turn.accepted = true;
@@ -997,7 +1069,19 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
             reportId: turn.reportId,
             generation: turn.generation,
           });
+        } else if (msg.role === "user" && turn.steer?.claimed) {
+          // Pi persists this before the provider call, which can still be aborted without a response.
+          const content = text(msg.content) ?? text(list(msg.content)[0]?.text);
+          const expected = turn.steer.wireText;
+          turn.steer.observed ||=
+            content === expected || !!content?.startsWith(`${expected}\n\n[Image`);
         } else if (msg.role === "assistant") {
+          if (
+            turn.steer?.observed &&
+            !this.interrupting &&
+            ["stop", "toolUse", "length"].includes(String(msg.stopReason))
+          )
+            this.finishSteer(turn, "read");
           const blocks = list(msg.content);
           turn.finalText = blocks
             .filter((block) => block.type === "text")
@@ -1076,11 +1160,18 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     const block = turn.blocks.get(index) ?? { content: "", startedAt: Date.now() };
     turn.blocks.set(index, block);
     switch (update.type) {
+      case "thinking_start":
+        this.event({ kind: "thinking_delta", content: "", startedAt: block.startedAt });
+        break;
       case "text_delta":
       case "thinking_delta": {
         const delta = text(update.delta) ?? "";
         block.content += delta;
-        this.event({ kind: update.type, content: delta });
+        this.event({
+          kind: update.type,
+          content: delta,
+          ...(update.type === "thinking_delta" && { startedAt: block.startedAt }),
+        });
         break;
       }
       case "text_end":
@@ -2061,7 +2152,10 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     this.disposed = true;
     this.advanceGeneration();
     clearInterval(this.reconcileTimer);
-    if (this.activeTurn) this.activeTurn.settled = true;
+    if (this.activeTurn) {
+      this.activeTurn.settled = true;
+      this.finishSteer(this.activeTurn, "outcome_unknown");
+    }
     const rpc = this.rpc;
     this.rpc = undefined;
     this.closing = (this.retiring ?? this.shutdown(rpc, totalTimeoutMs)).finally(async () => {

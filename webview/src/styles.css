@@ -1106,15 +1106,6 @@ button {
   flex-shrink: 0;
   align-self: center;
 }
-.activity-label {
-  font-size: 11px;
-  color: var(--accent);
-  opacity: 0.85;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .compact-header {
   display: flex;
   align-items: center;
@@ -1170,11 +1161,18 @@ button {
 .ctx-high .ctx-bar-fill {
   background: var(--error);
 }
-.working-indicator {
+.turn-footer {
+  height: 20px;
+  line-height: 20px;
+  margin: 4px 0 0;
+  white-space: nowrap;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
-  font-style: italic;
   font-size: 12px;
-  animation: pulse 2s infinite;
+}
+.turn-activity {
+  color: var(--accent);
 }
 .live-thinking {
   margin: 4px 0;
@@ -1183,6 +1181,7 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  vertical-align: middle;
 }
 .message-error .message-content {
   color: var(--error);
@@ -1434,6 +1433,8 @@ span.katex-display {
 /* ---- Step groups and events --------------------------------------------- */
 
 .step-group {
+  container-name: step-box;
+  container-type: inline-size;
   margin: 4px 0;
   border-left: 2px solid var(--border-strong);
   padding-left: 10px;
@@ -1448,6 +1449,7 @@ span.katex-display {
   cursor: pointer;
   color: var(--text-muted);
   font-size: 11.5px;
+  line-height: 18px;
   user-select: none;
   padding: 2px 0;
   min-width: 0;
@@ -1461,18 +1463,55 @@ span.katex-display {
   flex-shrink: 0;
 }
 .step-summary {
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 .step-tools {
-  display: flex;
-  gap: 4px;
   min-width: 0;
-  overflow: hidden;
-  flex-wrap: wrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.step-tools-track {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  width: max-content;
+  gap: 4px;
+}
+.step-tools[data-fade-start],
+.step-tools[data-fade-end] {
+  mask-image: linear-gradient(
+    to right,
+    var(--tool-fade-start, #000),
+    #000 12px,
+    #000 calc(100% - 12px),
+    var(--tool-fade-end, #000)
+  );
+}
+.step-tools[data-fade-start] {
+  --tool-fade-start: #0005;
+}
+.step-tools[data-fade-end] {
+  --tool-fade-end: #0005;
 }
 .step-tools-more {
   font-size: 10px;
   color: var(--text-muted);
+}
+@container step-box (max-width: 460px) {
+  .step-header {
+    display: grid;
+    grid-template-columns: 10px minmax(0, 1fr);
+    row-gap: 2px;
+  }
+  .step-summary {
+    white-space: normal;
+  }
+  .step-tools {
+    grid-column: 2;
+    justify-self: start;
+    max-width: 100%;
+  }
 }
 .events-list {
   margin-top: 4px;
@@ -1512,6 +1551,11 @@ span.katex-display {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
   border: 1px solid var(--border);
+}
+.step-tools .event-chip {
+  flex: 0 0 auto;
+  max-width: none;
+  text-overflow: clip;
 }
 .chip-mini {
   font-weight: 500;
@@ -2780,7 +2824,6 @@ button.action-target:hover {
 
 @media (max-width: 768px), (max-height: 500px) {
   .subagent-counts,
-  .step-tools,
   .task-item .task-time {
     display: none;
   }
@@ -2870,14 +2913,9 @@ button.action-target:hover {
   .agents-chip {
     max-width: 38vw;
   }
-  /* "Alice · model · time · ● sleeping until 03:01": let the status drop to
-     its own line rather than be cut to a few characters. */
   .message-header {
     flex-wrap: wrap;
     row-gap: 0;
-  }
-  .message-header .activity-label {
-    flex: 1 1 auto;
   }
   .panel-title {
     font-size: var(--fs-text);
@@ -4940,6 +4978,7 @@ button.action-target:hover {
   flex-direction: column;
   gap: 10px;
   font-size: var(--fs-text);
+  container-type: inline-size;
 }
 /* A card of sections parted by hairlines, every one starting on the edge
    the fold arrow sits on: the header, where it works and on what, the
@@ -5170,11 +5209,12 @@ button.action-target:hover {
 }
 .ap-agent-top {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
   min-width: 0;
 }
 .ap-agent-name {
+  flex: 0 3 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5183,6 +5223,7 @@ button.action-target:hover {
 }
 .ap-model {
   field-sizing: content;
+  min-width: 0;
   max-width: 100%;
   padding: 0 2px;
   font: inherit;
@@ -5191,6 +5232,14 @@ button.action-target:hover {
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   cursor: pointer;
+}
+.ap-model:not(.ap-effort) {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ap-effort {
+  flex-shrink: 0;
 }
 .ap-model:hover {
   border-color: var(--border);
@@ -5204,6 +5253,25 @@ button.action-target:hover {
   white-space: nowrap;
   font-size: var(--fs-meta);
   color: var(--text-muted);
+}
+.ap-meta.has-controls {
+  display: flex;
+  align-items: baseline;
+  flex: 1 1 auto;
+  text-overflow: clip;
+}
+.ap-meta-model {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ap-meta-sep,
+.ap-meta-effort,
+.ap-meta-fast {
+  flex-shrink: 0;
+  white-space: pre;
 }
 .ap-agent.as-working .ap-agent-state {
   color: var(--accent);
@@ -5237,9 +5305,27 @@ button.action-target:hover {
 }
 .ap-agent-actions {
   display: flex;
+  flex-shrink: 0;
   gap: 2px;
+  margin-left: auto;
   margin-right: -5px;
+  margin-block: -2px;
   opacity: 0;
+}
+@container (max-width: 460px) {
+  .ap-agent-top {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 4px 6px;
+  }
+  .ap-agent-actions {
+    margin-left: 0;
+  }
+  .ap-meta {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
 }
 .ap-agent:hover .ap-agent-actions,
 .ap-agent:focus-within .ap-agent-actions {
@@ -5403,6 +5489,7 @@ button.action-target:hover {
   }
   .ap-agent-actions {
     margin-right: -12px;
+    margin-block: -9px;
   }
   .ap-session-head {
     padding-block: 2px;

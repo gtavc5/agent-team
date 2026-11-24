@@ -2,7 +2,7 @@ import { expect } from "vitest";
 import { agentMessages, fixture } from "../fixture.ts";
 
 export default fixture({
-  description: "A non-steerable Pi session dispatches queued prompts FIFO only after settlement.",
+  description: "Without a steering boundary, Pi dispatches queued prompts FIFO after settlement.",
   steps: [
     { op: "send", text: "First prompt." },
     { op: "send", text: "Second prompt." },

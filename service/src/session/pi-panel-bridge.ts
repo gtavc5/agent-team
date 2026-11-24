@@ -30,6 +30,8 @@ interface SessionManager {
 
 interface ExtensionContext {
   cwd: string;
+  model?: { provider: string };
+  signal?: AbortSignal;
   sessionManager: SessionManager;
 }
 
@@ -67,6 +69,13 @@ interface PiExtensionApi {
     emit(channel: string, data: unknown): void;
   };
   on(event: "session_start", handler: (event: unknown, ctx: ExtensionContext) => void): Unsubscribe;
+  on(
+    event: "turn_end",
+    handler: (
+      event: { outcome: string; context: { pendingMessages: unknown[] } },
+      ctx: ExtensionContext,
+    ) => Promise<void>,
+  ): Unsubscribe;
   on(
     event: "before_agent_start",
     handler: (event: BeforeAgentStartEvent, ctx: ExtensionContext) => void | Promise<void>,
@@ -649,6 +658,27 @@ export default function piPanelBridge(pi: PiExtensionApi): void {
       await Promise.race([controlConnected, delay(1_000)]);
       await reportReady(ctx, proof);
     })().catch(() => undefined);
+  });
+
+  pi.on("turn_end", async (event, ctx) => {
+    // ACP tool continuations need not start a new provider request with Pi's updated context.
+    if (
+      stopped ||
+      !generation ||
+      ctx.sessionManager.getHeader()?.parentSession ||
+      !ctx.model ||
+      ctx.model.provider === "antigravity-acp" ||
+      event.outcome !== "completed" ||
+      ctx.signal?.aborted ||
+      event.context.pendingMessages.length
+    )
+      return;
+    // The host owns the write deadline. Do not release the turn while a slow
+    // durable claim is in progress: it may still become a real stdin write.
+    await requestJson(`steer-boundary?until=${Date.now() + 2000}`, {
+      method: "POST",
+      timeoutMs: 0,
+    }).catch(() => undefined);
   });
 
   pi.on("before_agent_start", async (event) => {

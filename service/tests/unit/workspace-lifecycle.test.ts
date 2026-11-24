@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { summarizeMessage } from "../../src/workspace/summary";
 import { EventEmitter } from "events";
 import { Workspace, WorkspaceCallbacks } from "../../src/workspace/workspace";
 import { HostRegistry, Host, HostSessionHandle, HostInfo, LocalHost } from "../../src/session/host";
@@ -60,6 +61,12 @@ class FakeHost implements Host {
     const s = new FakeSession(config);
     this.sessions.set(agentId, s);
     return s;
+  }
+  replaceSession(agentId: string, config: SessionConfig): HostSessionHandle {
+    const old = this.sessions.get(agentId);
+    old?.removeAllListeners();
+    void this.destroySession(agentId);
+    return this.createSession(agentId, config);
   }
   destroySession(agentId: string): Promise<void> {
     this.sessions.get(agentId)?.abort();
@@ -129,6 +136,206 @@ describe("Workspace teardown", () => {
     expect(ws.messages.some((m) => m.id === queued.id)).toBe(false);
     expect(ws.isIdle).toBe(true);
     expect(ws.removeAgent(agent.id)).toBeNull();
+  });
+});
+
+describe("Streaming timers", () => {
+  it("snapshots the active timer but never the live thinking text", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      const { ws, session } = makeWorkspace();
+      await ws.sendMessage("go");
+      const reply = ws.messages.find((m) => m.kind === "agent")!;
+      expect(summarizeMessage(reply).waitingSince).toBe(1_000);
+
+      clock.mockReturnValue(8_000);
+      session.emit("event", { kind: "thinking_delta", content: "draft", startedAt: 7_500 });
+      session.emit("event", { kind: "thinking_delta", content: " more" });
+      const midThinking = summarizeMessage(reply);
+      expect(midThinking.liveThinkingSince).toBe(7_500);
+      expect(midThinking.waitingSince).toBeUndefined();
+      expect(JSON.stringify(midThinking)).not.toContain("draft");
+      expect(JSON.stringify(ws.getState())).not.toContain("liveThinkingSince");
+
+      session.emit("event", { kind: "thinking", content: "finished", durationMs: 500 });
+      session.emit("event", { kind: "tool_use", content: "Read", toolUseId: "read" });
+      expect(reply.liveThinkingSince).toBeUndefined();
+      expect(reply.waitingSince).toBeUndefined();
+      clock.mockReturnValue(10_000);
+      session.emit("event", { kind: "tool_result", content: "OK", toolUseId: "read" });
+      expect(summarizeMessage(reply).waitingSince).toBe(10_000);
+      expect(JSON.stringify(ws.getState())).not.toContain("waitingSince");
+
+      session.emit("event", { kind: "result", content: "" });
+      expect(reply.liveThinkingSince).toBeUndefined();
+      expect(reply.waitingSince).toBeUndefined();
+      expect(reply.events).toContainEqual(
+        expect.objectContaining({ kind: "thinking", durationMs: 500 }),
+      );
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});
+
+describe("Workspace model switching", () => {
+  const models = [
+    {
+      id: "gpt-5.6-terra",
+      label: "Terra",
+      backend: "codex" as const,
+      effortLevels: ["high", "low"],
+    },
+    { id: "demo/model", label: "Demo", backend: "pi" as const, effortLevels: ["low"] },
+  ];
+
+  it("lists both backends and replaces the session in place before the first turn", async () => {
+    const onAgentUpdated = vi.fn();
+    const { ws, host, agent, session } = makeWorkspace({
+      modelOptions: () => models,
+      onAgentUpdated,
+    });
+    expect(ws.getInfo().agents[0].canSwitchBackend).toBe(true);
+    await ws.sendMessage("/model");
+    expect(ws.messages.at(-1)?.content).toContain("`demo/model`");
+
+    await ws.sendMessage("/model demo/model");
+    const replacement = host.sessions.get(agent.id)!;
+    expect(replacement).not.toBe(session);
+    expect(session.listenerCount("event")).toBe(0);
+    expect(replacement.getState().config).toMatchObject({
+      cwd: "/tmp",
+      model: "demo/model",
+      backend: "pi",
+    });
+    expect(onAgentUpdated).toHaveBeenLastCalledWith(
+      ws.id,
+      expect.objectContaining({
+        id: agent.id,
+        model: "demo/model",
+        name: "A",
+        avatar: "a",
+        color: "#888",
+        isDefault: true,
+        canSwitchBackend: true,
+      }),
+    );
+    await ws.sendMessage("/model gpt-5.6-terra");
+    expect(host.sessions.get(agent.id)?.getState().config.backend).toBe("codex");
+  });
+
+  it("does not let a model switch overtake the first prompt", async () => {
+    const { ws, agent, session, host } = makeWorkspace({ modelOptions: () => models });
+    const sending = ws.sendMessage("first prompt");
+    const switching = ws.sendMessage("/model demo/model");
+    await Promise.all([sending, switching]);
+    expect(session.sent).toEqual(["first prompt"]);
+    expect(host.sessions.get(agent.id)).toBe(session);
+    expect(ws.messages.at(-1)?.content).toContain("cannot move");
+  });
+
+  it.each([
+    {
+      prompt: "/model",
+      reply: "**A** runs on **Terra** (`gpt-5.6-terra`).\nAvailable: **gpt-5.6-terra**",
+      empty: true,
+    },
+    { prompt: "hello", reply: "Hi there.", empty: false },
+  ])("recognizes pre-upgrade history after '$prompt'", async ({ prompt, reply, empty }) => {
+    const { ws, host, agent } = makeWorkspace();
+    const state = ws.getState();
+    state.messages!.push(
+      { id: "user", kind: "user", agentId: null, content: prompt, status: "done", timestamp: 1 },
+      {
+        id: "reply",
+        kind: "agent",
+        agentId: agent.id,
+        turnId: "turn-legacy",
+        content: reply,
+        status: "done",
+        timestamp: 2,
+        events: [],
+      },
+    );
+    const registry = new HostRegistry();
+    registry.register(host);
+    const restored = Workspace.fromState(state, registry, {
+      onNewMessage: () => {},
+      onStreamEvent: () => {},
+      onMessageDone: () => {},
+      modelOptions: () => models,
+    });
+    expect(restored.getInfo().agents[0].canSwitchBackend).toBe(empty);
+    await restored.sendMessage("/model demo/model");
+    expect(host.sessions.get(agent.id)?.getState().config.backend).toBe(empty ? "pi" : "codex");
+  });
+
+  it("rebinds panel tools on a replacement managed by LocalHost", async () => {
+    const host = new LocalHost("local", "Local");
+    const registry = new HostRegistry();
+    registry.register(host);
+    const tools = { instructions: "Project instructions", tools: [] };
+    const onSessionReplaced = vi.fn((_ws: Workspace, session: HostSessionHandle) => {
+      session.setPanelTools?.(tools);
+    });
+    const ws = new Workspace("ws-p", "p", "p", "local", "/tmp", registry, {
+      onNewMessage: () => {},
+      onStreamEvent: () => {},
+      onMessageDone: () => {},
+      modelOptions: () => models,
+      onSessionReplaced,
+    });
+    ws.projectLink = { projectId: "proj", role: "lead" };
+    const agent = ws.addAgent(
+      "A",
+      "gpt-5.6-terra",
+      "a",
+      "#888",
+      {
+        backend: "codex",
+        effort: "low",
+      },
+      "account",
+    );
+    const original = ws.agents.get(agent.id)!.session;
+    const disposed = vi.spyOn(original, "dispose");
+    try {
+      await ws.sendMessage("/model demo/model");
+      const replacement = ws.agents.get(agent.id)!.session;
+      expect(disposed).toHaveBeenCalledOnce();
+      expect(original.listenerCount("event")).toBe(0);
+      expect(replacement.getState().config.effort).toBe("low");
+      expect(ws.agents.get(agent.id)?.info.account).toBe("account");
+      expect(ws.projectLink).toEqual({ projectId: "proj", role: "lead" });
+      expect(onSessionReplaced).toHaveBeenCalledWith(ws, replacement);
+      const replacementDisposed = vi.spyOn(replacement, "dispose");
+      await ws.dispose();
+      expect(replacementDisposed).toHaveBeenCalledOnce();
+    } finally {
+      await host.close();
+    }
+  });
+
+  it("does not leave the backend while busy, with a persisted session ID, or after a turn", async () => {
+    const { ws, host, agent, session } = makeWorkspace({ modelOptions: () => models });
+    const refuses = async () => {
+      expect(ws.getInfo().agents[0].canSwitchBackend).toBe(false);
+      await ws.sendMessage("/model demo/model");
+      expect(ws.messages.at(-1)?.content).toContain("cannot move");
+      expect(host.sessions.get(agent.id)).toBe(session);
+    };
+    session.isRunning = true;
+    await refuses();
+    session.isRunning = false;
+    session.sessionId = "existing";
+    await refuses();
+    session.sessionId = null;
+    await ws.sendMessage("go");
+    session.emit("event", { kind: "text_delta", content: "done" });
+    session.emit("event", { kind: "result", content: "" });
+    session.isRunning = false;
+    ws.clearContext(agent.id);
+    await refuses();
   });
 });
 

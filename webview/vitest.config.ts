@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
@@ -8,6 +8,7 @@ export default defineConfig({
     // Required for @testing-library/react's automatic DOM cleanup between tests.
     globals: true,
     include: ["tests/**/*.test.{ts,tsx}"],
+    exclude: [...configDefaults.exclude, "tests/browser/**"],
     // Otherwise every stylesheet reads as empty, even with ?raw.
     css: { include: [/styles\.css/, /sarasa-mono-sc\/[\w-]+\/result\.css/] },
   },

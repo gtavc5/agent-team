@@ -196,7 +196,7 @@ describe("render cost of a live transcript", () => {
     }
     expect(count()).toBe(0);
 
-    // The activity label ticks every second during a long tool: only the
+    // Activity ticks every second during a long tool: only the
     // streaming message shows it.
     sock.receive({
       type: "agent_activity",
@@ -205,7 +205,7 @@ describe("render cost of a live transcript", () => {
       activity: "Bash · 3s",
     });
     expect(count()).toBe(1);
-    expect(document.querySelector("#msg-live .activity-label")!.textContent).toBe("Bash · 3s");
+    expect(document.querySelector("#msg-live .turn-footer")!.textContent).toBe("Bash · 3s");
   });
 });
 

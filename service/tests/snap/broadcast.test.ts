@@ -15,7 +15,7 @@ import {
 import {
   applyStreamBatch,
   mergeDetailEvents,
-  withoutLiveThinking,
+  withoutLiveTiming,
   type PendingEvent,
 } from "../../../webview/src/state/stream";
 import type { Message as ClientMessage } from "../../../webview/src/state/useServer";
@@ -113,7 +113,7 @@ function clientFold(frames: Frame[], mode: "each" | "hidden") {
         const events = f.events as ClientMessage["events"];
         const merged = events ? mergeDetailEvents(m.events, events) : undefined;
         return {
-          ...withoutLiveThinking(m),
+          ...withoutLiveTiming(m),
           status: f.status as ClientMessage["status"],
           content: f.content as string,
           ...(merged ? { events: merged } : {}),

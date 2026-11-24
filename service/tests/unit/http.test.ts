@@ -12,6 +12,7 @@ import * as zlib from "zlib";
 import { Auth } from "../../src/server/auth";
 import { HttpHandler } from "../../src/server/http";
 import type { AuthConfig } from "../../src/config/config";
+import { lsofBinary } from "../lsof";
 
 vi.mock("fs", async (original) => {
   const fs = await original<typeof import("fs")>();
@@ -341,7 +342,7 @@ describe("file previews", () => {
     const openOnBig = () => {
       if (process.platform === "darwin") {
         const canonical = fs.realpathSync(big);
-        return execFileSync("lsof", ["-p", String(process.pid)], { encoding: "utf8" })
+        return execFileSync(lsofBinary(), ["-p", String(process.pid)], { encoding: "utf8" })
           .split("\n")
           .filter((line) => line.endsWith(canonical)).length;
       }

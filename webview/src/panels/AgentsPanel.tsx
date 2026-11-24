@@ -304,6 +304,12 @@ function AgentRow({
   const ctx = a.context;
   const pct = ctx && ctx.window ? Math.min(100, Math.round((ctx.tokens / ctx.window) * 100)) : null;
   const bg = a.backgroundTasks ?? [];
+  const modelOptions = modelLabels(switchable(a, models));
+  const hasModelSelect = !archived && !readOnly && connected && modelOptions.length >= 2;
+  const effortLevels =
+    !archived && !readOnly && connected && selectableLevels(a.effortLevels) ? a.effortLevels : null;
+  const hasControls = hasModelSelect || !!effortLevels;
+
   return (
     <div className={`ap-agent as-${state}`}>
       <AgentAvatar agent={a} size={22} />
@@ -312,10 +318,8 @@ function AgentRow({
           <span className="ap-agent-name" style={{ color: a.color }}>
             {a.name}
           </span>
-          <span className="ap-meta">
-            {archived || readOnly || !connected || switchable(a, models).length < 2 ? (
-              shortModel(a.model)
-            ) : (
+          <span className={`ap-meta${hasControls ? " has-controls" : ""}`}>
+            {hasModelSelect ? (
               <select
                 className="ap-model"
                 aria-label={`${a.name}'s model`}
@@ -323,30 +327,55 @@ function AgentRow({
                 value={a.model}
                 onChange={(e) => onModel(e.target.value)}
               >
-                {switchable(a, models).map((id) => (
+                {modelOptions.map(({ id, label }) => (
                   <option key={id} value={id}>
-                    {shortModel(id)}
+                    {label}
                   </option>
                 ))}
               </select>
-            )}
-            {archived || readOnly || !connected || !selectableLevels(a.effortLevels) ? (
-              a.effort && ` · ${a.effort}`
+            ) : hasControls ? (
+              <span className="ap-meta-model">{shortAgentModel(a.model)}</span>
             ) : (
+              shortAgentModel(a.model)
+            )}
+            {effortLevels ? (
               <>
-                {" · "}
+                <span className="ap-meta-sep" aria-hidden="true">
+                  {" · "}
+                </span>
                 <EffortSelect
                   className="ap-model ap-effort"
-                  levels={a.effortLevels}
+                  levels={effortLevels}
                   fallback={effortOf(models, a.model).fallback}
                   value={a.effort ?? ""}
                   onChange={(level) => level && onEffort(level)}
                   label={`${a.name}'s reasoning effort`}
                 />
               </>
+            ) : (
+              a.effort &&
+              (hasControls ? (
+                <span className="ap-meta-effort">{` · ${a.effort}`}</span>
+              ) : (
+                ` · ${a.effort}`
+              ))
             )}
-            {a.fast ? " · ⚡" : ""}
+            {a.fast && (hasControls ? <span className="ap-meta-fast">{" · ⚡"}</span> : " · ⚡")}
           </span>
+          {!archived && !readOnly && (
+            <div className="ap-agent-actions">
+              <button
+                title="Clear context"
+                aria-label={`Clear ${a.name}'s context`}
+                onClick={onClear}
+              >
+                <Icon name="clear" />
+              </button>
+              <button title="Remove" aria-label={`Remove ${a.name}`} onClick={onRemove}>
+                <Icon name="close" />
+              </button>
+            </div>
+          )}
         </div>
         {(archived || state !== "idle" || !connected || bg.length > 0) && (
           <div className="ap-agent-state">
@@ -366,26 +395,79 @@ function AgentRow({
           </div>
         )}
       </div>
-      {!archived && !readOnly && (
-        <div className="ap-agent-actions">
-          <button title="Clear context" aria-label={`Clear ${a.name}'s context`} onClick={onClear}>
-            <Icon name="clear" />
-          </button>
-          <button title="Remove" aria-label={`Remove ${a.name}`} onClick={onRemove}>
-            <Icon name="close" />
-          </button>
-        </div>
-      )}
     </div>
   );
 }
 
-// Models an agent can move to mid-session: a conversation stays on its
-// backend. The current one leads even when the list has dropped it.
+function parseModelParts(id: string): {
+  id: string;
+  provider: string;
+  date: string;
+  short: string;
+} {
+  const m = id.match(/^(.*?)(\[1m\])?$/i);
+  const raw = m?.[1] ?? id;
+  const suffix = m?.[2] ?? "";
+  const slash = raw.lastIndexOf("/");
+  const provider = slash >= 0 ? raw.slice(0, slash) : "";
+  const name = slash >= 0 ? raw.slice(slash + 1) : raw;
+  const dm = name.match(/^(.+?)-(\d{8})$/);
+  const baseName = dm ? dm[1] : name;
+  const date = dm ? dm[2] : "";
+  return {
+    id,
+    provider,
+    date,
+    short: shortModel(suffix ? `${baseName}${suffix}` : baseName),
+  };
+}
+
+function shortAgentModel(id: string): string {
+  return parseModelParts(id).short;
+}
+
+// Strip provider prefixes and snapshot dates locally for narrow selects, adding
+// back whichever part disambiguates colliding options while keeping full IDs
+// in `<option value>`.
+function modelLabels(ids: string[]): Array<{ id: string; label: string }> {
+  const parsed = ids.map(parseModelParts);
+  const byShort = new Map<string, typeof parsed>();
+
+  for (const item of parsed) {
+    const group = byShort.get(item.short);
+    if (group) group.push(item);
+    else byShort.set(item.short, [item]);
+  }
+
+  const resolved = parsed.map((item) => {
+    const group = byShort.get(item.short)!;
+    if (group.length === 1) return { id: item.id, label: item.short };
+
+    const providersDiffer = new Set(group.map((g) => g.provider)).size > 1;
+    const datesDiffer = new Set(group.map((g) => g.date)).size > 1;
+    const parts: string[] = [];
+
+    if (providersDiffer && item.provider) parts.push(item.provider);
+    if (datesDiffer && item.date) parts.push(item.date);
+
+    return {
+      id: item.id,
+      label: parts.length > 0 ? `${item.short} (${parts.join(", ")})` : item.short,
+    };
+  });
+
+  const labelCounts = new Map<string, number>();
+  for (const r of resolved) labelCounts.set(r.label, (labelCounts.get(r.label) ?? 0) + 1);
+
+  return resolved.map((r) => (labelCounts.get(r.label)! > 1 ? { id: r.id, label: r.id } : r));
+}
+
+// A conversation stays on its backend. The current model is always selectable.
 function switchable(a: AgentInfo, models: ModelOption[]): string[] {
   const backend =
     models.find((m) => m.id === a.model)?.backend ?? (a.model.startsWith("gpt-") ? "codex" : "pi");
-  const ids = models.filter((m) => m.backend === backend).map((m) => m.id);
+  const allowOtherBackend = a.canSwitchBackend && !a.busy && agentState(a) === "idle";
+  const ids = models.filter((m) => allowOtherBackend || m.backend === backend).map((m) => m.id);
   return ids.includes(a.model) ? ids : [a.model, ...ids];
 }
 

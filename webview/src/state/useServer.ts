@@ -20,7 +20,7 @@ import {
   mergeDetailEvents,
   mergeLatestPage,
   PendingEvent,
-  withoutLiveThinking,
+  withoutLiveTiming,
 } from "./stream";
 
 // Liveness probing. Mobile browsers freeze the page when the screen turns off
@@ -113,8 +113,9 @@ export interface StreamEvent {
   // A finished thinking block: how long it took and, once its API call
   // ends, how many tokens it spent. A tool call: from call to result.
   durationMs?: number;
-  // A tool call's start, when its backend gives it: a running one counts up.
+  // Start of a tool call or a live thinking block.
   startedAt?: number;
+  waitingSince?: number | null;
   tokens?: number;
   subagent?: SubAgentInfo;
   // Present on summary pages instead of the bodies.
@@ -282,10 +283,10 @@ export interface Message {
   thinking?: ThinkingStats;
   // History pages arrive as summaries; full events load on first expand.
   detail?: "summary";
-  // A thinking block streaming in right now, and when it started (client
-  // clock). Client-only: the finished block arrives as a "thinking" event.
+  // Text is client-only; the timestamps also arrive in streaming snapshots.
   liveThinking?: string;
   liveThinkingSince?: number;
+  waitingSince?: number;
 }
 
 export interface AgentInfo {
@@ -295,6 +296,7 @@ export interface AgentInfo {
   avatar: string;
   color: string;
   isDefault: boolean;
+  canSwitchBackend?: boolean;
   busy?: boolean;
   state?: RunState;
   // Transient label of what the agent is doing (compacting, a long tool...).
@@ -917,7 +919,7 @@ export function useServer() {
                   if (m.id !== messageId) return m;
                   const merged = events ? mergeDetailEvents(m.events, events) : undefined;
                   return {
-                    ...withoutLiveThinking(m),
+                    ...withoutLiveTiming(m),
                     status,
                     content,
                     ...(merged ? { events: merged } : {}),
@@ -940,7 +942,9 @@ export function useServer() {
               w.id === wsId
                 ? {
                     ...w,
-                    agents: w.agents.map((a) => (a.id === agentId ? { ...a, busy: true } : a)),
+                    agents: w.agents.map((a) =>
+                      a.id === agentId ? { ...a, busy: true, canSwitchBackend: false } : a,
+                    ),
                   }
                 : w,
             ),

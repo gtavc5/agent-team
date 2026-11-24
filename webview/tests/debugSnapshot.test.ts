@@ -32,7 +32,13 @@ describe("debug snapshot", () => {
     const html = trimmedHtml(3);
     expect(html.startsWith("<!doctype html>")).toBe(true);
     expect((html.match(/class="message"/g) ?? []).length).toBe(3);
+    expect(html).not.toContain('<div class="message">1</div>');
+    expect(html).toContain('<div class="message">2</div>');
+    expect(html).toContain('<div class="message">3</div>');
+    expect(html).toContain('<div class="message">4</div>');
     expect(html).toContain("history-hint");
+    // Fewer than maxMessages keeps everything.
+    expect((trimmedHtml(10).match(/class="message"/g) ?? []).length).toBe(4);
     // The live DOM is untouched.
     expect(document.querySelectorAll(".message")).toHaveLength(4);
   });

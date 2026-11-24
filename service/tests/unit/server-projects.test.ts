@@ -11,7 +11,7 @@ import type { Objective } from "../../src/project/objectives";
 import { Server } from "../../src/server/server";
 import { ProjectManager } from "../../src/project/manager";
 import { closeHistory, historyOf, saveIndex, saveWorkspace } from "../../src/workspace/state";
-import type { PromptEnvelope, SessionConfig } from "../../src/session/types";
+import type { PiAvailableModel, PromptEnvelope, SessionConfig } from "../../src/session/types";
 import * as codex from "../../src/session/codex";
 import { LocalHost } from "../../src/session/host";
 import { QUOTA_TTL, type QuotaState } from "../../src/session/quota-schema";
@@ -32,13 +32,19 @@ interface Launch {
 }
 
 let launches: Launch[] = [];
+let sessionsByAgent = new Map<string, TestSession>();
 const ENV_KEYS = ["HOME", "https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"];
 let savedEnv: Record<string, string | undefined>;
 
 class TestSession extends FakeSession {
   private launch: Launch | null = null;
+  availableModels: PiAvailableModel[] = [];
   constructor(private readonly sessionConfig: SessionConfig) {
     super(sessionConfig);
+  }
+
+  getAvailableModels(): PiAvailableModel[] {
+    return this.availableModels;
   }
 
   send(input: string | PromptEnvelope): Promise<void> {
@@ -104,12 +110,17 @@ beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   for (const k of ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"]) delete process.env[k];
   launches = [];
-  vi.spyOn(LocalHost.prototype, "createSession").mockImplementation(
-    (_id, config) => new TestSession(config),
-  );
-  vi.spyOn(LocalHost.prototype, "restoreSession").mockImplementation(
-    (_id, state) => new TestSession(state.config),
-  );
+  sessionsByAgent = new Map();
+  vi.spyOn(LocalHost.prototype, "createSession").mockImplementation((id, config) => {
+    const s = new TestSession(config);
+    sessionsByAgent.set(id, s);
+    return s;
+  });
+  vi.spyOn(LocalHost.prototype, "restoreSession").mockImplementation((id, state) => {
+    const s = new TestSession(state.config);
+    sessionsByAgent.set(id, s);
+    return s;
+  });
 });
 
 afterEach(() => {
@@ -318,6 +329,74 @@ const readState = (base: string, id: string): WorkspaceState => {
 };
 
 describe("server restart with projects", () => {
+  it("dispatches on the new backend with worker tools and persists the switch", async () => {
+    const { base, root, web } = seed();
+    fs.writeFileSync(path.join(base, "config.toml"), "[pi]\n");
+    vi.spyOn(LocalHost.prototype, "discoverPiModels").mockResolvedValue([
+      { id: "demo/model", provider: "demo", modelId: "model", effortLevels: ["low"] },
+    ]);
+    const state = readState(base, "ws-live");
+    state.agents[0].session.config.effort = "low";
+    saveWorkspace(base, state);
+    closeHistory(base);
+    const { server, frames, send, stop } = await start(base, web);
+    try {
+      await until(
+        () =>
+          frames.some((f) => JSON.stringify(f.models ?? f.config ?? null).includes("demo/model")),
+        "Pi catalog",
+      );
+      send({ type: "send_message", workspaceId: "ws-live", content: "/model demo/model" });
+      await until(
+        () =>
+          frames.some(
+            (f) =>
+              f.type === "agent_updated" &&
+              f.workspaceId === "ws-live" &&
+              (f.agent as AgentState).model === "demo/model",
+          ),
+        "replacement",
+      );
+      send({ type: "send_message", workspaceId: "ws-live", content: "first prompt" });
+      await until(() => launches.length === 1, "first dispatch");
+      expect(launches[0]).toMatchObject({
+        cwd: root,
+        model: "demo/model",
+        effort: "low",
+        prompts: ["first prompt"],
+      });
+      expect(launches[0].panel?.tools.map((tool) => tool.name)).toContain("finish_task");
+      launches[0].emit({ kind: "text_delta", content: "done" });
+      launches[0].emit({ kind: "result", content: "" });
+      await server.close();
+      const saved = readState(base, "ws-live");
+      expect(saved.projectLink).toMatchObject({ projectId: "proj-1", role: "worker" });
+      expect(saved.agents[0]).toMatchObject({
+        id: "a-live",
+        model: "demo/model",
+        session: { config: { backend: "pi", effort: "low", cwd: root } },
+      });
+      const restarted = await start(base, web);
+      try {
+        const init = restarted.frames.find((f) => f.type === "init")!;
+        const workspace = (init.workspaces as WorkspaceState[]).find((w) => w.id === "ws-live");
+        expect(workspace?.agents[0]).toMatchObject({
+          id: "a-live",
+          model: "demo/model",
+          effort: "low",
+          canSwitchBackend: false,
+        });
+      } finally {
+        restarted.stop();
+        await restarted.server.close();
+      }
+    } finally {
+      stop();
+      await server.close();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     { order: "ready before control", overlap: false },
     { order: "control before ready", overlap: false },
@@ -561,6 +640,87 @@ describe("server restart with projects", () => {
       fs.rmSync(base, { recursive: true, force: true });
     }
   });
+
+  it("refreshes start_session models on unstarted/idle leads and defers running leads until idle", async () => {
+    vi.spyOn(LocalHost.prototype, "discoverPiModels").mockResolvedValue([
+      {
+        id: "antigravity-acp/claude-opus-4-6-thinking",
+        provider: "antigravity-acp",
+        modelId: "claude-opus-4-6-thinking",
+      },
+    ]);
+    const setPanelTools = vi.spyOn(TestSession.prototype, "setPanelTools");
+    const { base, web } = seed();
+    fs.writeFileSync(path.join(base, "config.toml"), "[pi]\n");
+    const { frames, send, stop } = await start(base, web);
+    try {
+      const leadSession = sessionsByAgent.get("a-lead")!;
+      const liveSession = sessionsByAgent.get("a-live")!;
+      const startDescription = (session: TestSession) =>
+        session.panelTools?.tools.find((t) => t.name === "start_session")?.description ?? "";
+
+      // Boot-discovered Pi models reach the restored unstarted lead.
+      expect(startDescription(leadSession)).toContain("antigravity-acp/claude-opus-4-6-thinking");
+
+      // Create a second project whose lead stays unstarted/idle.
+      const beforeIds = new Set(sessionsByAgent.keys());
+      send({ type: "create_project", root: null, cwd: base, name: "idle-proj" });
+      await until(
+        () =>
+          frames.some(
+            (f) =>
+              f.type === "project_updated" && (f.project as { name?: string }).name === "idle-proj",
+          ),
+        "second project created",
+      );
+      const idleLeadId = [...sessionsByAgent.keys()].find((id) => !beforeIds.has(id))!;
+      const idleLeadSession = sessionsByAgent.get(idleLeadId)!;
+      expect(startDescription(idleLeadSession)).toContain(
+        "antigravity-acp/claude-opus-4-6-thinking",
+      );
+
+      // Start a turn on ws-lead so it is actively running.
+      send({ type: "send_message", workspaceId: "ws-lead", content: "hello" });
+      await until(() => launches.length === 1, "lead turn running");
+      setPanelTools.mockClear();
+
+      // Discover a new Pi model while ws-lead is running.
+      liveSession.availableModels = [
+        {
+          id: "kimi-coding/k2p5",
+          provider: "kimi-coding",
+          modelId: "k2p5",
+        },
+      ];
+      liveSession.emit("commands", []);
+      await until(
+        () =>
+          frames.some(
+            (f) =>
+              f.type === "models_update" &&
+              (f.models as Array<{ id: string }>).some((m) => m.id === "kimi-coding/k2p5"),
+          ),
+        "models_update broadcast",
+      );
+
+      // The unstarted/idle lead updates immediately; the running lead is untouched mid-turn.
+      expect(startDescription(idleLeadSession)).toContain("kimi-coding/k2p5");
+      expect(setPanelTools.mock.instances.filter((inst) => inst === leadSession)).toHaveLength(0);
+      expect(startDescription(leadSession)).not.toContain("kimi-coding/k2p5");
+
+      // Once the running lead finishes its turn and becomes idle, its tools refresh.
+      launches[0].emit({ type: "result", result: "done" });
+      await until(
+        () => startDescription(leadSession).includes("kimi-coding/k2p5"),
+        "lead tools refreshed on idle",
+      );
+      expect(startDescription(leadSession)).toContain("kimi-coding/k2p5");
+    } finally {
+      stop();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it("re-attaches the panel tools and delivers to an archived worker without losing its history", async () => {
     const { base, root, web } = seed();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});

@@ -85,6 +85,7 @@ export class Server {
   private catalogModels: PiAvailableModel[] = [];
   private catalogRevision = 0;
   private models: ModelOption[] = availableModelOptions([]);
+  private staleLeadToolWorkspaces = new Set<string>();
   private readonly restoring: Promise<void>;
   private closing = false;
   private restored = false;
@@ -664,6 +665,7 @@ export class Server {
             workspaceId: workspace.id,
             messageId: msg.messageId,
           });
+          this.flushPendingLeadTools(workspace);
         }
         return;
       }
@@ -705,6 +707,7 @@ export class Server {
         const workspace = this.workspaces.get(msg.workspaceId as string);
         if (workspace && workspace.clearContext(msg.agentId as string)) {
           this.persistWorkspaceNow(workspace.id);
+          this.flushPendingLeadTools(workspace);
         }
         return;
       }
@@ -821,6 +824,7 @@ export class Server {
     if (timer) clearTimeout(timer);
     this.persistTimers.delete(workspaceId);
     this.workspaces.delete(workspaceId);
+    this.staleLeadToolWorkspaces.delete(workspaceId);
     this.commandsByAgent.delete(workspaceId);
     this.refreshModels();
     deleteWorkspaceState(this.baseDir, workspaceId);
@@ -919,10 +923,7 @@ export class Server {
         presets.some((preset, i) => preset.name !== previousPresets[i].name)
       ) {
         for (const workspace of this.workspaces.values()) {
-          if (workspace.projectLink?.role !== "lead") continue;
-          const tools = this.projects.toolsFor(workspace);
-          if (tools)
-            for (const agent of workspace.agents.values()) agent.session.setPanelTools?.(tools);
+          if (workspace.projectLink?.role === "lead") this.refreshLeadTools(workspace);
         }
       }
       this.broadcastUI({ type: "identities_update", user: this.config.user, presets });
@@ -1330,6 +1331,11 @@ export class Server {
     ws.archivedAt = null;
     this.persistWorkspaceNow(ws.id);
     this.broadcastUI({ type: "workspace_unarchived", workspaceId: ws.id });
+    for (const entry of ws.agents.values()) {
+      const agent = ws.agentInfo(entry);
+      if (agent.canSwitchBackend)
+        this.broadcastUI({ type: "agent_updated", workspaceId: ws.id, agent });
+    }
     try {
       this.projects.restored(ws);
     } catch (e) {
@@ -1459,6 +1465,28 @@ export class Server {
     }
   }
 
+  private refreshLeadTools(workspace: Workspace): void {
+    if (workspace.projectLink?.role !== "lead" || this.isProjectSealed(workspace)) {
+      this.staleLeadToolWorkspaces.delete(workspace.id);
+      return;
+    }
+    // Never mutate panel tools on an active/busy Lead mid-conversation so prompt cache is preserved.
+    if (!workspace.isIdle) {
+      this.staleLeadToolWorkspaces.add(workspace.id);
+      return;
+    }
+    this.staleLeadToolWorkspaces.delete(workspace.id);
+    const tools = this.projects.toolsFor(workspace);
+    if (tools) {
+      for (const agent of workspace.agents.values()) agent.session.setPanelTools?.(tools);
+    }
+  }
+
+  private flushPendingLeadTools(workspace: Workspace): void {
+    if (!this.staleLeadToolWorkspaces.has(workspace.id)) return;
+    this.refreshLeadTools(workspace);
+  }
+
   private refreshModels(): void {
     const models = availableModelOptions([
       ...this.catalogModels,
@@ -1485,6 +1513,7 @@ export class Server {
             agent: workspace.agentInfo(agent),
           });
       }
+      if (workspace.projectLink?.role === "lead") this.refreshLeadTools(workspace);
     }
   }
 
@@ -1574,11 +1603,15 @@ export class Server {
         const ws = this.workspaces.get(wsId);
         if (ws) this.git.requestPrRefresh(ws.cwd);
         if (ws) this.projects.workerIdle(ws);
+        if (ws) this.flushPendingLeadTools(ws);
       },
       onAgentState: (wsId, agentId, state) => {
         this.broadcastUI({ type: "agent_state", workspaceId: wsId, agentId, state });
         const ws = this.workspaces.get(wsId);
-        if (ws && state === "idle") this.projects.workerIdle(ws);
+        if (ws && state === "idle") {
+          this.projects.workerIdle(ws);
+          this.flushPendingLeadTools(ws);
+        }
       },
       onSaveNow: () => this.persistWorkspaceNow(id),
       canDequeue: () => this.restored,
@@ -1622,6 +1655,10 @@ export class Server {
       },
       modelOptions: () => this.models,
       sessionEnv: (model) => this.resolveProviderEnv(model),
+      piConfig: () => this.piConfig(),
+      onSessionReplaced: (workspace, session) => {
+        session.setPanelTools?.(this.projects.toolsFor(workspace));
+      },
     };
   }
 

@@ -141,6 +141,38 @@ describe("connection liveness", () => {
     expect(FakeSocket.instances).toHaveLength(2);
   });
 
+  it("uses the reconnected snapshot's timers even if no new thinking text arrives", () => {
+    const { result, ws } = connected();
+    const page = (over: Record<string, unknown>) => ({
+      type: "workspace_messages",
+      workspaceId: "w",
+      hasMore: false,
+      before: null,
+      messages: [liveMessage(over)],
+    });
+    act(() => ws.receive(page({ waitingSince: 1_000 })));
+    expect(result.current.workspaces[0].messages[0].waitingSince).toBe(1_000);
+
+    act(() => ws.drop());
+    act(() => setVisibility("visible"));
+    const next = FakeSocket.instances.at(-1)!;
+    expect(next).not.toBe(ws);
+    act(() => {
+      next.open();
+      next.receive({ ...init, workspaces: [{ ...W, createdAt: 0 }] });
+      next.receive(page({ liveThinkingSince: 3_000 }));
+    });
+    const reply = () => result.current.workspaces[0].messages[0];
+    expect(reply().liveThinkingSince).toBe(3_000);
+    expect(reply().liveThinking).toBeUndefined();
+    expect(reply().waitingSince).toBeUndefined();
+
+    act(() => next.receive(streamEvent({ kind: "text_delta", content: "!", waitingSince: 8_000 })));
+    frame();
+    expect(reply().liveThinkingSince).toBeUndefined();
+    expect(reply().waitingSince).toBe(8_000);
+  });
+
   it("resyncs the newest page in place after a reconnect", () => {
     const { result } = renderHook(() => useServer());
     const ws = FakeSocket.instances[0];

@@ -629,8 +629,8 @@ describe("stream and message rendering", () => {
     const unknown = render(
       <MessageItem msg={{ ...base, status: "outcome_unknown" }} agents={[agent]} />,
     );
-    expect(unknown.getByRole("alert").textContent).toMatch(/may have reached the agent/i);
-    expect(unknown.getByRole("alert").textContent).toMatch(/retry manually/i);
+    expect(unknown.getByRole("alert").textContent).toMatch(/may still process this message/i);
+    expect(unknown.getByRole("alert").textContent).toMatch(/will not resend it automatically/i);
     expect(unknown.container.querySelector(".message-outcome-unknown")).not.toBeNull();
   });
 

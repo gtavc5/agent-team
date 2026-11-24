@@ -1,4 +1,4 @@
-{"header":{"backend":"pi","fixture":"single-queue-order","description":"A non-steerable Pi session dispatches queued prompts FIFO only after settlement.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
+{"header":{"backend":"pi","fixture":"single-queue-order","description":"Without a steering boundary, Pi dispatches queued prompts FIFO after settlement.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
 {"step":{"op":"send","text":"First prompt.","i":0},"t":0}
 {"sent":{"type":"prompt","message":"First prompt."},"t":5}
 {"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}

@@ -689,9 +689,13 @@ export class CodexSession extends EventEmitter {
       case "item/agentMessage/delta":
         this.text(params.itemId as string, params.delta as string);
         break;
-      case "item/reasoning/summaryTextDelta":
-        this.emit("event", { kind: "thinking_delta", content: params.delta as string });
+      case "item/reasoning/summaryTextDelta": {
+        const itemId = params.itemId as string;
+        const startedAt = this.itemStartedAt.get(itemId) ?? Date.now();
+        this.itemStartedAt.set(itemId, startedAt);
+        this.emit("event", { kind: "thinking_delta", content: params.delta as string, startedAt });
         break;
+      }
       case "thread/tokenUsage/updated":
         this.noteTokens(params.tokenUsage as ThreadTokenUsage);
         break;
@@ -779,9 +783,12 @@ export class CodexSession extends EventEmitter {
         this.emit("steered", inputId);
         break;
       }
-      case "reasoning":
-        this.itemStartedAt.set(item.id, Date.now());
+      case "reasoning": {
+        const startedAt = Date.now();
+        this.itemStartedAt.set(item.id, startedAt);
+        this.emit("event", { kind: "thinking_delta", content: "", startedAt });
         break;
+      }
       case "commandExecution":
         this.toolUse(item, "Bash", `**Bash**\n${fenced(commandText(item), "bash")}`);
         break;
@@ -827,13 +834,11 @@ export class CodexSession extends EventEmitter {
       case "reasoning": {
         const text = (item.summary.length ? item.summary : item.content).join("\n\n").trim();
         const started = this.itemStartedAt.get(item.id);
-        if (text) {
-          this.emit("event", {
-            kind: "thinking",
-            content: text,
-            ...(started !== undefined && { durationMs: Date.now() - started }),
-          });
-        }
+        this.itemStartedAt.delete(item.id);
+        const durationMs = started == null ? undefined : Date.now() - started;
+        if (text) this.emit("event", { kind: "thinking", content: text, durationMs });
+        else if (durationMs != null)
+          this.emit("event", { kind: "thinking_delta", content: "", durationMs });
         break;
       }
       case "commandExecution": {

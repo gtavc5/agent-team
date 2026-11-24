@@ -441,11 +441,18 @@ describe("mergeLatestPage", () => {
 
   it("keeps a live thinking block across a resync while both sides still stream", () => {
     const cur = msg({ id: "m1", liveThinking: "so far", liveThinkingSince: 1_000 });
-    const next = msg({ id: "m1", detail: "summary" });
+    const next = msg({ id: "m1", detail: "summary", liveThinkingSince: 1_000 });
     expect(mergeLatestPage([cur], [next])[0]).toMatchObject({
       liveThinking: "so far",
       liveThinkingSince: 1_000,
     });
+    const afterPause = { ...next, liveThinkingSince: undefined, waitingSince: 2_000 };
+    expect(mergeLatestPage([cur], [afterPause])[0]).toEqual(afterPause);
+    const newBlock = { ...next, liveThinkingSince: 3_000 };
+    expect(mergeLatestPage([cur], [newBlock])[0]).toEqual(newBlock);
+    expect(
+      applyEventsToMessage(newBlock, [ev("thinking_delta", { content: "tail", startedAt: 3_000 })]),
+    ).toMatchObject({ liveThinking: "tail", liveThinkingSince: 3_000 });
     const done = msg({ id: "m1", status: "done" });
     expect(mergeLatestPage([cur], [done])[0].liveThinking).toBeUndefined();
   });

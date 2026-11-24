@@ -73,7 +73,12 @@ new work. The panel provides the orchestration and UI, not a model of its own.
 - **Run state per agent** — idle, working, waiting on background work, or
   sleeping until a scheduled wake-up. The context figure is the size of the
   turn's last request against the model's window, not a running total. A
-  message to a working Codex agent goes into its running turn.
+  message to a working Codex agent goes into its running turn. Native Pi
+  sessions take the next queued input between model requests, after the current
+  tools finish. Until handoff it stays cancellable; a Stop leaves it queued.
+  If Pi may have taken it but delivery cannot be confirmed, the panel shows
+  **delivery outcome unknown** and never resends it automatically. Pi's shared
+  queue is not cleared. Antigravity ACP keeps panel FIFO delivery.
 - **Slash commands** handled by the panel itself: `/effort <level>`,
   `/model <id>`, `/fast [on|off]` (Codex's priority tier), `/context` and
   `/usage`. `/goal` is disabled.
@@ -140,9 +145,14 @@ With pixi, `pixi run serve` builds and starts in one step.
 ```bash
 pixi run dev-webview         # Vite dev server with HMR
 npm run check                # tsc (strict) + ESLint + prettier, zero tolerance
-npm test                     # service + webview (vitest)
+npm test                     # service + webview (Vitest, no browser)
 npm run fmt                  # prettier
 ```
+
+For layout changes, install Playwright's Chromium (`npx playwright install chromium`,
+or `npx playwright install --with-deps chromium` on Linux if system libraries are missing).
+Run `npm run test:browser` for headless geometry tests, or `npm run test:slow` for the
+full local checks, unit tests, and browser suite before committing or pushing.
 
 To try the UI without touching your own data, seed a demo — a project with a
 lead, workers, history and a board; no session is started — into a separate

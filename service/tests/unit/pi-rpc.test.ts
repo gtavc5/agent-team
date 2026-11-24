@@ -133,6 +133,22 @@ describe("PiRpcClient", () => {
     stdout.end();
   });
 
+  it("writes a steer with image blocks, returning acceptance rather than delivery", async () => {
+    const { client, stdout, writes } = makeClient();
+    const images = [{ type: "image" as const, data: "AAAA", mimeType: "image/png" }];
+    const result = client.steer("follow", { images });
+    await flushWrites();
+    expect(JSON.parse(writes[0].toString())).toEqual({
+      type: "steer",
+      id: "req-1",
+      message: "follow",
+      images,
+    });
+    stdout.write(response("req-1", "steer", { disposition: "queued" }));
+    await expect(result).resolves.toEqual({ disposition: "queued" });
+    stdout.end();
+  });
+
   it("runs onBeforeWrite synchronously immediately before prompt bytes and preserves images", async () => {
     const order: string[] = [];
     const stdout = new PassThrough();

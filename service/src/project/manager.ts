@@ -632,7 +632,6 @@ export class ProjectManager {
   // noted as what they were all last sent: only for what goes to all of
   // them (see showAllAwaiting for one that connects).
   awaitsUser(w: Workspace): boolean {
-    if (w.hasPendingDialogs) return true;
     const awaits = this.waits(w);
     if (awaits) this.awaiting.add(w.id);
     else this.awaiting.delete(w.id);
@@ -1818,7 +1817,9 @@ export class ProjectManager {
       return this.readObjective(projectId, objectiveId);
     }
     if (!this.host.loadWorkspace(w)) throw new Error(`"${w.name}" cannot be loaded`);
-    const fromLead = w.getMessages().filter((m) => m.from?.role === "lead");
+    // Keep only delivered lead messages; queued/undelivered ones were not
+    // received by this turn and may still drive a later turn.
+    const fromLead = w.getMessages().filter((m) => m.from?.role === "lead" && m.status === "done");
     const when = (t: number) => new Date(t).toISOString();
     const cap = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)} …(cut)` : s);
     const out = [`You are session ${w.id} "${w.name}" in ${w.cwd}.`, ""];
@@ -2250,8 +2251,9 @@ ${body}`,
 // How the workspace marks a turn cut off (a stop, a restart).
 const INTERRUPTED = "*\\[interrupted\\]*";
 
-// A worker the lead started that stopped on the user: its last turn, on the
-// task or on what the user wrote since, ended without calling finish_task.
+// A worker the lead started that stopped on the user: an agent's last turn, on
+// the task or on what the user wrote since, ended without calling finish_task
+// and was not superseded by a later successful finish_task in the workspace.
 // Not what it answered the lead later, nor a turn that failed or was cut off.
 export function awaitsUser(w: Workspace): boolean {
   if (w.hasPendingDialogs) return true;
@@ -2261,16 +2263,32 @@ export function awaitsUser(w: Workspace): boolean {
   const messages = w.getMessages();
   const task = taskOf(messages);
   if (!task) return false;
+  let lastFinish = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (finishedTask(messages[i])) {
+      lastFinish = i;
+      break;
+    }
+  }
   return w.lastTurns().some(({ input, replies, stopped }) => {
     const from = asked(messages, input);
     if (from.from && from.id !== task.id) return false;
     const last = replies[replies.length - 1];
     if (stopped || last?.status !== "done" || last.content.endsWith(INTERRUPTED)) return false;
-    // A refused finish_task (a context too long, say) reported nothing.
-    return !replies.some((m) =>
-      m.events?.some((e) => e.toolName === "mcp__panel__finish_task" && !e.toolResultIsError),
-    );
+    if (lastFinish >= 0 && messages.indexOf(last) <= lastFinish) return false;
+    return !replies.some(finishedTask);
   });
+}
+
+// A refused finish_task (a context too long, say) reported nothing.
+function finishedTask(m: Message): boolean {
+  return (
+    m.kind === "agent" &&
+    !!m.events?.some(
+      (e) =>
+        e.kind === "tool_use" && e.toolName === "mcp__panel__finish_task" && !e.toolResultIsError,
+    )
+  );
 }
 
 // The task a worker was started with: its first message, from the lead (a

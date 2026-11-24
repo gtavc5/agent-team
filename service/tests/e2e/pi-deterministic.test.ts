@@ -11,6 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 import { WebSocket } from "ws";
 import { expect, it, vi } from "vitest";
 import { trackAcceptanceProcesses } from "../../../scripts/e2e-pi-acp";
+import { lsofBinary } from "../lsof";
 import type { ProjectManager } from "../../src/project/manager";
 import { ReportJournalStore } from "../../src/project/report-journal";
 import type { Project } from "../../src/project/store";
@@ -89,9 +90,13 @@ export default function (pi) {
         let reply = "pi-e2e-ready";
         if (child) {
           const [, gate, marker] = child;
+          fs.appendFileSync(path.join(gates, "seen-" + gate), marker + "\\n");
+          if (gate === "Bunknown") pi.sendMessage({customType:"steer-test-notice",content:"background-notice-survived",display:true}, { triggerTurn:true });
           const deadline = Date.now() + 45000;
           while (!options?.signal?.aborted && !fs.existsSync(path.join(gates, gate)) && Date.now() < deadline) await pause(30);
           reply = fs.existsSync(path.join(gates, gate)) ? marker : "gate-not-released";
+        } else if (messages.some((m) => text(m).includes("background-notice-survived")) && !fs.existsSync(path.join(gates,"notice-received"))) {
+          fs.writeFileSync(path.join(gates,"notice-received"), "");
         } else if (prompt.includes("pi-e2e-lead-plan")) {
           const steps = [call("write_objective", {id:"pi-e2e/suite", title:"Pi E2E", goal:"run scenario"}),
             call("add_items", {objective_id:"pi-e2e/suite", tasks:["exercise Pi Worker"]}),
@@ -153,7 +158,7 @@ interface Frame {
   state?: string;
   status?: string;
   content?: string;
-  message?: string;
+  message?: { id: string; content?: string; status?: string };
   messages?: unknown[];
   models?: Array<{ id: string }>;
 }
@@ -161,7 +166,7 @@ interface Frame {
 function listeningPorts() {
   try {
     return execFileSync(
-      "lsof",
+      lsofBinary(),
       ["-nP", "-a", "-p", String(process.pid), "-iTCP", "-sTCP:LISTEN", "-Fn"],
       { encoding: "utf8", timeout: 1000 },
     )
@@ -421,6 +426,85 @@ async function runDeterministicPiScenario() {
     }
     console.log("Pi E2E: blocking select click and timeout passed");
     const openGate = (name: string) => fs.writeFileSync(path.join(gates, name), "");
+    const gateEntered = (gate: string) =>
+      vi.waitFor(() => expect(fs.existsSync(path.join(gates, `seen-${gate}`))).toBe(true), {
+        timeout: 8000,
+      });
+    for (const outcome of ["delivered", "preclaim", "unknown"]) {
+      const since = frames.length;
+      const before = session(lead).usage.turns;
+      prompt(lead, `pi-e2e-child:A${outcome}:initial`);
+      await gateEntered(`A${outcome}`);
+      const follow = `pi-e2e-child:B${outcome}:reply${outcome}`;
+      prompt(lead, follow);
+      const queued = (
+        await seen(
+          "new_message",
+          (f) => f.message?.content === follow && f.message.status === "queued",
+          since,
+        )
+      ).message!;
+      if (outcome === "delivered") {
+        prompt(lead, "pi-e2e-child:Cdelivered:thirdreply");
+        await seen(
+          "new_message",
+          (f) =>
+            f.message?.content === "pi-e2e-child:Cdelivered:thirdreply" &&
+            f.message.status === "queued",
+          since,
+        );
+      }
+      if (outcome === "preclaim") wire({ type: "interrupt", workspaceId: lead });
+      else openGate(`A${outcome}`);
+      await gateEntered(`B${outcome}`);
+      if (outcome === "unknown") {
+        wire({ type: "interrupt", workspaceId: lead });
+        await seen(
+          "message_done",
+          (f) => f.messageId === queued.id && f.status === "outcome_unknown",
+          since,
+        );
+        ws.close();
+        await once(ws, "close");
+        ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        ws.on("message", (raw: Buffer) => frames.push(JSON.parse(raw.toString()) as Frame));
+        await once(ws, "open");
+        const reopened = frames.length;
+        wire({ type: "open_workspace", workspaceId: lead });
+        const page = await seen("workspace_messages", (f) => f.workspaceId === lead, reopened);
+        expect(page.messages).toContainEqual(
+          expect.objectContaining({ id: queued.id, status: "outcome_unknown" }),
+        );
+        prompt(lead, "check retained notices");
+        await vi.waitFor(
+          () => expect(fs.existsSync(path.join(gates, "notice-received"))).toBe(true),
+          { timeout: 8000 },
+        );
+        await vi.waitFor(() => expect(session(lead).isRunning).toBe(false));
+      } else {
+        openGate(`B${outcome}`);
+        if (outcome === "delivered") {
+          await gateEntered("Cdelivered");
+          openGate("Cdelivered");
+        }
+        await seen(
+          "message_done",
+          (f) => f.workspaceId === lead && f.content === `reply${outcome}`,
+          since,
+        );
+        if (outcome === "delivered") {
+          await seen(
+            "message_done",
+            (f) => f.workspaceId === lead && f.content === "thirdreply",
+            since,
+          );
+        }
+        expect(session(lead).usage.turns - before).toBe(outcome === "preclaim" ? 2 : 1);
+      }
+      expect(fs.readFileSync(path.join(gates, `seen-B${outcome}`), "utf8").trim()).toBe(
+        `reply${outcome}`,
+      );
+    }
     const child = async (kind: string, since: number, taskId?: string) =>
       (
         await seen(

@@ -353,46 +353,7 @@ describe("StepGroup", () => {
   });
 });
 
-describe("MessageItem activity", () => {
-  const msg = (over: Partial<Message> = {}): Message => ({
-    id: "m1",
-    kind: "agent",
-    agentId: "a1",
-    content: "",
-    timestamp: 0,
-    status: "streaming",
-    events: [],
-    ...over,
-  });
-
-  it("shows the agent's activity instead of the generic working indicator", () => {
-    const { container } = render(
-      <MessageItem
-        msg={msg()}
-        agents={[{ ...agent, busy: true, activity: "compacting context" }]}
-      />,
-    );
-    expect(container.querySelector(".working-indicator")!.textContent).toBe("compacting context");
-    expect(container.querySelector(".activity-label")!.textContent).toBe("compacting context");
-  });
-
-  it("waits on the model with a timer, and hides the label once the message is done", () => {
-    const { container, rerender } = render(<MessageItem msg={msg()} agents={[agent]} />);
-    expect(container.querySelector(".working-indicator")!.textContent).toBe(
-      "Waiting for the model · 0s",
-    );
-    rerender(
-      <MessageItem
-        msg={msg({ status: "done", content: "hi" })}
-        agents={[{ ...agent, activity: "stale" }]}
-      />,
-    );
-    expect(container.querySelector(".activity-label")).toBeNull();
-    expect(container.querySelector(".working-indicator")).toBeNull();
-  });
-});
-
-describe("waiting for the model", () => {
+describe("streaming turn footer", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
   const msg = (over: Partial<Message> = {}): Message => ({
@@ -406,50 +367,113 @@ describe("waiting for the model", () => {
     ...over,
   });
   const read = ev("tool_use", { toolName: "Read", content: "**Read** `a`", contentOffset: 0 });
-  const waiting = (c: HTMLElement) =>
-    [...c.querySelectorAll(".working-indicator")].map((e) => e.textContent);
+  const footer = (c: HTMLElement) => c.querySelector(".turn-footer");
   const tick = (ms: number) =>
     act(() => {
       vi.advanceTimersByTime(ms);
     });
 
-  it("counts from the start of a turn that has produced nothing yet", () => {
-    const { container } = render(<MessageItem msg={msg()} agents={[agent]} />);
-    tick(45_000);
-    expect(waiting(container)).toEqual(["Waiting for the model · 45s"]);
+  it.each(["done", "error"] as const)("keeps one footer until the turn is %s", (status) => {
+    const view = (over: Partial<Message> = {}) => <MessageItem msg={msg(over)} agents={[agent]} />;
+    const { container, rerender } = render(view());
+    const node = footer(container)!;
+    expect(node).toBe(container.querySelector(".message-body")!.lastElementChild);
+    expect(node.textContent).toBe("");
+    tick(4_999);
+    expect(node.textContent).toBe("");
+    tick(1);
+    expect(node.textContent).toBe("Waiting for the model · 5s");
+    rerender(view({ content: "So" }));
+    expect([...container.querySelectorAll(".turn-footer")]).toEqual([node]);
+    expect(node.textContent).toBe("");
+    rerender(view({ content: "So", status }));
+    expect(footer(container)).toBeNull();
   });
 
-  it("shows after a quiet spell once a tool result is in, and resets on progress", () => {
-    const done = { ...read, toolResult: "body" };
-    const { container, rerender } = render(
-      <MessageItem msg={msg({ events: [done] })} agents={[agent]} />,
+  it.each([false, true])("shows only the highest priority status (compact: %s)", (compact) => {
+    const since = Date.now() - 45_000;
+    const view = (over: Partial<Message>, activity?: string) => (
+      <MessageItem msg={msg(over)} agents={[{ ...agent, activity }]} compact={compact} />
     );
-    tick(4_000);
-    expect(waiting(container)).toEqual([]);
-    tick(2_000);
-    expect(waiting(container)).toEqual(["Waiting for the model · 6s"]);
-    rerender(<MessageItem msg={msg({ events: [done], content: "So" })} agents={[agent]} />);
-    expect(waiting(container)).toEqual([]);
+    const { container, rerender } = render(view({ waitingSince: since }));
+    const node = footer(container)!;
+    expect(node.textContent).toBe("Waiting for the model · 45s");
+    const thinking = { liveThinkingSince: since, waitingSince: since };
+    rerender(view(thinking));
+    expect(node.textContent).toBe("Thinking · 45s");
+    expect(container.textContent.match(/Thinking · 45s/g)).toHaveLength(1);
+    rerender(view(thinking, "compacting context"));
+    expect(footer(container)).toBe(node);
+    expect(node.textContent).toBe("compacting context");
+    expect(container.textContent.match(/compacting context/g)).toHaveLength(1);
+    expect(container.textContent).not.toContain("Thinking ·");
   });
 
-  it("stays out of the way while a tool runs or a block is thinking", () => {
-    const { container, rerender } = render(
-      <MessageItem msg={msg({ events: [read] })} agents={[agent]} />,
-    );
-    tick(60_000);
-    expect(waiting(container)).toEqual([]);
-    rerender(
-      <MessageItem
-        msg={msg({
-          events: [{ ...read, toolResult: "body" }],
-          liveThinking: "hm",
-          liveThinkingSince: Date.now(),
-        })}
-        agents={[agent]}
-      />,
-    );
-    tick(60_000);
-    expect(waiting(container)).toEqual([]);
+  it("uses exact phase deadlines and does not hide an older qualifying parallel call", () => {
+    vi.setSystemTime(10_000);
+    const view = (over: Partial<Message> = {}) => <MessageItem msg={msg(over)} agents={[agent]} />;
+    const { container, rerender } = render(view({ waitingSince: 10_000 }));
+    const node = footer(container)!;
+    tick(250);
+    const first = { ...read, toolUseId: "read", startedAt: Date.now() };
+    rerender(view({ events: [first] }));
+    tick(2_999);
+    expect(node.textContent).toBe("");
+    tick(1);
+    expect(node.textContent).toBe("Read · 3s");
+
+    tick(250);
+    const second = ev("tool_use", { toolName: "Bash", toolUseId: "bash", startedAt: Date.now() });
+    rerender(view({ events: [first, second] }));
+    expect(node.textContent).toBe("Read · 3s");
+    tick(3_000);
+    expect(node.textContent).toBe("Bash · 3s");
+
+    tick(250);
+    rerender(view({ waitingSince: Date.now() }));
+    tick(4_999);
+    expect(node.textContent).toBe("");
+    tick(1);
+    expect(node.textContent).toBe("Waiting for the model · 5s");
+  });
+
+  it("rechecks a wait deadline if the wall clock moved backward", () => {
+    vi.setSystemTime(10_000);
+    const clock = vi.spyOn(Date, "now");
+    try {
+      const { container } = render(
+        <MessageItem msg={msg({ waitingSince: 10_000 })} agents={[agent]} />,
+      );
+      clock.mockImplementation(() => new Date().getTime() - 1_000);
+      tick(5_000);
+      expect(footer(container)?.textContent).toBe("");
+      tick(1_000);
+      expect(footer(container)?.textContent).toBe("Waiting for the model · 5s");
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("does not say Waiting during work, even before a tool can report activity", () => {
+    const waitingSince = Date.now() - 45_000;
+    const view = (over: Partial<Message>) => <MessageItem msg={msg(over)} agents={[agent]} />;
+    const { container, rerender } = render(view({ waitingSince }));
+    const node = footer(container)!;
+    expect(node.textContent).toBe("Waiting for the model · 45s");
+    const call = { ...read, startedAt: Date.now() };
+    rerender(view({ waitingSince, events: [call] }));
+    expect(node.textContent).toBe("");
+    tick(2_999);
+    expect(node.textContent).toBe("");
+    tick(1);
+    expect(node.textContent).toBe("Read · 3s");
+    const running = ev("subagent_start", {
+      subagent: { taskId: "child", description: "Working", status: "running" },
+    });
+    rerender(view({ waitingSince, events: [running] }));
+    expect(node.textContent).toBe("");
+    tick(6_000);
+    expect(node.textContent).toBe("");
   });
 });
 
@@ -969,18 +993,21 @@ describe("live thinking", () => {
     const { container, rerender } = render(<MessageItem msg={view("")} agents={[agent]} />);
     const panel = () => container.querySelector(".live-thinking");
     const boxes = () => container.querySelectorAll(".step-group");
-    // It joins the box of the events before it, which opens for it; the
-    // time shows once, on the block's own row.
+    const header = boxes()[0].querySelector(".step-header")!;
+    const footer = container.querySelector(".turn-footer")!;
     expect(boxes()).toHaveLength(1);
-    expect(panel()!.closest(".step-group")!.className).toContain("open");
-    expect(boxes()[0].querySelector(".step-header")!.textContent).toBe("▾1 thinking · 1 tool call");
-    expect(panel()!.textContent).toContain("Thinking · 0s");
-    expect(boxes()[0].textContent.match(/Thinking · /g)).toHaveLength(1);
+    expect(header.textContent).toContain("▸1 thinking · 1 tool call");
+    expect(panel()).toBeNull();
+    expect(footer.textContent).toBe("Thinking · 0s");
+
+    fireEvent.click(header);
+    expect(boxes()[0].classList.contains("open")).toBe(true);
     expect(panel()!.querySelector(".event-content")).toBeNull();
     act(() => {
       vi.advanceTimersByTime(3_000);
     });
-    expect(panel()!.textContent).toContain("Thinking · 3s");
+    expect(footer.textContent).toBe("Thinking · 3s");
+    expect(container.textContent.match(/Thinking · 3s/g)).toHaveLength(1);
 
     // Each fragment adds to what is shown; nothing scrolls away or is cut.
     const first = "First I check the **states**.";
@@ -991,7 +1018,7 @@ describe("live thinking", () => {
     expect(body.querySelector("strong")!.textContent).toBe("states");
     expect(body.textContent.endsWith("the tail")).toBe(true);
 
-    // The block ended: it is an ordinary item of the same box, which folds.
+    // Finished thinking replaces the live item without closing the box.
     rerender(
       <MessageItem
         msg={live({
@@ -1005,11 +1032,13 @@ describe("live thinking", () => {
     );
     expect(panel()).toBeNull();
     expect(boxes()).toHaveLength(1);
-    expect(boxes()[0].className).not.toContain("open");
-    expect(boxes()[0].textContent).toContain("1 thinking");
+    expect(boxes()[0].classList.contains("open")).toBe(true);
+    expect(boxes()[0].querySelector(".event-thinking .event-content")!.textContent).toContain(
+      "the tail",
+    );
   });
 
-  it("gives a first-thing thinking block a box of its own that folds", () => {
+  it("gives a first-thing thinking block a folded box of its own", () => {
     const { container, rerender } = render(
       <MessageItem
         msg={live({ liveThinking: "Let me see.", liveThinkingSince: Date.now() })}
@@ -1017,17 +1046,13 @@ describe("live thinking", () => {
       />,
     );
     const box = () => container.querySelector(".step-group")!;
-    expect(box().querySelector(".live-thinking")!.textContent).toContain("Let me see.");
-    // The header counts the block as the thinking it will be, never empty;
-    // the time shows once, on the block's own row.
-    expect(box().querySelector(".step-header")!.textContent).toBe("▾1 thinking");
-    expect(box().querySelector(".live-thinking .event-row")!.textContent).toBe("Thinking · 0s");
-    expect(box().textContent.match(/Thinking · /g)).toHaveLength(1);
-    // The reader folds it: it stays folded while the block streams on.
-    fireEvent.click(box().querySelector(".step-header")!);
-    expect(box().className).not.toContain("open");
+    const original = box();
     expect(box().querySelector(".live-thinking")).toBeNull();
-    expect(box().querySelector(".step-header")!.textContent).toContain("Thinking · 0s");
+    expect(box().querySelector(".step-header")!.textContent).toBe("▸1 thinking");
+    fireEvent.click(box().querySelector(".step-header")!);
+    expect(box().querySelector(".live-thinking")!.textContent).toBe("Let me see.");
+    fireEvent.click(box().querySelector(".step-header")!);
+    expect(box().querySelector(".live-thinking")).toBeNull();
     rerender(
       <MessageItem
         msg={live({ liveThinking: "Let me see. More.", liveThinkingSince: Date.now() })}
@@ -1043,10 +1068,29 @@ describe("live thinking", () => {
       />,
     );
     expect(container.querySelectorAll(".step-group")).toHaveLength(1);
-    expect(box().textContent).toContain("1 thinking");
+    expect(box()).toBe(original);
+    expect(box().querySelector(".step-header")!.textContent).toBe("▸1 thinking");
   });
 
-  it("puts a block that follows text after that text, where it will land", () => {
+  it("remembers an open first-thinking box across separately flushed closing events", () => {
+    const view = (msg: Message) => <MessageItem msg={msg} agents={[agent]} />;
+    const { container, rerender } = render(view(live()));
+    let msg = applyEventsToMessage(live(), [ev("thinking_delta", { startedAt: Date.now() })]);
+    rerender(view(msg));
+    fireEvent.click(container.querySelector(".step-header")!);
+    expect(container.querySelector(".step-group.open")).not.toBeNull();
+
+    msg = applyEventsToMessage(msg, [ev("thinking_delta", { durationMs: 6_000 })]);
+    rerender(view(msg));
+    expect(container.querySelector(".turn-footer")!.textContent).toBe("");
+    msg = applyEventsToMessage(msg, [ev("thinking", { content: "Reasoned.", durationMs: 6_000 })]);
+    rerender(view(msg));
+    expect(container.querySelector(".step-group.open .event-content")?.textContent).toBe(
+      "Reasoned.",
+    );
+  });
+
+  it("keeps the folded box that follows text when its thinking ends", () => {
     const events = [
       ev("tool_use", { toolName: "Read", content: "**Read** `a`", contentOffset: 0 }),
     ];
@@ -1056,13 +1100,11 @@ describe("live thinking", () => {
         agents={[agent]}
       />,
     );
-    const order = () =>
-      [...container.querySelectorAll(".message-content p, .step-group")]
-        .filter((e) => e.tagName !== "P" || !e.closest(".step-group"))
-        .map((e) =>
-          e.tagName === "P" ? e.textContent : e.querySelector(".live-thinking") ? "live" : "box",
-        );
-    expect(order()).toEqual(["box", "Found it.", "live"]);
+    const items = () => [...container.querySelectorAll(".message-content p, .step-group")];
+    const before = items();
+    expect(before.map((e) => e.tagName)).toEqual(["DIV", "P", "DIV"]);
+    expect(before[1].textContent).toBe("Found it.");
+    expect(before[2].textContent).toBe("▸1 thinking");
     rerender(
       <MessageItem
         msg={live({
@@ -1072,18 +1114,9 @@ describe("live thinking", () => {
         agents={[agent]}
       />,
     );
-    expect(order()).toEqual(["box", "Found it.", "box"]);
-  });
-
-  it("replaces the generic working indicator while it is up", () => {
-    const { container } = render(
-      <MessageItem
-        msg={live({ liveThinking: "", liveThinkingSince: Date.now() })}
-        agents={[agent]}
-      />,
-    );
-    expect(container.querySelector(".working-indicator")).toBeNull();
-    expect(container.querySelector(".live-thinking")!.textContent).toContain("Thinking · 0s");
+    expect(items()).toHaveLength(3);
+    expect(items()[2]).toBe(before[2]);
+    expect(items()[2].textContent).toBe("▸1 thinking");
   });
 });
 

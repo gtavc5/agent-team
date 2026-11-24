@@ -10,6 +10,7 @@ import {
 } from "../src/panels/scope";
 import { App } from "../src/App";
 import type { AgentInfo, Objective, Project, Workspace } from "../src/state/useServer";
+import css from "../src/styles.css?raw";
 import { FakeSocket } from "./fakeSocket";
 
 const NOW = Date.now();
@@ -798,6 +799,19 @@ describe("switching an agent's model and effort", () => {
   const options = (el: Element | null) =>
     [...(el as HTMLSelectElement).options].map((o) => o.textContent);
 
+  it("offers both backends when the server says the session is empty", () => {
+    const { container, onSetModel } = render1(
+      agent("a", {
+        model: "claude-opus-5-5",
+        canSwitchBackend: true,
+      }),
+    );
+    const select = container.querySelector(".ap-model") as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).toEqual(models.map((m) => m.id));
+    fireEvent.change(select, { target: { value: "gpt-6-astra" } });
+    expect(onSetModel).toHaveBeenCalledWith("s", "a", "gpt-6-astra");
+  });
+
   it("offers the Pi models, the current one first when the list has dropped it", () => {
     const { container, onSetModel } = render1(agent("a", { model: "claude-opus-4-6" }));
     const select = container.querySelector(".ap-model") as HTMLSelectElement;
@@ -875,5 +889,272 @@ describe("switching an agent's model and effort", () => {
     );
     expect(offline.container.querySelector(".ap-effort")).toBeNull();
     expect(offline.container.querySelector(".ap-meta")!.textContent).toContain(" · max");
+  });
+
+  it("shortens provider prefixes locally and disambiguates colliding model labels while submitting full IDs", () => {
+    const colliding = [
+      {
+        id: "anthropic/claude-opus-4-6",
+        label: "Opus 4.6",
+        backend: "pi" as const,
+        effortLevels: ["low", "high"],
+        defaultEffort: "high",
+      },
+      {
+        id: "github-copilot/claude-opus-4-6",
+        label: "Opus 4.6",
+        backend: "pi" as const,
+        effortLevels: ["low", "high"],
+      },
+      {
+        id: "claude-haiku-4-5-20251001",
+        label: "Haiku 4.5",
+        backend: "pi" as const,
+        effortLevels: ["low"],
+      },
+      {
+        id: "claude-haiku-4-5-20260115",
+        label: "Haiku 4.5",
+        backend: "pi" as const,
+        effortLevels: ["low"],
+      },
+      {
+        id: "google-antigravity/gemini-3.8-flash",
+        label: "Gemini 3.8 Flash",
+        backend: "pi" as const,
+        effortLevels: ["low"],
+      },
+    ];
+    const onSetModel = vi.fn();
+    const { container } = render(
+      <AgentsPanel
+        sessions={[
+          ws("s", {
+            agents: [
+              agent("a", {
+                model: "anthropic/claude-opus-4-6",
+                effortLevels: ["low", "high"],
+                fast: true,
+              }),
+            ],
+          }),
+        ]}
+        project={undefined}
+        activeWsId="s"
+        connected
+        models={colliding}
+        actions={{
+          onOpen: vi.fn(),
+          onStop: vi.fn(),
+          onArchive: vi.fn(),
+          onRestore: vi.fn(),
+          onSetReporting: vi.fn(),
+          onAddAgent: vi.fn(),
+          onClearContext: vi.fn(),
+          onRemoveAgent: vi.fn(),
+          onSetModel,
+          onSetEffort: vi.fn(),
+          onStopTask: vi.fn(),
+          onCancelWake: vi.fn(),
+          onStopAll: vi.fn(),
+        }}
+      />,
+    );
+    const modelSelect = container.querySelector(".ap-model:not(.ap-effort)") as HTMLSelectElement;
+    expect([...modelSelect.options].map((o) => o.value)).toEqual([
+      "anthropic/claude-opus-4-6",
+      "github-copilot/claude-opus-4-6",
+      "claude-haiku-4-5-20251001",
+      "claude-haiku-4-5-20260115",
+      "google-antigravity/gemini-3.8-flash",
+    ]);
+    expect([...modelSelect.options].map((o) => o.textContent)).toEqual([
+      "opus 4.6 (anthropic)",
+      "opus 4.6 (github-copilot)",
+      "haiku 4.5 (20251001)",
+      "haiku 4.5 (20260115)",
+      "gemini 3.8 flash",
+    ]);
+    fireEvent.change(modelSelect, { target: { value: "github-copilot/claude-opus-4-6" } });
+    expect(onSetModel).toHaveBeenCalledWith("s", "a", "github-copilot/claude-opus-4-6");
+    fireEvent.change(modelSelect, { target: { value: "claude-haiku-4-5-20260115" } });
+    expect(onSetModel).toHaveBeenCalledWith("s", "a", "claude-haiku-4-5-20260115");
+  });
+
+  it("places name, controls and actions so narrow panels give Model and Effort a dedicated non-clipping row", () => {
+    const sheet = document.createElement("style");
+    sheet.textContent = css;
+    document.head.appendChild(sheet);
+    try {
+      const { container } = render1(
+        agent("very-long-agent-name-for-narrow-panel", {
+          model: "agy/gemini-4-carbon",
+          effortLevels: ["low", "high"],
+          fast: true,
+        }),
+      );
+      const top = container.querySelector(".ap-agent-top")!;
+      const name = top.querySelector(".ap-agent-name")!;
+      const meta = top.querySelector(".ap-meta")!;
+      const model = meta.querySelector(".ap-model:not(.ap-effort)")!;
+      const effort = meta.querySelector(".ap-effort")!;
+      const actions = top.querySelector(".ap-agent-actions")!;
+      expect(name).toBeTruthy();
+      expect(meta.classList.contains("has-controls")).toBe(true);
+      expect(model).toBeTruthy();
+      expect(effort).toBeTruthy();
+      expect(actions.querySelectorAll("button")).toHaveLength(2);
+      expect(meta.textContent).toContain("⚡");
+
+      expect(getComputedStyle(meta).display).toBe("flex");
+      expect(getComputedStyle(meta).minWidth).toBe("0px");
+      expect(getComputedStyle(model).minWidth).toBe("0px");
+      expect(getComputedStyle(effort).flexShrink).toBe("0");
+      expect(getComputedStyle(actions).flexShrink).toBe("0");
+
+      const panelRule = /\.agents-panel\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+      expect(panelRule).toMatch(/container-type:\s*inline-size/);
+      const narrowMatch = /@container\s*\(max-width:\s*(\d+)px\)\s*\{([\s\S]*?\n\})/.exec(css);
+      const narrowMax = Number(narrowMatch?.[1] ?? 0);
+      const narrowBlock = narrowMatch?.[2] ?? "";
+      expect(narrowMax).toBeGreaterThanOrEqual(440);
+      expect(narrowBlock).toMatch(/\.ap-agent-top\s*\{[^}]*display:\s*grid/);
+      expect(narrowBlock).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto/);
+      expect(narrowBlock).toMatch(/\.ap-meta\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/);
+    } finally {
+      sheet.remove();
+    }
+  });
+
+  it("handles mixed provider+date collisions, undated vs dated pairs, and single-model effort rows", () => {
+    const mixed = [
+      { id: "anthropic/claude-haiku-4-5-20251001", label: "Haiku", backend: "pi" as const },
+      { id: "anthropic/claude-haiku-4-5-20260115", label: "Haiku", backend: "pi" as const },
+      { id: "bedrock/claude-haiku-4-5-20251001", label: "Haiku", backend: "pi" as const },
+      { id: "claude-opus-4-6", label: "Opus", backend: "pi" as const },
+      { id: "claude-opus-4-6-20251001", label: "Opus", backend: "pi" as const },
+    ];
+    const { container, unmount } = render(
+      <AgentsPanel
+        sessions={[
+          ws("s", { agents: [agent("a", { model: "anthropic/claude-haiku-4-5-20251001" })] }),
+        ]}
+        project={undefined}
+        activeWsId="s"
+        connected
+        models={mixed}
+        actions={{
+          onOpen: vi.fn(),
+          onStop: vi.fn(),
+          onArchive: vi.fn(),
+          onRestore: vi.fn(),
+          onSetReporting: vi.fn(),
+          onAddAgent: vi.fn(),
+          onClearContext: vi.fn(),
+          onRemoveAgent: vi.fn(),
+          onSetModel: vi.fn(),
+          onSetEffort: vi.fn(),
+          onStopTask: vi.fn(),
+          onCancelWake: vi.fn(),
+          onStopAll: vi.fn(),
+        }}
+      />,
+    );
+    const select = container.querySelector(".ap-model:not(.ap-effort)") as HTMLSelectElement;
+    expect([...select.options].map((o) => o.textContent)).toEqual([
+      "haiku 4.5 (anthropic, 20251001)",
+      "haiku 4.5 (anthropic, 20260115)",
+      "haiku 4.5 (bedrock, 20251001)",
+      "opus 4.6",
+      "opus 4.6 (20251001)",
+    ]);
+    unmount();
+
+    // Single model + effort levels renders static shortened model beside EffortSelect.
+    const single = render(
+      <AgentsPanel
+        sessions={[
+          ws("s", {
+            agents: [
+              agent("a", {
+                model: "anthropic/claude-opus-5-5",
+                effortLevels: ["low", "high"],
+                effort: "high",
+              }),
+            ],
+          }),
+        ]}
+        project={undefined}
+        activeWsId="s"
+        connected
+        models={[
+          {
+            id: "anthropic/claude-opus-5-5",
+            label: "Opus 5.5",
+            backend: "pi" as const,
+            effortLevels: ["low", "high"],
+          },
+        ]}
+        actions={{
+          onOpen: vi.fn(),
+          onStop: vi.fn(),
+          onArchive: vi.fn(),
+          onRestore: vi.fn(),
+          onSetReporting: vi.fn(),
+          onAddAgent: vi.fn(),
+          onClearContext: vi.fn(),
+          onRemoveAgent: vi.fn(),
+          onSetModel: vi.fn(),
+          onSetEffort: vi.fn(),
+          onStopTask: vi.fn(),
+          onCancelWake: vi.fn(),
+          onStopAll: vi.fn(),
+        }}
+      />,
+    );
+    expect(single.container.querySelector(".ap-meta-model")!.textContent).toBe("opus 5.5");
+    expect(single.container.querySelector(".ap-effort")).toBeTruthy();
+    single.unmount();
+
+    // Model select + static a.effort (no effortLevels) keeps static effort non-shrinking.
+    const sheet = document.createElement("style");
+    sheet.textContent = css;
+    document.head.appendChild(sheet);
+    try {
+      const staticEffort = render(
+        <AgentsPanel
+          sessions={[
+            ws("s", {
+              agents: [agent("a", { model: "cursor/composer-2.5", effort: "high" })],
+            }),
+          ]}
+          project={undefined}
+          activeWsId="s"
+          connected
+          models={models}
+          actions={{
+            onOpen: vi.fn(),
+            onStop: vi.fn(),
+            onArchive: vi.fn(),
+            onRestore: vi.fn(),
+            onSetReporting: vi.fn(),
+            onAddAgent: vi.fn(),
+            onClearContext: vi.fn(),
+            onRemoveAgent: vi.fn(),
+            onSetModel: vi.fn(),
+            onSetEffort: vi.fn(),
+            onStopTask: vi.fn(),
+            onCancelWake: vi.fn(),
+            onStopAll: vi.fn(),
+          }}
+        />,
+      );
+      const effortText = staticEffort.container.querySelector(".ap-meta-effort")!;
+      expect(effortText.textContent).toBe(" · high");
+      expect(getComputedStyle(effortText).flexShrink).toBe("0");
+      staticEffort.unmount();
+    } finally {
+      sheet.remove();
+    }
   });
 });

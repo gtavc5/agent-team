@@ -20,7 +20,7 @@ import {
   UiDialogResponse,
 } from "../session/types";
 import type { GitInfo, PrInfo } from "../repo/git";
-import { HostSessionHandle, HostRegistry } from "../session/host";
+import { type BoundarySteer, HostSessionHandle, HostRegistry } from "../session/host";
 import {
   MODEL_OPTIONS,
   type ModelOption,
@@ -54,6 +54,7 @@ export interface Message {
   status: MessageStatus;
   events?: StreamEvent[];
   turnId?: string;
+  localCommand?: true;
   images?: MessageImage[];
   forwardRef?: ForwardRef;
   // Sent by another session rather than typed by the user.
@@ -79,6 +80,8 @@ export interface Message {
   // "summary" when the events carry only chips/counts (history pages); the
   // full events arrive via load_message_details.
   detail?: "summary";
+  liveThinkingSince?: number;
+  waitingSince?: number;
 }
 
 export interface AgentInfo {
@@ -94,6 +97,7 @@ export interface AgentInfo {
 
 // Wire form of an agent: info plus transient runtime state.
 export interface AgentRuntimeInfo extends AgentInfo {
+  canSwitchBackend: boolean;
   busy: boolean;
   state: RunState;
   activity: string | null;
@@ -282,6 +286,8 @@ export interface WorkspaceCallbacks {
   modelOptions?(): ModelOption[];
   // Provider settings a model runs with.
   sessionEnv?: (model: string, account?: string) => Record<string, string> | undefined;
+  piConfig?: () => Partial<SessionConfig>;
+  onSessionReplaced?: (workspace: Workspace, session: HostSessionHandle) => void;
 }
 
 // Persisted events from older versions may lack fields the renderer
@@ -498,10 +504,17 @@ export class Workspace {
         out.push({ agentId, input, replies, stopped: t.stopped });
         continue;
       }
-      const typed = (m: Message) =>
-        m.kind === "user" && m.status !== "queued" && !m.content.trimStart().startsWith("/");
+      const typed = (idx: number) => {
+        const m = this.messages[idx];
+        return (
+          m.kind === "user" &&
+          m.status !== "queued" &&
+          !m.content.trimStart().startsWith("/") &&
+          !this.messages[idx + 1]?.localCommand
+        );
+      };
       let i = this.messages.length - 1;
-      while (i >= 0 && !typed(this.messages[i])) i--;
+      while (i >= 0 && !typed(i)) i--;
       if (i < 0) continue;
       let next = i + 1;
       while (next < this.messages.length && this.messages[next].kind !== "user") next++;
@@ -554,7 +567,8 @@ export class Workspace {
   // Every change a client is told about is one to save.
   private streamed(msg: Message, event: StreamEvent): void {
     this.changed.add(msg.id);
-    this.cb?.onStreamEvent(this.id, msg, event);
+    const timed = updateLiveTiming(msg, event);
+    this.cb?.onStreamEvent(this.id, msg, timed);
   }
 
   private finished(
@@ -608,12 +622,14 @@ export class Workspace {
     const config = session?.nextTurnOptions ?? session?.getState().config;
     const effort = config?.effort ?? session?.effectiveEffort ?? undefined;
     const model = config?.model ?? this.agents.get(agentId)?.info.model;
+    const timestamp = Date.now();
     return {
       id: genId("msg"),
       kind: "agent",
       agentId,
       content: "",
-      timestamp: Date.now(),
+      timestamp,
+      waitingSince: timestamp,
       status: "streaming",
       events: [],
       turnId: genId("turn"),
@@ -627,6 +643,7 @@ export class Workspace {
   private settle(msg: Message): void {
     if (msg.status !== "streaming") return;
     msg.status = "done";
+    clearLiveTiming(msg);
     this.finished(msg.id, "done", msg.content, msg.events);
   }
 
@@ -847,6 +864,7 @@ export class Workspace {
               "*(no output — the session ended without producing anything; check network/credentials or server logs)*";
           }
           entry.currentMsg.status = "done";
+          clearLiveTiming(entry.currentMsg);
           // The retry succeeded; "API retry 2/10 in 5s" is no longer true.
           clearRetry(entry.currentMsg);
           if (event.context) {
@@ -887,6 +905,7 @@ export class Workspace {
         // The model saw the prompt a waiting retry would send: it carries on.
         if (entry.retryPending && answered(msg)) entry.lastEnvelope = undefined;
         msg.status = "error";
+        clearLiveTiming(msg);
         event.contentOffset = msg.content.length;
         msg.events!.push(event);
         this.streamed(msg, event);
@@ -1054,6 +1073,7 @@ export class Workspace {
     session.on("rateLimit", (info: { rateLimitType?: string; resetsAt?: number }) => {
       this.cb?.onRateLimit?.(this.id, agentId, info);
     });
+    session.setBoundarySteerSource?.(() => this.nextBoundarySteer(agentId, session));
     session.on("steered", (inputId: string) => this.steered(agentId, inputId));
     session.on("unread", (ids: string[]) => this.unread(ids));
     session.on("backgroundTasks", () => {
@@ -1175,16 +1195,21 @@ export class Workspace {
 
   // A slash command handled here answers locally (string), rewrites the
   // prompt that goes to the agent ({ forward }), or is not ours (null).
-  private async tryHandleCommand(text: string, agent: AgentEntry): Promise<CommandOutcome> {
+  private tryHandleCommand(text: string, agent: AgentEntry): CommandOutcome | Promise<string> {
     if (text === "/usage" || text === "/cost") {
-      const data = await agent.session.getUsageInfo?.();
-      if (!data) return "No active session — send a message first to start a session.";
-      return formatUsageInfo(data);
+      return (
+        agent.session
+          .getUsageInfo?.()
+          .then((data) => (data ? formatUsageInfo(data) : NO_ACTIVE_SESSION)) ?? NO_ACTIVE_SESSION
+      );
     }
     if (text === "/context") {
-      const data = await agent.session.getContextUsage?.();
-      if (!data) return "No active session — send a message first to start a session.";
-      return formatContextUsage(data);
+      return (
+        agent.session
+          .getContextUsage?.()
+          .then((data) => (data ? formatContextUsage(data) : NO_ACTIVE_SESSION)) ??
+        NO_ACTIVE_SESSION
+      );
     }
     if (text === "/effort" || text.startsWith("/effort ")) {
       return this.handleEffortCommand(text.slice("/effort".length).trim(), agent);
@@ -1226,55 +1251,116 @@ export class Workspace {
     return "/goal is disabled.";
   }
 
-  // A session is a transcript, not tied to a model: the next turn resumes it
-  // on the new one, only within its backend and where it can change models.
+  private canSwitchBackend(agent: AgentEntry, state: SessionState): boolean {
+    return (
+      this.messagesLoaded &&
+      !!this.hostRegistry.get(this.hostId)?.replaceSession &&
+      (state.config.backend === "codex" || state.config.backend === "pi") &&
+      this.agentState(agent) === "idle" &&
+      !this.dispatchHeld(agent) &&
+      !this.held(agent) &&
+      !agent.currentMsg &&
+      !agent.input &&
+      !agent.delivered &&
+      !state.sessionId &&
+      !state.sessionFile &&
+      !state.hasConfirmedTurns &&
+      !state.usage.turns &&
+      !this.messages.some(
+        (m, index) =>
+          m.queuedFor === agent.info.id ||
+          (m.kind === "agent" &&
+            m.agentId === agent.info.id &&
+            !m.localCommand &&
+            !isLegacyLocalCommandReply(this.messages[index - 1], m)),
+      )
+    );
+  }
+
   private handleModelCommand(arg: string, agent: AgentEntry): string {
     const { name, model: current } = agent.info;
-    const backend = backendForModel(current);
-    const catalog = this.cb?.modelOptions?.();
-    const choices = catalog
-      ? catalog.filter((m) => m.backend === backend)
-      : backend === "pi"
-        ? (agent.session.getAvailableModels?.() ?? []).map((m) => ({
-            id: m.id,
-            label: m.name ?? m.id,
-          }))
-        : MODEL_OPTIONS.filter((m) => m.backend === backend);
+    const state = agent.session.getState();
+    const backend =
+      state.config.backend === "pi" || state.config.backend === "codex"
+        ? state.config.backend
+        : backendForModel(current);
+    const canSwitchBackend = this.canSwitchBackend(agent, state);
+    const catalog: ModelOption[] = this.cb?.modelOptions?.() ?? [
+      ...MODEL_OPTIONS,
+      ...(agent.session.getAvailableModels?.() ?? [])
+        .filter((m) => !MODEL_OPTIONS.some((preset) => preset.id === m.id))
+        .map((m) => ({ id: m.id, label: m.name ?? m.id, backend: "pi" as const })),
+    ];
+    const choices = canSwitchBackend ? catalog : catalog.filter((m) => m.backend === backend);
     const label = (id: string) => choices.find((m) => m.id === id)?.label ?? id;
     if (!arg) {
       return [
         `**${name}** runs on **${label(current)}** (\`${current}\`).`,
         `Available: ${choices.map((m) => (m.id === current ? `**${m.id}**` : `\`${m.id}\``)).join(" · ")}`,
         "",
-        "Use `/model <id>` to switch; the conversation carries over.",
+        canSwitchBackend
+          ? "Use `/model <id>` to switch, including to another backend before the first turn."
+          : "Use `/model <id>` to switch; the conversation carries over.",
       ].join("\n");
     }
     const next = arg;
     if (next === current) return `**${name}** already runs on **${label(current)}**.`;
-    if (backendForModel(next) !== backend) {
+    const target = catalog.find((m) => m.id === next);
+    const nextBackend = target?.backend ?? backendForModel(next);
+    const crossesBackend = backend !== nextBackend;
+    if (crossesBackend && !canSwitchBackend) {
       const [kind, of] = {
         pi: ["Pi session", "Pi"],
         codex: ["Codex thread", "Codex"],
       }[backend];
       return `**${name}** cannot move to \`${next}\`: a ${kind} continues only on a ${of} model.`;
     }
-    if (!agent.session.setModel) {
+    if (crossesBackend && !target) return `\`${next}\` is not in the model list.`;
+    if (!crossesBackend && !agent.session.setModel) {
       return `**${name}** cannot switch models; add an agent on \`${next}\` instead.`;
     }
-    // The effort carries over where the new model declares it, else it starts
-    // as a fresh agent on that model would; fast mode where it has one.
-    const declared = this.effortLevels(agent, next);
-    const effort = agent.session.getState().config.effort;
+
+    const declared = crossesBackend
+      ? effortLevelsForModel(next, catalog)
+      : this.effortLevels(agent, next);
+    const effort = state.config.effort;
+    const fallback = target?.effort ?? target?.defaultEffort ?? defaultEffortForModel(next);
     const keep =
-      effort && declared?.includes(effort) ? effort : (defaultEffortForModel(next) ?? undefined);
-    const fast = Boolean(agent.session.getState().config.fast) && supportsFastMode(next);
-    agent.session.setModel(next, keep, fast);
-    agent.session.setProviderEnv?.(this.cb?.sessionEnv?.(next, agent.info.account));
+      effort && declared?.includes(effort)
+        ? effort
+        : fallback && declared?.includes(fallback) !== false
+          ? fallback
+          : undefined;
+    const fast = Boolean(state.config.fast) && supportsFastMode(next);
+    const providerEnv = this.cb?.sessionEnv?.(next, agent.info.account);
+    if (crossesBackend) {
+      const host = this.hostRegistry.get(this.hostId);
+      if (!host?.connected || !host.replaceSession) return `Host not connected: ${this.hostId}`;
+      const session = host.replaceSession(agent.info.id, {
+        ...state.config,
+        ...(nextBackend === "pi" && this.cb?.piConfig?.()),
+        backend: nextBackend,
+        model: next,
+        effort: keep,
+        fast,
+        providerEnv,
+        ...this.sessionStorage(),
+      });
+      agent.session = session;
+      agent.handler = this.attachSession(agent.info.id, session);
+      agent.runState = undefined;
+      agent.activity = undefined;
+      this.cb?.onSessionReplaced?.(this, session);
+      this.cb?.onCommandsUpdate?.(agent.info.id, session.getCommands?.() ?? []);
+    } else {
+      agent.session.setModel!(next, keep, fast);
+      agent.session.setProviderEnv?.(providerEnv);
+    }
     agent.info.model = next;
     this.cb?.onAgentUpdated?.(this.id, this.agentInfo(agent));
     const known = choices.some((m) => m.id === next);
     return [
-      `**${name}** moves from ${label(current)} to **${label(next)}**; the conversation carries over. ${this.appliesWhen(agent)}`,
+      `**${name}** moves from ${label(current)} to **${label(next)}**${crossesBackend ? "." : "; the conversation carries over."} ${this.appliesWhen(agent)}`,
       ...(known
         ? []
         : [
@@ -1354,7 +1440,9 @@ export class Workspace {
     if (!agent)
       throw new Error(resolvedTarget ? `Agent not found: ${resolvedTarget}` : "No default agent");
 
-    let cmdResult = await this.tryHandleCommand(cleanContent.trim(), agent);
+    // A prompt must enter the queue before a later /model can test for an empty session.
+    const command = this.tryHandleCommand(cleanContent.trim(), agent);
+    let cmdResult = command instanceof Promise ? await command : command;
     if (cmdResult !== null && typeof cmdResult !== "string") {
       cleanContent = cmdResult.forward;
       cmdResult = null;
@@ -1373,6 +1461,8 @@ export class Workspace {
       const agentMsg = this.makeAgentMsg(agent.info.id);
       agentMsg.content = cmdResult;
       agentMsg.status = "done";
+      agentMsg.localCommand = true;
+      clearLiveTiming(agentMsg);
       this.pushMessage(agentMsg);
       this.finished(agentMsg.id, "done", cmdResult);
       return;
@@ -1452,6 +1542,58 @@ export class Workspace {
         (m) => m.status === "queued" && m.queuedFor === agent.info.id && !m.steering,
       )
     );
+  }
+
+  private nextBoundarySteer(
+    agentId: string,
+    session: HostSessionHandle,
+  ): BoundarySteer | undefined {
+    const entry = this.agents.get(agentId);
+    const available = () =>
+      entry &&
+      this.agents.get(agentId)?.session === session &&
+      this.isWritable() &&
+      this.cb?.canDequeue?.() !== false &&
+      !this.held(entry) &&
+      !entry.startingMessageId &&
+      !entry.recoveringDispatching;
+    if (!available()) return;
+    const msg = this.messages.find(
+      (item) => item.queuedFor === agentId && item.status === "queued",
+    );
+    const envelope = msg?.queuedEnvelope;
+    if (!msg || !envelope || envelope.reportId || envelope.text.trimStart().startsWith("/")) return;
+    return {
+      envelope,
+      claim: () => {
+        if (
+          !available() ||
+          msg.status !== "queued" ||
+          msg.queuedFor !== agentId ||
+          !this.messages.includes(msg)
+        )
+          return false;
+        // Commit before the RPC write. Restart recovery already treats dispatching as non-replayable.
+        msg.status = "dispatching";
+        this.touch([msg.id]);
+        try {
+          this.cb?.onSaveNow?.();
+        } catch (error) {
+          msg.status = "queued";
+          throw error;
+        }
+        this.finished(msg.id, msg.status, msg.content);
+        return true;
+      },
+      finish: (outcome) => {
+        if (msg.status !== "dispatching") return;
+        if (outcome === "rejected") {
+          msg.status = "queued";
+          this.finished(msg.id, msg.status, msg.content);
+        } else if (outcome === "read") this.steered(agentId, msg.id);
+        else this.completeDispatch(msg, outcome === "handled" ? "done" : outcome);
+      },
+    };
   }
 
   // A message handed to the running turn stays queued until the model reads
@@ -2112,8 +2254,7 @@ export class Workspace {
     if (by === "user") this.dropRetry(entry);
     if (entry.currentMsg && entry.currentMsg.status === "streaming") {
       entry.currentMsg.content = withInterrupted(entry.currentMsg.content);
-      entry.currentMsg.status = "done";
-      this.finished(entry.currentMsg.id, "done", entry.currentMsg.content, entry.currentMsg.events);
+      this.settle(entry.currentMsg);
     }
     entry.currentMsg = null;
     this.settleStale(entry);
@@ -2151,14 +2292,16 @@ export class Workspace {
   }
 
   agentInfo(a: AgentEntry): AgentRuntimeInfo {
+    const state = a.session.getState();
     return {
       ...a.info,
+      canSwitchBackend: this.canSwitchBackend(a, state),
       busy: a.session.isRunning,
       state: this.agentState(a),
       activity: a.activity ?? null,
-      effort: a.session.getState().config.effort ?? null,
+      effort: state.config.effort ?? null,
       effortLevels: this.effortLevels(a, a.info.model) ?? [],
-      fast: Boolean(a.session.getState().config.fast),
+      fast: Boolean(state.config.fast),
       backgroundTasks: a.session.backgroundTaskList ?? [],
       context: this.lastContext(a),
       wake: a.session.wake ?? null,
@@ -2223,7 +2366,7 @@ export class Workspace {
           ...(a.retryPending && { pausedUntil: a.pausedUntil, lastEnvelope: a.lastEnvelope }),
         };
       }),
-      ...(this.messagesLoaded && { messages: this.messages }),
+      ...(this.messagesLoaded && { messages: this.messages.map(withoutLiveTiming) }),
       createdAt: this.createdAt,
       lastActivityAt: this.lastActivityAt,
       archivedAt: this.archivedAt,
@@ -2329,11 +2472,52 @@ export class Workspace {
   }
 }
 
+function updateLiveTiming(msg: Message, event: StreamEvent): StreamEvent {
+  if (msg.status !== "streaming") return event;
+  if (event.kind === "thinking_delta" && event.durationMs == null) {
+    const startedAt = event.startedAt ?? msg.liveThinkingSince ?? Date.now();
+    msg.liveThinkingSince = startedAt;
+    delete msg.waitingSince;
+    return { ...event, startedAt, waitingSince: null };
+  }
+
+  // Background card updates aren't progress by the main model.
+  if (
+    event.kind === "subagent_progress" ||
+    event.kind === "subagent_done" ||
+    event.kind === "subagent_start"
+  ) {
+    if (msg.liveThinkingSince != null || event.kind === "subagent_progress") return event;
+  }
+  delete msg.liveThinkingSince;
+  const hasWork = msg.events?.some(
+    (e) =>
+      (e.kind === "tool_use" && e.toolResult == null) ||
+      (e.kind === "subagent_start" && e.subagent?.status === "running"),
+  );
+  if (hasWork) delete msg.waitingSince;
+  else msg.waitingSince = Date.now();
+  return { ...event, waitingSince: msg.waitingSince ?? null };
+}
+
+function clearLiveTiming(msg: Message): void {
+  delete msg.liveThinkingSince;
+  delete msg.waitingSince;
+}
+
+function withoutLiveTiming(msg: Message): Message {
+  if (msg.liveThinkingSince == null && msg.waitingSince == null) return msg;
+  const copy = { ...msg };
+  clearLiveTiming(copy);
+  return copy;
+}
+
 function dialogKey(agentId: string, generation: number, requestId: string): string {
   return `${agentId}:${generation}:${requestId}`;
 }
 
 function restoreMessage(msg: Message & { queuedPrompt?: string }): boolean {
+  clearLiveTiming(msg);
   if (msg.events) normalizeEvents(msg.events);
   if (msg.queuedPrompt === undefined) return false;
   msg.queuedEnvelope ??= { inputId: msg.id, text: msg.queuedPrompt };
@@ -2355,6 +2539,40 @@ function lastThinking(events: StreamEvent[]): StreamEvent | undefined {
 
 function genId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const NO_ACTIVE_SESSION = "No active session — send a message first to start a session.";
+
+function isLegacyLocalCommandReply(input: Message | undefined, reply: Message): boolean {
+  if (
+    input?.kind !== "user" ||
+    input.from ||
+    input.status !== "done" ||
+    reply.status !== "done" ||
+    !reply.turnId ||
+    reply.events?.length !== 0
+  )
+    return false;
+  const prompt = input.content.replace(/(?:^|\s)@\S+\s*/, " ").trim();
+  const hasArgs = (name: string) => prompt === name || prompt.startsWith(`${name} `);
+  // Older local commands wrote adjacent user/reply pairs with no localCommand marker.
+  if (hasArgs("/model"))
+    return /^\*\*.*\*\* (?:runs on|already runs on|moves from|cannot move to|cannot switch models)\b/.test(
+      reply.content,
+    );
+  if (hasArgs("/effort"))
+    return /^(?:Effort (?:levels for|for)|Invalid effort level|\*\*[^\n]+(?:does not support|\nEffort:))/.test(
+      reply.content,
+    );
+  if (hasArgs("/fast"))
+    return /^(?:Fast mode for|Usage: `\/fast|\*\*.*\*\* .*does not support fast mode)/.test(
+      reply.content,
+    );
+  if (prompt === "/usage" || prompt === "/cost")
+    return reply.content.startsWith("## Session Usage") || reply.content === NO_ACTIVE_SESSION;
+  if (prompt === "/context")
+    return reply.content.startsWith("## Context Usage") || reply.content === NO_ACTIVE_SESSION;
+  return hasArgs("/goal") && reply.content === "/goal is disabled.";
 }
 
 function formatUsageInfo(data: Record<string, unknown>): string {

@@ -27,7 +27,7 @@ const withSheet = (fn: () => void) => {
 };
 
 describe("the transcript", () => {
-  it("counts up a running call's time in the header and its row, then shows how long it took", () => {
+  it("counts up a running call's time in the footer and its row, then shows how long it took", () => {
     vi.useFakeTimers();
     try {
       const call: StreamEvent = {
@@ -47,26 +47,26 @@ describe("the transcript", () => {
         events: [call],
       };
       const { container, rerender } = render(<MessageItem msg={msg} agents={[agent]} />);
-      const header = () => container.querySelector(".activity-label")?.textContent;
+      const footer = () => container.querySelector(".turn-footer")?.textContent;
       const row = () => container.querySelector(".event-time")?.textContent;
-      expect(header()).toBe("Cursor · 37s");
+      expect(footer()).toBe("Cursor · 37s");
       fireEvent.click(container.querySelector(".step-header")!);
       expect(row()).toBe("37s");
       act(() => {
         vi.advanceTimersByTime(25_000);
       });
-      expect([header(), row()]).toEqual(["Cursor · 1m 2s", "1m 2s"]);
+      expect([footer(), row()]).toEqual(["Cursor · 1m 2s", "1m 2s"]);
       // What the backend says it is doing comes first.
       const busy = { ...agent, activity: "Bash · 40s" };
       rerender(<MessageItem msg={msg} agents={[busy]} />);
-      expect(header()).toBe("Bash · 40s");
+      expect(footer()).toBe("Bash · 40s");
       const ended = { ...call, toolResult: "done", durationMs: 63_000 };
       rerender(<MessageItem msg={{ ...msg, events: [ended] }} agents={[agent]} />);
-      expect([header(), row()]).toEqual([undefined, "1m 3s"]);
+      expect([footer(), row()]).toEqual(["", "1m 3s"]);
       // A turn that stopped with the call open (a restart) counts nothing.
       rerender(<MessageItem msg={{ ...msg, status: "done" }} agents={[agent]} />);
       expect(container.querySelector(".event-row")).not.toBeNull();
-      expect([header(), row()]).toEqual([undefined, undefined]);
+      expect([footer(), row()]).toEqual([undefined, undefined]);
     } finally {
       vi.useRealTimers();
     }

@@ -22,6 +22,12 @@ import { PanelHttpServer } from "./panel-http";
 import { PiSession } from "./pi";
 import type { PanelToolset } from "../project/tools";
 
+export interface BoundarySteer {
+  envelope: PromptEnvelope;
+  claim(): boolean;
+  finish(outcome: "read" | "handled" | "rejected" | "outcome_unknown"): void;
+}
+
 export interface HostSessionHandle extends EventEmitter {
   sessionId: string | null;
   usage: UsageStats;
@@ -34,6 +40,7 @@ export interface HostSessionHandle extends EventEmitter {
   send(input: string | PromptEnvelope, hooks?: SendHooks): Promise<SendReceipt | void>;
   steer?(message: string, inputId: string): Promise<boolean>;
   readonly canSteer?: boolean;
+  setBoundarySteerSource?(source: () => BoundarySteer | undefined): void;
   abort(): void;
   resetContext?(): void;
   dispose?(): Promise<void>;
@@ -81,6 +88,7 @@ export interface Host {
   readonly connected: boolean;
   getInfo(): HostInfo;
   createSession(agentId: string, config: SessionConfig): HostSessionHandle;
+  replaceSession?(agentId: string, config: SessionConfig): HostSessionHandle;
   destroySession(agentId: string): Promise<void>;
   restoreSession(agentId: string, state: SessionState): HostSessionHandle;
   quotaReader?(): PiQuotaReader | undefined;
@@ -145,10 +153,26 @@ export class LocalHost implements Host {
     return this.track(agentId, session);
   }
 
+  replaceSession(agentId: string, config: SessionConfig): HostSessionHandle {
+    const old = this.sessions.get(agentId);
+    const session = this.createSession(agentId, config);
+    if (old) {
+      old.removeAllListeners();
+      void this.disposeSession(old).catch((error) => {
+        console.error(`[host] Could not dispose replaced session ${agentId}:`, error);
+      });
+    }
+    return session;
+  }
+
   async destroySession(agentId: string): Promise<void> {
     const session = this.sessions.get(agentId);
     if (!session) return;
     this.sessions.delete(agentId);
+    await this.disposeSession(session);
+  }
+
+  private async disposeSession(session: HostSessionHandle): Promise<void> {
     if (session.dispose) await session.dispose();
     else session.abort();
   }

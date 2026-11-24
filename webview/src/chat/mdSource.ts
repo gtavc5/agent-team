@@ -286,17 +286,53 @@ function inlineClose(md: string, open: number): number {
   }
   if (md[j] !== "$" || md[j + 1] === "$" || /\s/.test(md[j - 1])) return -1;
   const body = md.slice(open + 1, j);
-  if (neverMath(body)) return -1;
+  if (neverMath(body) || !balancedBraces(body)) return -1;
   const before = md[open - 1] ?? "";
   const after = md[j + 1] ?? "";
   // "$x$" quoted is talking about the syntax.
   if ((before === "'" || before === '"') && after === before) return -1;
   // "${name}" is a template placeholder, not TeX.
   if (body[0] === "{" && !body.includes("\\")) return -1;
-  if (TEX_MARKUP.test(body)) return j;
-  if (ALNUM.test(before) || ALNUM.test(after)) return -1;
+  // Awk regex match `~ /.../` paired across `$0` and trailing `$/`.
+  if (/~\s*\//.test(body)) return -1;
+  const attachedLeft = ALNUM.test(before) || (before === "_" && after !== "_");
+  const attachedRight = ALNUM.test(after) || (after === "_" && before !== "_");
+  if (attachedLeft || attachedRight) {
+    return attachedTex(body, before) ? j : -1;
+  }
+  if (TEX_MARKUP.test(body)) {
+    // Regex `/^...$/` paired across shell/awk `$0` has `^` right after `/`.
+    if (/(?<!\\)\/\^/.test(body)) return -1;
+    if (!body.includes("\\") && /[A-Za-z]{2,}\s+[A-Za-z]{2,}/.test(body)) return -1;
+    return j;
+  }
   if (/[{}]/.test(body) || /[A-Za-z]{2,}\s+[A-Za-z]{2,}/.test(body)) return -1;
   return j;
+}
+
+function balancedBraces(body: string): boolean {
+  let depth = 0;
+  for (let k = 0; k < body.length; k++) {
+    if (body[k] === "\\") {
+      k++;
+      continue;
+    }
+    if (body[k] === "{") depth++;
+    else if (body[k] === "}" && --depth < 0) return false;
+  }
+  return depth === 0;
+}
+
+// Inline math glued to letters or digits is either a sub/superscript on a
+// preceding base (`SiO$_2$`, `25$^\circ$C`, `(x+1)$^2$`) or a single TeX symbol
+// (`0.20$\sim$0.25`, `30$\mu$m`), never a shell/awk `$0`/`$1` across code.
+function attachedTex(body: string, before: string): boolean {
+  if (body[0] === "^" || body[0] === "_") {
+    return (
+      body.length > 1 && body[1] !== "/" && (ALNUM.test(before) || before === ")" || before === "]")
+    );
+  }
+  return /^\\(?:[A-Za-z]{2,}|[^A-Za-z0-9\s])$/.test(body);
 }
 
 function neverMath(body: string): boolean {

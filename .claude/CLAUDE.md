@@ -17,7 +17,7 @@ Detailed knowledge lives in skills — load them at the moments their descriptio
 - **Never skip, weaken, or `.skip` a failing test.** Fix the cause. Every UI change ships with a vitest test; every event-pipeline change is checked against the snap fixtures, and a `.snap.md` is only regenerated (`-u`) for diffs you can explain line by line.
 - **Never guess the shape of an SDK stream.** If a fix depends on frame order or fields, capture the scenario (capture-sdk skill) and add the recording as a fixture.
 - **Never start many real Codex sessions in a short time.** Captures and smoke tests hit the user's own account; bursts of sessions look like abuse and can get the account banned. Capture only the scenarios you need, one at a time, spaced out; never loop captures or run them in parallel.
-- **Never push unverified code.** `npm run check && npm test && npm run build` locally before every push. Commit only when asked; push only when asked.
+- **Never push unverified code.** `npm run test:slow && npm run build` locally before every push. Commit only when asked; push only when asked.
 - Never `pkill -f` a pattern that can match your own shell (the server command line, `codex app-server`, ...). Kill specific PIDs.
 
 ## Working Style
@@ -51,7 +51,8 @@ Tests and tooling:
 
 - Node ≥ 26 (the history is in `node:sqlite`), npm workspaces rooted at the repo top level — `npm install` at the root only. TypeScript scripts run through `tsx` (`npm run capture -- …`), never compiled.
 - `npm run check` — root `tsc` (scripts + cross-package test), per-workspace strict `tsc`, ESLint (`typescript-eslint` recommendedTypeChecked + react-hooks), prettier. Zero tolerance; no `eslint-disable` except `react-hooks/exhaustive-deps` with a stated reason.
-- `npm test` — vitest in `service/` (`tests/unit` + `tests/snap`) then `webview/` (jsdom + testing-library).
+- `npm test` — Vitest in `service/` (`tests/unit` + `tests/snap`) then `webview/` (jsdom + testing-library), without Chromium.
+- `npm run test:browser` — headless Chromium layout tests (`webview/tests/browser/`); install Chromium with `npx playwright install chromium` first. `npm run test:slow` runs `check`, `test`, and `test:browser`.
 - `npm run build` — Vite bundle then esbuild server bundle into `dist/`. The codex binary is found in `node_modules` and resolved at runtime.
 - CI (`.github/workflows/ci.yml`) runs check, test, build on every push and PR.
 

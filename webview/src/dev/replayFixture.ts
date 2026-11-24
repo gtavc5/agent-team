@@ -3,6 +3,7 @@
 // through the exact same dispatch pipeline as live server frames.
 
 export const DEMO_WS_ID = "replay-demo";
+export const LAYOUT_TURN_ID = "demo-layout-turn";
 
 const AGENT = {
   id: "demo-agent",
@@ -13,7 +14,7 @@ const AGENT = {
   isDefault: true,
 };
 
-type Frame = Record<string, unknown>;
+type Frame = Record<string, unknown> & { delayAfterMs?: number };
 
 const LONG_OUTPUT = Array.from(
   { length: 60 },
@@ -612,12 +613,139 @@ export function buildFrames(): Frame[] {
       "Attempting one more call...\n\n[Claude error] session expired — message ends in the error state",
   });
 
+  appendLayoutTurn(frames, now);
   return frames;
+}
+
+function appendLayoutTurn(frames: Frame[], now: number) {
+  const messageId = LAYOUT_TURN_ID;
+  const firstText = "I'll cross-check the layout tests and their fixtures.";
+  const lastText = "\n\nThe fixtures cover the waiting, thinking, and tool phases.";
+  let at = frames.reduce((time, frame) => time + frameDelay(frame), now);
+  const push = (frame: Frame, delayAfterMs?: number) => {
+    frames.push(delayAfterMs == null ? frame : { ...frame, delayAfterMs });
+    at += delayAfterMs ?? frameDelay(frame);
+  };
+  const event = (event: Record<string, unknown>, delayAfterMs?: number) =>
+    push(ev(messageId, event), delayAfterMs);
+
+  push({
+    type: "new_message",
+    workspaceId: DEMO_WS_ID,
+    message: {
+      id: `${messageId}-prompt`,
+      kind: "user",
+      agentId: null,
+      content: "Cross-check the layout tests against the replay fixtures.",
+      timestamp: now + 180_000,
+      status: "done",
+    },
+  });
+  push({
+    type: "new_message",
+    workspaceId: DEMO_WS_ID,
+    message: {
+      id: messageId,
+      kind: "agent",
+      agentId: AGENT.id,
+      content: "",
+      timestamp: now + 181_000,
+      status: "streaming",
+      waitingSince: at,
+      events: [],
+    },
+  });
+  event({ kind: "text_delta", content: firstText, waitingSince: at });
+
+  const tools = [
+    ["Read", "Read the layout test"],
+    ["Grep", "Find the geometry assertions"],
+    ["Bash", "List the replay fixtures"],
+    ["mcp__project_index__find_test_coverage_for_changed_components", "Look up test coverage"],
+  ];
+  for (const [i, [toolName, content]] of tools.entries()) {
+    const toolUseId = `layout-tool-${i}`;
+    const startedAt = at;
+    event({
+      kind: "tool_use",
+      toolName,
+      toolUseId,
+      content,
+      startedAt,
+      contentOffset: firstText.length,
+      waitingSince: null,
+    });
+    event(
+      {
+        kind: "tool_result",
+        toolUseId,
+        content: "Found.",
+        durationMs: at - startedAt,
+        waitingSince: at,
+      },
+      i === tools.length - 1 ? 6_500 : undefined,
+    );
+  }
+
+  // Wire form of Pi's thinking_start and thinking_end, including the silent interval.
+  const startedAt = at;
+  const reasoning = "The geometry should stay the same until new visible content arrives.";
+  event({ kind: "thinking_delta", startedAt, content: "", waitingSince: null }, 6_000);
+  event({ kind: "thinking_delta", startedAt, content: reasoning, waitingSince: null }, 800);
+  const durationMs = at - startedAt;
+  event({ kind: "thinking_delta", content: "", durationMs, waitingSince: at }, 0);
+  event({
+    kind: "thinking",
+    content: reasoning,
+    durationMs,
+    contentOffset: firstText.length,
+    waitingSince: at,
+  });
+
+  const verifyStartedAt = at;
+  event(
+    {
+      kind: "tool_use",
+      toolName: "RunTests",
+      toolUseId: "layout-verify",
+      content: "Check the layout tests",
+      startedAt: verifyStartedAt,
+      contentOffset: firstText.length,
+      waitingSince: null,
+    },
+    3_500,
+  );
+  push(
+    {
+      type: "agent_activity",
+      workspaceId: DEMO_WS_ID,
+      agentId: AGENT.id,
+      activity: "Checking layout · 3s",
+    },
+    1_500,
+  );
+  event({
+    kind: "tool_result",
+    toolUseId: "layout-verify",
+    content: "Passed.",
+    durationMs: at - verifyStartedAt,
+    waitingSince: at,
+  });
+  push({ type: "agent_activity", workspaceId: DEMO_WS_ID, agentId: AGENT.id, activity: null });
+  event({ kind: "text_delta", content: lastText, waitingSince: at });
+  push({
+    type: "message_done",
+    workspaceId: DEMO_WS_ID,
+    messageId,
+    status: "done",
+    content: firstText + lastText,
+  });
 }
 
 // Frame pacing: fast for deltas, slower for structural frames so the eye can
 // follow tool pairing and subagent state transitions.
-function frameDelay(frame: Frame): number {
+export function frameDelay(frame: Frame): number {
+  if (frame.delayAfterMs != null) return frame.delayAfterMs;
   if (frame.type !== "stream_event") return 250;
   const kind = (frame.event as Record<string, unknown>).kind as string;
   if (kind === "text_delta" || kind === "thinking_delta") return 18;
@@ -629,8 +757,10 @@ export async function startDemoReplay(
   dispatch: (msg: Record<string, unknown>) => void,
 ): Promise<void> {
   for (const frame of buildFrames()) {
-    dispatch(frame);
-    await new Promise((r) => setTimeout(r, frameDelay(frame)));
+    const { delayAfterMs: _delay, ...wire } = frame;
+    dispatch(wire);
+    const delay = frameDelay(frame);
+    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
   }
   console.log("[replay-demo] finished");
 }

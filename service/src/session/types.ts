@@ -77,9 +77,10 @@ export interface StreamEvent {
   // by a later thinking_tokens event) how many tokens it spent. On a tool
   // call (its result, then the call it merges into): from call to result.
   durationMs?: number;
-  // On a tool call: when it started (ms since the epoch), so one still
-  // running shows how long it has been.
+  // Start of a tool call or a live thinking block (ms since the epoch).
   startedAt?: number;
+  // Workspace stream only: when the wait began, or null when it ended.
+  waitingSince?: number | null;
   tokens?: number;
   toolInput?: ToolInput;
   step?: number;

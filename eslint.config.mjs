@@ -33,7 +33,7 @@ export default tseslint.config(
   },
   {
     // Build/test configs sit outside every tsconfig; plain rules only.
-    files: ["**/*.{js,mjs}", "**/vite.config.ts", "**/vitest.config.ts"],
+    files: ["**/*.{js,mjs}", "**/vite.config.ts", "**/vitest{,.browser}.config.ts"],
     extends: [tseslint.configs.disableTypeChecked],
   },
 );

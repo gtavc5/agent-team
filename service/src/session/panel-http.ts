@@ -26,6 +26,7 @@ export interface PanelSessionRegistration {
   sessionKey: string;
   getToolset: () => PanelToolset | null;
   onQuota?: (snapshot: QuotaSnapshot) => void;
+  onSteerBoundary?: (open: () => boolean) => Promise<void>;
   restoreExpectation?: { expectedAnchorId: string | null };
   onAnswer?: (tool: string, args: unknown, text: string, isError: boolean) => void;
 }
@@ -386,7 +387,7 @@ export class PanelHttpServer {
     try {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       const match =
-        /^\/v1\/sessions\/([^/]+)\/(toolset|call|ready|control|control-reply|quota)$/.exec(
+        /^\/v1\/sessions\/([^/]+)\/(toolset|call|ready|control|control-reply|quota|steer-boundary)$/.exec(
           url.pathname,
         );
       if (!match) {
@@ -413,6 +414,12 @@ export class PanelHttpServer {
           session.onQuota(result.data);
           this.json(res, 200, { ok: true });
         }
+      } else if (req.method === "POST" && endpoint === "steer-boundary") {
+        const deadline = Number(url.searchParams.get("until"));
+        const open = () =>
+          Date.now() < deadline && !res.destroyed && this.sessions.get(key) === session;
+        if (open()) await session.onSteerBoundary?.(open);
+        this.json(res, 200, { ok: true });
       } else if (req.method === "GET" && endpoint === "toolset") {
         this.sendToolset(res, session);
       } else if (req.method === "POST" && endpoint === "call") {

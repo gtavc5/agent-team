@@ -198,7 +198,7 @@ interface PiCompactionResult {
 
 type AllowedCommand =
   | { id: string; type: "compact"; customInstructions?: string }
-  | { id: string; type: "prompt"; message: string; images?: PiRpcImage[] }
+  | { id: string; type: "prompt" | "steer"; message: string; images?: PiRpcImage[] }
   | { id: string; type: "abort" }
   | { id: string; type: "get_state" }
   | { id: string; type: "get_session_stats" }
@@ -294,6 +294,18 @@ export class PiRpcClient extends EventEmitter {
       options,
       options.onBeforeWrite,
     ) as Promise<{ disposition: string }>;
+  }
+
+  steer(
+    message: string,
+    options: PiRpcPromptOptions,
+  ): Promise<{ disposition: "handled" | "queued" }> {
+    return this.request(
+      "steer",
+      (id) => ({ id, type: "steer", message, ...(options.images && { images: options.images }) }),
+      options,
+      options.onBeforeWrite,
+    ) as Promise<{ disposition: "handled" | "queued" }>;
   }
 
   compact(customInstructions?: string, onBeforeWrite?: () => void): Promise<PiCompactionResult> {
@@ -459,7 +471,15 @@ export class PiRpcClient extends EventEmitter {
     if (!request) return;
     this.pending.delete(id);
     clearTimeout(request.timer);
-    if (message.success === true) {
+    // Only an explicit rejection of this steer makes a second write safe.
+    if (
+      request.command === "steer" &&
+      (message.command !== "steer" ||
+        (message.success !== true &&
+          !(message.success === false && typeof message.error === "string")))
+    ) {
+      request.reject(new Error("Malformed Pi steer response"));
+    } else if (message.success === true) {
       request.resolve(message.data);
     } else {
       request.reject(

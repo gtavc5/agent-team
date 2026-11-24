@@ -15,6 +15,10 @@ import { FakeHost, FakeSession } from "./fakes";
 import { HostRegistry } from "../../src/session/host";
 import { setupProjects as setup, tick, tmpDir as tmp, withTask } from "./projectHarness";
 
+// Fake setTimeout and Date without hijacking DirWatcher's 250ms setInterval
+// polling, which otherwise runs thousands of sync fs scans on long jumps.
+const useFakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+
 describe("ProjectStore", () => {
   it("persists projects outside the repository and removes them whole", () => {
     const base = tmp();
@@ -634,7 +638,7 @@ describe("ProjectManager", () => {
   });
 
   it("tells a worker what it is on, as it stands: the task, the lead's word since, its objective", async () => {
-    const { create, call, workspaces } = setup();
+    const { create, call, workspaces, endTurn } = setup();
     const { lead } = create("clice");
     await withTask(call, lead);
     await call(lead, "add_items", { objective_id: "core/modules", decisions: ["which std?"] });
@@ -653,6 +657,8 @@ describe("ProjectManager", () => {
       outcome: "C++20",
     });
     await call(lead, "message_session", { session_id: worker.id, message: "Skip header units." });
+    endTurn(worker);
+    await tick();
 
     const now = await call(worker, "current_task");
     expect(now).toContain(`You are session ${worker.id} "modules"`);
@@ -667,6 +673,51 @@ describe("ProjectManager", () => {
     expect(await call(worker, "current_task", { objective_id: "core/lexer" })).toContain(
       "core/lexer — Lexer",
     );
+  });
+
+  it("omits still-queued lead messages from current_task while keeping delivered ones", async () => {
+    const { create, call, session, workspaces, endTurn } = setup();
+    const { lead } = create("clice");
+    await call(lead, "start_session", {
+      title: "modules",
+      cwd: "wt",
+      task: "Implement scanner.",
+    });
+    const worker = [...workspaces.values()].find((w) => w.projectLink?.role === "worker")!;
+
+    await call(lead, "message_session", { session_id: worker.id, message: "Use C++20." });
+    endTurn(worker);
+    await tick();
+
+    // Queued behind the active turn: must not leak into current_task before dispatch.
+    await call(lead, "message_session", {
+      session_id: worker.id,
+      message: "Do not touch parser.",
+    });
+    expect(worker.messages.find((m) => m.content === "Do not touch parser.")?.status).toBe(
+      "queued",
+    );
+
+    const midTurn = await call(worker, "current_task");
+    expect(midTurn).toContain("Implement scanner.");
+    expect(midTurn).toContain("Use C++20.");
+    expect(midTurn).not.toContain("Do not touch parser.");
+
+    endTurn(worker);
+    await tick();
+    const afterDelivery = await call(worker, "current_task");
+    expect(afterDelivery).toContain("Do not touch parser.");
+
+    // A lead message whose dispatch failed never reached the worker and stays omitted.
+    await call(lead, "message_session", {
+      session_id: worker.id,
+      message: "Never delivered.",
+    });
+    vi.spyOn(session(worker), "send").mockRejectedValueOnce(new Error("boom"));
+    endTurn(worker);
+    await tick();
+    expect(worker.messages.find((m) => m.content === "Never delivered.")?.status).toBe("error");
+    expect(await call(worker, "current_task")).not.toContain("Never delivered.");
   });
 
   it("starts an isolated worker that sees its own tasks and nothing else of the board", async () => {
@@ -1223,7 +1274,7 @@ describe("project messages that must not be lost or looped", () => {
   });
 
   it("space out worker starts so a lead cannot burst sessions", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { create, call, workers, session } = setup();
       const { lead } = create("a");
@@ -1545,7 +1596,7 @@ describe("rate-limit retries", () => {
   });
 
   it("go ahead of what comes in meanwhile: the lead's message waits, the user's is the cue to retry now", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { lead, w, agentId, s, call, endTurn } = await limited();
       // Past the reset, the retry not yet fired (a restart's ladder).
@@ -1629,7 +1680,7 @@ describe("rate-limit retries", () => {
   });
 
   it("are not used up by the user writing while a turn still runs", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, agentId, s, endTurn } = await limited();
       s.isRunning = true;
@@ -1658,7 +1709,7 @@ describe("worker tasks held back for spacing", () => {
   };
 
   it("wait as a saved queued message and go out after the gap, or after a restart", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { reply, w1, session, registry } = await twoStarts();
       expect(reply).toContain("Its task goes out in 15 s");
@@ -1677,7 +1728,7 @@ describe("worker tasks held back for spacing", () => {
   });
 
   it("leave nothing to retry once sent, so a restart sends nothing again", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w1, session, endTurn, registry } = await twoStarts();
       await vi.advanceTimersByTimeAsync(START_SPACING_MS);
@@ -1693,7 +1744,7 @@ describe("worker tasks held back for spacing", () => {
   });
 
   it("space the lead's messages that wake idle workers", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w1, lead, call, session, endTurn, workers } = await twoStarts();
       await vi.advanceTimersByTimeAsync(START_SPACING_MS);
@@ -1719,7 +1770,7 @@ describe("worker tasks held back for spacing", () => {
   });
 
   it("go out even when their timer fires a millisecond early", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w1, session } = await twoStarts();
       vi.setSystemTime(Date.now() - 1);
@@ -1761,7 +1812,7 @@ describe("worker tasks held back for spacing", () => {
   });
 
   it("are not held back by a restart's checks on the workers that owe their lead a word", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { create, call, manager, workers } = setup();
       const { lead } = create("a");
@@ -1780,7 +1831,7 @@ describe("worker tasks held back for spacing", () => {
   });
 
   it("stay ahead of a follow-up sent in the meantime", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w1, lead, call, session, endTurn } = await twoStarts();
       expect(await call(lead, "message_session", { session_id: w1.id, message: "also X" })).toBe(
@@ -1799,7 +1850,7 @@ describe("worker tasks held back for spacing", () => {
   });
 
   it("are dropped by stop_session", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w1, lead, call, session, frames } = await twoStarts();
       await call(lead, "stop_session", { session_id: w1.id });
@@ -1815,7 +1866,7 @@ describe("worker tasks held back for spacing", () => {
   });
 
   it("are dropped with their project", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w1, session, manager, lead } = await twoStarts();
       manager.delete(lead.projectLink!.projectId);
@@ -1862,7 +1913,7 @@ describe("a worker that goes idle without reporting", () => {
       .join("\n\n");
 
   it("takes a refused finish_task for no report: the worker still waits for the user", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, session } = await started();
       session(w).emit("event", {
@@ -1887,7 +1938,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("leaves a task that ends in a question to the user, across a restart too", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, endTurn, restart, manager } = await started();
       say("Which branch should this go on?");
@@ -1906,7 +1957,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("tells the lead once, with the last reply, when its later message is answered without a report", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, endTurn, askNext } = await started();
       await askNext("which branch is it on?");
@@ -1927,7 +1978,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("counts the wait from the last thing the worker did", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, endTurn, ask } = await started();
       await ask("also this");
@@ -1946,7 +1997,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("does not tell in the gap between a background task's end and the turn it starts", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, endTurn, askNext, state } = await started();
       await askNext("run the build");
@@ -1971,7 +2022,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("says nothing more once it finished, but a progress report is not one", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, call, say, told, settle, endTurn, ask } = await started();
       say("Done.");
@@ -2001,7 +2052,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("tells how a failed turn ended, and leaves one the user stopped to them", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, session, endTurn, ask, state } = await started();
       say("Working on it");
@@ -2045,7 +2096,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("tells a stopped turn that a wake-up then carried on as ended, and keeps the reply past a stray error", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, session, endTurn, state } = await started();
       say("Build started.");
@@ -2068,7 +2119,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("leaves the lead's own stop alone, and a worker the user took over to the user", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { lead, w, call, say, told, settle, session, endTurn, ask } = await started();
       session(w).isRunning = false;
@@ -2111,7 +2162,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("waits while anything is still to run: a queued message, a pause, a background task, a wake-up", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, endTurn, ask, state } = await started();
       await ask("also this");
@@ -2144,7 +2195,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("keeps two agents of a worker apart, and a stop of one from the other", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, endTurn, askNext } = await started();
       await askNext("is staging up?");
@@ -2167,7 +2218,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("never throws out of its timer, and stops with the manager", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const { lead, w, told, settle, endTurn, ask, askNext, manager, host } = await started();
@@ -2191,7 +2242,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("comes from the panel, about the worker", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { lead, w, endTurn, askNext, settle } = await started();
       await askNext("which branch?");
@@ -2208,7 +2259,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("carries on a turn a restart cut off, a shutdown or a crash, without the lead", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, restart, manager, ask, session, endTurn } = await started();
       say("Halfway through");
@@ -2253,7 +2304,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("carries on the lead's message past a command the user had the panel answer", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, restart, manager, askNext, session, endTurn } = await started();
       await askNext("which commit?");
@@ -2274,7 +2325,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("carries on once: cut off again, the lead is told", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, restart, manager, session } = await started();
       say("Halfway through");
@@ -2298,7 +2349,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("drops a carry-on waiting for its start slot when the user writes first", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, restart, manager, session, endTurn } = await started();
       say("Halfway through");
@@ -2322,7 +2373,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("leaves a turn a restart cut off to the user who wrote to it since", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, restart, manager, session, endTurn } = await started();
       say("Halfway through");
@@ -2340,7 +2391,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("keeps across a restart what it owes and what it already reported", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, call, say, told, settle, endTurn, restart, manager, ask } = await started();
       say("Done.");
@@ -2365,7 +2416,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("waits for a rate-limit retry still to run, however late it is", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, session, endTurn, askNext } = await started();
       await askNext("is it merged?");
@@ -2387,7 +2438,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("owes nothing once archived", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { lead, w, told, settle, endTurn, call, manager } = await started();
       endTurn(w);
@@ -2402,7 +2453,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("carries on a task whose background work a crash cut off, and shows no wait till then", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, endTurn, state, restart, manager, session } = await started();
       say("Started the build in the background.");
@@ -2420,7 +2471,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("tells the lead what a session the user started answers it", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { lead, call, host, project, session, endTurn, settle, w } = await started();
       const own = host.createWorkspace("mine", w.cwd, { projectId: project.id, role: "worker" });
@@ -2446,7 +2497,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("tells a fresh lead nothing of what the lead of a deleted project said", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, endTurn, settle, manager, project, workspaces } = await started();
       manager.delete(project.id);
@@ -2462,7 +2513,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("shows it waiting for the user when its task or the user's turn ends on them", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, settle, endTurn, restart, frames } = await started();
       const shown = () =>
@@ -2480,7 +2531,7 @@ describe("a worker that goes idle without reporting", () => {
       vi.useRealTimers();
     }
 
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, lead, say, settle, endTurn, session, call, askNext, frames, manager, project } =
         await started();
@@ -2556,7 +2607,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("shows it waiting only once nothing more is to run, through wake-ups and notices", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, settle, endTurn, state, call, session, frames } = await started();
       const shown = () =>
@@ -2599,7 +2650,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("shows a task the lead retried after it failed waiting for the user", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, session, endTurn, ask } = await started();
       say("Working on it");
@@ -2619,7 +2670,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("reads no command the panel answered as the user's turn after a restart", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, settle, session, call, endTurn, restart } = await started();
       say("Which branch?");
@@ -2641,8 +2692,203 @@ describe("a worker that goes idle without reporting", () => {
     }
   });
 
+  it("clears awaitsUser in a multi-agent worker once finish_task succeeds, and re-arms on later user turns or dialogs", async () => {
+    useFakeTimers();
+    try {
+      const { w, say, settle, session, call, endTurn, restart, host, frames, manager } =
+        await started();
+      const shown = () =>
+        frames
+          .filter((f) => f.type === "workspace_updated" && f.id === w.id)
+          .map((f) => f.awaitsUser === true);
+
+      host.addAgent(w, "Allen", "gpt-6-astra", "b", "c");
+      const [primaryEntry, allenEntry] = [...w.agents.values()];
+      const allen = allenEntry.session as FakeSession;
+      const endAllen = () => {
+        allen.isRunning = false;
+        allen.emit("event", { kind: "result", content: "" });
+      };
+
+      // Primary asks a question, then user consults a second agent who replies
+      // without finish_task, then user tells the primary to finish.
+      say("Here is my plan. Thoughts?");
+      endTurn(w);
+      expect(awaitsUser(w)).toBe(true);
+      expect(shown()).toEqual([true]);
+
+      await w.sendMessage("@Allen review this");
+      allen.emit("event", { kind: "text_delta", content: "Looks solid." });
+      endAllen();
+      expect(awaitsUser(w)).toBe(true);
+
+      await w.sendMessage("LGTM, go ahead");
+      session(w).emit("event", {
+        kind: "tool_use",
+        toolName: "mcp__panel__finish_task",
+        toolUseId: "ft1",
+        content: "**finish_task**",
+      });
+      await call(w, "finish_task", { summary: "done" });
+      endTurn(w);
+      await settle();
+      expect(awaitsUser(w)).toBe(false);
+      expect(shown()).toEqual([true, false]);
+
+      // Pending UI dialog still forces awaitsUser even after finish_task,
+      // and showAwaiting broadcasts both the rise and clear.
+      const dialog = {
+        workspaceId: w.id,
+        agentId: primaryEntry.info.id,
+        processGeneration: 1,
+        requestId: "confirm-1",
+      };
+      session(w).emit("ui_dialog_request", dialog);
+      manager.showAwaiting(w);
+      expect(awaitsUser(w)).toBe(true);
+      expect(manager.awaitsUser(w)).toBe(true);
+      session(w).emit("ui_dialog_resolved", dialog);
+      manager.showAwaiting(w);
+      expect(awaitsUser(w)).toBe(false);
+      expect(manager.awaitsUser(w)).toBe(false);
+      expect(shown()).toEqual([true, false, true, false]);
+
+      // A targeted local slash command (@Allen /usage) after finish_task is not
+      // mistaken for a new user turn after restart.
+      await w.sendMessage("@Allen /usage");
+      const afterFinish = restart(w);
+      expect(awaitsUser(afterFinish)).toBe(false);
+
+      // A new user message AFTER a successful finish_task re-arms awaitsUser
+      // (both live and after restart), even when handled by the second agent.
+      const [, allenAfter] = [...afterFinish.agents.values()];
+      const allenRestarted = allenAfter.session as FakeSession;
+      await afterFinish.sendMessage("@Allen one more check?");
+      allenRestarted.emit("event", { kind: "text_delta", content: "Looks good, merge it?" });
+      allenRestarted.isRunning = false;
+      allenRestarted.emit("event", { kind: "result", content: "" });
+      expect(awaitsUser(afterFinish)).toBe(true);
+      const afterFollowUp = restart(afterFinish);
+      expect(awaitsUser(afterFollowUp)).toBe(true);
+
+      // A refused finish_task on a follow-up after an earlier successful
+      // finish_task does not clear awaitsUser either.
+      const primaryAfter = [...afterFollowUp.agents.values()][0].session as FakeSession;
+      await afterFollowUp.sendMessage("report the follow-up too");
+      primaryAfter.emit("event", {
+        kind: "tool_use",
+        toolName: "mcp__panel__finish_task",
+        toolUseId: "ft-post-err",
+        content: "**finish_task**",
+      });
+      primaryAfter.emit("event", {
+        kind: "tool_result",
+        toolUseId: "ft-post-err",
+        content: "The context is over the limit.",
+        isError: true,
+      });
+      primaryAfter.emit("event", { kind: "text_delta", content: "Context too long." });
+      primaryAfter.isRunning = false;
+      primaryAfter.emit("event", { kind: "result", content: "" });
+      expect(awaitsUser(afterFollowUp)).toBe(true);
+      expect(awaitsUser(restart(afterFollowUp))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let a refused finish_task supersede an earlier agent turn", async () => {
+    useFakeTimers();
+    try {
+      const { w, say, settle, session, endTurn, restart, host } = await started();
+      host.addAgent(w, "Allen", "gpt-6-astra", "b", "c");
+      const allen = [...w.agents.values()][1].session as FakeSession;
+
+      say("Plan?");
+      endTurn(w);
+      await w.sendMessage("@Allen thoughts?");
+      allen.emit("event", { kind: "text_delta", content: "LGTM" });
+      allen.isRunning = false;
+      allen.emit("event", { kind: "result", content: "" });
+      expect(awaitsUser(w)).toBe(true);
+
+      // Refused finish_task on a failed turn must not clear Allen's earlier turn.
+      await w.sendMessage("go ahead");
+      session(w).emit("event", {
+        kind: "tool_use",
+        toolName: "mcp__panel__finish_task",
+        toolUseId: "ft-err",
+        content: "**finish_task**",
+      });
+      session(w).emit("event", {
+        kind: "tool_result",
+        toolUseId: "ft-err",
+        content: "The context is over the limit.",
+        isError: true,
+      });
+      session(w).isRunning = false;
+      session(w).emit("event", { kind: "error", content: "API Error: 529 overloaded" });
+      await settle();
+      expect(awaitsUser(w)).toBe(true);
+
+      // Refused finish_task on a completed turn still keeps awaitsUser true,
+      // both live and after restart.
+      await w.sendMessage("try again");
+      session(w).emit("event", {
+        kind: "tool_use",
+        toolName: "mcp__panel__finish_task",
+        toolUseId: "ft-err-2",
+        content: "**finish_task**",
+      });
+      session(w).emit("event", {
+        kind: "tool_result",
+        toolUseId: "ft-err-2",
+        content: "The context is over the limit.",
+        isError: true,
+      });
+      say("Shall I shorten it?");
+      endTurn(w);
+      await settle();
+      expect(awaitsUser(w)).toBe(true);
+      expect(awaitsUser(restart(w))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears awaitsUser across a restart when a second agent finishes while primary keeps its delivered task turn", async () => {
+    useFakeTimers();
+    try {
+      const { w, say, settle, call, endTurn, restart, host } = await started();
+      host.addAgent(w, "Allen", "gpt-6-astra", "b", "c");
+      const allen = [...w.agents.values()][1].session as FakeSession;
+
+      // Primary stops on the task (a.input === a.delivered, restored after restart).
+      say("Which approach?");
+      endTurn(w);
+      expect(awaitsUser(w)).toBe(true);
+
+      // Second agent finishes the task without primary getting another turn.
+      await w.sendMessage("@Allen wrap it up");
+      allen.emit("event", {
+        kind: "tool_use",
+        toolName: "mcp__panel__finish_task",
+        toolUseId: "ft-allen",
+        content: "**finish_task**",
+      });
+      await call(w, "finish_task", { summary: "done by Allen" });
+      allen.isRunning = false;
+      allen.emit("event", { kind: "result", content: "" });
+      await settle();
+      expect(awaitsUser(w)).toBe(false);
+      expect(awaitsUser(restart(w))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("leaves to the user across a restart what they took over", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, say, told, settle, endTurn, askNext, restart, manager } = await started();
       await askNext("which commit?");
@@ -2661,7 +2907,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("never shows the lead, a session the user started or an archived one waiting", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { lead, w, say, endTurn, call, host, session, project } = await started();
       say("Which branch?");
@@ -2687,7 +2933,7 @@ describe("a worker that goes idle without reporting", () => {
   });
 
   it("is archived with all its sessions once none is busy, and comes back with its lead", async () => {
-    vi.useFakeTimers();
+    useFakeTimers();
     try {
       const { w, lead, told, settle, endTurn, askNext, manager, project } = await started();
       await askNext("which branch?");

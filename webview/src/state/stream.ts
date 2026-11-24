@@ -44,12 +44,14 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
   if (textDelta) content = (content || "") + textDelta;
   const live = liveThinkingAfter(m, evts);
   const liveChanged =
-    live.liveThinking !== m.liveThinking || live.liveThinkingSince !== m.liveThinkingSince;
+    live.liveThinking !== m.liveThinking ||
+    live.liveThinkingSince !== m.liveThinkingSince ||
+    live.waitingSince !== m.waitingSince;
   if (regular.length === 0) {
     const retryCleared = evts.some(clearsRetry) && events.some((e) => e.kind === "retry");
     if (retryCleared) events = events.filter((e) => e.kind !== "retry");
     return textDelta || liveChanged || retryCleared
-      ? { ...withoutLiveThinking(m), content, ...live, ...(retryCleared && { events }) }
+      ? { ...withoutLiveTiming(m), content, ...live, ...(retryCleared && { events }) }
       : m;
   }
 
@@ -154,38 +156,48 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
     }
     events.push(ev);
   }
-  return { ...withoutLiveThinking(m), content, events, ...live };
+  return { ...withoutLiveTiming(m), content, events, ...live };
 }
 
-type LiveThinking = Pick<Message, "liveThinking" | "liveThinkingSince">;
+type LiveTiming = Pick<Message, "liveThinking" | "liveThinkingSince" | "waitingSince">;
 
 // The thinking block streaming in, in batch order: an empty delta opens a
 // block, the next ones extend it, and the main loop moving on ends it — its
 // "thinking" event, a delta carrying the block's duration (a block whose
 // text is not returned gets no event), the reply's text, a tool call.
-function liveThinkingAfter(m: Message, evts: StreamEvent[]): LiveThinking {
+function liveThinkingAfter(m: Message, evts: StreamEvent[]): LiveTiming {
+  if (m.status !== "streaming") return {};
   let text = m.liveThinking;
   let since = m.liveThinkingSince;
+  let waitingSince = m.waitingSince;
   for (const e of evts) {
+    if (e.waitingSince !== undefined) waitingSince = e.waitingSince ?? undefined;
     // A background task reporting on this message is not the main loop
     // moving on.
     if (SUBAGENT_KINDS.has(e.kind)) continue;
     if (e.kind !== "thinking_delta" || e.durationMs != null) {
       text = undefined;
       since = undefined;
+    } else if (e.startedAt != null) {
+      text = (e.startedAt === since ? (text ?? "") : "") + e.content;
+      since = e.startedAt;
     } else if (text == null || !e.content) {
       text = e.content ?? "";
-      since = Date.now();
+      since = !e.content ? Date.now() : (since ?? Date.now());
     } else {
       text += e.content;
     }
   }
-  return text == null ? {} : { liveThinking: text, liveThinkingSince: since };
+  return {
+    ...(text != null && { liveThinking: text }),
+    ...(since != null && { liveThinkingSince: since }),
+    ...(waitingSince != null && { waitingSince }),
+  };
 }
 
-export function withoutLiveThinking(m: Message): Message {
-  if (m.liveThinking == null) return m;
-  const { liveThinking: _text, liveThinkingSince: _since, ...rest } = m;
+export function withoutLiveTiming(m: Message): Message {
+  if (m.liveThinking == null && m.liveThinkingSince == null && m.waitingSince == null) return m;
+  const { liveThinking: _text, liveThinkingSince: _thinking, waitingSince: _waiting, ...rest } = m;
   return rest;
 }
 
@@ -386,9 +398,14 @@ function reconcileMessage(cur: Message, next: Message): Message {
   const merged = next.events
     ? { ...next, events: mergeDetailEvents(cur.events, next.events) }
     : next;
-  // Still thinking on both sides: the block goes on, and so does its timer.
-  if (cur.status === "streaming" && next.status === "streaming" && cur.liveThinking != null) {
-    return { ...merged, liveThinking: cur.liveThinking, liveThinkingSince: cur.liveThinkingSince };
+  // Keep a locally received prefix only if the server is still on that block.
+  if (
+    next.status === "streaming" &&
+    next.liveThinkingSince != null &&
+    next.liveThinkingSince === cur.liveThinkingSince &&
+    cur.liveThinking != null
+  ) {
+    return { ...merged, liveThinking: cur.liveThinking };
   }
   return merged;
 }

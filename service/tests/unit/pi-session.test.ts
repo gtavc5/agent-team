@@ -166,6 +166,7 @@ function harness(
             respond(frame, { commands: [{ name: "skill:test", source: "skill" }] });
             break;
           case "compact":
+          case "steer":
             break;
           case "prompt":
             order.push("write");
@@ -241,6 +242,112 @@ function confirmed(cfg: SessionConfig): SessionState {
     hasConfirmedTurns: true,
   };
 }
+
+describe("Pi boundary steering", () => {
+  async function setup() {
+    const h = harness();
+    const claim = vi.fn(() => true);
+    const finish = vi.fn();
+    const source = vi.fn(() => ({ envelope: { text: "follow", inputId: "B" }, claim, finish }));
+    h.session.setBoundarySteerSource(source);
+    await h.session.send("first");
+    const client = h.clients[0];
+    const boundary = (open = () => true) => h.register.mock.calls[0][0].onSteerBoundary!(open);
+    client.event({ type: "agent_start" });
+    client.event({ type: "message_end", message: { role: "user" } });
+    const write = () =>
+      vi.waitFor(() => {
+        const frame = client.wire.find((item) => item.type === "steer");
+        expect(frame).toBeDefined();
+        return frame!;
+      });
+    return { ...h, client, boundary, write, claim, finish, source };
+  }
+
+  it("never writes after the boundary expires during the durable claim", async () => {
+    const h = await setup();
+    let open = true;
+    h.claim.mockImplementation(() => {
+      open = false;
+      return true;
+    });
+    await h.boundary(() => open);
+    expect(h.finish.mock.calls).toEqual([["rejected"]]);
+    expect(h.client.wire.some((frame) => frame.type === "steer")).toBe(false);
+  });
+
+  it("treats a malformed reply after write as unknown, never a rejection", async () => {
+    const h = await setup();
+    const handoff = h.boundary();
+    const frame = await h.write();
+    h.client.event({ type: "response", id: frame.id, command: "steer" });
+    await handoff;
+    expect(h.finish.mock.calls).toEqual([["outcome_unknown"]]);
+  });
+
+  it("keeps the matched input across another user message and assigns end-only output to its reply", async () => {
+    const h = await setup();
+    const handoff = h.boundary();
+    const frame = await h.write();
+    h.client.respond(frame, { disposition: "queued" });
+    await handoff;
+    let owner = "A";
+    const replies: Record<string, string> = { A: "initial", B: "" };
+    h.finish.mockImplementation(() => {
+      owner = "B";
+    });
+    h.session.on("event", (event: StreamEvent) => {
+      if (event.kind === "text_delta") replies[owner] += event.content;
+    });
+    for (const text of [frame.message, "another input"])
+      h.client.event({
+        type: "message_end",
+        message: { role: "user", content: [{ type: "text", text }] },
+      });
+    h.client.event({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "answer" },
+    });
+    expect(replies).toEqual({ A: "initial", B: "answer" });
+    expect(h.finish.mock.calls).toEqual([["read"]]);
+  });
+
+  it.each(["read", "interrupted", "crash", "rejected", "handled"])(
+    "settles a claimed steer as %s without clearing Pi's queue",
+    async (outcome) => {
+      const h = await setup();
+      expect(h.claim).not.toHaveBeenCalled();
+      const handoff = h.boundary();
+      const frame = await h.write();
+      expect(h.claim).toHaveBeenCalledTimes(1);
+      h.client.respond(
+        frame,
+        { disposition: outcome === "handled" ? "handled" : "queued" },
+        outcome !== "rejected",
+      );
+      await handoff;
+      if (outcome === "crash") h.client.rpc.emit("exit", 1, null);
+      else {
+        h.client.event({
+          type: "message_end",
+          message: { role: "user", content: [{ type: "text", text: frame.message }] },
+        });
+        if (outcome === "read" || outcome === "interrupted")
+          expect(h.finish).not.toHaveBeenCalled();
+        const interrupted = outcome === "interrupted" ? h.session.interrupt() : undefined;
+        h.client.event({
+          type: "message_end",
+          message: { role: "assistant", stopReason: interrupted ? "aborted" : "stop", content: [] },
+        });
+        h.client.event({ type: "agent_settled" });
+        await interrupted;
+      }
+      const expected = ["interrupted", "crash"].includes(outcome) ? "outcome_unknown" : outcome;
+      expect(h.finish.mock.calls).toEqual([[expected]]);
+      expect(h.client.wire.some((frame) => frame.type === "clear_queue")).toBe(false);
+    },
+  );
+});
 
 describe("PiSession dispatch and stream state", () => {
   it("allows a slow quota command to finish without retiring Pi", async () => {
@@ -505,6 +612,55 @@ describe("PiSession dispatch and stream state", () => {
     });
     return { ws, registry };
   }
+
+  it("restores a persistently claimed steer as unknown and drains only the next FIFO input", async () => {
+    const h = harness();
+    const { ws } = workspaceFor(h, { onSaveNow: () => saveWorkspace(h.dir, ws.getState()) });
+    cleanup.push(() => closeHistory(h.dir));
+    const agent = ws.addAgent("Pi", "mock/test", "", "", { backend: "pi" });
+    saveIndex(h.dir, [ws.id]);
+    await ws.sendMessage("first", agent.id);
+    const client = h.clients[0];
+    client.event({ type: "agent_start" });
+    client.event({ type: "message_end", message: { role: "user" } });
+    ws.deliver(
+      "lead follow",
+      { role: "lead", name: "Lead", workspaceId: "lead" },
+      "[From the lead] follow",
+    );
+    await ws.sendMessage("next", agent.id);
+    const boundary = h.register.mock.calls[0][0].onSteerBoundary!(() => true);
+    const frame = await vi.waitFor(() => {
+      const steer = client.wire.find((item) => item.type === "steer");
+      expect(steer?.message).toContain("[From the lead] follow");
+      return steer!;
+    });
+    client.respond(frame, { disposition: "queued" });
+    await boundary;
+    const persisted = loadAll(h.dir)[0];
+    expect(persisted.messages?.find((msg) => msg.content === "lead follow")?.status).toBe(
+      "dispatching",
+    );
+    const fresh = harness();
+    const registry = new HostRegistry();
+    const host = new LocalHost("local", "Local");
+    vi.spyOn(host, "restoreSession").mockReturnValue(fresh.session);
+    registry.register(host);
+    const restored = Workspace.fromState(persisted, registry);
+    restored.settlePlainDispatchingOnRestore();
+    restored.dequeueNext(agent.id);
+    await vi.waitFor(() =>
+      expect(
+        fresh.clients[0]?.wire.filter((item) => item.type === "prompt").map((item) => item.message),
+      ).toEqual(["next"]),
+    );
+    expect(restored.getMessages().find((msg) => msg.content === "lead follow")?.status).toBe(
+      "outcome_unknown",
+    );
+    client.event({ type: "agent_settled" });
+    await ws.dispose();
+    await restored.dispose();
+  });
 
   it("discards the old preset before starting the first turn on the new model", async () => {
     const h = harness({ config: { model: "mock/extended" } });
@@ -784,6 +940,29 @@ describe("PiSession dispatch and stream state", () => {
     ).toHaveLength(2);
   });
 
+  it("starts the thinking timer even without text deltas", async () => {
+    const { session, clients, events } = harness();
+    await session.send("stream");
+    const { event } = clients[0];
+    event({ type: "agent_start" });
+    const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    event({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
+    });
+    expect(events).toEqual([{ kind: "thinking_delta", content: "", startedAt: 10_000 }]);
+
+    clock.mockReturnValue(17_000);
+    event({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "Considered." },
+    });
+    expect(events.slice(1)).toEqual([
+      { kind: "thinking_delta", content: "", durationMs: 7_000 },
+      { kind: "thinking", content: "Considered.", durationMs: 7_000 },
+    ]);
+  });
+
   it("closes thinking deltas before finalized thinking and retains authoritative text, tool formatting and usage columns", async () => {
     const { session, clients, events } = harness();
     await session.send("stream");
@@ -824,7 +1003,7 @@ describe("PiSession dispatch and stream state", () => {
     });
     event({ type: "agent_settled" });
     expect(events.slice(0, 3)).toEqual([
-      { kind: "thinking_delta", content: "dr" },
+      { kind: "thinking_delta", content: "dr", startedAt: expect.any(Number) as unknown },
       { kind: "thinking_delta", content: "", durationMs: expect.any(Number) as unknown },
       { kind: "thinking", content: "draft", durationMs: expect.any(Number) as unknown },
     ]);

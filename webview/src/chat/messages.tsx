@@ -5,6 +5,7 @@ import {
   memo,
   Component,
   useEffect,
+  useRef,
   createContext,
   useContext,
 } from "react";
@@ -352,12 +353,7 @@ export const EventItem = memo(function EventItem({
   const [resultOpen, setResultOpen] = useState(false);
   const [bodyOpen, setBodyOpen] = useState(false);
   const summarized = !!onLoadDetails;
-  const running =
-    useContext(TurnRunningContext) &&
-    ev.kind === "tool_use" &&
-    ev.toolResult == null &&
-    ev.resultLength == null &&
-    ev.durationMs == null;
+  const running = useContext(TurnRunningContext) && isRunningTool(ev);
   const runningSecs = useElapsed(running ? ev.startedAt : undefined);
 
   if (ev.kind === "compact" || ev.kind === "notice" || ev.kind === "retry" || ev.kind === "error") {
@@ -673,25 +669,71 @@ function stepTools(regular: StreamEvent[]): string[] {
   return seen;
 }
 
-export interface LiveBlock {
-  text: string;
-  since: number;
+function elapsedSeconds(now: number, since: number): number {
+  return Math.max(0, Math.floor((now - since) / 1000));
 }
 
-// Seconds since `since`, ticking while `active`.
-function useElapsed(since: number | undefined): number {
-  const [now, setNow] = useState(() => Date.now());
+function nextSecondAt(now: number, since: number): number {
+  return since + (elapsedSeconds(now, since) + 1) * 1000;
+}
+
+// Schedule against the phase's start, not the previous phase's tick cadence.
+function useRenderAt(at: number) {
+  const [ticks, tick] = useState(0);
+  // Re-arm even at the same deadline if the wall clock moved backward.
   useEffect(() => {
-    if (since == null) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [since]);
-  return since == null ? 0 : Math.max(0, Math.floor((now - since) / 1000));
+    if (!Number.isFinite(at)) return;
+    const timer = setTimeout(() => tick((n) => n + 1), Math.max(0, at - Date.now()));
+    return () => clearTimeout(timer);
+  }, [at, ticks]);
 }
 
-// One collapsible box for a run of ordinary events (thinking, tool calls).
-// A thinking block streaming in is its last item: the box opens for it and
-// folds again once it is done, unless the reader toggled it.
+function useElapsed(since: number | undefined): number {
+  const now = Date.now();
+  useRenderAt(since == null ? Infinity : nextSecondAt(now, since));
+  return since == null ? 0 : elapsedSeconds(now, since);
+}
+
+function StepTools({ tools }: { tools: string[] }) {
+  const strip = useRef<HTMLSpanElement>(null);
+  const track = useRef<HTMLSpanElement>(null);
+  const [fadeStart, setFadeStart] = useState(false);
+  const [fadeEnd, setFadeEnd] = useState(false);
+  const measure = useCallback(() => {
+    const el = strip.current!;
+    setFadeStart(el.scrollLeft > 1);
+    setFadeEnd(el.scrollWidth - el.clientWidth - el.scrollLeft > 1);
+  }, []);
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(strip.current!);
+    observer.observe(track.current!);
+    return () => observer.disconnect();
+  }, [measure]);
+
+  return (
+    <span
+      className="step-tools"
+      ref={strip}
+      onScroll={measure}
+      tabIndex={fadeStart || fadeEnd ? 0 : undefined}
+      data-fade-start={fadeStart || undefined}
+      data-fade-end={fadeEnd || undefined}
+    >
+      <span className="step-tools-track" ref={track}>
+        {tools.slice(0, 6).map((t) => (
+          <span key={t} className={`event-chip chip-mini ${chipClassFor(t, "tool_use")}`}>
+            {chipLabelFor(t)}
+          </span>
+        ))}
+        {tools.length > 6 && <span className="step-tools-more">+{tools.length - 6}</span>}
+      </span>
+    </span>
+  );
+}
+
+// Live thinking joins the last box without changing the reader's choice to open it.
 function StepBox({
   events,
   live,
@@ -699,13 +741,13 @@ function StepBox({
   defaultOpen = false,
 }: {
   events: StreamEvent[];
-  live?: LiveBlock;
+  live?: string;
   onLoadDetails?: () => void;
   defaultOpen?: boolean;
 }) {
   const [toggled, setToggled] = useState<boolean | null>(null);
-  const open = toggled ?? (defaultOpen || !!live);
-  const secs = useElapsed(live?.since);
+  if (events.length === 0 && live == null) return null;
+  const open = toggled ?? defaultOpen;
   const toggle = () => {
     if (!open) onLoadDetails?.();
     setToggled(!open);
@@ -713,31 +755,21 @@ function StepBox({
   const tools = stepTools(events);
   // The block streaming in counts as the thinking it will be: the header
   // reads the same before and after, and is never empty.
-  const counted: StreamEvent[] = live ? [...events, { kind: "thinking", content: "" }] : events;
+  const counted: StreamEvent[] =
+    live != null ? [...events, { kind: "thinking", content: "" }] : events;
   return (
     <div className={`step-group${open ? " open" : ""}`}>
       <div className="step-header" onClick={toggle}>
         <span className="events-toggle">{open ? "▾" : "▸"}</span>
-        {/* Open, the block's own row shows its time. */}
-        {live && !open && <LiveChip secs={secs} />}
         {counted.length > 0 && <span className="step-summary">{stepSummary(counted)}</span>}
-        {!open && tools.length > 0 && (
-          <span className="step-tools">
-            {tools.slice(0, 6).map((t) => (
-              <span key={t} className={`event-chip chip-mini ${chipClassFor(t, "tool_use")}`}>
-                {chipLabelFor(t)}
-              </span>
-            ))}
-            {tools.length > 6 && <span className="step-tools-more">+{tools.length - 6}</span>}
-          </span>
-        )}
+        {!open && tools.length > 0 && <StepTools tools={tools} />}
       </div>
       {open && (
         <div className="events-list">
           {events.map((ev, i) => (
             <EventItem key={i} ev={ev} onLoadDetails={onLoadDetails} />
           ))}
-          {live && <LiveThinking text={live.text} secs={secs} />}
+          {live != null && <LiveThinking text={live} />}
         </div>
       )}
     </div>
@@ -753,6 +785,7 @@ export function StepGroup({
   onLoadDetails,
   defaultOpen = false,
   live,
+  keepTail = false,
 }: {
   group: { step: number; events: StreamEvent[] };
   onLoadEvents?: (taskId: string) => void;
@@ -760,12 +793,14 @@ export function StepGroup({
   onLoadDetails?: () => void;
   defaultOpen?: boolean;
   // A thinking block streaming in after these events.
-  live?: LiveBlock;
+  live?: string;
+  keepTail?: boolean;
 }) {
   const blocks = timelineBlocks(group.events);
-  // Where the finished block will land: the trailing step box, or a new one
-  // after a card or banner (same key, so the box keeps its state).
-  const liveOwnBox = live && blocks[blocks.length - 1]?.kind !== "steps";
+  // Keep the reader's choice if a closing thinking delta flushes before its final event.
+  if ((keepTail || live != null) && blocks.at(-1)?.kind !== "steps") {
+    blocks.push({ kind: "steps", events: [] });
+  }
   return (
     <>
       {blocks.map((block, i) => {
@@ -802,7 +837,6 @@ export function StepGroup({
           />
         );
       })}
-      {liveOwnBox && <StepBox key={`s${blocks.length}`} events={[]} live={live} />}
     </>
   );
 }
@@ -816,15 +850,9 @@ function LiveChip({ secs }: { secs: number }) {
   );
 }
 
-// A thinking block as it streams in, so a long think does not look like a
-// stuck agent: it grows like the reply's text, drawn as the finished block
-// will be, which then takes its place.
-export function LiveThinking({ text, secs }: { text: string; secs: number }) {
+function LiveThinking({ text }: { text: string }) {
   return (
-    <div className="live-thinking event event-thinking">
-      <div className="event-row">
-        <LiveChip secs={secs} />
-      </div>
+    <div className="event event-thinking live-thinking">
       {text && (
         <div className="event-content">
           <StreamingMdBlock>{text}</StreamingMdBlock>
@@ -836,30 +864,17 @@ export function LiveThinking({ text, secs }: { text: string; secs: number }) {
 
 const CALL_SHOWN_AFTER_S = 3;
 
-// The latest call still running that knows when it started.
-function runningCall(events: StreamEvent[]): StreamEvent | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (
-      e.kind === "tool_use" &&
-      e.startedAt != null &&
-      e.toolResult == null &&
-      e.resultLength == null &&
-      e.durationMs == null
-    ) {
-      return e;
-    }
-  }
-  return null;
+function isRunningTool(e: StreamEvent): boolean {
+  return (
+    e.kind === "tool_use" && e.toolResult == null && e.resultLength == null && e.durationMs == null
+  );
 }
 
 // A tool call still running or a subagent still working: the turn is not
 // waiting on the model.
 function workInFlight(events: StreamEvent[]): boolean {
   return events.some(
-    (e) =>
-      (e.kind === "tool_use" && e.toolResult == null && e.resultLength == null) ||
-      (e.kind === "subagent_start" && e.subagent?.status === "running"),
+    (e) => isRunningTool(e) || (e.kind === "subagent_start" && e.subagent?.status === "running"),
   );
 }
 
@@ -869,32 +884,66 @@ function progressOf(msg: Message): string {
   return `${msg.content.length}:${events.length}:${results}`;
 }
 
-const WAIT_SHOWN_AFTER_MS = 5000;
+const WAIT_SHOWN_AFTER_S = 5;
 
-// Nothing has arrived for a while and nothing else explains it: the turn
-// is waiting on the model. Shown with how long, so a request that stalls
-// is told apart from one that is thinking or running a tool.
-function WaitingIndicator({
-  progress,
-  immediate = false,
+function QuietWait({ since }: { since?: number }) {
+  const [localSince] = useState(Date.now);
+  const now = Date.now();
+  const start = since ?? localSince;
+  const elapsed = elapsedSeconds(now, start);
+  const show = elapsed >= WAIT_SHOWN_AFTER_S;
+  useRenderAt(show ? nextSecondAt(now, start) : start + WAIT_SHOWN_AFTER_S * 1000);
+  return show ? `Waiting for the model · ${elapsed}s` : null;
+}
+
+function TurnFooter({
+  msg,
+  activity,
+  detailEvents,
 }: {
-  progress: string;
-  immediate?: boolean;
+  msg: Message;
+  activity?: string | null;
+  detailEvents: StreamEvent[];
 }) {
-  const [since, setSince] = useState(() => Date.now());
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    setSince(Date.now());
-    setNow(Date.now());
-  }, [progress]);
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-  const waited = Math.max(0, now - since);
-  if (!immediate && waited < WAIT_SHOWN_AFTER_MS) return null;
+  const now = Date.now();
+  const thinkingSince = msg.liveThinkingSince;
+  let call: StreamEvent | undefined;
+  let tickAt = Infinity;
+  if (!activity) {
+    for (let i = detailEvents.length - 1; i >= 0; i--) {
+      const e = detailEvents[i];
+      if (!isRunningTool(e) || e.startedAt == null) continue;
+      const showAt = e.startedAt + CALL_SHOWN_AFTER_S * 1000;
+      if (showAt <= now) {
+        call = e;
+        break;
+      }
+      tickAt = Math.min(tickAt, showAt);
+    }
+    const since = call?.startedAt ?? thinkingSince;
+    if (since != null) tickAt = Math.min(tickAt, nextSecondAt(now, since));
+  }
+  useRenderAt(tickAt);
+
+  const label =
+    activity ||
+    (call
+      ? `${chipLabelFor(toolNameOf(call) ?? "tool")} · ${formatDuration(elapsedSeconds(now, call.startedAt!) * 1000)}`
+      : null);
+
   return (
-    <div className="working-indicator">Waiting for the model · {Math.floor(waited / 1000)}s</div>
+    <div className="turn-footer">
+      {label ? (
+        <span className="turn-activity">{label}</span>
+      ) : thinkingSince != null ? (
+        <LiveChip secs={elapsedSeconds(now, thinkingSince)} />
+      ) : !workInFlight(detailEvents) ? (
+        <QuietWait
+          key={msg.waitingSince == null ? progressOf(msg) : undefined}
+          since={msg.waitingSince}
+        />
+      ) : null}
+    </div>
   );
 }
 
@@ -976,14 +1025,6 @@ export const MessageItem = memo(function MessageItem({
     [agentId, onCancelSubagent],
   );
 
-  // What the turn is doing, as its backend says ("Bash · 42s"); otherwise
-  // the call it has been waiting on for a while, by the call's own start.
-  const waitingOn =
-    msg.status === "streaming" && !agents.find((a) => a.id === msg.agentId)?.activity
-      ? runningCall(msg.events ?? [])
-      : null;
-  const waited = useElapsed(waitingOn?.startedAt);
-
   if (msg.kind === "system") {
     const [avatar, text] = systemAvatar(msg.content);
     return (
@@ -1008,15 +1049,7 @@ export const MessageItem = memo(function MessageItem({
           : msg.status === "error"
             ? " message-error"
             : "";
-  const thinkingLive = streaming && msg.liveThinking != null;
-
   const events = msg.events ?? [];
-  const activity = !streaming
-    ? null
-    : (agent?.activity ??
-      (waitingOn && waited >= CALL_SHOWN_AFTER_S
-        ? `${chipLabelFor(toolNameOf(waitingOn) ?? "tool")} · ${formatDuration(waited * 1000)}`
-        : null));
   const detailEvents = events.filter(
     (e) => e.kind !== "text" && e.kind !== "text_delta" && e.kind !== "thinking_delta",
   );
@@ -1074,14 +1107,12 @@ export const MessageItem = memo(function MessageItem({
     }
   }
 
-  let liveAt = -1;
-  if (thinkingLive) {
+  let tailAt = -1;
+  if (!isUser && streaming) {
     if (segments.length === 0) segments.push({ text: "", events: [] });
-    liveAt = joinsLastEvents ? segments.length - 2 : segments.length - 1;
+    tailAt = joinsLastEvents ? segments.length - 2 : segments.length - 1;
   }
-  const liveBlock = thinkingLive
-    ? { text: msg.liveThinking!, since: msg.liveThinkingSince! }
-    : undefined;
+  const liveBlock = msg.liveThinkingSince != null ? (msg.liveThinking ?? "") : undefined;
 
   const time = new Date(msg.timestamp).toLocaleTimeString([], {
     hour: "2-digit",
@@ -1172,7 +1203,6 @@ export const MessageItem = memo(function MessageItem({
                 ) : null}
                 <span className="message-time">{time}</span>
                 {streaming && <span className="streaming-dot" />}
-                {activity && <span className="activity-label">{activity}</span>}
                 {!streaming && quoteButton}
               </div>
             )}
@@ -1180,7 +1210,6 @@ export const MessageItem = memo(function MessageItem({
               <div className="compact-header">
                 <span className="message-time">{time}</span>
                 {streaming && <span className="streaming-dot" />}
-                {activity && <span className="activity-label">{activity}</span>}
                 {!streaming && quoteButton}
               </div>
             )}
@@ -1193,9 +1222,8 @@ export const MessageItem = memo(function MessageItem({
             )}
             {msg.status === "outcome_unknown" && (
               <div className="delivery-status delivery-outcome-unknown" role="alert">
-                <strong>Delivery outcome unknown.</strong> This message may have reached the agent
-                before a crash. Verify what happened before deciding whether to retry manually; it
-                was not retried automatically.
+                <strong>Delivery outcome unknown.</strong> The agent may still process this message.
+                The panel will not resend it automatically. Verify what happened before retrying.
               </div>
             )}
 
@@ -1217,16 +1245,6 @@ export const MessageItem = memo(function MessageItem({
                 <span className="forward-ref-preview">{msg.forwardRef.preview}</span>
               </div>
             )}
-
-            {streaming &&
-              !thinkingLive &&
-              !msg.content &&
-              detailEvents.length === 0 &&
-              (activity ? (
-                <div className="working-indicator">{activity}</div>
-              ) : (
-                <WaitingIndicator progress="start" immediate />
-              ))}
 
             {msg.images && msg.images.length > 0 && (
               <div className="msg-images">
@@ -1254,24 +1272,23 @@ export const MessageItem = memo(function MessageItem({
                           ) : (
                             <MdBlock>{seg.text}</MdBlock>
                           ))}
-                        {(seg.events.length > 0 || si === liveAt) && (
+                        {(seg.events.length > 0 || si === tailAt) && (
                           <StepGroup
                             group={{ step: si, events: seg.events }}
                             onLoadEvents={handleLoadEvents}
                             onCancelSubagent={handleCancelSubagent}
                             onLoadDetails={handleLoadDetails}
-                            live={si === liveAt ? liveBlock : undefined}
+                            live={si === tailAt ? liveBlock : undefined}
+                            keepTail={si === tailAt}
                           />
                         )}
                       </div>
                     ))}
                   </div>
                 )}
-            {streaming &&
-              !thinkingLive &&
-              !activity &&
-              (msg.content || detailEvents.length > 0) &&
-              !workInFlight(detailEvents) && <WaitingIndicator progress={progressOf(msg)} />}
+            {!isUser && streaming && (
+              <TurnFooter msg={msg} activity={agent?.activity} detailEvents={detailEvents} />
+            )}
           </div>
         </div>
       </TurnRunningContext.Provider>

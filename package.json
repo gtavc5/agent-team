@@ -11,6 +11,8 @@
   "scripts": {
     "build": "npm run build -w webview && npm run build -w service",
     "test": "npm run test -w service && npm run test -w webview",
+    "test:browser": "npm run test:browser -w webview",
+    "test:slow": "npm run check && npm test && npm run test:browser",
     "typecheck": "tsc -p tsconfig.json && npm run typecheck --workspaces",
     "lint": "eslint .",
     "fmt": "prettier --write .",
