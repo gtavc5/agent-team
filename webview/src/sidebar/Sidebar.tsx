@@ -1,5 +1,5 @@
-import type { QuotaState } from "../../../service/src/session/quota-schema";
-import { memo, useState, useEffect } from "react";
+import type { QuotaRow, QuotaState, QuotaWindow } from "../../../service/src/session/quota-schema";
+import { memo, useState, useEffect, useId } from "react";
 import type { Workspace, Project, SystemStatus, SearchHit } from "../state/useServer";
 import {
   groupWorkspaces,
@@ -26,6 +26,101 @@ function quotaBarColor(pct: number): string {
   if (pct >= 80) return "var(--error)";
   if (pct >= 50) return "var(--warning)";
   return "var(--accent)";
+}
+
+function quotaTone(pct: number): "danger" | "warn" | "normal" {
+  if (pct >= 80) return "danger";
+  if (pct >= 50) return "warn";
+  return "normal";
+}
+
+const PROVIDER_SHORT_LABEL: Record<string, string> = {
+  "antigravity-acp": "Agy",
+  "openai-codex": "Codex",
+  "native-codex": "Codex",
+  "kimi-coding": "Kimi",
+};
+
+function baseQuotaRowName(row: Pick<QuotaRow, "provider" | "name">): string {
+  const name = row.name.trim();
+  const provider = row.provider;
+  const shortProvider = PROVIDER_SHORT_LABEL[provider] ?? provider;
+  if (!name) return shortProvider;
+  if (provider === "antigravity-acp") {
+    const clean = name.replace(/^antigravity(?:[\s·:/-]+)?/i, "").trim();
+    return clean ? `Agy · ${clean}` : "Agy";
+  }
+  if (provider === "openai-codex" || provider === "native-codex") {
+    if (/^codex$/i.test(name)) return "Codex";
+    const sub = name.match(/^codex[\s·:/-]+(.+)$/i);
+    return sub ? `Codex · ${sub[1].trim()}` : `Codex · ${name}`;
+  }
+  if (provider === "kimi-coding") {
+    if (/^kimi(?:\s+(?:code|coding))?$/i.test(name)) return "Kimi";
+    const sub = name.match(/^kimi(?:\s+(?:code|coding))?[\s·:/-]+(.+)$/i);
+    return sub ? `Kimi · ${sub[1].trim()}` : `Kimi · ${name}`;
+  }
+  const lowerName = name.toLowerCase();
+  const lowerProvider = provider.toLowerCase();
+  if (lowerName === lowerProvider || lowerName.startsWith(`${lowerProvider} `)) return name;
+  return `${provider} · ${name}`;
+}
+
+function quotaRowLabels(rows: QuotaRow[]): string[] {
+  const bases = rows.map(baseQuotaRowName);
+  const providersByBase = new Map<string, Set<string>>();
+  for (let i = 0; i < rows.length; i++) {
+    let set = providersByBase.get(bases[i]);
+    if (!set) {
+      set = new Set();
+      providersByBase.set(bases[i], set);
+    }
+    set.add(rows[i].provider);
+  }
+  return rows.map((row, i) => {
+    const base = bases[i];
+    if ((providersByBase.get(base)?.size ?? 0) <= 1) return base;
+    if (row.provider === "native-codex") return `${base} · native`;
+    if (row.provider === "openai-codex") return `${base} · Pi`;
+    return `${base} · ${row.provider}`;
+  });
+}
+
+function shortWindowLabel(label: string): string {
+  const trimmed = label.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === "weekly" || lower === "week" || lower === "7d") return "wk";
+  if (lower === "daily" || lower === "day" || lower === "1d") return "1d";
+  if (lower === "monthly" || lower === "month" || lower === "30d" || lower === "monthly total")
+    return "mo";
+  if (lower === "monthly code") return "code";
+  if (lower === "primary") return "1st";
+  if (lower === "secondary") return "2nd";
+  return trimmed;
+}
+
+function detailWindowLabel(label: string): string {
+  const trimmed = label.trim();
+  if (/^[a-z]/.test(trimmed)) return trimmed[0].toUpperCase() + trimmed.slice(1);
+  return trimmed;
+}
+
+function selectSummaryWindows(windows: QuotaWindow[]): QuotaWindow[] {
+  if (windows.length <= 2) return windows;
+  return windows
+    .map((w, i) => ({ w, i }))
+    .sort((a, b) => b.w.usedPct - a.w.usedPct || a.i - b.i)
+    .slice(0, 2)
+    .map((entry) => entry.w);
+}
+
+function formatQuotaReset(resetsAt: number): string {
+  return new Date(resetsAt).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function StatusBar({ label, pct, extra }: { label: string; pct: number; extra?: string }) {
@@ -80,57 +175,149 @@ export function QuotaPanel({
   refresh?: () => void;
   connected: boolean;
 }) {
+  const panelId = useId();
   const [clock, setClock] = useState(now);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
     const timer = setInterval(() => setClock(Date.now()), 30_000);
     return () => clearInterval(timer);
   }, []);
   const displayTime = Math.max(now, clock);
+  const labels = quotaRowLabels(quota.rows);
+  const toggleRow = (key: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+
   return (
-    <section className="quota-panel system-status-panel" aria-label="Account quota">
-      <header>
-        Account quota{" "}
-        <button disabled={!connected || quota.refreshing} onClick={refresh}>
-          {quota.refreshing ? "Refreshing…" : "Refresh"}
+    <section className="quota-panel system-status-panel" aria-label="Quota used">
+      <header className="quota-header">
+        <span className="quota-heading">Quota used</span>
+        <button
+          type="button"
+          className={`quota-refresh${quota.refreshing ? " refreshing" : ""}`}
+          disabled={!connected || quota.refreshing}
+          onClick={refresh}
+          aria-label={quota.refreshing ? "Refreshing…" : "Refresh"}
+          title={quota.refreshing ? "Refreshing…" : "Refresh quota"}
+        >
+          <Icon name="clear" />
         </button>
       </header>
-      {quota.rows.map((row) => (
-        <div className="quota-group" key={`${row.provider}/${row.name}`}>
-          <strong>
-            {row.provider}
-            {row.name && ` · ${row.name}`}
-          </strong>
-          <small>
-            {row.availability !== "available" &&
-              [row.availability, row.reason].filter(Boolean).join(" · ")}
-            {row.observedAt > 0 && (
-              <>
-                {" "}
-                {row.windows.length > 0 &&
-                  (row.availability !== "available" || displayTime - row.observedAt >= 60_000) &&
-                  "stale · "}
-                {formatRelative(row.observedAt, displayTime)}
-              </>
-            )}
-          </small>
-          {row.windows.map((w) => (
-            <div key={w.label}>
-              <StatusBar label={w.label} pct={w.usedPct} />
-              {w.resetsAt && (
-                <small>
-                  Resets{" "}
-                  {new Date(w.resetsAt).toLocaleString([], {
-                    month: "short",
-                    day: "numeric",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </small>
-              )}
-            </div>
-          ))}
+      {quota.rows.length > 0 && (
+        <div className="quota-list">
+          {quota.rows.map((row, index) => {
+            const key = `${row.provider}/${row.name}`;
+            const open = expanded.has(key);
+            const detailsId = `${panelId}-row-${index}`;
+            const isUnavailable = row.availability !== "available";
+            const isStale =
+              row.windows.length > 0 &&
+              (isUnavailable || (row.observedAt > 0 && displayTime - row.observedAt >= 60_000));
+            const summaryWindows = selectSummaryWindows(row.windows);
+            const statusText = [row.availability, row.reason].filter(Boolean).join(" · ");
+            const rowLabel = labels[index];
+            return (
+              <div
+                className={`quota-group${open ? " open" : ""}${isUnavailable ? " quota-group-error" : ""}${isStale ? " quota-group-stale" : ""}`}
+                key={key}
+              >
+                <button
+                  type="button"
+                  className="quota-row-toggle"
+                  aria-expanded={open}
+                  aria-controls={detailsId}
+                  onClick={() => toggleRow(key)}
+                  title={isUnavailable ? `${rowLabel} — ${statusText}` : rowLabel}
+                >
+                  <span className="quota-caret" aria-hidden="true">
+                    {open ? "▾" : "▸"}
+                  </span>{" "}
+                  <span className="quota-name">{rowLabel}</span>{" "}
+                  <span className="quota-summary">
+                    {isUnavailable && row.windows.length === 0 ? (
+                      <span className="quota-status-error">
+                        <span className="quota-badge quota-badge-error" aria-hidden="true">
+                          !
+                        </span>{" "}
+                        {row.availability}
+                      </span>
+                    ) : (
+                      <>
+                        {isUnavailable && (
+                          <>
+                            <span
+                              role="img"
+                              className="quota-badge quota-badge-error"
+                              title={statusText}
+                              aria-label={statusText}
+                            >
+                              !
+                            </span>{" "}
+                          </>
+                        )}
+                        {!isUnavailable && isStale && (
+                          <>
+                            <span className="quota-badge quota-badge-stale">stale</span>{" "}
+                          </>
+                        )}
+                        {summaryWindows.map((w, wi) => {
+                          const pct = Math.round(w.usedPct);
+                          return (
+                            <span className="quota-metric" key={w.label}>
+                              {wi > 0 && (
+                                <>
+                                  {" "}
+                                  <span className="quota-sep" aria-hidden="true">
+                                    ·
+                                  </span>{" "}
+                                </>
+                              )}
+                              <span className="quota-win-label">{shortWindowLabel(w.label)}</span>{" "}
+                              <span className={`quota-pct quota-pct-${quotaTone(pct)}`}>
+                                {pct}%
+                              </span>
+                            </span>
+                          );
+                        })}
+                      </>
+                    )}
+                  </span>
+                </button>
+                {open && (
+                  <div id={detailsId} className="quota-details">
+                    {isUnavailable && <div className="quota-detail-status">{statusText}</div>}
+                    {row.windows.map((w) => {
+                      const pct = Math.round(w.usedPct);
+                      return (
+                        <div className="quota-detail-window" key={w.label}>
+                          <span className="quota-detail-label">{detailWindowLabel(w.label)}:</span>{" "}
+                          <span className={`quota-pct quota-pct-${quotaTone(pct)}`}>
+                            {pct}% used
+                          </span>
+                          {w.resetsAt && (
+                            <span className="quota-detail-reset">
+                              {" "}
+                              · Resets {formatQuotaReset(w.resetsAt)}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <div className="quota-detail-meta">
+                      {row.observedAt > 0
+                        ? `${isStale ? "stale · " : ""}Updated ${formatRelative(row.observedAt, displayTime)}`
+                        : "Not yet observed"}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
-      ))}
+      )}
     </section>
   );
 }

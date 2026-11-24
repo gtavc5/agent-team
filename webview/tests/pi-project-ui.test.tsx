@@ -77,16 +77,17 @@ function initFrame(
   };
 }
 
-it("hydrates sidebar quota on init and reconnect, refreshes without a turn and labels stale bars", () => {
+it("hydrates sidebar quota on init and reconnect, refreshes without a turn and expands inline details", () => {
   const app = render(<App />);
   const sock = FakeSocket.instances.at(-1)!;
   act(() => sock.open());
+  const now = Date.now();
   const row = {
     provider: "antigravity-acp",
     name: "Gemini",
     availability: "available",
-    observedAt: Date.now() - 120000,
-    windows: [{ label: "weekly", usedPct: 34, resetsAt: Date.now() + 3600000 }],
+    observedAt: now - 120000,
+    windows: [{ label: "weekly", usedPct: 34, resetsAt: now + 3600000 }],
   };
   const quota = {
     refreshing: false,
@@ -96,16 +97,37 @@ it("hydrates sidebar quota on init and reconnect, refreshes without a turn and l
         provider: "native-codex",
         name: "",
         availability: "unavailable",
+        reason: "usage unavailable",
         observedAt: 0,
         windows: [],
       },
     ],
   };
   receive(sock, initFrame([], { quota }));
-  expect(app.getByRole("progressbar", { name: "weekly" }).getAttribute("aria-valuenow")).toBe("34");
-  expect(app.getByText(/stale · 2m ago/)).toBeTruthy();
+  expect(app.getByText("Quota used")).toBeTruthy();
+  const agyRow = app.getByRole("button", { name: /Agy · Gemini/ });
+  expect(agyRow.getAttribute("aria-expanded")).toBe("false");
+  expect(agyRow.textContent).toContain("stale");
+  expect(agyRow.textContent).toContain("wk");
+  expect(agyRow.textContent).toContain("34%");
+  // Details are folded by default.
+  expect(app.queryByText(/Resets /)).toBeNull();
+  const codexRow = app.getByRole("button", { name: /Codex/ });
+  expect(codexRow.textContent).toContain("unavailable");
+  // Expand Agy row inline to inspect full window breakdown, reset time, and updated timestamp.
+  fireEvent.click(agyRow);
+  expect(agyRow.getAttribute("aria-expanded")).toBe("true");
+  expect(app.getByText(/34% used/)).toBeTruthy();
   expect(app.getByText(/Resets /)).toBeTruthy();
-  expect(app.getByText("unavailable")).toBeTruthy();
+  expect(app.getByText(/stale · Updated 2m ago/)).toBeTruthy();
+  // Collapse back.
+  fireEvent.click(agyRow);
+  expect(agyRow.getAttribute("aria-expanded")).toBe("false");
+  expect(app.queryByText(/Resets /)).toBeNull();
+  // Expand unavailable row to see full reason.
+  fireEvent.click(codexRow);
+  expect(app.getByText("unavailable · usage unavailable")).toBeTruthy();
+
   fireEvent.click(app.getByRole("button", { name: "Refresh" }));
   expect(sock.frames()).toContainEqual({ type: "refresh_quota" });
   receive(sock, { type: "quota_snapshot", quota: { ...quota, refreshing: true } });
@@ -113,7 +135,7 @@ it("hydrates sidebar quota on init and reconnect, refreshes without a turn and l
     true,
   );
   receive(sock, initFrame([], { quota: { refreshing: false, rows: [] } }));
-  expect(app.queryByRole("progressbar", { name: "weekly" })).toBeNull();
+  expect(app.queryByRole("button", { name: /Agy · Gemini/ })).toBeNull();
 });
 
 it("ages quota without websocket traffic", () => {
@@ -138,13 +160,125 @@ it("ages quota without websocket traffic", () => {
         }}
       />,
     );
+    const row = view.getByRole("button", { name: /acp · g/ });
+    expect(row.textContent).not.toContain("stale");
     act(() => {
       vi.advanceTimersByTime(60_001);
     });
-    expect(view.getByText(/stale · 1m ago/)).toBeTruthy();
+    expect(row.textContent).toContain("stale");
+    fireEvent.click(row);
+    expect(view.getByText(/stale · Updated 1m ago/)).toBeTruthy();
   } finally {
     vi.useRealTimers();
   }
+});
+
+it("deduplicates short names, prioritizes top-2 windows, and shows threshold tones and error badges", () => {
+  const now = 1_800_000_000_000;
+  const view = render(
+    <QuotaPanel
+      now={now}
+      connected
+      quota={{
+        refreshing: false,
+        rows: [
+          {
+            provider: "openai-codex",
+            name: "Codex",
+            availability: "available",
+            observedAt: now - 10_000,
+            windows: [
+              { label: "5h", usedPct: 40, resetsAt: now + 3_600_000 },
+              { label: "weekly", usedPct: 55, resetsAt: now + 86_400_000 },
+            ],
+          },
+          {
+            provider: "kimi-coding",
+            name: "Kimi Code",
+            availability: "available",
+            observedAt: now - 10_000,
+            windows: [
+              { label: "5h", usedPct: 12 },
+              { label: "monthly total", usedPct: 86 },
+              { label: "monthly code", usedPct: 62 },
+            ],
+          },
+          {
+            provider: "antigravity-acp",
+            name: "Pro",
+            availability: "available",
+            observedAt: now - 10_000,
+            windows: [{ label: "5h", usedPct: 25 }],
+          },
+          {
+            provider: "antigravity-acp",
+            name: "Flash",
+            availability: "unavailable",
+            reason: "usage unavailable",
+            observedAt: now - 120_000,
+            windows: [{ label: "5h", usedPct: 91 }],
+          },
+        ],
+      }}
+    />,
+  );
+
+  // Deduplicated short names keep Antigravity bucket labels intact.
+  const codex = view.getByRole("button", { name: /^▸?\s*Codex\b/ });
+  expect(codex.querySelector(".quota-name")?.textContent).toBe("Codex");
+  expect(codex.querySelectorAll(".quota-pct")[0].className).toContain("quota-pct-normal");
+  expect(codex.querySelectorAll(".quota-pct")[1].className).toContain("quota-pct-warn");
+
+  const kimi = view.getByRole("button", { name: /Kimi/ });
+  expect(kimi.querySelector(".quota-name")?.textContent).toBe("Kimi");
+  // >2 windows: summary shows only top 2 highest usedPct (monthly total 86% and monthly code 62%).
+  const kimiSummaryPcts = [...kimi.querySelectorAll(".quota-pct")].map((el) => el.textContent);
+  expect(kimiSummaryPcts).toEqual(["86%", "62%"]);
+  expect(kimi.querySelectorAll(".quota-pct")[0].className).toContain("quota-pct-danger");
+  // Expanding Kimi reveals all 3 windows.
+  fireEvent.click(kimi);
+  expect(view.getByText(/12% used/)).toBeTruthy();
+  expect(view.getByText(/86% used/)).toBeTruthy();
+  expect(view.getByText(/62% used/)).toBeTruthy();
+
+  const agyPro = view.getByRole("button", { name: /Agy · Pro/ });
+  expect(agyPro.querySelector(".quota-name")?.textContent).toBe("Agy · Pro");
+
+  // Unavailable with cached window still shows `!` badge and cached percentage in summary.
+  const agyFlash = view.getByRole("button", { name: /Agy · Flash/ });
+  expect(agyFlash.querySelector(".quota-badge-error")?.textContent).toBe("!");
+  expect(agyFlash.textContent).toContain("91%");
+  fireEvent.click(agyFlash);
+  expect(view.getByText("unavailable · usage unavailable")).toBeTruthy();
+
+  // Disambiguates colliding Codex rows from distinct providers.
+  view.rerender(
+    <QuotaPanel
+      now={now}
+      connected
+      quota={{
+        refreshing: false,
+        rows: [
+          {
+            provider: "openai-codex",
+            name: "Codex",
+            availability: "available",
+            observedAt: now - 5_000,
+            windows: [{ label: "5h", usedPct: 30 }],
+          },
+          {
+            provider: "native-codex",
+            name: "Codex",
+            availability: "available",
+            observedAt: now - 5_000,
+            windows: [{ label: "5h", usedPct: 70 }],
+          },
+        ],
+      }}
+    />,
+  );
+  const names = [...view.container.querySelectorAll(".quota-name")].map((el) => el.textContent);
+  expect(names).toEqual(["Codex · Pi", "Codex · native"]);
 });
 let localStore: Map<string, string>;
 beforeEach(() => {
