@@ -1,12 +1,19 @@
 import type { ModelOption } from "../state/useServer";
 
+export function selectableLevels(levels?: string[]): levels is string[] {
+  return !!levels?.some((level) => level !== "off");
+}
+
 // The effort levels a model takes, and the one it runs at when none is chosen.
 export function effortOf(
   models: ModelOption[],
   model: string,
 ): { levels: string[]; fallback?: string } {
   const opt = models.find((m) => m.id === model);
-  return { levels: opt?.effortLevels ?? [], fallback: opt?.effort ?? opt?.defaultEffort };
+  return {
+    levels: selectableLevels(opt?.effortLevels) ? opt.effortLevels : [],
+    fallback: opt?.effort ?? opt?.defaultEffort,
+  };
 }
 
 // Effort levels, "" for the model's default (`fallback`, when known): always

@@ -4,6 +4,8 @@ import { EventItem, BannerItem, StepGroup, MessageItem } from "../src/chat/messa
 import { Sidebar, SidebarProps, SystemStatusPanel } from "../src/sidebar/Sidebar";
 import { ConfirmDialog } from "../src/workspace/dialogs";
 import { StreamEvent, Message, AgentInfo, Workspace, SystemStatus } from "../src/state/useServer";
+import { formatPiToolUse } from "../../service/src/session/pi-tool-format";
+import { applyEventsToMessage } from "../src/state/stream";
 
 const ev = (kind: string, over: Partial<StreamEvent> = {}): StreamEvent => ({
   kind,
@@ -35,12 +37,168 @@ describe("EventItem", () => {
     expect(queryByText("Details")).toBeNull();
   });
 
-  it("shows the body of multi-line tool calls (commands, diffs) by default", () => {
+  it.each([
+    [{}, ""],
+    [{ offset: 4 }, " · offset 4"],
+    [{ limit: 20 }, " · limit 20"],
+    [{ offset: 4, limit: 20 }, " · offset 4 · limit 20"],
+  ])("keeps formatted Pi read %j compact in live and history rows", (options, suffix) => {
+    const event = {
+      kind: "tool_use" as const,
+      ...formatPiToolUse("read", { path: "src/a.ts", ...options }),
+      toolResult: "file body",
+    };
+    const onLoadDetails = vi.fn();
+    const { container, queryByRole, rerender } = render(<EventItem ev={event} />);
+    const history = {
+      ...event,
+      content: event.content.split("\n")[0],
+      bodyLength: event.content.length,
+      toolResult: undefined,
+      resultLength: event.toolResult.length,
+    };
+    for (const row of [event, history]) {
+      rerender(<EventItem ev={row} onLoadDetails={row === event ? undefined : onLoadDetails} />);
+      expect(container.querySelector(".event-summary-line code")?.textContent).toBe(
+        `src/a.ts${suffix}`,
+      );
+      expect(container.querySelector(".event-content")).toBeNull();
+      expect(queryByRole("button", { name: "Details" })).toBeNull();
+      expect(queryByRole("button", { name: /^Result/ })).not.toBeNull();
+    }
+    expect(onLoadDetails).not.toHaveBeenCalled();
+  });
+
+  it.each([[undefined], [30]])(
+    "shows Pi Bash with timeout %s without a second title",
+    (timeout) => {
+      const event = ev("tool_use", formatPiToolUse("bash", { command: "npm test", timeout }));
+      const history = {
+        ...event,
+        content: event.content.split("\n")[0],
+        bodyLength: event.content.length,
+      };
+      const onLoadDetails = vi.fn();
+      const { container, getByText, rerender } = render(
+        <EventItem ev={history} onLoadDetails={onLoadDetails} />,
+      );
+      expect(container.querySelector(".event-content pre")).toBeNull();
+      fireEvent.click(getByText(/tap to load/));
+      expect(onLoadDetails).toHaveBeenCalledTimes(1);
+      rerender(<EventItem ev={event} />);
+      expect(container.querySelector(".event-chip")?.textContent).toBe("bash");
+      expect(container.querySelector(".event-summary-line code")?.textContent).toBe(
+        timeout === undefined ? undefined : "timeout 30s",
+      );
+      expect(container.querySelector(".event-content strong")).toBeNull();
+      expect(container.querySelector(".event-content pre code.language-bash")?.textContent).toBe(
+        "npm test\n",
+      );
+      expect(container.querySelector(".event-content pre code.language-json")).toBeNull();
+    },
+  );
+
+  it.each([
+    [[{ oldText: "old", newText: "new" }], "- old\n+ new\n"],
+    [
+      [
+        { oldText: "old", newText: "new" },
+        { oldText: "second", newText: "changed" },
+      ],
+      "- old\n+ new\n\n- second\n+ changed\n",
+    ],
+  ])("shows formatted Pi Edit %j as a diff below its path", (edits, diff) => {
+    const event = ev("tool_use", formatPiToolUse("edit", { path: "a.ts", edits }));
+    const { container } = render(<EventItem ev={event} />);
+    expect(container.querySelector(".event-summary-line code")?.textContent).toBe("a.ts");
+    expect(container.querySelector(".event-content pre code.language-diff")?.textContent).toBe(
+      diff,
+    );
+    expect(container.querySelector(".event-content pre code.language-json")).toBeNull();
+  });
+
+  it("renders a path-only Pi Edit without an empty diff or a separate heading", () => {
+    const event = ev("tool_use", formatPiToolUse("edit", { path: "a.ts", edits: [] }));
+    const { container } = render(<EventItem ev={event} />);
+    expect(container.querySelector(".event-summary-line code")?.textContent).toBe("a.ts");
+    expect(container.querySelector(".event-content")).toBeNull();
+  });
+
+  it("keeps the content of a Pi Write even when it contains Markdown fences", () => {
+    const content = "# Hello\n```sh\necho hello\n```";
+    const event = ev("tool_use", formatPiToolUse("write", { path: "notes.md", content }));
+    const { container } = render(<EventItem ev={event} />);
+    expect(container.querySelector(".event-summary-line code")?.textContent).toBe("notes.md");
+    expect(container.querySelector(".event-content pre code")?.textContent).toBe(`${content}\n`);
+  });
+
+  it("keeps the literal backticks in a Pi Grep glob", () => {
+    const glob = "src/`draft`.ts";
+    const event = ev("tool_use", formatPiToolUse("grep", { pattern: "needle", glob }));
+    const { container } = render(<EventItem ev={event} />);
+    expect(container.textContent).toContain(glob);
+  });
+
+  it("distinguishes literal line breaks from backslash-n in Pi Grep paths", () => {
+    const multiline = ev(
+      "tool_use",
+      formatPiToolUse("grep", { pattern: "needle", path: "src\nlog" }),
+    );
+    const literal = ev(
+      "tool_use",
+      formatPiToolUse("grep", { pattern: "needle", path: "src\\nlog" }),
+    );
+    const { container, rerender } = render(<EventItem ev={multiline} />);
+    expect(container.querySelector(".event-content code.language-json")?.textContent).toContain(
+      `"path": ${JSON.stringify("src\nlog")}`,
+    );
+    rerender(<EventItem ev={literal} />);
+    expect(container.querySelector(".event-summary-line code")?.textContent).toBe(
+      "needle in src\\nlog",
+    );
+    expect(container.querySelector(".event-content")).toBeNull();
+  });
+
+  it("keeps an indented code block even when its first line matches the tool chip", () => {
+    const event = ev("tool_use", { toolName: "bash", content: "    **Bash**\n    echo hello" });
+    const { container } = render(<EventItem ev={event} />);
+    expect(container.querySelector(".event-summary-line")).toBeNull();
+    expect(container.querySelector(".event-content pre code")?.textContent).toBe(
+      "**Bash**\necho hello\n",
+    );
+  });
+
+  it("keeps a Markdown Setext heading even when its text matches the tool chip", () => {
+    const event = ev("tool_use", { toolName: "Bash", content: "**Bash**\n===\n\nCommand notes" });
+    const { container } = render(<EventItem ev={event} />);
+    expect(container.querySelector(".event-content h1")?.textContent).toBe("Bash");
+    expect(container.querySelector(".event-content p")?.textContent).toBe("Command notes");
+  });
+
+  it("keeps a tool heading above a line that only resembles a backtick fence", () => {
+    const event = ev("tool_use", { toolName: "Bash", content: "**Bash**\n```not a `fence`" });
+    const { container } = render(<EventItem ev={event} />);
+    expect(container.querySelector(".event-content strong")?.textContent).toBe("Bash");
+    expect(container.querySelector(".event-content pre")).toBeNull();
+  });
+
+  it("keeps a distinct MCP name and its arguments when shown under an aliased chip", () => {
+    const event = ev("tool_use", formatPiToolUse("mcp__docs__search", { query: "pi" }));
+    const { container } = render(<EventItem ev={event} />);
+    expect(container.querySelector(".event-chip")?.textContent).toBe("docs · search");
+    expect(container.querySelector(".event-content strong")?.textContent).toBe("mcp__docs__search");
+    expect(container.querySelector(".event-content pre code.language-json")?.textContent).toContain(
+      '"query": "pi"',
+    );
+  });
+
+  it("shows the body of historical or Codex Bash calls without a duplicate heading", () => {
     const { container } = render(
       <EventItem ev={ev("tool_use", { content: "**Bash**\n```bash\nnpm test\n```" })} />,
     );
     expect(container.querySelector(".event-chip")!.textContent).toBe("Bash");
     expect(container.querySelector(".event-content")!.textContent).toContain("npm test");
+    expect(container.querySelector(".event-content strong")).toBeNull();
   });
 
   it("toggles the paired tool result", () => {
@@ -133,6 +291,44 @@ describe("BannerItem", () => {
     expect(banners[0].className).toContain("banner-retry");
     expect(banners[1].className).toContain("banner-compact");
   });
+});
+
+describe("MessageItem retry recovery", () => {
+  it.each([false, true])(
+    "updates and clears the streaming retry banner (compact=%s)",
+    (compact) => {
+      const streaming: Message = {
+        id: "m1",
+        kind: "agent",
+        agentId: agent.id,
+        content: "",
+        timestamp: 0,
+        status: "streaming",
+        events: [ev("retry", { content: "Retrying (1/3 in 2s): 529 overloaded" })],
+      };
+      const view = (msg: Message) => <MessageItem msg={msg} agents={[agent]} compact={compact} />;
+      const { container, rerender } = render(view(streaming));
+      const updated = applyEventsToMessage(streaming, [
+        ev("retry", { content: "Retrying (2/3 in 4s): 529 overloaded" }),
+      ]);
+      rerender(view(updated));
+      expect(container.querySelectorAll('[data-kind="retry"]')).toHaveLength(1);
+      expect(container.textContent).toContain("Retrying (2/3 in 4s)");
+
+      rerender(view(applyEventsToMessage(updated, [ev("retry")])));
+      expect(container.querySelector('[data-kind="retry"]')).toBeNull();
+      const recovered = applyEventsToMessage(updated, [
+        ev("text_delta", { content: "Recovered reply." }),
+      ]);
+      rerender(view(recovered));
+      expect(container.querySelector('[data-kind="retry"]')).toBeNull();
+      expect(container.textContent).toContain("Recovered reply.");
+
+      rerender(view(applyEventsToMessage(streaming, [ev("error", { content: "final failure" })])));
+      expect(container.querySelector('[data-kind="retry"]')).toBeNull();
+      expect(container.querySelectorAll('[data-kind="error"]')).toHaveLength(1);
+    },
+  );
 });
 
 describe("StepGroup", () => {

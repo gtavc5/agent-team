@@ -866,6 +866,8 @@ describe("switching an agent's model and effort", () => {
     // A model with no levels, or no connection: the effort as text, if any.
     const none = render1(agent("k", { model: "cursor/composer-2.5", effortLevels: [] }));
     expect(none.container.querySelector(".ap-effort")).toBeNull();
+    const off = render1(agent("k", { model: "cursor/composer-2.5", effortLevels: ["off"] }));
+    expect(off.container.querySelector(".ap-effort")).toBeNull();
     none.unmount();
     const offline = render1(
       agent("a", { model: "claude-opus-5-5", effort: "max", effortLevels: five }),

@@ -2,7 +2,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent } from "@testing-library/react";
 import { AddAgentDialog } from "../src/workspace/dialogs";
-import type { ModelOption } from "../src/state/useServer";
+import type { AgentPreset, ModelOption } from "../src/state/useServer";
 
 const models: ModelOption[] = [
   {
@@ -18,7 +18,7 @@ const models: ModelOption[] = [
     effortLevels: ["low", "medium", "high"],
     defaultEffort: "medium",
   },
-  { id: "openai/gpt-5.5", label: "GPT 5.5", backend: "pi", effortLevels: [] },
+  { id: "openai/gpt-5.5", label: "GPT 5.5", backend: "pi", effortLevels: ["off"] },
   {
     id: "gpt-6-astra",
     label: "GPT-6 Astra",
@@ -28,15 +28,12 @@ const models: ModelOption[] = [
   },
 ];
 
-const dialog = () => {
+const dialog = (
+  presets: AgentPreset[] = [{ name: "Kisara", avatar: "k.jpg", color: "#D8A0D8" }],
+) => {
   const onAdd = vi.fn();
   const utils = render(
-    <AddAgentDialog
-      presets={[{ name: "Kisara", avatar: "k.jpg", color: "#D8A0D8" }]}
-      models={models}
-      onClose={() => {}}
-      onAdd={onAdd}
-    />,
+    <AddAgentDialog presets={presets} models={models} onClose={() => {}} onAdd={onAdd} />,
   );
   const model = () => utils.getByText("Model").parentElement!.querySelector("select")!;
   const effort = () => utils.queryByLabelText("Reasoning effort") as HTMLSelectElement | null;
@@ -72,6 +69,23 @@ describe("adding an agent", () => {
       "#D8A0D8",
       "low",
     );
+  });
+
+  it("selects available preset defaults on open and on click", () => {
+    const base = { avatar: "a", color: "red" };
+    const d = dialog([
+      { ...base, name: "A", model: models[1].id, effort: "high" },
+      { ...base, name: "B", model: models[0].id, effort: "max" },
+      { ...base, name: "C", model: "missing", effort: "low" },
+      { ...base, name: "D", model: models[1].id, effort: "max" },
+    ]);
+    expect([d.model().value, d.effort()!.value]).toEqual([models[1].id, "high"]);
+    fireEvent.click(d.getByText("B"));
+    expect([d.model().value, d.effort()!.value]).toEqual([models[0].id, "max"]);
+    fireEvent.click(d.getByText("C"));
+    expect([d.model().value, d.effort()!.value]).toEqual([models[0].id, ""]);
+    fireEvent.click(d.getByText("D"));
+    expect([d.model().value, d.effort()!.value]).toEqual([models[1].id, ""]);
   });
 
   it("groups the models by backend", () => {

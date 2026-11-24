@@ -84,9 +84,20 @@ export function AddAgentDialog({
   onAdd: (name: string, model: string, avatar: string, color: string, effort?: string) => void;
 }) {
   const [selectedPreset, setSelectedPreset] = useState(0);
-  const [model, setModel] = useState(models[0]?.id ?? "");
-  // "" for the model's default; kept across models that have the level.
-  const [effort, setEffort] = useState("");
+  const defaults = (preset: AgentPreset | undefined, fallback: string) => {
+    const available = models.find((m) => m.id === preset?.model);
+    const model = available?.id ?? fallback;
+    const effort =
+      (!preset?.model || available) &&
+      preset?.effort &&
+      effortOf(models, model).levels.includes(preset.effort)
+        ? preset.effort
+        : "";
+    return { model, effort };
+  };
+  const initial = defaults(presets[0], models[0]?.id ?? "");
+  const [model, setModel] = useState(initial.model);
+  const [effort, setEffort] = useState(initial.effort);
   const chooseModel = (next: string) => {
     setModel(next);
     if (!effortOf(models, next).levels.includes(effort)) setEffort("");
@@ -110,6 +121,11 @@ export function AddAgentDialog({
               className={`preset-item ${i === selectedPreset ? "selected" : ""}`}
               onClick={() => {
                 setSelectedPreset(i);
+                if (p.model || p.effort) {
+                  const next = defaults(p, model);
+                  setModel(next.model);
+                  setEffort(next.effort);
+                }
                 setCustomName("");
               }}
             >

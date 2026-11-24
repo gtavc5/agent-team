@@ -1,7 +1,7 @@
 import { Fragment, memo, useState } from "react";
 import type { AgentInfo, ModelOption, Project, Workspace } from "../state/useServer";
 import { AgentAvatar } from "../workspace/avatar";
-import { EffortSelect, effortOf } from "../workspace/EffortSelect";
+import { EffortSelect, effortOf, selectableLevels } from "../workspace/EffortSelect";
 import { agentState, stateLabel } from "../workspace/agents";
 import { formatRelative, formatTokens, shortModel } from "../format";
 import { DEFAULT_BRANCH, sessionName, sessionState, sessionWork } from "./scope";
@@ -330,7 +330,7 @@ function AgentRow({
                 ))}
               </select>
             )}
-            {archived || readOnly || !connected || !a.effortLevels?.length ? (
+            {archived || readOnly || !connected || !selectableLevels(a.effortLevels) ? (
               a.effort && ` · ${a.effort}`
             ) : (
               <>

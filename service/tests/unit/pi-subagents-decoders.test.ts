@@ -58,14 +58,52 @@ describe("subagent modes and canonical identities", () => {
 });
 
 describe("Pi tool Markdown normalization", () => {
-  it("formats Read with its path on the first line and all remaining arguments", () => {
-    const result = formatPiToolUse("read", { path: "a.ts", offset: 4, limit: 20 });
-    expect(result.toolName).toBe("read");
-    expect(result.toolSource).toBe("builtin");
-    expect(result.content.split("\n")[0]).toBe("**Read** `a.ts`");
-    expect(result.content).toContain('"offset": 4');
-    expect(result.content).toContain('"limit": 20');
-    expect(result.toolInput).toEqual({ tool: "Read", file_path: "a.ts" });
+  it("treats null as omitted only for known optional builtin arguments", () => {
+    const cases = [
+      ["read", { path: "a.ts" }, ["offset", "limit"], ["path"]],
+      ["write", { path: "a.ts", content: "text" }, [], ["path", "content"]],
+      [
+        "edit",
+        { path: "a.ts", edits: [{ oldText: "a", newText: "b" }] },
+        ["oldText", "old_string", "newText", "new_string"],
+        ["path"],
+      ],
+      ["bash", { command: "pwd" }, ["timeout"], ["command"]],
+      [
+        "grep",
+        { pattern: "a" },
+        ["path", "file_path", "glob", "ignoreCase", "literal", "context", "limit"],
+        ["pattern"],
+      ],
+      ["find", { pattern: "*.ts" }, ["path", "file_path", "limit"], ["pattern"]],
+      ["ls", {}, ["path", "file_path", "limit"], []],
+    ] as const;
+    const nulls = (keys: readonly string[]) => Object.fromEntries(keys.map((key) => [key, null]));
+    for (const [tool, args, optional, required] of cases) {
+      expect(formatPiToolUse(tool, { ...args, ...nulls(optional) }), tool).toEqual(
+        formatPiToolUse(tool, args),
+      );
+      const invalid = nulls([...required, "extra"]);
+      expect(
+        formatPiToolUse(tool, { ...args, ...nulls(optional), ...invalid }).content,
+        tool,
+      ).toContain(`\n\`\`\`json\n${JSON.stringify(invalid, null, 2)}\n\`\`\``);
+    }
+  });
+
+  it.each([
+    [{}, ""],
+    [{ offset: 4 }, " · offset 4"],
+    [{ limit: 20 }, " · limit 20"],
+    [{ offset: 4, limit: 20 }, " · offset 4 · limit 20"],
+    [{ offset: 1, limit: 0 }, " · offset 1 · limit 0"],
+  ])("keeps Read arguments %j on one line", (options, suffix) => {
+    expect(formatPiToolUse("read", { path: "a.ts", ...options })).toEqual({
+      toolName: "read",
+      toolSource: "builtin",
+      content: `**Read** \`a.ts\`${suffix}`,
+      toolInput: { tool: "Read", file_path: "a.ts" },
+    });
   });
 
   it("formats Write content and extra arguments without losing either", () => {
@@ -80,7 +118,76 @@ describe("Pi tool Markdown normalization", () => {
     expect(result.toolInput).toEqual({ tool: "Write", file_path: "notes.md" });
   });
 
-  it("formats Pi Edit keys as a diff and extracts legacy-compatible toolInput", () => {
+  it("formats the current Edit schema and keeps only unknown arguments in JSON", () => {
+    const result = formatPiToolUse("edit", {
+      path: "a.ts",
+      edits: [{ oldText: "first\nsecond", newText: "replaced" }],
+      extra: true,
+    });
+    expect(result.content).toBe(
+      '**Edit** `a.ts`\n```diff\n- first\n- second\n+ replaced\n```\n```json\n{\n  "extra": true\n}\n```',
+    );
+    expect(result.toolInput).toEqual({
+      tool: "Edit",
+      file_path: "a.ts",
+      old_string: "first\nsecond",
+      new_string: "replaced",
+    });
+  });
+
+  it("shows multiple Edit replacements in order without inventing file line numbers", () => {
+    const result = formatPiToolUse("edit", {
+      path: "a.ts",
+      edits: [{ oldText: "remove", newText: "" }, null, { oldText: "", newText: "insert" }],
+    });
+    expect(result.content).toBe(
+      "**Edit** `a.ts` · 1 invalid replacement\n```diff\n- remove\n\n+ insert\n```",
+    );
+    expect(result.toolInput).toEqual({ tool: "Edit", file_path: "a.ts" });
+  });
+
+  it.each([{}, { edits: [] }])(
+    "shows a path-only Edit for missing or empty replacements %j",
+    (options) => {
+      expect(formatPiToolUse("edit", { path: "a.ts", ...options })).toMatchObject({
+        content: "**Edit** `a.ts`",
+        toolInput: { tool: "Edit", file_path: "a.ts" },
+      });
+    },
+  );
+
+  it.each([
+    [{ edits: [null, { oldText: "a" }, { newText: 1 }] }, "3 invalid replacements"],
+    [{ edits: "?" }, "1 invalid replacement"],
+    [{ old_string: "before" }, "1 invalid replacement"],
+    [{ old_string: null, new_string: null }, "1 invalid replacement"],
+  ])("indicates malformed Edit arguments %j without dumping them", (options, label) => {
+    expect(formatPiToolUse("edit", { path: "a.ts", ...options })).toMatchObject({
+      content: `**Edit** \`a.ts\` · ${label}`,
+      toolInput: { tool: "Edit", file_path: "a.ts" },
+    });
+  });
+
+  it.each([
+    { oldText: "a", newText: "b" },
+    '[{"oldText":"a","newText":"b"}]',
+    '{"oldText":"a","newText":"b"}',
+  ])("recognizes an Edit argument that Pi normalizes before execution: %j", (edits) => {
+    const result = formatPiToolUse("edit", { path: "a.ts", edits, oldText: "c", newText: "d" });
+    expect(result.content).toBe("**Edit** `a.ts`\n```diff\n- a\n+ b\n\n- c\n+ d\n```");
+  });
+
+  it("preserves a legacy alias pair alongside current Edit replacements", () => {
+    const result = formatPiToolUse("edit", {
+      path: "a.ts",
+      edits: [{ oldText: "a", newText: "b" }],
+      old_string: "c",
+      new_string: "d",
+    });
+    expect(result.content).toBe("**Edit** `a.ts`\n```diff\n- a\n+ b\n\n- c\n+ d\n```");
+  });
+
+  it("formats legacy top-level Edit keys as a diff and extracts legacy-compatible toolInput", () => {
     const result = formatPiToolUse("edit", {
       path: "a.ts",
       oldText: "const a = 1;",
@@ -111,45 +218,61 @@ describe("Pi tool Markdown normalization", () => {
     });
   });
 
-  it("formats Bash with an empty summary and complete command/timeout below it", () => {
-    const result = formatPiToolUse("bash", { command: "npm test", timeout: 30 });
-    expect(result.content.split("\n")[0]).toBe("**Bash**");
-    expect(result.content).toContain("```bash\nnpm test\n```");
-    expect(result.content).toContain('"timeout": 30');
+  it("preserves legacy Edit calls with independently aliased replacement fields", () => {
+    expect(
+      formatPiToolUse("edit", { file_path: "a.ts", oldText: "before", new_string: "after" }),
+    ).toMatchObject({
+      content: "**Edit** `a.ts`\n```diff\n- before\n+ after\n```",
+      toolInput: { tool: "Edit", file_path: "a.ts", old_string: "before", new_string: "after" },
+    });
   });
 
-  it("formats Grep with all filters and its path searchable", () => {
+  it.each([
+    [{}, ""],
+    [{ timeout: 30 }, " timeout 30s"],
+  ])("formats Bash arguments %j without a JSON block", (options, suffix) => {
+    expect(formatPiToolUse("bash", { command: "npm test", ...options }).content).toBe(
+      `**Bash**${suffix}\n\`\`\`bash\nnpm test\n\`\`\``,
+    );
+  });
+
+  it("shows malformed ls paths and bash timeouts without claiming defaults", () => {
+    expect(formatPiToolUse("ls", { path: 123, limit: null }).content).toBe(
+      '**Ls**\n```json\n{\n  "path": 123\n}\n```',
+    );
+    expect(formatPiToolUse("bash", { command: "pwd", timeout: "4" }).content).toBe(
+      '**Bash**\n```bash\npwd\n```\n```json\n{\n  "timeout": "4"\n}\n```',
+    );
+  });
+
+  it("formats Grep with all filters and its path on one line", () => {
     const result = formatPiToolUse("grep", {
       pattern: "needle",
       path: "src",
       glob: "**/*.ts",
       context: 2,
       ignoreCase: true,
+      literal: true,
       limit: 10,
     });
-    expect(result.content.split("\n")[0]).toBe("**Grep** `needle`");
-    for (const text of [
-      '"path": "src"',
-      '"glob": "**/*.ts"',
-      '"context": 2',
-      '"ignoreCase": true',
-      '"limit": 10',
-    ]) {
-      expect(result.content).toContain(text);
-    }
+    expect(result.content).toBe(
+      "**Grep** `needle` in `src` · glob `**/*.ts` · ignore case · literal · context 2 · limit 10",
+    );
   });
 
-  it("formats Find with pattern first and path/limit below it", () => {
+  it("formats Find with pattern, path and limit on one line", () => {
     const result = formatPiToolUse("find", { pattern: "*.ts", path: "src", limit: 50 });
-    expect(result.content.split("\n")[0]).toBe("**Find** `*.ts`");
-    expect(result.content).toContain('"path": "src"');
-    expect(result.content).toContain('"limit": 50');
+    expect(result.content).toBe("**Find** `*.ts` in `src` · limit 50");
   });
 
-  it("formats Ls with its path first and all other options below it", () => {
-    const result = formatPiToolUse("ls", { path: "src", hidden: true });
-    expect(result.content.split("\n")[0]).toBe("**Ls** `src`");
-    expect(result.content).toContain('"hidden": true');
+  it("formats Ls with optional path and limit on one line", () => {
+    expect(formatPiToolUse("ls", { path: "src", limit: 50 }).content).toBe(
+      "**Ls** `src` · limit 50",
+    );
+    expect(formatPiToolUse("ls", { limit: 50 }).content).toBe("**Ls** `.` · limit 50");
+    expect(formatPiToolUse("ls", { path: "src", hidden: true }).content).toContain(
+      '"hidden": true',
+    );
   });
 
   it("normalizes bridge-owned tools and appends arguments absent from the panel first line", () => {
@@ -305,8 +428,7 @@ describe("native Pi Session v3 decoder", () => {
       "tool_result",
     ]);
     expect(decoded.events.map((event) => event.content)).not.toContain("inactive branch");
-    expect(decoded.events[3].content.split("\n")[0]).toBe("**Read** `a.ts`");
-    expect(decoded.events[3].content).toContain('"offset": 2');
+    expect(decoded.events[3].content).toBe("**Read** `a.ts` · offset 2");
     expect(decoded.events[3].toolInput).toEqual({ tool: "Read", file_path: "a.ts" });
     expect(decoded.events[4]).toMatchObject({ toolUseId: "call-1", content: "file body" });
     expect(decoded.events.every((event) => event.durationMs === undefined)).toBe(true);
@@ -370,8 +492,7 @@ describe("child transcript artifact decoder and reconstruction", () => {
       "notice",
     ]);
     expect(events.filter((event) => event.kind === "tool_use")).toHaveLength(1);
-    expect(events[2].content).toContain("**Read** `real.ts`");
-    expect(events[2].content).toContain('"limit": 5');
+    expect(events[2].content).toBe("**Read** `real.ts` · limit 5");
     expect(events[3].content).toBe("result body");
     expect(events[4]).toMatchObject({ level: "warning", content: "byte limit reached" });
     expect(events.every((event) => event.durationMs === undefined)).toBe(true);

@@ -1,0 +1,9 @@
+{"type":"extension_ui_request","id":"5cfcc0d8-c8bc-4fb8-8053-06ebf3e3b76a","method":"notify","message":"hello"}
+{"type":"extension_ui_request","id":"363d2fd5-db5c-441d-a7a4-925d8fcad047","method":"notify","message":"warning","notifyType":"warning"}
+{"type":"extension_ui_request","id":"22ca9e83-4e25-4c04-aa8e-bb9f44ddd650","method":"setStatus","statusKey":"progress","statusText":"\u001b[32mready\u001b[0m"}
+{"type":"extension_ui_request","id":"75ee1158-dbd6-4510-b5ac-bd13abef1e40","method":"setWidget","widgetKey":"panel","widgetLines":["<b>not HTML</b>","line two"]}
+{"type":"extension_ui_request","id":"47e6f6f6-a73b-4578-a5ef-b6b832795740","method":"setWidget","widgetKey":"panel","widgetLines":["moved"],"widgetPlacement":"belowEditor"}
+{"type":"extension_ui_request","id":"2b9aa76c-1b14-4b97-b34b-3983efe0764f","method":"setStatus","statusKey":"progress"}
+{"type":"extension_ui_request","id":"3bdd98c5-4e64-4bc3-af8c-1abca808175e","method":"setWidget","widgetKey":"panel"}
+{"type":"extension_ui_request","id":"db1d0575-e1da-43bd-9d26-5dcf2bcf8d6d","method":"setTitle","title":"mine"}
+{"type":"extension_ui_request","id":"c93d2b75-cb39-4cec-975b-a903a4b7f0f5","method":"set_editor_text","text":"mine"}

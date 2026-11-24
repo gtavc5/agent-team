@@ -417,7 +417,7 @@ export default function observe(pi) {
       activeTools: pi.getActiveTools(),
       toolSnippets: event.systemPromptOptions.toolSnippets,
       section: event.systemPromptOptions.sections.agent_team_panel,
-      panelTools: pi.getAllTools().filter((tool) => tool.name.startsWith("panel_")).map((tool) => tool.name),
+      panelTools: Object.fromEntries(pi.getAllTools().filter((tool) => tool.name.startsWith("panel_")).map((tool) => [tool.name, tool.description])),
     }));
   });
 }
@@ -444,10 +444,16 @@ describe.skipIf(!localPiBinary)("real Pi panel bridge gate", () => {
     30_000,
   );
 
-  it("expands and shrinks real Pi tools with synchronized selectedTools and toolSnippets", async () => {
+  it("updates real Pi tool descriptions, selected tools, and snippets on toolset changes", async () => {
     const directory = temporaryDirectory("panel-pi-dynamic-tools-");
     const snapshot = path.join(directory, "before-agent-start.json");
     const observer = writeSyntheticProviderObserver(directory);
+    const stable: PanelTool = {
+      name: "panel_stable",
+      description: 'Presets: "One".',
+      shape: {},
+      handler: () => Promise.resolve("stable"),
+    };
     let toolset: PanelToolset = {
       instructions: "first instructions",
       tools: [
@@ -458,6 +464,7 @@ describe.skipIf(!localPiBinary)("real Pi panel bridge gate", () => {
           handler: () => Promise.resolve("alpha"),
           ...{ promptSnippet: "Use panel_alpha for alpha." },
         },
+        stable,
       ],
     };
     const fixture = await startRealPi({
@@ -476,6 +483,7 @@ describe.skipIf(!localPiBinary)("real Pi panel bridge gate", () => {
           handler: () => Promise.resolve("beta"),
           ...{ promptSnippet: "Use panel_beta for beta." },
         },
+        { ...stable, description: 'Presets: "Two".' },
       ],
     };
     fixture.server.notifyToolsetChanged(fixture.key);
@@ -488,7 +496,7 @@ describe.skipIf(!localPiBinary)("real Pi panel bridge gate", () => {
       activeTools: string[];
       toolSnippets: Record<string, string>;
       section: string;
-      panelTools: string[];
+      panelTools: Record<string, string>;
     };
     expect(observed.selectedTools).toContain("panel_beta");
     expect(observed.selectedTools).not.toContain("panel_alpha");
@@ -497,7 +505,11 @@ describe.skipIf(!localPiBinary)("real Pi panel bridge gate", () => {
     expect(observed.toolSnippets.panel_beta).toBe("Use panel_beta for beta.");
     expect(observed.toolSnippets.panel_alpha).toBeUndefined();
     expect(observed.section).toBe("expanded instructions");
-    expect(observed.panelTools).toEqual(expect.arrayContaining(["panel_alpha", "panel_beta"]));
+    expect(observed.panelTools).toMatchObject({
+      panel_alpha: "Alpha",
+      panel_beta: "Beta",
+      panel_stable: 'Presets: "Two".',
+    });
   }, 30_000);
 
   it("restores >32 MiB compacted Pi v3 history and probes only exact report markers", async () => {

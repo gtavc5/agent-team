@@ -187,7 +187,17 @@ type DrainWaiter = {
   cleanup: () => void;
 };
 
+interface PiCompactionResult {
+  summary: string;
+  firstKeptEntryId: string;
+  tokensBefore: number;
+  estimatedTokensAfter?: number;
+  usage?: Record<string, unknown>;
+  details?: unknown;
+}
+
 type AllowedCommand =
+  | { id: string; type: "compact"; customInstructions?: string }
   | { id: string; type: "prompt"; message: string; images?: PiRpcImage[] }
   | { id: string; type: "abort" }
   | { id: string; type: "get_state" }
@@ -284,6 +294,15 @@ export class PiRpcClient extends EventEmitter {
       options,
       options.onBeforeWrite,
     ) as Promise<{ disposition: string }>;
+  }
+
+  compact(customInstructions?: string, onBeforeWrite?: () => void): Promise<PiCompactionResult> {
+    return this.request(
+      "compact",
+      (id) => ({ id, type: "compact", ...(customInstructions && { customInstructions }) }),
+      { timeoutMs: 15 * 60_000 },
+      onBeforeWrite,
+    ) as Promise<PiCompactionResult>;
   }
 
   abort(options: PiRpcRequestOptions = {}): Promise<void> {

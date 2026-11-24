@@ -2125,6 +2125,46 @@ button.action-target:hover {
   color: var(--text-secondary);
 }
 
+.extension-ui {
+  min-width: 0;
+  max-height: min(8em, 13dvh);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.extension-ui section {
+  padding: 3px 0;
+}
+.extension-ui strong {
+  margin-inline-end: 6px;
+}
+.extension-status {
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+}
+.extension-widget {
+  white-space: pre-wrap;
+  border-inline-start: 2px solid var(--border);
+  padding-inline-start: 6px;
+}
+.extension-notice {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--accent);
+}
+.extension-notice.warning {
+  color: var(--warning);
+}
+.extension-notice.error {
+  color: var(--error);
+}
+.extension-notice button {
+  flex: none;
+}
+
 /* ---- Composer ----------------------------------------------------------- */
 
 .input-area {

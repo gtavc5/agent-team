@@ -13,6 +13,11 @@ import { Auth } from "../../src/server/auth";
 import { HttpHandler } from "../../src/server/http";
 import type { AuthConfig } from "../../src/config/config";
 
+vi.mock("fs", async (original) => {
+  const fs = await original<typeof import("fs")>();
+  return { ...fs, lstatSync: vi.fn(fs.lstatSync) };
+});
+
 let base: string;
 let web: string;
 let uploads: string;
@@ -157,6 +162,57 @@ describe("session cookies", () => {
 });
 
 describe("static files", () => {
+  it("prefers local avatars, sandboxed and confined to regular files", async () => {
+    const headers = { cookie: await login() };
+    const get = (p: string) => request(`/avatars/${p}`, { headers });
+    const local = path.join(base, "avatars");
+    fs.mkdirSync(local);
+    fs.mkdirSync(path.join(web, "avatars"));
+    fs.writeFileSync(path.join(web, "avatars", "face.svg"), "bundled");
+    expect((await get("face.svg")).body.toString()).toBe("bundled");
+    fs.writeFileSync(path.join(local, "face.svg"), "override");
+    const avatar = await get("face.svg");
+    expect(avatar.body.toString()).toBe("override");
+    expect(avatar.headers).toMatchObject({
+      "content-type": "image/svg+xml",
+      "content-security-policy": "sandbox",
+      "x-content-type-options": "nosniff",
+      "cache-control": "private, no-cache",
+    });
+    fs.symlinkSync(path.join(web, "index.html"), path.join(local, "linked"));
+    fs.mkdirSync(path.join(local, "folder"));
+    for (const name of ["linked", "folder", "..%2findex.html", "../index.html"])
+      expect((await get(name)).status).toBe(404);
+  });
+  it("accepts absolute-form requests for bundled avatars", async () => {
+    const headers = { cookie: await login() };
+    fs.mkdirSync(path.join(web, "avatars"), { recursive: true });
+    fs.writeFileSync(path.join(web, "avatars", "absolute.png"), "absolute");
+    const res = await request(`http://127.0.0.1:${port}/avatars/absolute.png`, { headers });
+    expect(res.body.toString()).toBe("absolute");
+  });
+
+  it("does not rely on a prior directory stat to confine an avatar read", async () => {
+    const headers = { cookie: await login() };
+    const temp = fs.mkdtempSync(path.join(base, "avatar-test-"));
+    fs.symlinkSync(web, path.join(temp, "avatars"));
+    const stale = fs.statSync(web);
+    const originalFs = await vi.importActual<typeof import("fs")>("fs");
+    const spy = vi
+      .mocked(fs.lstatSync)
+      .mockImplementation((p, options) =>
+        p === path.join(temp, "avatars") ? stale : originalFs.lstatSync(p, options),
+      );
+    const original = handler;
+    try {
+      handler = new HttpHandler(new Auth(() => authConfig), web, uploads, temp);
+      expect((await request("/avatars/logo.png", { headers })).status).toBe(404);
+    } finally {
+      handler = original;
+      spy.mockRestore();
+    }
+  });
+
   it("gzip text assets for clients that accept it, and re-compress after a rebuild", async () => {
     const cookie = await login();
     const file = path.join(web, "assets", "app.js");

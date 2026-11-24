@@ -27,7 +27,6 @@ import {
 } from "../workspace/state";
 import { loadConfig, AppConfig } from "../config/config";
 import {
-  AGENT_PRESETS,
   MODEL_OPTIONS,
   availableModelOptions,
   backendForModel,
@@ -268,9 +267,11 @@ export class Server {
       models: this.models,
       commands,
       commandsByAgent,
+      extensionUi: [...this.workspaces.values()].flatMap((w) => w.getExtensionUi()),
       pendingDialogs: [...this.workspaces.values()].flatMap((w) => w.getPendingDialogs()),
       config: {
-        presets: AGENT_PRESETS,
+        presets: this.config.presets,
+        user: this.config.user,
         models: this.models,
         commands,
         hosts: this.config.hosts,
@@ -333,6 +334,7 @@ export class Server {
             workspaceId: workspace.id,
             messages: summarizeMessages(page),
             hasMore: older.length > limit,
+            extensionUi: workspace.getExtensionUi(),
             pendingDialogs: workspace.getPendingDialogs(),
             // Echoed so the client can tell an older page from a resync of
             // the newest one (the latter replaces, the former prepends).
@@ -786,11 +788,7 @@ export class Server {
     }
 
     try {
-      if (
-        effort &&
-        backendForModel(model) === "codex" &&
-        !effortLevelsForModel(model).includes(effort)
-      ) {
+      if (effort && effortLevelsForModel(model, this.models)?.includes(effort) === false) {
         this.sendJson(ws, { type: "error", message: `${model} has no effort ${effort}` });
         return;
       }
@@ -847,6 +845,7 @@ export class Server {
   private watchConfig(): void {
     const configPath = path.join(this.baseDir, "config.toml");
     fs.watchFile(configPath, { interval: 2000 }, () => {
+      const previousPresets = this.config.presets;
       try {
         this.config = loadConfig(this.baseDir);
       } catch (e) {
@@ -856,6 +855,19 @@ export class Server {
         });
         return;
       }
+      const presets = this.config.presets;
+      if (
+        presets.length !== previousPresets.length ||
+        presets.some((preset, i) => preset.name !== previousPresets[i].name)
+      ) {
+        for (const workspace of this.workspaces.values()) {
+          if (workspace.projectLink?.role !== "lead") continue;
+          const tools = this.projects.toolsFor(workspace);
+          if (tools)
+            for (const agent of workspace.agents.values()) agent.session.setPanelTools?.(tools);
+        }
+      }
+      this.broadcastUI({ type: "identities_update", user: this.config.user, presets });
       this.reapplyProviderEnv();
       void this.refreshPiCatalog();
       console.log("[config] reloaded config.toml");
@@ -1176,11 +1188,15 @@ export class Server {
       createWorkspace: (name, cwd, link) => this.makeWorkspace(name, cwd, undefined, link),
       addAgent: (w, name, model, avatar, color, effort) =>
         this.addAgentTo(w, name, model, avatar, color, undefined, effort),
-      projectDefaults: () =>
-        this.config.projects.model
-          ? this.config.projects
-          : { model: this.config.pi?.default_model, effort: this.config.pi?.default_effort },
-      modelIds: () => this.models.map((model) => model.id),
+      agentPresets: () => this.config.presets,
+      projectDefaults: () => ({
+        ...this.config.projects,
+        ...(!this.config.projects.model && {
+          model: this.config.pi?.default_model,
+          effort: this.config.pi?.default_effort,
+        }),
+      }),
+      modelOptions: () => this.models,
       isLeadOnline: (project) =>
         Boolean(project.lead && this.hostRegistry.get(project.lead.hostId)?.connected),
       removeWorkspace: (id) => this.removeWorkspace(id),
@@ -1395,8 +1411,23 @@ export class Server {
       ),
     ]);
     if (JSON.stringify(models) === JSON.stringify(this.models)) return;
+    const previous = this.models;
     this.models = models;
     this.broadcastUI({ type: "models_update", models });
+    for (const workspace of this.workspaces.values()) {
+      for (const agent of workspace.agents.values()) {
+        const id = agent.info.model;
+        if (
+          JSON.stringify(effortLevelsForModel(id, previous)) !==
+          JSON.stringify(effortLevelsForModel(id, models))
+        )
+          this.broadcastUI({
+            type: "agent_updated",
+            workspaceId: workspace.id,
+            agent: workspace.agentInfo(agent),
+          });
+      }
+    }
   }
 
   private agentCommands(wsId: string, agentId: string, list: CommandInfo[]): void {
@@ -1499,6 +1530,7 @@ export class Server {
         const w = this.workspaces.get(id);
         if (w) this.projects.mirrorReportDelivery(w, reportId, state, meta);
       },
+      onExtensionUi: (event) => this.broadcastUI({ type: "extension_ui", event }),
       onUiDialogRequest: (dialog) => {
         this.broadcastUI({ type: "ui_dialog_request", dialog });
         const w = this.workspaces.get(id);
@@ -1530,6 +1562,7 @@ export class Server {
       onUnhandled: (wsId, agentId, msg) => {
         appendLog(this.baseDir, wsId, { timestamp: Date.now(), agentId, unhandled: msg });
       },
+      modelOptions: () => this.models,
       sessionEnv: (model) => this.resolveProviderEnv(model),
     };
   }

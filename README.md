@@ -55,6 +55,13 @@ new work. The panel provides the orchestration and UI, not a model of its own.
   tool calls with their run times, subagent and background-task cards, and a
   per-message row with effort level and context usage. Long histories page
   in lazily.
+- **Pi extension UI** — dialogs accept replies; `notify` shows a short-lived
+  notice. Keyed `setStatus` entries and `setWidget` text blocks appear beside
+  the composer, grouped by agent. They survive a browser refresh, not a Pi
+  process restart. Omit `statusText` or `widgetLines` to clear its key.
+  `setTitle` targets a terminal, and `set_editor_text` would overwrite a user's
+  local draft: the panel does neither. These and unknown methods are logged
+  as unhandled (method and request ID only), never answered as dialogs.
 - **Side panels**, floating or pinned beside the chat:
   - _Agents_ — from a lead, every session of the project in a two-line card
     to unfold; from any other session, that session alone: its agents'
@@ -219,7 +226,11 @@ when the pinned Codex binary is unavailable. Other model ids route to Pi;
 For Codex, a `[1m]` suffix selects the 872K context window through
 `model_context_window`; the plain CLI model id has the suffix stripped.
 
-Agent identities (name, avatar, colour) are presets in the same file.
+Agent identities (name, avatar, colour) default to the presets in the same
+file and can be configured with `[[agent_presets]]` in `config.toml`. A lead
+can pin a worker's identity by exact preset name in `start_session`. Codex
+registers panel tools when a thread starts; resumed threads keep their
+original tool schema and descriptions.
 
 ## Running it as a service
 

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { AGENT_PRESETS } from "../../src/config/presets";
 import { loadConfig } from "../../src/config/config";
 import { loadSettings, saveSettings } from "../../src/workspace/state";
 
@@ -44,6 +45,41 @@ describe("loadConfig", () => {
     const d = writeConfig(`[projects]\nmodel = "provider/model"\neffort = "high"\n`);
     expect(loadConfig(d).projects).toEqual({ model: "provider/model", effort: "high" });
     expect(loadConfig(dir).projects).toEqual({});
+  });
+
+  it("reads user, lead and agent identities without changing built-in defaults", () => {
+    for (const source of ["", "agent_presets = []"]) {
+      expect(loadConfig(writeConfig(source))).toMatchObject({
+        user: { name: "You", avatar: "avatars/ykiko.jpg" },
+        presets: AGENT_PRESETS,
+      });
+    }
+    const cfg = loadConfig(
+      writeConfig(`
+[user]
+name="Ada"
+avatar="avatars/me.png"
+[projects]
+lead_name="Boss"
+lead_avatar="B"
+lead_color="red"
+[[agent_presets]]
+name="One"
+avatar="1"
+color="blue"
+model="p/model"
+effort="high"
+[[agent_presets]]
+name="Two"
+avatar="2"
+color="green"`),
+    );
+    expect(cfg.user).toEqual({ name: "Ada", avatar: "avatars/me.png" });
+    expect(cfg.projects).toEqual({ lead_name: "Boss", lead_avatar: "B", lead_color: "red" });
+    expect(cfg.presets).toEqual([
+      { name: "One", avatar: "1", color: "blue", model: "p/model", effort: "high" },
+      { name: "Two", avatar: "2", color: "green" },
+    ]);
   });
 
   it("reads Pi and restart settings", () => {

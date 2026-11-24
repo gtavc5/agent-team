@@ -350,7 +350,8 @@ describe("Synthetic Pi corpus privacy", () => {
         expect(hits).toHaveLength(1);
         expect(hits[0]).toMatchObject({ kind, depth: 1, subagentTaskId: taskId });
         if (kind === "tool_call") {
-          expect(hits[0].lines.some((line) => line.n > 1 && line.text.includes(marker))).toBe(true);
+          expect(hits[0].lines.map((line) => line.n)).toEqual([1]);
+          expect(hits[0].lines[0].text).toContain(`in corpus/${marker}`);
         }
       }
       expect(

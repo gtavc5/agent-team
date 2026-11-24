@@ -9,6 +9,22 @@ export interface PendingEvent {
 
 // Kinds that only carry streamed text and never land in `events`.
 const DELTA_KINDS = new Set(["text_delta", "thinking_delta"]);
+const RETRY_PROGRESS_KINDS = new Set([
+  "text_delta",
+  "thinking_delta",
+  "thinking",
+  "tool_use",
+  "subagent_start",
+]);
+
+function clearsRetry(e: StreamEvent): boolean {
+  return (
+    RETRY_PROGRESS_KINDS.has(e.kind) ||
+    e.kind === "error" ||
+    e.kind === "result" ||
+    (e.kind === "retry" && !e.content)
+  );
+}
 
 // Fold a batch of stream events into a message. Mirrors the server-side
 // aggregation in task.ts so the client view converges with what gets
@@ -18,6 +34,7 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
   if (evts.length === 0) return m;
   const deltas = evts.filter((e) => DELTA_KINDS.has(e.kind));
   const regular = evts.filter((e) => !DELTA_KINDS.has(e.kind));
+  let events = [...(m.events ?? [])];
 
   let content = m.content;
   const textDelta = deltas
@@ -29,10 +46,13 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
   const liveChanged =
     live.liveThinking !== m.liveThinking || live.liveThinkingSince !== m.liveThinkingSince;
   if (regular.length === 0) {
-    return textDelta || liveChanged ? { ...withoutLiveThinking(m), content, ...live } : m;
+    const retryCleared = evts.some(clearsRetry) && events.some((e) => e.kind === "retry");
+    if (retryCleared) events = events.filter((e) => e.kind !== "retry");
+    return textDelta || liveChanged || retryCleared
+      ? { ...withoutLiveThinking(m), content, ...live, ...(retryCleared && { events }) }
+      : m;
   }
 
-  let events = [...(m.events ?? [])];
   // Subagent starts are copied before their transcript changes, once per
   // batch: the rest are shared with the previous state or are the wire
   // objects themselves, and React may run the same batch twice (StrictMode,
@@ -47,7 +67,11 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
     return events[i].subagent!;
   };
 
-  for (const ev of regular) {
+  for (const ev of evts) {
+    if (clearsRetry(ev) && events.some((e) => e.kind === "retry")) {
+      events = events.filter((e) => e.kind !== "retry");
+    }
+    if (DELTA_KINDS.has(ev.kind)) continue;
     if (ev.kind === "tool_result" && ev.toolUseId) {
       const matchIdx = events.findIndex(
         (e) => e.kind === "tool_use" && e.toolUseId === ev.toolUseId,
@@ -73,6 +97,7 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
       continue;
     }
     if (ev.kind === "retry") {
+      if (!ev.content) continue;
       const idx = events.findIndex((e) => e.kind === "retry");
       if (idx >= 0) {
         events[idx] = { ...ev, contentOffset: events[idx].contentOffset };
@@ -401,7 +426,8 @@ export function toolNameOf(ev: StreamEvent): string | null {
 // One-line summary for a tool_use row: the first line with the bold name
 // stripped, so "**Read** `a.ts`" shows as "a.ts".
 export function toolSummary(ev: StreamEvent): string {
-  const firstLine = (ev.content ?? "").split("\n")[0] ?? "";
+  const firstLine = (ev.content ?? "").split("\n", 1)[0] ?? "";
+  if (/^(?: {4}| {0,3}\t)/.test(firstLine)) return "";
   return firstLine
     .replace(/^\*\*[^*]+\*\*\s*/, "")
     .replace(/`/g, "")

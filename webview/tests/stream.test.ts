@@ -76,6 +76,51 @@ describe("applyEventsToMessage", () => {
     ]);
   });
 
+  it("clears retries on explicit recovery, real progress, and failure", () => {
+    const retry = ev("retry", { content: "Retrying" });
+    const progress = [
+      ev("text_delta", { content: "recovered" }),
+      ev("thinking_delta", { content: "thinking" }),
+      ev("thinking", { content: "thought" }),
+      ev("tool_use", { content: "Read", toolUseId: "read" }),
+      ev("subagent_start", {
+        subagent: { taskId: "task", description: "work", status: "running", events: [] },
+      }),
+    ];
+    for (const event of progress) {
+      const out = applyEventsToMessage(msg({ events: [retry] }), [event]);
+      expect(
+        out.events?.some((e) => e.kind === "retry"),
+        event.kind,
+      ).toBe(false);
+    }
+    expect(applyEventsToMessage(msg({ events: [retry] }), [ev("retry")]).events).toEqual([]);
+    expect(
+      applyEventsToMessage(msg({ events: [retry] }), [ev("error", { content: "failed" })]).events,
+    ).toEqual([expect.objectContaining({ kind: "error", content: "failed" })]);
+  });
+
+  it("uses wire order when progress and retry updates share a batch", () => {
+    const recovered = applyEventsToMessage(msg(), [
+      ev("retry", { content: "Retrying" }),
+      ev("text_delta", { content: "recovered" }),
+    ]);
+    expect(recovered.events).toEqual([]);
+    const retrying = applyEventsToMessage(msg(), [
+      ev("text_delta", { content: "working" }),
+      ev("retry", { content: "Retrying" }),
+    ]);
+    expect(retrying.events?.map((e) => e.kind)).toEqual(["retry"]);
+    const restarted = applyEventsToMessage(msg(), [
+      ev("retry", { content: "Retry 1", contentOffset: 0 }),
+      ev("text_delta", { content: "ok" }),
+      ev("retry", { content: "Retry 2", contentOffset: 2 }),
+    ]);
+    expect(restarted.events).toEqual([
+      expect.objectContaining({ kind: "retry", content: "Retry 2", contentOffset: 2 }),
+    ]);
+  });
+
   it("folds subagent inner events onto the start event without mutating the input", () => {
     const start = ev("subagent_start", {
       subagent: { taskId: "task", description: "d", status: "running", events: [] },

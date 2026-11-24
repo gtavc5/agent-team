@@ -316,6 +316,40 @@ const readState = (base: string, id: string): WorkspaceState => {
 };
 
 describe("server restart with projects", () => {
+  it("sends identities on init and refreshes preset names in lead tools on config reload", async () => {
+    const setPanelTools = vi.spyOn(TestSession.prototype, "setPanelTools");
+    const startSessionDescription = () =>
+      setPanelTools.mock.calls
+        .map(([set]) => set?.tools.find((tool) => tool.name === "start_session")?.description)
+        .filter((description) => description !== undefined)
+        .at(-1);
+    const { base, web } = seed();
+    const config = path.join(base, "config.toml");
+    const source = '[user]\nname="Ada"\n[[agent_presets]]\nname="One"\ncolor="blue"\navatar="1"';
+    fs.writeFileSync(config, source);
+    const { frames, stop } = await start(base, web);
+    try {
+      expect(frames.find((f) => f.type === "init")?.config).toMatchObject({
+        user: { name: "Ada" },
+        presets: [{ name: "One" }],
+      });
+      expect(startSessionDescription()).toContain('Presets: "One".');
+      fs.writeFileSync(config, source.replace("Ada", "Other").replace("One", "Two"));
+      await vi.waitFor(
+        () =>
+          expect(frames.find((f) => f.type === "identities_update")).toMatchObject({
+            user: { name: "Other" },
+            presets: [{ name: "Two" }],
+          }),
+        { timeout: 3500 },
+      );
+      expect(startSessionDescription()).toContain('Presets: "Two".');
+      expect(startSessionDescription()).not.toContain('"One"');
+    } finally {
+      stop();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
   it("re-attaches the panel tools and delivers to an archived worker without losing its history", async () => {
     const { base, root, web } = seed();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});

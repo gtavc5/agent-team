@@ -6,6 +6,8 @@ export interface AgentPreset {
   name: string;
   avatar: string;
   color: string;
+  model?: string;
+  effort?: string;
 }
 
 export const AGENT_PRESETS: AgentPreset[] = [
@@ -134,6 +136,7 @@ export function availableModelOptions(piModels: Iterable<PiAvailableModel>): Mod
       backend: "pi",
       label: model.name ?? model.id,
       contextWindow: model.contextWindow,
+      effortLevels: model.effortLevels ?? pi.get(model.id)?.effortLevels,
     });
   return [...MODEL_OPTIONS, ...[...pi.values()].sort((a, b) => a.id.localeCompare(b.id))];
 }
@@ -179,8 +182,15 @@ export function defaultEffortForModel(modelId: string): string | null {
   return opt?.effort ?? opt?.defaultEffort ?? null;
 }
 
-export function effortLevelsForModel(modelId: string): string[] {
-  return findModelOption(modelId)?.effortLevels ?? [];
+export function effortLevelsForModel(
+  modelId: string,
+  catalog?: ModelOption[],
+): string[] | undefined {
+  return (
+    catalog?.find((m) => m.id === modelId)?.effortLevels ??
+    findModelOption(modelId)?.effortLevels ??
+    (backendForModel(modelId) === "pi" ? undefined : [])
+  );
 }
 
 export function supportsAdaptiveThinking(_modelId: string): boolean {

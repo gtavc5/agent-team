@@ -110,6 +110,25 @@ export class HttpHandler {
         return;
       }
 
+      const rawPath = (req.url ?? "/").replace(/^https?:\/\/[^/?#]*/i, "").split(/[?#]/, 1)[0];
+      const requestPath = decodeURIComponent(rawPath);
+      if (requestPath.startsWith("/avatars/") || pathname.startsWith("/avatars/")) {
+        const name = requestPath.slice("/avatars/".length);
+        if (
+          requestPath !== `/avatars/${name}` ||
+          !name ||
+          /[/\\\\\0]/.test(name) ||
+          name === "." ||
+          name === ".."
+        ) {
+          res.statusCode = 404;
+          res.end("Not found");
+          return;
+        }
+        this.serveAvatar(name, res);
+        return;
+      }
+
       if (pathname.startsWith("/uploads/")) {
         const target = path.normalize(
           path.join(this.uploadsDir, pathname.slice("/uploads/".length)),
@@ -152,11 +171,7 @@ export class HttpHandler {
       // Everything under assets/ is content-hashed by Vite (JS, CSS, fonts).
       if (pathname.startsWith("/assets/")) {
         res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-      } else if (
-        pathname.startsWith("/avatars/") ||
-        pathname.startsWith("/icons/") ||
-        pathname.startsWith("/file-icons/")
-      ) {
+      } else if (pathname.startsWith("/icons/") || pathname.startsWith("/file-icons/")) {
         // Not content-hashed, so not immutable; a day spares the home-screen
         // app a re-download on every cold start.
         res.setHeader("Cache-Control", "public, max-age=86400");
@@ -173,6 +188,50 @@ export class HttpHandler {
       res.statusCode = 500;
       res.end(String(e));
     }
+  }
+
+  private serveAvatar(name: string, res: http.ServerResponse): void {
+    for (const base of [this.baseDir, this.webDir]) {
+      const file = path.join(fs.realpathSync(base), "avatars", name);
+      if (!fs.lstatSync(file, { throwIfNoEntry: false })?.isFile()) continue;
+      let fd: number;
+      try {
+        // Darwin's O_NOFOLLOW_ANY rejects symlinks in parent components too.
+        const noLinks = process.platform === "darwin" ? 0x20000000 : fs.constants.O_NOFOLLOW;
+        fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | noLinks);
+      } catch (e) {
+        if (
+          ["ENOENT", "ENOTDIR", "ELOOP", "ENXIO", "EMLINK"].includes(
+            (e as NodeJS.ErrnoException).code ?? "",
+          )
+        )
+          continue;
+        throw e;
+      }
+      try {
+        if (
+          !fs.fstatSync(fd).isFile() ||
+          (process.platform !== "darwin" && fs.readlinkSync(`/proc/self/fd/${fd}`) !== file)
+        ) {
+          fs.closeSync(fd);
+          continue;
+        }
+      } catch (e) {
+        fs.closeSync(fd);
+        throw e;
+      }
+      res.setHeader(
+        "Content-Type",
+        MIME[path.extname(name).toLowerCase()] ?? "application/octet-stream",
+      );
+      res.setHeader("Cache-Control", "private, no-cache");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Security-Policy", "sandbox");
+      pipeline(fs.createReadStream(file, { fd }), res, () => {});
+      return;
+    }
+    res.statusCode = 404;
+    res.end("Not found");
   }
 
   // Identifies the served bundle; a client that reconnects and sees a

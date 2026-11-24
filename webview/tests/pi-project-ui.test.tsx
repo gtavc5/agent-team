@@ -168,6 +168,121 @@ describe("per-agent commands and dynamic models", () => {
   });
 });
 
+describe("extension UI", () => {
+  const owner = { workspaceId: "w1", agentId: "a1", processGeneration: 7 };
+  const snapshot = {
+    ...owner,
+    statuses: [{ key: "k", text: "ready" }],
+    widgets: [{ key: "w", placement: "belowEditor", lines: ["<img src=x>", "**not markdown**"] }],
+  };
+  it("hydrates and updates plain text on the requested side of the composer", () => {
+    const view = render(<App />);
+    const sock = FakeSocket.instances.at(-1)!;
+    act(() => sock.open());
+    receive(sock, initFrame(undefined, { extensionUi: [snapshot] }));
+    const above = () => view.container.querySelector('[data-placement="aboveEditor"]');
+    const below = () => view.container.querySelector('[data-placement="belowEditor"]');
+    const row = view.container.querySelector(".input-row");
+    expect(above()?.nextElementSibling).toBe(row);
+    expect(below()?.previousElementSibling).toBe(row);
+    expect(above()?.textContent).toContain("ready");
+    expect(below()?.textContent).toContain("<img src=x>\n**not markdown**");
+    expect(below()?.querySelector("img")).toBeNull();
+    const send = (change: object) =>
+      receive(sock, { type: "extension_ui", event: { ...owner, change } });
+    send({ kind: "widget", key: "w", placement: "aboveEditor", lines: ["moved"] });
+    expect(above()?.textContent).toContain("moved");
+    expect(below()).toBeNull();
+    send({ kind: "status", key: "k", text: "updated" });
+    expect(above()?.textContent).not.toContain("ready");
+    expect(above()?.textContent).toContain("updated");
+    send({ kind: "widget", key: "w", placement: "aboveEditor" });
+    send({ kind: "status", key: "k" });
+    expect(above()).toBeNull();
+    send({ kind: "notify", id: "n", level: "error", message: "transient" });
+    expect(above()?.querySelector(".extension-notice.error")?.textContent).toContain("transient");
+    fireEvent.click(view.getByRole("button", { name: "Dismiss notification" }));
+    expect(view.queryByText("transient")).toBeNull();
+    send({ kind: "notify", id: "n2", level: "warning", message: "not replayed" });
+    receive(sock, initFrame(undefined, { extensionUi: [snapshot] }));
+    expect(view.queryByText("not replayed")).toBeNull();
+    expect(below()).not.toBeNull();
+  });
+  it("keeps another owner's error visible through a burst of notices until its own expiry", () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useServer());
+      const sock = FakeSocket.instances.at(-1)!;
+      act(() => sock.open());
+      receive(sock, initFrame([workspace("w1"), workspace("w2")]));
+      const notice = (workspaceId: string, id: string) =>
+        receive(sock, {
+          type: "extension_ui",
+          event: {
+            ...owner,
+            workspaceId,
+            change: { kind: "notify", id, level: "error", message: id },
+          },
+        });
+      notice("w1", "first");
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      for (let i = 0; i < 10; i++) notice("w2", String(i));
+      expect(result.current.extensionUi.notices.map((n) => n.id)).toEqual([
+        "first",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+      ]);
+      act(() => {
+        vi.advanceTimersByTime(7900);
+      });
+      expect(result.current.extensionUi.notices).toHaveLength(8);
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      expect(result.current.extensionUi.notices).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("isolates snapshots and live state across workspace, agent and retired generations", () => {
+    const { result } = renderHook(() => useServer());
+    const sock = FakeSocket.instances.at(-1)!;
+    act(() => sock.open());
+    const other = { ...snapshot, workspaceId: "w2" };
+    receive(sock, initFrame(undefined, { extensionUi: [snapshot, other] }));
+    const send = (gen: number, change: object) =>
+      receive(sock, { type: "extension_ui", event: { ...owner, processGeneration: gen, change } });
+    send(7, { kind: "notify", id: "n", message: "expiring", level: "info" });
+    send(8, { kind: "reset" });
+    send(7, { kind: "status", key: "late", text: "gone" });
+    expect(result.current.extensionUi.notices).toEqual([]);
+    expect(result.current.extensionUi.agents).toContainEqual({
+      ...owner,
+      processGeneration: 8,
+      statuses: [],
+      widgets: [],
+    });
+    receive(sock, {
+      type: "workspace_messages",
+      workspaceId: "w1",
+      messages: [],
+      hasMore: false,
+      extensionUi: [],
+    });
+    expect(result.current.extensionUi.agents).toEqual([other]);
+    receive(sock, { type: "agent_removed", workspaceId: "w2", agentId: "a1" });
+    expect(result.current.extensionUi.agents).toEqual([]);
+  });
+});
+
 describe("blocking UI dialog protocol", () => {
   it("deduplicates identities, resolves exactly one generation, and replaces workspace snapshots", () => {
     const { result } = renderHook(() => useServer());

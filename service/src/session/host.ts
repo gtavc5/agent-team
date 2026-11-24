@@ -60,7 +60,7 @@ export interface HostSessionHandle extends EventEmitter {
     timeoutMs?: number,
   ): Promise<DispatchedReportProbeResult>;
   getAvailableModels?(): PiAvailableModel[];
-  getAvailableThinkingLevels?(): string[];
+  getAvailableThinkingLevels?(model: string): string[] | undefined;
   getCommands?(): CommandInfo[];
   reconcileAsyncRuns?(): Promise<void>;
 }

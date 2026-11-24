@@ -27,6 +27,7 @@ import {
   resolveStopTarget,
   type SubagentNotifyRun,
 } from "./pi-subagents";
+import { decodeExtensionUi } from "./pi-extension-ui";
 import { extractPiToolResultText, formatPiToolUse } from "./pi-tool-format";
 import type {
   ActiveAsyncRunRecord,
@@ -43,6 +44,9 @@ import type {
   SessionState,
   StreamEvent,
   SubAgentInfo,
+  UiChange,
+  ExtensionUiEvent,
+  UiDialogMethod,
   UiDialogRequest,
   UiDialogResponse,
   UsageStats,
@@ -169,6 +173,17 @@ interface Turn {
   finalText: string;
   error?: string;
   contextualInput?: number;
+  compact?: boolean;
+}
+
+function piEffortLevels(model: Json): string[] | undefined {
+  if (typeof model.reasoning !== "boolean") return undefined;
+  if (!model.reasoning) return ["off"];
+  const map = object(model.thinkingLevelMap);
+  return ["off", "minimal", "low", "medium", "high", "xhigh", "max"].filter(
+    (level) =>
+      map[level] !== null && ((level !== "xhigh" && level !== "max") || map[level] !== undefined),
+  );
 }
 
 type Setting = { desired?: string; applied?: string; lastError?: string };
@@ -233,6 +248,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private appliedPanelTools: PanelToolset | null = null;
   private panelToolsError?: string;
   private rpc?: PiRpcClient;
+  private compactingRpc?: PiRpcClient;
+  private compactionBoundary?: { pending?: Promise<void> };
   private starting?: Promise<void>;
   private closing?: Promise<void>;
   private interrupting?: Promise<boolean>;
@@ -257,7 +274,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private lastHelperCaptureAt = 0;
   private readonly dialogs = new Map<string, { request: UiDialogRequest; timer: NodeJS.Timeout }>();
   private models: PiAvailableModel[] = [];
-  private levels: string[] = [];
+  private levels?: string[];
   private commands: CommandInfo[] = [];
   private stats: Json | null = null;
   private pendingOptions?: Promise<void>;
@@ -301,7 +318,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
 
   getState(): SessionState {
     return {
-      config: { ...this.config },
+      config: { ...this.config, model: this.model.desired, effort: this.effort.desired },
       usage: { ...this.usage },
       sessionId: this.sessionId,
       sessionFile: this.sessionFile,
@@ -356,11 +373,19 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   getAvailableModels(): PiAvailableModel[] {
     return this.models.slice();
   }
-  getAvailableThinkingLevels(): string[] {
-    return this.levels.slice();
+  getAvailableThinkingLevels(model = this.model.applied): string[] | undefined {
+    return this.rpc && model === this.model.applied ? this.levels?.slice() : undefined;
   }
   getCommands(): CommandInfo[] {
-    return this.commands.slice();
+    return [
+      {
+        name: "compact",
+        source: "pi",
+        description: "Compact conversation context",
+        argumentHint: "[instructions]",
+      },
+      ...this.commands.filter((command) => command.name !== "compact"),
+    ];
   }
   getContextUsage(): Promise<Json | null> {
     const context = object(this.stats?.contextUsage);
@@ -527,6 +552,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           YAAT_PI_ANTIGRAVITY_ENTRY: providerEntry,
         },
       });
+      this.levels = undefined;
       this.rpc = rpc;
       this.tainted = false;
       rpc.on("event", (event: unknown) => {
@@ -582,6 +608,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
                 modelId,
                 name: text(model.name),
                 reasoning: model.reasoning === true,
+                effortLevels: piEffortLevels(model),
                 contextWindow: num(model.contextWindow),
               },
             ]
@@ -629,8 +656,11 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           .join("/") || undefined;
       await this.applyOptions(rpc, generation);
       if (!this.current(generation, rpc)) throw new Error("Pi startup cancelled");
+      this.emit("thinking_levels");
       this.sessionProof = proof;
-      if (!this.hasConfirmedTurns) this.sessionFile = proof.sessionFile;
+      if (this.hasConfirmedTurns)
+        this.updateCheckpoint(proof.leafId, proof.entryCount, proof.sessionFile);
+      else this.sessionFile = proof.sessionFile;
       this.subagentsSessionId = ready.subagentsSessionId ?? undefined;
       this.bridgeOwnedToolNames = new Set(ready.ownerToolNames);
       this.appliedPanelTools = this.panelTools;
@@ -659,6 +689,10 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     if (this.disposed || this.isRunning) throw new Error("Pi session is busy or disposed");
     const envelope = typeof input === "string" ? { inputId: randomUUID(), text: input } : input;
     const turn = newTurn(this.processGeneration, envelope);
+    const compact = /^\/compact(?:\s+([\s\S]+))?$/.exec(envelope.text.trim());
+    if (compact && envelope.attachmentIds?.length)
+      throw new Error("/compact does not accept attachments");
+    turn.compact = Boolean(compact);
     this.activeTurn = turn;
     try {
       this.emit("runState", "working");
@@ -669,22 +703,32 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       const rpc = this.rpc!;
       await this.applyOptions(rpc, turn.generation);
       if (!this.live(turn) || this.interrupting) throw new Error("Pi prompt dispatch cancelled");
-      const reply = await rpc.prompt(envelope.text, {
-        images,
-        onBeforeWrite: () => {
-          if (!this.live(turn) || this.interrupting)
-            throw new Error("Pi prompt dispatch cancelled");
-          hooks?.onBeforeWrite?.({
-            inputId: envelope.inputId,
-            reportId: envelope.reportId,
-            generation: turn.generation,
-            beforeLeafId: this.expectedLeafAnchorId,
-            beforeEntryCount: this.minEntryCount,
-            startedAt: Date.now(),
-          });
-          turn.written = true;
-        },
-      });
+      if (this.compactionBoundary) await this.syncCompactionCheckpoint(rpc);
+      const onBeforeWrite = () => {
+        if (this.compactionBoundary)
+          throw new PiRpcResponseError("compact", "Waiting for Pi compaction checkpoint");
+        if (this.compactingRpc === rpc || (compact && turn.started))
+          throw new PiRpcResponseError(
+            compact ? "compact" : "prompt",
+            "Pi is already processing a turn",
+          );
+        if (!this.live(turn) || this.interrupting) throw new Error("Pi prompt dispatch cancelled");
+        hooks?.onBeforeWrite?.({
+          inputId: envelope.inputId,
+          reportId: envelope.reportId,
+          generation: turn.generation,
+          beforeLeafId: this.expectedLeafAnchorId,
+          beforeEntryCount: this.minEntryCount,
+          startedAt: Date.now(),
+        });
+        turn.written = true;
+      };
+      if (compact) {
+        await rpc.compact(compact[1], onBeforeWrite);
+        this.finish(turn, { kind: "result", content: "" });
+        return { disposition: "handled" };
+      }
+      const reply = await rpc.prompt(envelope.text, { images, onBeforeWrite });
       if (reply?.disposition === "handled") {
         if (!turn.started) this.finish(turn);
         else if (this.live(turn)) {
@@ -699,8 +743,17 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       this.scheduleCaptureDetached(rpc.pid);
       return { disposition: "started" };
     } catch (error) {
-      if (error instanceof PiRpcResponseError && error.command === "prompt") {
-        const retryable = /already processing/i.test(error.message);
+      if (turn.compact && turn.accepted && error instanceof PiRpcResponseError) {
+        this.finish(turn, { kind: "error", content: error.message });
+        return { disposition: "handled" };
+      }
+      if (
+        error instanceof PiRpcResponseError &&
+        (error.command === "prompt" || error.command === "compact")
+      ) {
+        const retryable = /already processing|waiting for Pi compaction checkpoint/i.test(
+          error.message,
+        );
         if (retryable && turn.started) {
           // An unsolicited Pi turn (e.g. subagent-notify wakeup) started before
           // Pi rejected this prompt as busy. Keep the running turn alive as a
@@ -729,7 +782,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
 
   setModel(model: string, effort?: string): void {
     this.model.desired = model;
-    if (effort !== undefined) this.effort.desired = effort;
+    this.effort.desired = effort;
     if (this.rpc && !this.starting && !this.isRunning)
       void this.applyOptions(this.rpc, this.processGeneration);
   }
@@ -766,6 +819,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           if (this.current(generation, rpc)) setting.lastError = message(error);
         }
       };
+      const previousModel = this.model.applied;
       await apply(this.model, async (desired) => {
         const model =
           this.models.find((item) => item.id === desired) ??
@@ -788,10 +842,23 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         if (this.current(generation, rpc)) {
           this.levels = levels;
           this.effort.applied = state.thinkingLevel;
-          this.emit("thinking_levels");
         }
       });
-      await apply(this.effort, (desired) => rpc.setThinkingLevel(desired, timeout));
+      if (!this.current(generation, rpc)) return;
+      const desired = this.effort.desired;
+      const levels = this.getAvailableThinkingLevels(this.model.desired);
+      if (desired && levels && !levels.includes(desired)) {
+        this.effort.desired = undefined;
+        this.emit("effort_preset_cleared");
+        this.event({
+          kind: "notice",
+          level: "warning",
+          content: `${this.model.applied} has no effort ${desired}; using ${this.effort.applied ?? "the model default"}.`,
+        });
+      } else if (levels) {
+        await apply(this.effort, (value) => rpc.setThinkingLevel(value, timeout));
+      }
+      if (!this.starting && previousModel !== this.model.applied) this.emit("thinking_levels");
     };
     const pending = work();
     this.pendingOptions = pending;
@@ -827,7 +894,62 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
 
   private handleEvent(event: Json): void {
     if (event.type === "extension_ui_request") {
-      this.openDialog(event);
+      const change = decodeExtensionUi(event, () => this.unhandledUi(event));
+      const { method } = event;
+      if (change) this.extensionUi(change);
+      else if (
+        method === "select" ||
+        method === "confirm" ||
+        method === "input" ||
+        method === "editor"
+      ) {
+        this.openDialog(event, method);
+      } else this.unhandledUi(event);
+
+      return;
+    }
+    if (event.type === "compaction_start" || event.type === "compaction_end") {
+      const reason = text(event.reason) ?? "unknown";
+      const turn = this.activeTurn;
+      const manual = reason === "manual" && turn?.compact && turn.written && this.live(turn);
+      if (event.type === "compaction_start") {
+        this.compactingRpc = this.rpc;
+        if (manual && turn.inputId) {
+          turn.accepted = true;
+          this.emit("user_message_accepted", {
+            inputId: turn.inputId,
+            reportId: turn.reportId,
+            generation: turn.generation,
+          });
+        }
+        this.event({ kind: "compact", content: `Compacting context (${reason})` });
+      } else {
+        this.compactingRpc = undefined;
+        const result = object(event.result);
+        const before = num(result.tokensBefore),
+          after = num(result.estimatedTokensAfter);
+        const counts =
+          before === undefined
+            ? ""
+            : `: ${before}${after === undefined ? "" : ` → ~${after}`} tokens`;
+        const error = text(event.errorMessage);
+        const content =
+          error ??
+          (event.aborted
+            ? `Compaction aborted (${reason})`
+            : `Context compacted (${reason})${counts}`);
+        if (event.result) {
+          this.stats = null;
+          this.compactionBoundary = {};
+          void this.syncCompactionCheckpoint(this.rpc!);
+        }
+        if (manual && error) this.finish(turn, { kind: "error", content });
+        else {
+          this.event({ kind: "compact", content });
+          if (manual)
+            this.finish(turn, { kind: "result", content: "", interrupted: event.aborted === true });
+        }
+      }
       return;
     }
     const msg = object(event.message);
@@ -910,11 +1032,29 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       case "agent_settled":
         this.settle(turn);
         break;
-      case "auto_compaction_end":
-        if (event.result) this.event({ kind: "compact", content: "Context compacted" });
+      case "auto_retry_start": {
+        const attempt = num(event.attempt);
+        const maxAttempts = num(event.maxAttempts);
+        const delayMs = num(event.delayMs);
+        const count =
+          attempt === undefined
+            ? undefined
+            : `${attempt}${maxAttempts === undefined ? "" : `/${maxAttempts}`}`;
+        const delayText =
+          delayMs === undefined
+            ? undefined
+            : delayMs >= 60_000
+              ? `${Math.round(delayMs / 60_000)}m`
+              : `${Number((delayMs / 1000).toFixed(1))}s`;
+        const progress = [count, delayText && `in ${delayText}`].filter(Boolean).join(" ");
+        const label = progress ? `Retrying (${progress})` : "Pi is retrying";
+        const error = text(event.errorMessage);
+        this.event({ kind: "retry", content: error ? `${label}: ${error}` : label });
         break;
-      case "auto_retry_start":
-        this.event({ kind: "retry", content: text(event.errorMessage) ?? "Pi is retrying" });
+      }
+      case "auto_retry_end":
+        if (event.success === false) turn.error = text(event.finalError) ?? turn.error;
+        this.event({ kind: "retry", content: "" });
         break;
     }
   }
@@ -978,15 +1118,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     const rpc = this.rpc!;
     if (rpc.pid) void this.captureDetached(rpc.pid);
     // Start bounded bookkeeping before notifying the queue; neither promise is awaited by it.
-    const checkpoint = this.panelHttp.isControlConnected(this.sessionKey)
-      ? this.panelHttp.requestSessionCheckpoint(this.sessionKey, this.statsTimeoutMs)
-      : undefined;
-    void checkpoint
-      ?.then((proof) => {
-        if (this.current(turn.generation, rpc) && proof.sessionId === this.sessionId)
-          this.updateCheckpoint(proof.leafId, proof.entryCount, proof.sessionFile);
-      })
-      .catch(() => undefined);
+    void this.refreshCheckpoint(rpc, turn.generation);
     void rpc
       .getSessionStats({ timeoutMs: this.statsTimeoutMs })
       .then((stats) => {
@@ -1020,6 +1152,34 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
                 : undefined,
           },
     );
+  }
+
+  private syncCompactionCheckpoint(rpc: PiRpcClient): Promise<void> | undefined {
+    const boundary = this.compactionBoundary;
+    if (boundary)
+      return (boundary.pending ??= this.refreshCheckpoint(rpc, this.processGeneration).finally(
+        () => {
+          boundary.pending = undefined;
+        },
+      ));
+  }
+
+  private async refreshCheckpoint(rpc: PiRpcClient, generation: number): Promise<void> {
+    const boundary = this.compactionBoundary;
+    if (!this.panelHttp.isControlConnected(this.sessionKey)) return;
+    await this.panelHttp
+      .requestSessionCheckpoint(this.sessionKey, this.statsTimeoutMs)
+      .then((proof) => {
+        if (
+          this.current(generation, rpc) &&
+          proof.sessionId === this.sessionId &&
+          proof.entryCount >= this.minEntryCount
+        ) {
+          if (this.compactionBoundary === boundary) this.compactionBoundary = undefined;
+          this.updateCheckpoint(proof.leafId, proof.entryCount, proof.sessionFile);
+        }
+      })
+      .catch(() => undefined);
   }
 
   private updateCheckpoint(leafId: string | null, count: number, file: string | null): void {
@@ -1068,15 +1228,43 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     return { ...result, sessionProof: this.sessionProof };
   }
 
-  private openDialog(event: Json): void {
-    const id = text(event.id),
-      method = event.method;
-    if (
-      !id ||
-      this.dialogs.has(id) ||
-      (method !== "select" && method !== "confirm" && method !== "input" && method !== "editor")
-    )
+  private extensionUi(change: UiChange): void {
+    this.emit("extension_ui", {
+      workspaceId: this.config.workspaceId ?? "",
+      agentId: this.config.agentId ?? "",
+      processGeneration: this.processGeneration,
+      change,
+    } satisfies ExtensionUiEvent);
+  }
+  private advanceGeneration(): void {
+    this.processGeneration++;
+    this.extensionUi({ kind: "reset" });
+  }
+  private unhandledUi(event: Json): void {
+    // Keep terminal titles and editor/draft contents out of persistent diagnostics.
+    this.emit("unhandled", {
+      type: event.type,
+      method: text(event.method)?.slice(0, 128),
+      id: text(event.id)?.slice(0, 128),
+    });
+  }
+  private openDialog(event: Json, method: UiDialogMethod): void {
+    const id = text(event.id);
+    if (!id || this.dialogs.has(id)) {
+      this.unhandledUi(event);
       return;
+    }
+    // Preserve the tolerant dialog UI, but make malformed frames observable.
+    if (
+      typeof event.title !== "string" ||
+      (method === "select" &&
+        (!Array.isArray(event.options) || !event.options.every((v) => typeof v === "string"))) ||
+      (method === "confirm" && typeof event.message !== "string") ||
+      (event.timeout !== undefined && num(event.timeout) === undefined) ||
+      (event.placeholder !== undefined && typeof event.placeholder !== "string") ||
+      (event.prefill !== undefined && typeof event.prefill !== "string")
+    )
+      this.unhandledUi(event);
     const timeoutMs = Math.max(
       0,
       num(event.timeout) ?? this.options.dialogFallbackTimeoutMs ?? 110_000,
@@ -1612,7 +1800,9 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     else {
       this.cancelDialogs();
       this.rpc = undefined;
-      ++this.processGeneration;
+      this.compactionBoundary = undefined;
+      this.compactingRpc = undefined;
+      this.advanceGeneration();
       this.unregisterRoute();
       // Independent runners can still finish after an unexpected Pi exit.
       void this.reconcileAsyncRuns();
@@ -1684,8 +1874,10 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     this.cancelDialogs();
     const rpc = this.rpc;
     this.rpc = undefined;
+    this.compactingRpc = undefined;
+    this.compactionBoundary = undefined;
     this.tainted = true;
-    ++this.processGeneration;
+    this.advanceGeneration();
     this.retiring = this.shutdown(rpc, 10_000).finally(() => {
       this.retiring = undefined;
       void this.reconcileAsyncRuns();
@@ -1856,7 +2048,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     if (this.closing) return this.closing;
     this.cancelDialogs();
     this.disposed = true;
-    ++this.processGeneration;
+    this.advanceGeneration();
     clearInterval(this.reconcileTimer);
     if (this.activeTurn) this.activeTurn.settled = true;
     const rpc = this.rpc;

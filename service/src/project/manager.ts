@@ -11,11 +11,13 @@ import {
 } from "./report-journal";
 import * as fs from "fs";
 import * as os from "os";
+import type { ProjectsConfig } from "../config/config";
 import * as path from "path";
 import {
   AGENT_PRESETS,
+  type AgentPreset,
   MODEL_OPTIONS,
-  backendForModel,
+  type ModelOption,
   effortLevelsForModel,
 } from "../config/presets";
 import { resolveWorkspacePath } from "../repo/dirs";
@@ -48,6 +50,7 @@ import {
 import { IssueStore, locate, type IssueModule, type ModuleEntry } from "./issues";
 import { IssueBoard } from "./issue-board";
 import {
+  selectablePresetNames,
   leadToolset,
   workerToolset,
   type FinishPatch,
@@ -107,8 +110,9 @@ export interface ProjectHost {
   ): void;
   // config.toml's [projects]: the model and effort leads default to.
   isLeadOnline?(project: Project): boolean;
-  modelIds?(): string[];
-  projectDefaults?(): { model?: string; effort?: string };
+  modelOptions?(): ModelOption[];
+  projectDefaults?(): ProjectsConfig;
+  agentPresets?(): AgentPreset[];
   // Deletes a workspace without the project bookkeeping of a user delete.
   removeWorkspace(id: string): void;
   // False when the workspace is still busy.
@@ -199,7 +203,7 @@ export class ProjectManager {
   // The model leads, and workers started without one, run on: the
   // configured one where a lead may run on it, its effort where it has it.
   private panelModels(): string[] {
-    return this.host.modelIds?.() ?? MODEL_OPTIONS.map((model) => model.id);
+    return (this.host.modelOptions?.() ?? MODEL_OPTIONS).map((model) => model.id);
   }
 
   private defaultModel(): { model: string; effort?: string } {
@@ -209,10 +213,14 @@ export class ProjectManager {
     return {
       model,
       ...(effort &&
-        (backendForModel(model) === "pi" || effortLevelsForModel(model).includes(effort)) && {
+        effortLevelsForModel(model, this.host.modelOptions?.())?.includes(effort) !== false && {
           effort,
         }),
     };
+  }
+
+  private agentPresets(): AgentPreset[] {
+    return this.host.agentPresets?.() ?? AGENT_PRESETS;
   }
 
   create(name: string, root: string | null, model?: string, cwd?: string): Project {
@@ -233,9 +241,17 @@ export class ProjectManager {
       project.lead = { hostId: lead.hostId, workspaceId: lead.id };
       this.store.save(project);
       this.issues(project.id);
-      const preset = AGENT_PRESETS[0];
+      const preset = this.agentPresets()[0];
+      const identity = this.host.projectDefaults?.();
       const effort = model === defaults.model ? defaults.effort : undefined;
-      this.host.addAgent(lead, "Lead", model, preset.avatar, preset.color, effort);
+      this.host.addAgent(
+        lead,
+        identity?.lead_name ?? "Lead",
+        model,
+        identity?.lead_avatar ?? preset.avatar,
+        identity?.lead_color ?? preset.color,
+        effort,
+      );
     } catch (e) {
       if (lead) this.host.removeWorkspace(lead.id);
       this.store.remove(project.id);
@@ -557,7 +573,13 @@ export class ProjectManager {
     const project = link && this.store.get(link.projectId);
     if (!link || !project) return null;
     return link.role === "lead"
-      ? leadToolset(this.api, project, this.store.notesDir(project.id), this.workerModels())
+      ? leadToolset(
+          this.api,
+          project,
+          this.store.notesDir(project.id),
+          this.workerModels(),
+          this.agentPresets().map((preset) => preset.name),
+        )
       : workerToolset(
           this.api,
           workspace.id,
@@ -1041,6 +1063,34 @@ export class ProjectManager {
     ].join("\n");
   }
 
+  private workerPreset(
+    projectId: string,
+    presets: AgentPreset[],
+    model: string,
+    effort?: string,
+  ): AgentPreset {
+    const modelMatches = presets.filter((p) => p.model === model);
+    let candidates = effort === undefined ? [] : modelMatches.filter((p) => p.effort === effort);
+    if (!candidates.length) candidates = modelMatches;
+    if (!candidates.length) candidates = presets.filter((p) => !p.model);
+    if (!candidates.length) candidates = AGENT_PRESETS;
+    if (candidates.length === 1) return candidates[0];
+
+    const identities = this.workers(projectId).map((w) => w.resolveAgent()?.info);
+    let picked = candidates[0];
+    let fewest = Infinity;
+    for (const candidate of candidates) {
+      const count = identities.filter(
+        (info) => info?.name === candidate.name && info.avatar === candidate.avatar,
+      ).length;
+      if (count < fewest) {
+        picked = candidate;
+        fewest = count;
+      }
+    }
+    return picked;
+  }
+
   private startSession(projectId: string, a: StartSessionArgs): string {
     const project = this.require(projectId);
     const input =
@@ -1053,14 +1103,28 @@ export class ProjectManager {
         `Not a directory: ${a.cwd}. Create it first${project.root ? ` (a worktree: git -C ${project.root} worktree add <path> -b <branch>)` : ""}.`,
       );
     }
-    const models = this.workerModels();
-    if (a.model && !models.includes(a.model)) {
-      throw new Error(`Unknown model ${a.model}; one of: ${models.join(", ")}`);
+    const presets = this.agentPresets();
+    let chosen: AgentPreset | undefined;
+    if (a.preset !== undefined) {
+      const matches = presets.filter((p) => p.name === a.preset);
+      const name = JSON.stringify(a.preset);
+      if (!matches.length) {
+        const names = selectablePresetNames(presets.map((p) => p.name));
+        throw new Error(`Unknown preset ${name}; one of: ${names || "(none)"}`);
+      }
+      if (matches.length > 1) {
+        throw new Error(`Ambiguous preset ${name}; ${matches.length} presets have this name`);
+      }
+      chosen = matches[0];
     }
     const defaults = this.defaultModel();
-    const model = a.model ?? defaults.model;
-    const levels = effortLevelsForModel(model);
-    if (a.effort && levels.length > 0 && !levels.includes(a.effort)) {
+    const model = a.model ?? chosen?.model ?? defaults.model;
+    const models = this.workerModels();
+    if (!models.includes(model)) {
+      throw new Error(`Unknown model ${model}; one of: ${models.join(", ")}`);
+    }
+    const levels = effortLevelsForModel(model, this.host.modelOptions?.());
+    if (a.effort && levels && !levels.includes(a.effort)) {
       throw new Error(
         levels.length
           ? `${model} has no effort ${a.effort}; one of: ${levels.join(", ")}`
@@ -1077,8 +1141,15 @@ export class ProjectManager {
       throw new Error(`No task ${a.taskId} in ${objective!.id}`);
     }
 
-    const effort = a.effort ?? (model === defaults.model ? defaults.effort : undefined);
-    const preset = AGENT_PRESETS[this.workers(projectId).length % AGENT_PRESETS.length];
+    const defaultEffort = model === defaults.model ? defaults.effort : undefined;
+    let effort = a.effort ?? defaultEffort;
+    if (chosen && a.effort === undefined) {
+      effort = a.model === undefined ? defaultEffort : undefined;
+      if (chosen.effort !== undefined) {
+        effort = levels?.includes(chosen.effort) ? chosen.effort : undefined;
+      }
+    }
+    const preset = chosen ?? this.workerPreset(projectId, presets, model, effort);
     const w = this.host.createWorkspace(a.title, cwd, {
       projectId,
       role: "worker",

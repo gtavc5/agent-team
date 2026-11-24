@@ -625,6 +625,11 @@ async function replayPi(
               userStatuses: ws.messages.filter((m) => m.kind === "user").map((m) => m.status),
               prompts: player.sent.filter((m) => m.type === "prompt").map((m) => String(m.message)),
               terminalCount: events.filter((e) => e.kind === "result" || e.kind === "error").length,
+              retryBanner:
+                [...ws.messages]
+                  .reverse()
+                  .find((m) => m.kind === "agent")
+                  ?.events?.find((e) => e.kind === "retry")?.content ?? null,
               thinkingClosed: events.some(
                 (e) =>
                   e.kind === "thinking_delta" && e.content === "" && e.durationMs !== undefined,
@@ -693,7 +698,7 @@ function makePiProject(dir: string, registry: HostRegistry, worker: Workspace, s
     loadWorkspace: () => true,
     history,
     isLeadOnline: () => true,
-    modelIds: () => [DEFAULT_MODEL.pi],
+    modelOptions: () => [{ id: DEFAULT_MODEL.pi, label: DEFAULT_MODEL.pi, backend: "pi" }],
     persistWorkspace: () => {},
     saveWorkspaceNow: () => {},
     workspaceChanged: () => {},

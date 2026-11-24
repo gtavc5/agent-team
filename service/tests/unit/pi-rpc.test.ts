@@ -92,6 +92,22 @@ describe("LfJsonLineDecoder", () => {
 });
 
 describe("PiRpcClient", () => {
+  it.each([undefined, "Keep decisions"])(
+    "sends compact with instructions %s",
+    async (instructions) => {
+      const { client, stdout, writes } = makeClient();
+      const pending = client.compact(instructions);
+      await flushWrites();
+      expect(JSON.parse(writes[0].toString())).toEqual({
+        id: "req-1",
+        type: "compact",
+        ...(instructions && { customInstructions: instructions }),
+      });
+      const result = { summary: "Earlier work", firstKeptEntryId: "entry", tokensBefore: 900 };
+      stdout.write(response("req-1", "compact", result));
+      await expect(pending).resolves.toEqual(result);
+    },
+  );
   it("matches out-of-order responses and drains concurrent stdout messages synchronously", async () => {
     const { client, stdout, writes } = makeClient();
     const first = client.getState();

@@ -44,6 +44,7 @@ interface BeforeAgentStartEvent {
 
 interface ToolInfo {
   name: string;
+  description: string;
 }
 
 interface PanelToolDefinition {
@@ -337,12 +338,13 @@ export default function piPanelBridge(pi: PiExtensionApi): void {
     return (await requestJson("toolset", { timeoutMs: 5_000 })) as PanelToolset;
   }
 
-  function registerNewTools(toolset: PanelToolset): Set<string> {
-    const existing = new Set(pi.getAllTools().map((tool) => tool.name));
+  function registerTools(toolset: PanelToolset): Set<string> {
+    const existing = new Map(pi.getAllTools().map((tool) => [tool.name, tool.description]));
     const desired = new Set<string>();
     for (const def of toolset.tools) {
-      if (!bridgeOwnedToolNames.has(def.name)) {
-        if (existing.has(def.name)) continue;
+      const owned = bridgeOwnedToolNames.has(def.name);
+      if (!owned && existing.has(def.name)) continue;
+      if (!owned || existing.get(def.name) !== def.description) {
         pi.registerTool({
           name: def.name,
           label: def.name,
@@ -373,7 +375,7 @@ export default function piPanelBridge(pi: PiExtensionApi): void {
 
   function applyToolset(toolset: PanelToolset, event?: BeforeAgentStartEvent): void {
     currentToolset = toolset;
-    const desired = registerNewTools(toolset);
+    const desired = registerTools(toolset);
     const options = event?.systemPromptOptions;
     for (const def of toolset.tools) {
       if (def.promptSnippet && options?.toolSnippets) {

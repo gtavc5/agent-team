@@ -6,6 +6,7 @@ import { z } from "zod";
 import { ProjectStore } from "../../src/project/store";
 import { leadToolset, workerToolset, type PanelApi } from "../../src/project/tools";
 import { SETTLE_MS, START_SPACING_MS, awaitsUser } from "../../src/project/manager";
+import { AGENT_PRESETS } from "../../src/config/presets";
 import { MCP_TEXT_LIMIT } from "../../src/session/types";
 import { Workspace } from "../../src/workspace/workspace";
 import { historyOf, saveIndex, saveWorkspace, loadAll } from "../../src/workspace/state";
@@ -327,6 +328,133 @@ describe("panel tool arguments", () => {
 });
 
 describe("ProjectManager", () => {
+  it("uses configured lead and least-used generic worker identities", async () => {
+    const { host, create, call, workers } = setup();
+    const first = { name: "One", avatar: "1", color: "red" };
+    const second = { name: "Two", avatar: "2", color: "blue" };
+    host.agentPresets = () => [first, second];
+    const { lead } = create("first");
+    expect([...lead.agents.values()][0].info).toMatchObject({ ...first, name: "Lead" });
+    host.projectDefaults = () => ({ lead_name: "Boss", lead_avatar: "B", lead_color: "green" });
+    expect([...create("other").lead.agents.values()][0].info).toMatchObject({
+      name: "Boss",
+      avatar: "B",
+      color: "green",
+    });
+    for (const expected of [first, second, first]) {
+      await call(lead, "start_session", { title: "worker", cwd: "wt", task: "work" });
+      expect([...workers().at(-1)!.agents.values()][0].info).toMatchObject(expected);
+    }
+  });
+
+  it("matches Kimi's effort preset unless the lead pins a different identity", async () => {
+    const { host, create, call, session, workers } = setup();
+    const kimi = "kimi-coding/k3.1-pro-highspeed";
+    const perseus = { name: "Perseus", avatar: "avatars/Perseus.jpg", color: "#C0C0C0" };
+    const ayanami = { name: "Ayanami", avatar: "avatars/Ayanami.jpg", color: "#88CCFF" };
+    const presets = [
+      { ...perseus, model: "gpt-6-astra", effort: "ultra" },
+      { name: "Scout", avatar: "S", color: "red", model: kimi, effort: "low" },
+      { ...ayanami, model: kimi, effort: "max" },
+    ];
+    host.agentPresets = () => presets;
+    host.modelOptions = () => [
+      { id: "gpt-6-astra", backend: "codex", label: "Astra" },
+      { id: kimi, backend: "pi", label: "Kimi", effortLevels: ["low", "max"] },
+      { id: "mock/unknown-levels", backend: "pi", label: "Unknown levels" },
+    ];
+    const { lead } = create("preset matching");
+    const args = { title: "worker", cwd: "wt", task: "work" };
+    const start = async (overrides: Record<string, string>) => {
+      await call(lead, "start_session", { ...args, ...overrides });
+      const worker = workers().at(-1)!;
+      return { ...worker.resolveAgent()!.info, effort: session(worker).getState().config.effort };
+    };
+
+    expect(await start({ model: kimi, effort: "max" })).toMatchObject({
+      ...ayanami,
+      model: kimi,
+      effort: "max",
+    });
+    expect(await start({ model: kimi })).toMatchObject({
+      name: "Scout",
+      model: kimi,
+      effort: undefined,
+    });
+    expect(await start({ preset: "Perseus", model: kimi })).toMatchObject({
+      ...perseus,
+      model: kimi,
+      effort: undefined,
+    });
+    expect(await start({ preset: "Ayanami" })).toMatchObject({
+      ...ayanami,
+      model: kimi,
+      effort: "max",
+    });
+    await expect(
+      call(lead, "start_session", { ...args, preset: "Perseus", model: kimi, effort: "ultra" }),
+    ).rejects.toThrow(`${kimi} has no effort ultra`);
+    expect(workers()).toHaveLength(4);
+    expect(await start({ preset: "Ayanami", model: "mock/unknown-levels" })).toMatchObject({
+      ...ayanami,
+      model: "mock/unknown-levels",
+      effort: undefined,
+    });
+    const tool = session(lead).panelTools!.tools.find((t) => t.name === "start_session")!;
+    expect(tool.description).toContain('Presets: "Perseus", "Scout", "Ayanami"');
+  });
+
+  it("rejects unknown and ambiguous preset names and unavailable preset models before creation", async () => {
+    const { host, create, call, session } = setup();
+    const preset = { name: "Scout", avatar: "S", color: "red" };
+    host.agentPresets = () => [
+      preset,
+      { ...preset, avatar: "X" },
+      { ...preset, name: "Offline", model: "mock/offline" },
+    ];
+    const { lead } = create("bad presets");
+    const createWorkspace = vi.spyOn(host, "createWorkspace");
+    const args = { title: "worker", cwd: "wt", task: "work" };
+    await expect(call(lead, "start_session", { ...args, preset: "scout" })).rejects.toThrow(
+      'Unknown preset "scout"; one of: "Offline"',
+    );
+    await expect(call(lead, "start_session", { ...args, preset: "Scout" })).rejects.toThrow(
+      'Ambiguous preset "Scout"',
+    );
+    await expect(call(lead, "start_session", { ...args, preset: "Offline" })).rejects.toThrow(
+      "Unknown model mock/offline",
+    );
+    expect(createWorkspace).not.toHaveBeenCalled();
+    const tool = session(lead).panelTools!.tools.find((t) => t.name === "start_session")!;
+    expect(tool.description).toContain('Presets: "Offline".');
+    expect(tool.description).not.toContain('"Scout"');
+  });
+
+  it("chooses least-used matching identities despite interleaved unmatched workers", async () => {
+    const { host, create, call, workers } = setup();
+    const model = "gpt-6-astra";
+    const first = { name: "One", avatar: "1", color: "red" };
+    const second = { name: "Two", avatar: "2", color: "blue" };
+    const generic = { name: "Generic", avatar: "G", color: "green" };
+    host.agentPresets = () => [
+      { ...first, model },
+      { ...second, model },
+    ];
+    const { lead } = create("interleaved");
+    const start = async (model: string) => {
+      await call(lead, "start_session", { title: "worker", cwd: "wt", task: "work", model });
+      return workers().at(-1)!.resolveAgent()!.info;
+    };
+
+    expect(await start(model)).toMatchObject(first);
+    expect(await start("gpt-5.5")).toMatchObject({ ...AGENT_PRESETS[0], model: "gpt-5.5" });
+    expect(await start(model)).toMatchObject(second);
+    const bound = host.agentPresets();
+    host.agentPresets = () => [...bound, generic];
+    expect(await start("gpt-5.5")).toMatchObject({ ...generic, model: "gpt-5.5" });
+    expect(await start(model)).toMatchObject(first);
+  });
+
   it("creates a lead on Opus with the lead's tools", () => {
     const { create, session } = setup();
     const { lead, project } = create("clice");
@@ -364,6 +492,23 @@ describe("ProjectManager", () => {
       sessions: [worker.id],
       tasks: [{ id: "t1", state: "doing", session: worker.id }],
     });
+  });
+
+  it("validates Pi worker presets and project defaults when levels are known", async () => {
+    const { host, create, call, session, workers } = setup();
+    host.modelOptions = () => [
+      { id: "mock/known", backend: "pi", label: "Known", effortLevels: ["low"] },
+      { id: "mock/unknown", backend: "pi", label: "Unknown" },
+    ];
+    host.projectDefaults = () => ({ model: "mock/known", effort: "xhigh" });
+    const { lead } = create("pi");
+    expect(session(lead).getState().config.effort).toBeUndefined();
+    const args = { title: "Worker", cwd: "wt", task: "task", effort: "xhigh" };
+    await expect(call(lead, "start_session", args)).rejects.toThrow(
+      "mock/known has no effort xhigh",
+    );
+    await call(lead, "start_session", { ...args, model: "mock/unknown" });
+    expect(session(workers()[0]).getState().config.effort).toBe("xhigh");
   });
 
   it("starts a worker at the effort asked for, one its model has", async () => {
@@ -410,7 +555,7 @@ describe("ProjectManager", () => {
   });
 
   it("runs leads and unnamed workers on the configured model and effort, if a lead may run on it", async () => {
-    const { manager, root, workspaces, call, host, session } = setup();
+    const { manager, root, workspaces, call, host, session, workers } = setup();
     fs.mkdirSync(path.join(root, "wt"), { recursive: true });
     host.projectDefaults = () => ({ model: "gpt-5.6-sol", effort: "high" });
     const project = manager.create("clice", root);
@@ -423,9 +568,14 @@ describe("ProjectManager", () => {
     const tool = start.panelTools.tools.find((t) => t.name === "start_session")!;
     expect(tool.description).toContain("Models: gpt-5.6-sol, gpt-6-astra");
     await call(lead, "start_session", { title: "w", cwd: "wt", task: "t" });
-    const worker = [...workspaces.values()].find((w) => w.projectLink?.role === "worker")!;
-    expect([...worker.agents.values()][0].info.model).toBe("gpt-5.6-sol");
-    expect(session(worker).getState().config.effort).toBe("high");
+    expect(workers()[0].resolveAgent()!.info.model).toBe("gpt-5.6-sol");
+    expect(session(workers()[0]).getState().config.effort).toBe("high");
+
+    const args = { title: "named", cwd: "wt", task: "t", preset: AGENT_PRESETS[0].name };
+    await call(lead, "start_session", args);
+    expect(session(workers().at(-1)!).getState().config.effort).toBe("high");
+    await call(lead, "start_session", { ...args, model: "gpt-5.6-sol" });
+    expect(session(workers().at(-1)!).getState().config.effort).toBeUndefined();
 
     // A model no lead runs on, or an effort its model lacks, is not taken.
     host.projectDefaults = () => ({ model: "gpt-5", effort: "high" });
@@ -435,8 +585,7 @@ describe("ProjectManager", () => {
     expect([...next.agents.values()][0].info.model).toBe("gpt-6-astra");
     host.projectDefaults = () => ({ model: "gpt-5.5", effort: "max" });
     await call(lead, "start_session", { title: "w2", cwd: "wt", task: "t" });
-    const second = [...workspaces.values()].filter((w) => w.projectLink?.role === "worker")[1];
-    expect(session(second).getState().config.effort).toBeUndefined();
+    expect(session(workers().at(-1)!).getState().config.effort).toBeUndefined();
   });
 
   it("takes a Codex model for the lead and its workers, not an unknown one", async () => {

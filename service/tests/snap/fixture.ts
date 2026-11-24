@@ -62,6 +62,7 @@ export interface PiCheckpoint {
   userStatuses: string[];
   prompts: string[];
   terminalCount: number;
+  retryBanner: string | null;
   thinkingClosed: boolean;
   pendingDialogIds: string[];
   contextUsage: Record<string, unknown> | null;

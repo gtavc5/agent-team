@@ -1,3 +1,9 @@
+import { emptyUi, receiveUi, withoutOwner, type LiveNotice } from "./extensionUi";
+import {
+  sameAgent,
+  type ExtensionUiEvent,
+  type ExtensionUiSnapshot,
+} from "../../../shared/extension-ui";
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   MOCK_WORKSPACES,
@@ -368,7 +374,11 @@ export interface SystemStatus {
   hostname: string;
 }
 
+export const DEFAULT_USER = { name: "You", avatar: "avatars/ykiko.jpg" };
+
 export interface AgentPreset {
+  model?: string;
+  effort?: string;
   name: string;
   avatar: string;
   color: string;
@@ -451,6 +461,7 @@ export function useServer() {
   // By project; a project with no issues has no entry.
   const [issues, setIssues] = useState<Record<string, IssueModules>>({});
   const [connected, setConnected] = useState(false);
+  const [user, setUser] = useState(DEFAULT_USER);
   const [presets, setPresets] = useState<AgentPreset[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [globalCommands, setGlobalCommands] = useState<CommandInfo[]>([]);
@@ -459,6 +470,24 @@ export function useServer() {
     workspaceId: string;
     agentId: string;
   } | null>(null);
+  const [extensionUi, setExtensionUi] = useState(emptyUi);
+  const nextExpiry = extensionUi.notices[0]?.expiresAt;
+  useEffect(() => {
+    if (nextExpiry === undefined) return;
+    const timer = setTimeout(
+      () => {
+        const now = Date.now();
+        setExtensionUi((prev) => ({
+          ...prev,
+          notices: prev.notices.filter((n) => n.expiresAt > now),
+        }));
+      },
+      Math.max(0, nextExpiry - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [nextExpiry]);
+  const dismissNotice = (notice: LiveNotice) =>
+    setExtensionUi((prev) => ({ ...prev, notices: prev.notices.filter((n) => n !== notice) }));
   const [pendingDialogs, setPendingDialogs] = useState<UiDialogRequest[]>([]);
   const [hosts, setHosts] = useState<HostInfo[]>([]);
   const [hostConfigs, setHostConfigs] = useState<Record<string, HostConfig>>({});
@@ -566,17 +595,23 @@ export function useServer() {
             });
           });
           const config = msg.config as {
-            presets: AgentPreset[];
+            presets?: AgentPreset[];
+            user?: typeof DEFAULT_USER;
             models: ModelOption[];
             commands?: CommandInfo[];
             hosts: Record<string, HostConfig>;
           };
-          setPresets(config.presets);
+          setUser(config.user ?? DEFAULT_USER);
+          setPresets(config.presets ?? []);
           setModels(config.models);
           const cfgExtra = config as unknown as { archiveAfterDays?: number };
           setArchiveAfterDays(cfgExtra.archiveAfterDays ?? 0);
           setGlobalCommands((msg.commands as CommandInfo[] | undefined) ?? config.commands ?? []);
           setCommandsByAgent((msg.commandsByAgent as CommandsByAgent | undefined) ?? {});
+          setExtensionUi({
+            agents: (msg.extensionUi as ExtensionUiSnapshot[] | undefined) ?? [],
+            notices: [],
+          });
           setPendingDialogs((msg.pendingDialogs as UiDialogRequest[] | undefined) ?? []);
           if (config.hosts) setHostConfigs(config.hosts);
           if (msg.hosts) setHosts(msg.hosts as HostInfo[]);
@@ -658,10 +693,21 @@ export function useServer() {
           break;
         }
 
+        case "identities_update":
+          setUser(msg.user as typeof DEFAULT_USER);
+          setPresets(msg.presets as AgentPreset[]);
+          break;
+
         case "models_update":
           setModels(msg.models as ModelOption[]);
           break;
 
+        case "extension_ui": {
+          const event = msg.event as ExtensionUiEvent;
+          const now = Date.now();
+          setExtensionUi((prev) => receiveUi(prev, event, now));
+          break;
+        }
         case "ui_dialog_request": {
           const dialog = msg.dialog as UiDialogRequest;
           setPendingDialogs((prev) =>
@@ -680,6 +726,19 @@ export function useServer() {
 
         case "workspace_messages": {
           const wsId = msg.workspaceId as string;
+          if (Array.isArray(msg.extensionUi)) {
+            const agents = msg.extensionUi as ExtensionUiSnapshot[];
+            setExtensionUi((prev) => ({
+              agents: [...prev.agents.filter((a) => a.workspaceId !== wsId), ...agents],
+              notices: prev.notices.filter(
+                (n) =>
+                  n.workspaceId !== wsId ||
+                  agents.some(
+                    (a) => sameAgent(n, a) && n.processGeneration === a.processGeneration,
+                  ),
+              ),
+            }));
+          }
           if (Array.isArray(msg.pendingDialogs)) {
             const dialogs = msg.pendingDialogs as UiDialogRequest[];
             setPendingDialogs((prev) => [
@@ -751,6 +810,7 @@ export function useServer() {
             delete next[wsId];
             return next;
           });
+          setExtensionUi((prev) => withoutOwner(prev, wsId));
           setPendingDialogs((prev) => prev.filter((d) => d.workspaceId !== wsId));
           break;
         }
@@ -797,6 +857,7 @@ export function useServer() {
             else delete next[wsId];
             return next;
           });
+          setExtensionUi((prev) => withoutOwner(prev, wsId, agentId));
           setPendingDialogs((prev) =>
             prev.filter((d) => d.workspaceId !== wsId || d.agentId !== agentId),
           );
@@ -1190,11 +1251,14 @@ export function useServer() {
     projects,
     issues,
     connected,
+    user,
     presets,
     models,
     commands,
     commandsByAgent,
     globalCommands,
+    extensionUi,
+    dismissNotice,
     pendingDialogs,
     selectCommandAgent: useCallback((workspaceId: string | null, agentId: string | null) => {
       setCommandTarget(workspaceId && agentId ? { workspaceId, agentId } : null);

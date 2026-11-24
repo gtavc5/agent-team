@@ -47,6 +47,7 @@ export type StreamEventKind =
   // permission denials, compact failures, auth prompts.
   | "notice"
   // API retry in progress; replaces the previous retry event of the turn.
+  // Empty content clears it, as do real assistant progress and terminal errors.
   | "retry";
 
 // "schedule": the agent scheduled its own wake-up (what it will do, when).
@@ -213,6 +214,8 @@ export interface BoundedSessionProof {
   anchorExistsInFile: boolean;
 }
 
+export type { ExtensionUiEvent, ExtensionUiSnapshot, UiChange } from "../../../shared/extension-ui";
+
 export type UiDialogMethod = "select" | "confirm" | "input" | "editor";
 
 export interface UiDialogRequest {
@@ -244,6 +247,7 @@ export interface PiAvailableModel {
   modelId: string;
   name?: string;
   reasoning?: boolean;
+  effortLevels?: string[];
   contextWindow?: number;
 }
 

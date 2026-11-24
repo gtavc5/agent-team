@@ -14,7 +14,8 @@ import { splitEvents, timelineBlocks } from "./events";
 import { toolNameOf, toolSummary } from "../state/stream";
 import { copySelectionAsMarkdown } from "./clipboard";
 import { CodeBlock, CopyButton, MdBlock, StreamingMdBlock } from "./markdown";
-import { AgentAvatar, Avatar } from "../workspace/avatar";
+import { DEFAULT_USER } from "../state/useServer";
+import { AgentAvatar, Avatar, isImageAvatar } from "../workspace/avatar";
 import { shortModel, formatTokens, formatDuration, formatRunTime } from "../format";
 
 function renderMentionContent(content: string, agents: AgentInfo[]) {
@@ -326,9 +327,9 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 // A tool body under its row: the row already shows the first line.
-function afterFirstLine(content: string): string {
+function afterFirstLine(content: string, singleLine = content): string {
   const nl = content.indexOf("\n");
-  return nl < 0 ? content : content.slice(nl + 1);
+  return nl < 0 ? singleLine : content.slice(nl + 1);
 }
 
 function resultLabel(len: number): string {
@@ -373,6 +374,14 @@ export const EventItem = memo(function EventItem({
       ? thinkingLabel(ev)
       : (KIND_LABEL[ev.kind] ?? ev.kind);
   const chipClass = chipClassFor(toolName, ev.kind);
+  const [firstLine, nextLine] = isToolUse && !summary ? ev.content.split("\n", 2) : [];
+  const duplicateHeading =
+    firstLine?.trimEnd().toLowerCase() === `**${label.toLowerCase()}**` &&
+    /^(?:| {0,3}(?:`{3,}[^`]*|~{3,}.*))$/.test(nextLine?.trimEnd() ?? "");
+  const body =
+    summary || duplicateHeading
+      ? afterFirstLine(ev.content, duplicateHeading ? "" : ev.content)
+      : ev.content;
   // Multi-line tool calls (Bash commands, edits) always show their body;
   // single-line ones (Read, Grep) get a summary and an optional details toggle.
   const bodyLen = ev.bodyLength ?? ev.content.length;
@@ -452,11 +461,14 @@ export const EventItem = memo(function EventItem({
         )
       ) : (
         <>
-          {!bodyMissing && !toolBodyMissing && (!isToolUse || showBodyByDefault || bodyOpen) && (
-            <div className="event-content">
-              <MdBlock>{summary ? afterFirstLine(ev.content) : ev.content}</MdBlock>
-            </div>
-          )}
+          {!bodyMissing &&
+            !toolBodyMissing &&
+            (!isToolUse || showBodyByDefault || bodyOpen) &&
+            (!duplicateHeading || body) && (
+              <div className="event-content">
+                <MdBlock>{body}</MdBlock>
+              </div>
+            )}
           {hasResult && resultOpen && ev.toolResult != null && (
             <div className="event-content event-result">
               {ev.toolResultIsMarkdown ? (
@@ -915,6 +927,7 @@ function systemAvatar(content: string): [string | null, string] {
 }
 
 export const MessageItem = memo(function MessageItem({
+  user = DEFAULT_USER,
   msg,
   agents,
   compact,
@@ -928,6 +941,7 @@ export const MessageItem = memo(function MessageItem({
 }: {
   msg: Message;
   agents: AgentInfo[];
+  user?: typeof DEFAULT_USER;
   compact?: boolean;
   highlight?: boolean;
   onOpenWorkspace?: (workspaceId: string) => void;
@@ -1093,11 +1107,20 @@ export const MessageItem = memo(function MessageItem({
               <div className="avatar-user avatar-from">{ORIGIN_GLYPH[from.role]}</div>
             ) : isUser ? (
               <div className="avatar-user">
-                <img
-                  src="avatars/ykiko.jpg"
-                  alt="You"
-                  style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }}
-                />
+                {isImageAvatar(user.avatar) ? (
+                  <img
+                    src={user.avatar}
+                    alt={user.name}
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      borderRadius: "50%",
+                      objectFit: "cover",
+                    }}
+                  />
+                ) : (
+                  user.avatar
+                )}
               </div>
             ) : agent ? (
               <AgentAvatar agent={agent} size={32} />
@@ -1119,7 +1142,7 @@ export const MessageItem = memo(function MessageItem({
                         {originLabel(from)}
                       </button>
                     ) : (
-                      <span className="message-author user-author">You</span>
+                      <span className="message-author user-author">{user.name}</span>
                     )}
                     {msg.status === "queued" && (
                       <span

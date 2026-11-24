@@ -59,6 +59,7 @@ export interface StartSessionArgs {
   title: string;
   cwd: string;
   task: string;
+  preset?: string;
   model?: string;
   effort?: string;
   objectiveId?: string;
@@ -229,13 +230,24 @@ const ISSUES =
 const LANGUAGE =
   "Write to the user in 简体中文: replies, questions, summaries. Code, identifiers, commit messages and the files you write stay in English.";
 
+export function selectablePresetNames(names: string[]): string {
+  const counts = new Map<string, number>();
+  for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
+  return [...counts]
+    .filter(([, count]) => count === 1)
+    .map(([name]) => JSON.stringify(name))
+    .join(", ");
+}
+
 export function leadToolset(
   api: PanelApi,
   project: Project,
   notesDir: string,
   models: string[],
+  presetNames: string[] = [],
 ): PanelToolset {
   const id = project.id;
+  const presets = selectablePresetNames(presetNames);
   return {
     instructions: [
       `You are the lead agent of the project "${project.name}" (${project.root ? `repository ${project.root}` : "no Git repository"}).`,
@@ -263,21 +275,23 @@ export function leadToolset(
       ...notesTools(api, id),
       {
         name: "start_session",
-        description: `Start a worker: a session in cwd whose first message is task. ${project.root ? "cwd is the repository or a worktree, reused: one whose sessions are idle or archived (project_status), clean, its branch merged or pushed; archive its idle session, then git -C <worktree> switch -c <branch> origin/main. A new worktree only when all are taken, at most four unless the user wants more." : "Use an existing directory; this project has no Git worktrees."} Models: ${models.join(", ")}.`,
+        description: `Start a worker: a session in cwd whose first message is task. ${project.root ? "cwd is the repository or a worktree, reused: one whose sessions are idle or archived (project_status), clean, its branch merged or pushed; archive its idle session, then git -C <worktree> switch -c <branch> origin/main. A new worktree only when all are taken, at most four unless the user wants more." : "Use an existing directory; this project has no Git worktrees."} Models: ${models.join(", ")}.${presets ? ` Presets: ${presets}.` : ""}`,
         shape: {
           title: z.string(),
           cwd: z.string(),
           task: z.string(),
+          preset: z
+            .string()
+            .optional()
+            .describe("Exact preset name; pins identity and supplies model and effort defaults"),
           model: z
             .string()
             .optional()
-            .describe(
-              `Default ${models[0]}; another where the task suits it better, or the user asks`,
-            ),
+            .describe(`Model override. Default ${models[0]} unless set by the preset`),
           effort: z
             .string()
             .optional()
-            .describe("Reasoning effort, one the model has; default its own, or the user's"),
+            .describe("Reasoning effort override, one the model supports"),
           objective_id: z.string().optional(),
           task_id: z.string().optional().describe("Doing now, review when it finishes"),
           isolated: z
@@ -293,6 +307,7 @@ export function leadToolset(
               title: String(a.title),
               cwd: String(a.cwd),
               task: String(a.task),
+              ...(typeof a.preset === "string" && { preset: a.preset }),
               ...(typeof a.model === "string" && { model: a.model }),
               ...(typeof a.effort === "string" && a.effort && { effort: a.effort }),
               ...(typeof a.objective_id === "string" && { objectiveId: a.objective_id }),

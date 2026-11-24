@@ -52,6 +52,30 @@ type = "local"
 # model = "provider/model"
 # effort = "medium"
 
+# lead_name = "Lead"
+# lead_avatar = "avatars/lead.jpg"
+# lead_color = "#D8A0D8"
+# Without overrides the lead uses the first preset's avatar and color.
+
+# Your name and avatar in chat. Use an emoji, a text label without a slash,
+# or an image path such as avatars/me.png.
+# Files in avatars/ beside config.toml take precedence over bundled avatars.
+# [user]
+# name = "You"
+# avatar = "avatars/ykiko.jpg"
+
+# Repeat to replace the built-in agent presets; omitted or empty uses built-ins.
+# A project worker can use a preset by exact name, with model and effort overrides.
+# Otherwise workers pick the least-used identity matching model and effort,
+# then model alone, then presets without a model, then built-ins.
+# Model and effort are optional defaults in the Add Agent dialog; use an exact picker ID.
+# [[agent_presets]]
+# name = "Scout"
+# avatar = "🔎"
+# color = "#789abc"
+# model = "provider/model"
+# effort = "medium"
+
 # External LLM providers (optional)
 # The provider name must be a prefix of the model ID you want to route.
 # [providers.deepseek]

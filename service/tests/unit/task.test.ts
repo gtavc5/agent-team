@@ -427,6 +427,38 @@ describe("banners, retries and activity", () => {
     expect(events[0].contentOffset).toBe(2);
   });
 
+  it("clears a retry on recovery or failure without waiting for the turn to end", () => {
+    const progress: Array<Partial<StreamEvent>> = [
+      { kind: "text_delta", content: "recovered" },
+      { kind: "thinking_delta", content: "thinking" },
+      { kind: "thinking", content: "thought" },
+      { kind: "tool_use", content: "**Read** `/a`", toolUseId: "read" },
+      subagentStart("recovered-task"),
+    ];
+    for (const event of progress) {
+      const { emit, agentMsgs, session } = makeWorkspace();
+      session.isRunning = true;
+      emit({ kind: "retry", content: "Retrying" });
+      emit(event);
+      expect(
+        agentMsgs()[0].events?.some((e) => e.kind === "retry"),
+        event.kind,
+      ).toBe(false);
+    }
+
+    const explicit = makeWorkspace();
+    explicit.session.isRunning = true;
+    explicit.emit({ kind: "retry", content: "Retrying" });
+    explicit.emit({ kind: "retry", content: "" });
+    expect(explicit.agentMsgs()[0].events).toEqual([]);
+
+    const failed = makeWorkspace();
+    failed.session.isRunning = true;
+    failed.emit({ kind: "retry", content: "Retrying" });
+    failed.emit({ kind: "error", content: "final failure" });
+    expect(failed.agentMsgs()[0].events?.map((e) => e.kind)).toEqual(["error"]);
+  });
+
   it("forwards session activity to the callback and exposes it on getInfo", () => {
     const host = new FakeHost();
     const registry = new HostRegistry();
@@ -866,6 +898,7 @@ describe("events between turns and late results", () => {
     await ws.sendMessage("go");
     emit({ kind: "retry", content: "API retry 1/10 in 1s" });
     emit({ kind: "text_delta", content: "answer" });
+    expect(agentMsgs()[0].events!.some((e) => e.kind === "retry")).toBe(false);
     emit({ kind: "result", content: "" });
     expect(agentMsgs()[0].events!.some((e) => e.kind === "retry")).toBe(false);
     await ws.sendMessage("again");

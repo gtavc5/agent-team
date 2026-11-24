@@ -30,6 +30,7 @@ import {
   CreateWorkspaceDialog,
   ConfirmDialog,
 } from "./workspace/dialogs";
+import { ExtensionUi } from "./workspace/ExtensionUi";
 import { UiDialogModal, uiDialogKey } from "./workspace/UiDialogModal";
 import { Sidebar } from "./sidebar/Sidebar";
 import { GitBar } from "./workspace/GitBar";
@@ -138,9 +139,12 @@ export function App() {
     projects,
     issues,
     connected,
+    user,
     presets,
     models,
     commands,
+    extensionUi,
+    dismissNotice,
     pendingDialogs,
     selectCommandAgent,
     respondUiDialog,
@@ -1549,6 +1553,7 @@ export function App() {
                             msg.turnId === prev.turnId;
                           const item = (
                             <MessageItem
+                              user={user}
                               msg={msg}
                               agents={msg.status === "streaming" ? activeWs.agents : settledAgents}
                               compact={compact}
@@ -1663,6 +1668,12 @@ export function App() {
                     ))}
                   </div>
                 )}
+                <ExtensionUi
+                  workspace={activeWs}
+                  ui={extensionUi}
+                  placement="aboveEditor"
+                  dismiss={dismissNotice}
+                />
                 <div className="input-row">
                   <input
                     ref={fileInputRef}
@@ -1768,6 +1779,12 @@ export function App() {
                     </span>
                   </button>
                 </div>
+                <ExtensionUi
+                  workspace={activeWs}
+                  ui={extensionUi}
+                  placement="belowEditor"
+                  dismiss={dismissNotice}
+                />
               </div>
             </>
           ) : (

@@ -8,9 +8,13 @@ import { PassThrough, Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PanelHttpServer, type PanelReadyReport } from "../../src/session/panel-http";
 import { PiRpcClient, type PiRpcSpawnOptions } from "../../src/session/pi-rpc";
+import { HostRegistry, LocalHost } from "../../src/session/host";
+import { Workspace, type WorkspaceCallbacks } from "../../src/workspace/workspace";
+import { closeHistory, loadAll, saveIndex, saveWorkspace } from "../../src/workspace/state";
 import { PiSession, type PiSessionOptions } from "../../src/session/pi";
 import type {
   ActiveAsyncRunRecord,
+  ExtensionUiEvent,
   SessionConfig,
   SessionState,
   StreamEvent,
@@ -54,7 +58,12 @@ function harness(
     state?: (config: SessionConfig) => SessionState;
     disposition?: string;
     enabledModels?: string[];
-    models?: Array<{ provider: string; id: string }>;
+    models?: Array<{
+      provider: string;
+      id: string;
+      reasoning?: boolean;
+      thinkingLevelMap?: Partial<Record<string, string | null>>;
+    }>;
   } = {},
 ) {
   const dir = temp();
@@ -155,6 +164,8 @@ function harness(
           case "get_commands":
             respond(frame, { commands: [{ name: "skill:test", source: "skill" }] });
             break;
+          case "compact":
+            break;
           case "prompt":
             order.push("write");
             respond(frame, { disposition }, disposition !== "rejected");
@@ -229,6 +240,202 @@ function confirmed(cfg: SessionConfig): SessionState {
 }
 
 describe("PiSession dispatch and stream state", () => {
+  it.each(["/compact", "/compact Keep\ndecisions"])(
+    "runs %s as a standalone command and checkpoints the new leaf",
+    async (command) => {
+      const h = harness({ state: confirmed });
+      vi.spyOn(h.panel, "isControlConnected").mockReturnValue(true);
+      vi.spyOn(h.panel, "requestSessionCheckpoint").mockResolvedValue({
+        sessionId: "saved",
+        sessionFile: h.state!.sessionFile!,
+        leafId: "compaction",
+        entryCount: 5,
+      });
+      await h.session.ensureStarted();
+      const c = h.clients[0];
+      const pending = h.session.send(command);
+      await vi.waitFor(() => expect(c.wire.at(-1)?.type).toBe("compact"));
+      const frame = c.wire.at(-1)!;
+      expect(frame.customInstructions).toBe(command === "/compact" ? undefined : "Keep\ndecisions");
+      await expect(h.session.send("next")).rejects.toThrow(/busy/);
+      c.event({ type: "compaction_start", reason: "manual" });
+      const result = { summary: "Summary", firstKeptEntryId: "kept", tokensBefore: 1234 };
+      c.event({
+        type: "compaction_end",
+        reason: "manual",
+        result,
+        aborted: false,
+        willRetry: false,
+      });
+      c.respond(frame, result);
+      await expect(pending).resolves.toEqual({ disposition: "handled" });
+      expect(h.session.getState()).toMatchObject({
+        expectedLeafAnchorId: "compaction",
+        minEntryCount: 5,
+      });
+      expect(h.done).toHaveBeenCalledTimes(1);
+      expect(h.events.map((e) => e.content)).toContain("Context compacted (manual): 1234 tokens");
+      expect(h.session.isRunning).toBe(false);
+    },
+  );
+
+  it("refuses compact with attachments before dispatch", async () => {
+    const h = harness();
+    fs.writeFileSync(path.join(h.dir, "a.png"), Buffer.from("89504e470d0a1a0a", "hex"));
+    const before = vi.fn();
+    await expect(
+      h.session.send(
+        { inputId: "img", text: "/compact", attachmentIds: ["a.png"] },
+        { onBeforeWrite: before },
+      ),
+    ).rejects.toThrow(/attachments/);
+    expect(before).not.toHaveBeenCalled();
+    expect(h.factory).not.toHaveBeenCalled();
+  });
+
+  it("settles an interrupted workspace command even when the compact RPC rejects after its end event", async () => {
+    const h = harness();
+    const { ws } = workspaceFor(h, {});
+    const agent = ws.addAgent("Pi", "mock/test", "", "", { backend: "pi" });
+    const pending = ws.sendMessage("/compact", agent.id);
+    await vi.waitFor(() => expect(h.clients[0]?.wire.at(-1)?.type).toBe("compact"));
+    const c = h.clients[0];
+    const frame = c.wire.at(-1)!;
+    c.event({ type: "compaction_start", reason: "manual" });
+    const stop = h.session.interrupt();
+    await vi.waitFor(() => expect(c.wire.at(-1)?.type).toBe("abort"));
+    c.event({ type: "compaction_end", reason: "manual", aborted: true, willRetry: false });
+    c.respond(frame, undefined, false);
+    expect(await stop).toBe(true);
+    await pending;
+    expect(h.done).toHaveBeenCalledTimes(1);
+    expect(
+      ws
+        .getMessages()
+        .filter((m) => m.kind !== "system")
+        .map((m) => m.status),
+    ).toEqual(["done", "done"]);
+    expect(
+      ws
+        .getMessages()
+        .at(-1)
+        ?.events?.map((e) => e.content),
+    ).toContain("Compaction aborted (manual)");
+  });
+
+  it("replays the failed empty-session compact from Pi 1.6.0 without leaving a running turn", async () => {
+    const h = harness();
+    await h.session.ensureStarted();
+    const c = h.clients[0];
+    const pending = h.session.send("/compact");
+    await vi.waitFor(() => expect(c.wire.at(-1)?.type).toBe("compact"));
+    for (const line of fs
+      .readFileSync(path.join(__dirname, "fixtures/pi-compact-empty.jsonl"), "utf8")
+      .trim()
+      .split("\n")) {
+      const frame = JSON.parse(line) as Frame;
+      c.event(frame.id ? { ...frame, id: c.wire.at(-1)!.id } : frame);
+    }
+    await expect(pending).resolves.toEqual({ disposition: "handled" });
+    expect(h.events.filter((e) => e.kind === "error")).toEqual([
+      { kind: "error", content: "Compaction failed: Nothing to compact (session too small)" },
+    ]);
+    expect(h.session.isRunning).toBe(false);
+  });
+
+  it("uses the post-compaction leaf for the next dispatch even when its checkpoint arrives late", async () => {
+    const h = harness({ state: confirmed });
+    await h.session.send("first");
+    const c = h.clients[0];
+    let release!: () => void;
+    const checkpoint = new Promise<void>((resolve) => {
+      release = resolve;
+    }).then(() => ({
+      sessionId: "saved",
+      sessionFile: h.state!.sessionFile!,
+      entryCount: 8,
+      leafId: "compaction",
+    }));
+    vi.spyOn(h.panel, "isControlConnected").mockReturnValue(true);
+    vi.spyOn(h.panel, "requestSessionCheckpoint").mockReturnValue(checkpoint);
+    for (const line of fs
+      .readFileSync(path.join(__dirname, "fixtures/pi-compact-overflow.jsonl"), "utf8")
+      .trim()
+      .split("\n")) {
+      c.event(JSON.parse(line) as Frame);
+    }
+    expect(h.events.map((e) => e.content)).toContain(
+      "Context compacted (overflow): 5002 → ~2209 tokens",
+    );
+    expect(h.done).toHaveBeenCalledTimes(1);
+    const hook = vi.fn();
+    const next = h.session.send("next", { onBeforeWrite: hook });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(hook).not.toHaveBeenCalled();
+    release();
+    await next;
+    expect(hook).toHaveBeenCalledWith(
+      expect.objectContaining({ beforeLeafId: "compaction", beforeEntryCount: 8 }),
+    );
+  });
+
+  it("does not write past an unverified compaction until the checkpoint succeeds", async () => {
+    const h = harness({ state: confirmed });
+    await h.session.ensureStarted();
+    vi.spyOn(h.panel, "isControlConnected").mockReturnValue(true);
+    const checkpoint = vi
+      .spyOn(h.panel, "requestSessionCheckpoint")
+      .mockRejectedValue(new Error("control unavailable"));
+    h.clients[0].event({
+      type: "compaction_end",
+      reason: "manual",
+      result: { tokensBefore: 500 },
+      aborted: false,
+      willRetry: false,
+    });
+    const hook = vi.fn();
+    await expect(h.session.send("next", { onBeforeWrite: hook })).resolves.toMatchObject({
+      disposition: "rejected",
+      retryable: true,
+    });
+    expect(hook).not.toHaveBeenCalled();
+    checkpoint.mockResolvedValue({
+      sessionId: "saved",
+      sessionFile: h.state!.sessionFile!,
+      entryCount: 7,
+      leafId: "compacted",
+    });
+    await expect(h.session.send("next", { onBeforeWrite: hook })).resolves.toEqual({
+      disposition: "started",
+    });
+    expect(hook).toHaveBeenCalledWith(expect.objectContaining({ beforeLeafId: "compacted" }));
+  });
+
+  it("surfaces out-of-turn compactions without creating an agent turn", async () => {
+    const h = harness();
+    await h.session.ensureStarted();
+    const c = h.clients[0];
+    c.event({ type: "compaction_start", reason: "threshold" });
+    await expect(h.session.send("/compact")).resolves.toMatchObject({
+      disposition: "rejected",
+      retryable: true,
+    });
+    c.event({ type: "compaction_end", reason: "threshold", aborted: true, willRetry: false });
+    c.event({
+      type: "compaction_end",
+      reason: "overflow",
+      errorMessage: "Overflow recovery failed",
+      aborted: false,
+      willRetry: false,
+    });
+    expect(h.events.map((e) => e.content)).toEqual([
+      "Compacting context (threshold)",
+      "Compaction aborted (threshold)",
+      "Overflow recovery failed",
+    ]);
+    expect(h.done).not.toHaveBeenCalled();
+    expect(h.session.isRunning).toBe(false);
+  });
   it.each([["mock/model-*"], ["*"]])(
     "filters RPC models by enabledModels %j without conflating thinking levels",
     async (enabledModels) => {
@@ -244,6 +451,106 @@ describe("PiSession dispatch and stream state", () => {
         enabledModels === "*" ? ["mock/model-x", "other/nested/name"] : ["mock/model-x"],
       );
       expect(h.session.getAvailableThinkingLevels()).toEqual(["low", "high"]);
+    },
+  );
+
+  it("discovers levels from each model's metadata, not the catalog session level list", async () => {
+    const models = [
+      { id: "plain", reasoning: false },
+      { id: "basic", reasoning: true },
+      { id: "restricted", reasoning: true, thinkingLevelMap: { off: null, minimal: null } },
+      {
+        id: "extended",
+        reasoning: true,
+        thinkingLevelMap: { off: null, xhigh: "extra", max: "max" },
+      },
+    ];
+    const h = harness({ models: models.map((model) => ({ ...model, provider: "mock" })) });
+    await h.session.ensureStarted();
+    expect(h.session.getAvailableModels().map((m) => m.effortLevels)).toEqual([
+      ["off"],
+      ["off", "minimal", "low", "medium", "high"],
+      ["low", "medium", "high"],
+      ["minimal", "low", "medium", "high", "xhigh", "max"],
+    ]);
+  });
+
+  function workspaceFor(h: ReturnType<typeof harness>, callbacks: Partial<WorkspaceCallbacks>) {
+    const registry = new HostRegistry();
+    const host = new LocalHost("local", "Local");
+    vi.spyOn(host, "createSession").mockReturnValue(h.session);
+    registry.register(host);
+    const ws = new Workspace("ws", "test", "project", "local", h.dir, registry, {
+      onNewMessage: () => {},
+      onStreamEvent: () => {},
+      onMessageDone: () => {},
+      ...callbacks,
+    });
+    return { ws, registry };
+  }
+
+  it("discards the old preset before starting the first turn on the new model", async () => {
+    const h = harness({ config: { model: "mock/extended" } });
+    const { ws } = workspaceFor(h, {
+      modelOptions: () => [
+        { id: "mock/extended", label: "Extended", backend: "pi", effortLevels: ["high", "xhigh"] },
+        { id: "mock/test", label: "Test", backend: "pi", effortLevels: ["low", "high"] },
+      ],
+    });
+    const a = ws.addAgent("Pi", "mock/extended", "", "", { backend: "pi" });
+    expect(ws.getInfo().agents[0].effortLevels).toEqual(["high", "xhigh"]);
+    await ws.sendMessage("/effort", a.id);
+    expect(ws.getMessages().at(-1)?.content).toContain("Available: `high` · `xhigh`");
+    await ws.sendMessage("/effort xhigh", a.id);
+    expect(ws.getInfo().agents[0].effort).toBe("xhigh");
+    await ws.sendMessage("/model mock/test", a.id);
+    expect(ws.getInfo().agents[0].effortLevels).toEqual(["low", "high"]);
+    expect(h.factory).not.toHaveBeenCalled();
+    expect(h.session.getState().config.effort).toBeUndefined();
+    const levels = vi.fn();
+    h.session.on("thinking_levels", levels);
+    await h.session.send("hello");
+    expect(levels).toHaveBeenCalledTimes(1);
+    expect(h.session.getAvailableThinkingLevels("mock/extended")).toBeUndefined();
+    expect(h.clients[0].wire.filter((f) => f.type === "set_thinking_level")).toEqual([]);
+    expect(h.events.filter((e) => e.level === "warning")).toEqual([]);
+  });
+
+  it.each(["startup", "idle"])(
+    "publishes and persists a rejected %s preset without a turn",
+    async (when) => {
+      const effort = when === "startup" ? "max" : undefined;
+      const h = harness({ config: { model: "mock/test", effort } });
+      const persisted = vi.fn();
+      const { ws, registry } = workspaceFor(h, {
+        onAgentUpdated: (_id, agent, transient) => {
+          if (transient) return;
+          persisted(agent.effort);
+          saveWorkspace(h.dir, ws.getState());
+        },
+      });
+      cleanup.push(() => closeHistory(h.dir));
+      ws.addAgent("Pi", "mock/test", "", "", { backend: "pi", effort });
+      saveIndex(h.dir, [ws.id]);
+      saveWorkspace(h.dir, ws.getState());
+      await h.session.ensureStarted();
+      if (when === "idle") {
+        expect(persisted).not.toHaveBeenCalled();
+        h.session.setEffort("max");
+      }
+      await vi.waitFor(() => expect(persisted).toHaveBeenCalledExactlyOnceWith(null));
+      const restored = Workspace.fromState(loadAll(h.dir)[0], registry);
+      cleanup.push(() => restored.dispose());
+      expect(restored.getInfo().agents[0].effort).toBeNull();
+      expect(h.events).toContainEqual(
+        expect.objectContaining({
+          level: "warning",
+          content: "mock/test has no effort max; using low.",
+        }),
+      );
+      expect(h.session.getState().config.effort).toBeUndefined();
+      expect(h.session.effectiveEffort).toBe("low");
+      expect(h.clients[0].wire.filter((f) => f.type === "set_thinking_level")).toEqual([]);
     },
   );
 
@@ -322,6 +629,60 @@ describe("PiSession dispatch and stream state", () => {
     expect(h.events.at(-1)).toMatchObject({ kind: "notice", level: "wakeup" });
     event({ type: "agent_settled" });
     expect(h.done).toHaveBeenCalledTimes(2);
+  });
+
+  it("formats Pi retry metadata and clears the banner on recovery", async () => {
+    const h = harness();
+    await h.session.send("work");
+    const { event } = h.clients[0];
+    event({
+      type: "auto_retry_start",
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 2000,
+      errorMessage: "529 overloaded",
+    });
+    event({ type: "auto_retry_end", success: true, attempt: 2 });
+    expect(h.events).toEqual([
+      { kind: "retry", content: "Retrying (1/3 in 2s): 529 overloaded" },
+      { kind: "retry", content: "" },
+    ]);
+    expect(h.done).not.toHaveBeenCalled();
+  });
+
+  it("clears a finally failed retry and emits its final error once", async () => {
+    const h = harness();
+    await h.session.send("work");
+    const { event } = h.clients[0];
+    event({
+      type: "auto_retry_start",
+      attempt: 3,
+      maxAttempts: 3,
+      delayMs: 4000,
+      errorMessage: "529 overloaded",
+    });
+    event({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "previous attempt",
+      },
+    });
+    event({
+      type: "auto_retry_end",
+      success: false,
+      attempt: 3,
+      finalError: "final failure",
+    });
+    event({ type: "agent_settled" });
+    expect(h.events).toEqual([
+      { kind: "retry", content: "Retrying (3/3 in 4s): 529 overloaded" },
+      { kind: "retry", content: "" },
+      { kind: "error", content: "final failure" },
+    ]);
+    expect(h.done).toHaveBeenCalledTimes(1);
   });
 
   it("starts a top-level session with no Panel tools even from a nested Pi shell", async () => {
@@ -466,6 +827,107 @@ describe("PiSession dispatch and stream state", () => {
     expect(await session.getContextUsage()).toBeNull();
     expect(await session.getUsageInfo()).toMatchObject({ cost: 3, tokens: { output: 7 } });
   });
+
+  it("decodes real Pi 1.6 session_start extension UI frames without opening or answering a dialog", async () => {
+    const { session, clients } = harness();
+    await session.send("extension UI");
+    const events = vi.fn<(e: ExtensionUiEvent) => void>(),
+      unhandled = vi.fn<(e: Frame) => void>();
+    session.on("extension_ui", events);
+    session.on("unhandled", unhandled);
+    const frames = fs
+      .readFileSync(path.join(__dirname, "fixtures/pi-1.6-extension-ui.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Frame);
+    for (const frame of frames) clients[0].event(frame);
+    expect(events.mock.calls.map(([event]) => event.change)).toEqual([
+      { kind: "notify", level: "info", message: "hello", id: frames[0].id },
+      { kind: "notify", level: "warning", message: "warning", id: frames[1].id },
+      { kind: "status", key: "progress", text: "ready" },
+      {
+        kind: "widget",
+        key: "panel",
+        placement: "aboveEditor",
+        lines: ["<b>not HTML</b>", "line two"],
+      },
+      { kind: "widget", key: "panel", placement: "belowEditor", lines: ["moved"] },
+      { kind: "status", key: "progress" },
+      { kind: "widget", key: "panel", placement: "aboveEditor" },
+    ]);
+    expect(events.mock.calls[0][0]).toMatchObject({
+      workspaceId: "workspace",
+      agentId: "agent",
+      processGeneration: 0,
+    });
+    expect(unhandled.mock.calls.map(([frame]) => frame.method)).toEqual([
+      "setTitle",
+      "set_editor_text",
+    ]);
+    expect(session.pendingUiDialogs).toEqual([]);
+    expect(clients[0].wire.some((frame) => frame.type === "extension_ui_response")).toBe(false);
+  });
+
+  it.each(["reset", "exit", "dispose"])(
+    "bounds live state and releases the retired generation on %s",
+    async (end) => {
+      const h = harness();
+      const unhandled = vi.fn();
+      const { ws } = workspaceFor(h, { onUnhandled: unhandled });
+      const agent = ws.addAgent("Pi", "mock/test", "", "", { backend: "pi" });
+      await h.session.ensureStarted();
+      const c = h.clients[0];
+      const send = (method: string, fields: object) =>
+        c.event({ type: "extension_ui_request", method, id: "ui", ...fields });
+      for (let i = 0; i < 25; i++) {
+        send("setStatus", { statusKey: `s${i}`, statusText: "x".repeat(255) + "🐈" });
+        send("setWidget", {
+          widgetKey: `w${i}`,
+          widgetLines: Array<string>(20).fill("x".repeat(300)),
+        });
+      }
+      send("setStatus", { statusKey: "s20", statusText: "" }); // Pi clears only on undefined.
+      const [snapshot] = ws.getExtensionUi();
+      expect(snapshot).toMatchObject({
+        workspaceId: ws.id,
+        agentId: agent.id,
+        processGeneration: 0,
+      });
+      expect(snapshot.statuses).toHaveLength(16);
+      expect(snapshot.statuses[0]).toEqual({ key: "s9", text: "x".repeat(255) });
+      expect(snapshot.statuses.at(-1)).toEqual({ key: "s20", text: "" });
+      expect(snapshot.widgets).toHaveLength(8);
+      expect(snapshot.widgets[0]).toMatchObject({
+        key: "w17",
+        lines: Array<string>(12).fill("x".repeat(256)),
+      });
+      for (const [method, fields] of [
+        ["futureMethod", {}],
+        ["setStatus", { statusKey: "x".repeat(129) }],
+        ["setStatus", { statusKey: "s20", statusText: null }],
+        ["setWidget", { widgetKey: "w17", widgetLines: 42 }],
+        ["setWidget", { widgetKey: "w17", widgetLines: [42] }],
+        ["notify", { message: 42 }],
+        ["select", { id: null }],
+      ] as const)
+        send(method, fields);
+      expect(ws.getExtensionUi()).toEqual([snapshot]);
+      expect(unhandled).toHaveBeenCalledTimes(7);
+      send("setWidget", { widgetKey: "w17", widgetLines: [42, "valid"] });
+      expect(ws.getExtensionUi()[0].widgets.at(-1)?.lines).toEqual(["valid"]);
+      expect(unhandled).toHaveBeenCalledTimes(8);
+      expect(c.wire.some((frame) => frame.type === "extension_ui_response")).toBe(false);
+      if (end === "reset") h.session.resetContext();
+      else if (end === "exit") c.rpc.emit("exit", 1, null);
+      else await h.session.dispose();
+      send("setStatus", { statusKey: "late", statusText: "obsolete" });
+      expect(ws.getExtensionUi()).toEqual([
+        { workspaceId: ws.id, agentId: agent.id, processGeneration: 1, statuses: [], widgets: [] },
+      ]);
+      ws.removeAgent(agent.id);
+      expect(ws.getExtensionUi()).toEqual([]);
+    },
+  );
 
   it("services the RPC stream during dialogs, consumes valid answers once, and cancels on timeout and interrupt", async () => {
     const { session, clients } = harness({ options: { dialogFallbackTimeoutMs: 25 } });

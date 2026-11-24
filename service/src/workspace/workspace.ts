@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { applyExtensionUi } from "../../../shared/extension-ui";
 import { validatePiAttachments } from "../session/pi";
 import {
   SessionConfig,
@@ -13,6 +14,8 @@ import {
   MessageStatus,
   PromptEnvelope,
   DispatchAttempt,
+  ExtensionUiEvent,
+  ExtensionUiSnapshot,
   UiDialogRequest,
   UiDialogResponse,
 } from "../session/types";
@@ -20,6 +23,7 @@ import type { GitInfo, PrInfo } from "../repo/git";
 import { HostSessionHandle, HostRegistry } from "../session/host";
 import {
   MODEL_OPTIONS,
+  type ModelOption,
   backendForModel,
   defaultEffortForModel,
   effortLevelsForModel,
@@ -193,6 +197,7 @@ export interface WorkspaceState {
 type CommandOutcome = string | { forward: string } | null;
 
 export interface AgentEntry {
+  extensionUi?: ExtensionUiSnapshot;
   info: AgentInfo;
   session: HostSessionHandle;
   handler: (event: StreamEvent) => void;
@@ -249,6 +254,7 @@ export interface WorkspaceCallbacks {
     state: "dispatching" | "sent_to_pi" | "outcome_unknown" | "error" | "settled",
     meta?: { errorMessage?: string; acceptedByPiAt?: number; settledAt?: number },
   ) => void;
+  onExtensionUi?: (event: ExtensionUiEvent) => void;
   onUiDialogRequest?: (dialog: UiDialogRequest) => void;
   onUiDialogResolved?: (
     dialog: Pick<UiDialogRequest, "workspaceId" | "agentId" | "processGeneration" | "requestId">,
@@ -273,6 +279,7 @@ export interface WorkspaceCallbacks {
   // An SDK message the session did not know how to render; logged so a
   // missing rendering is diagnosable instead of silent.
   onUnhandled?: (wsId: string, agentId: string, msg: unknown) => void;
+  modelOptions?(): ModelOption[];
   // Provider settings a model runs with.
   sessionEnv?: (model: string, account?: string) => Record<string, string> | undefined;
 }
@@ -292,6 +299,20 @@ export function normalizeEvents(events: StreamEvent[]): void {
     }
     if (sa.events) normalizeEvents(sa.events);
   }
+}
+
+const RETRY_PROGRESS_KINDS = new Set([
+  "text_delta",
+  "thinking_delta",
+  "thinking",
+  "tool_use",
+  "subagent_start",
+]);
+
+function clearRetry(msg: Message): boolean {
+  if (!msg.events?.some((e) => e.kind === "retry")) return false;
+  msg.events = msg.events.filter((e) => e.kind !== "retry");
+  return true;
 }
 
 // Apply an inner event to a subagent's transcript. Carriers nest: a
@@ -741,6 +762,13 @@ export class Workspace {
         }
       }
 
+      if (event.kind === "retry" && !event.content) {
+        if (entry.currentMsg && clearRetry(entry.currentMsg))
+          this.streamed(entry.currentMsg, event);
+        return;
+      }
+      if (entry.currentMsg && RETRY_PROGRESS_KINDS.has(event.kind)) clearRetry(entry.currentMsg);
+
       // Nothing in flight: a late tool result belongs to the call that
       // made it, and a banner (CLI notice, post-turn compaction, hook
       // failure) is a system line — opening an agent bubble for either left
@@ -820,9 +848,7 @@ export class Workspace {
           }
           entry.currentMsg.status = "done";
           // The retry succeeded; "API retry 2/10 in 5s" is no longer true.
-          if (entry.currentMsg.events?.some((e) => e.kind === "retry")) {
-            entry.currentMsg.events = entry.currentMsg.events.filter((e) => e.kind !== "retry");
-          }
+          clearRetry(entry.currentMsg);
           if (event.context) {
             entry.currentMsg.context = event.context;
             entry.lastContext = event.context;
@@ -857,6 +883,7 @@ export class Workspace {
         // The error is an event (rendered as a red banner where it
         // happened); appending it to the text as well showed it twice.
         const msg = this.ensureAgentMsg(entry);
+        clearRetry(msg);
         // The model saw the prompt a waiting retry would send: it carries on.
         if (entry.retryPending && answered(msg)) entry.lastEnvelope = undefined;
         msg.status = "error";
@@ -957,10 +984,12 @@ export class Workspace {
       this.cb?.onCommandsUpdate?.(agentId, cmds);
       this.cb?.onSessionCapabilities?.(this.id, agentId);
     });
-    session.on("thinking_levels", () => {
+    const updateAgent = (transient: boolean) => {
       const entry = this.agents.get(agentId);
-      if (entry) this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
-    });
+      if (entry) this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), transient);
+    };
+    session.on("thinking_levels", () => updateAgent(true));
+    session.on("effort_preset_cleared", () => updateAgent(false));
     session.on("session_checkpoint", () => {
       if (!this.agents.get(agentId)?.recoveringDispatching) this.cb?.onSaveNow?.();
     });
@@ -990,6 +1019,18 @@ export class Workspace {
         });
         entry.activeReportId = undefined;
       }
+    });
+    session.on("extension_ui", ({ processGeneration, change }: ExtensionUiEvent) => {
+      const entry = this.agents.get(agentId);
+      if (
+        !entry ||
+        entry.session !== session ||
+        processGeneration < (entry.extensionUi?.processGeneration ?? 0)
+      )
+        return;
+      const event = { workspaceId: this.id, agentId, processGeneration, change };
+      entry.extensionUi = applyExtensionUi(entry.extensionUi, event);
+      this.cb?.onExtensionUi?.(event);
     });
     session.on("ui_dialog_request", (dialog: UiDialogRequest) => {
       this.pendingDialogs.set(
@@ -1190,8 +1231,10 @@ export class Workspace {
   private handleModelCommand(arg: string, agent: AgentEntry): string {
     const { name, model: current } = agent.info;
     const backend = backendForModel(current);
-    const choices =
-      backend === "pi"
+    const catalog = this.cb?.modelOptions?.();
+    const choices = catalog
+      ? catalog.filter((m) => m.backend === backend)
+      : backend === "pi"
         ? (agent.session.getAvailableModels?.() ?? []).map((m) => ({
             id: m.id,
             label: m.name ?? m.id,
@@ -1220,10 +1263,10 @@ export class Workspace {
     }
     // The effort carries over where the new model declares it, else it starts
     // as a fresh agent on that model would; fast mode where it has one.
-    const declared = effortLevelsForModel(next);
+    const declared = this.effortLevels(agent, next);
     const effort = agent.session.getState().config.effort;
     const keep =
-      effort && declared.includes(effort) ? effort : (defaultEffortForModel(next) ?? undefined);
+      effort && declared?.includes(effort) ? effort : (defaultEffortForModel(next) ?? undefined);
     const fast = Boolean(agent.session.getState().config.fast) && supportsFastMode(next);
     agent.session.setModel(next, keep, fast);
     agent.session.setProviderEnv?.(this.cb?.sessionEnv?.(next, agent.info.account));
@@ -1241,9 +1284,17 @@ export class Workspace {
     ].join("\n");
   }
 
+  private effortLevels(agent: AgentEntry, model: string) {
+    return (
+      agent.session.getAvailableThinkingLevels?.(model) ??
+      effortLevelsForModel(model, this.cb?.modelOptions?.())
+    );
+  }
+
   private handleEffortCommand(arg: string, agent: AgentEntry): string {
     const model = agent.info.model;
-    const levels = agent.session.getAvailableThinkingLevels?.() ?? effortLevelsForModel(model);
+    const levels = this.effortLevels(agent, model);
+    if (!levels) return `Effort levels for ${model} are not yet known.`;
     if (levels.length === 0) {
       return `**${agent.info.name}** (${model}) does not support effort levels.`;
     }
@@ -1777,6 +1828,12 @@ export class Workspace {
     return this.pendingDialogs.size > 0;
   }
 
+  getExtensionUi(): ExtensionUiSnapshot[] {
+    return [...this.agents.values()].flatMap((entry) =>
+      entry.extensionUi ? [entry.extensionUi] : [],
+    );
+  }
+
   getPendingDialogs(): UiDialogRequest[] {
     return [...this.pendingDialogs.values()];
   }
@@ -2100,7 +2157,7 @@ export class Workspace {
       state: this.agentState(a),
       activity: a.activity ?? null,
       effort: a.session.getState().config.effort ?? null,
-      effortLevels: a.session.getAvailableThinkingLevels?.() ?? effortLevelsForModel(a.info.model),
+      effortLevels: this.effortLevels(a, a.info.model) ?? [],
       fast: Boolean(a.session.getState().config.fast),
       backgroundTasks: a.session.backgroundTaskList ?? [],
       context: this.lastContext(a),

@@ -12,7 +12,10 @@ import { FakeSession } from "./fakes";
 
 class Session extends FakeSession {
   models: PiAvailableModel[] = [];
-  levels = ["low", "high"];
+  levels?: string[];
+  setEffort(level: string) {
+    this.getState().config.effort = level;
+  }
   current?: UiDialogRequest;
   getAvailableModels() {
     return this.models;
@@ -53,9 +56,14 @@ describe("dynamic Pi capabilities over Server WebSocket", () => {
   it("isolates commands, merges runtime models, refreshes thinking levels and consumes one current dialog reply", async () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), "yaat-dynamic-ws-"));
     fs.writeFileSync(path.join(base, "config.toml"), "[pi]\n");
-    const catalog = vi
-      .spyOn(LocalHost.prototype, "discoverPiModels")
-      .mockResolvedValue([{ id: "provider/boot", provider: "provider", modelId: "boot" }]);
+    const catalog = vi.spyOn(LocalHost.prototype, "discoverPiModels").mockResolvedValue([
+      {
+        id: "provider/boot",
+        provider: "provider",
+        modelId: "boot",
+        effortLevels: ["minimal", "xhigh"],
+      },
+    ]);
     const sessions = new Map<string, Session>();
     const create = vi
       .spyOn(LocalHost.prototype, "createSession")
@@ -70,7 +78,9 @@ describe("dynamic Pi capabilities over Server WebSocket", () => {
       const port = await server.listening;
       const one = await connect(port, sockets);
       expect(one.frames.find((f) => f.type === "init")?.models).toEqual(
-        expect.arrayContaining([expect.objectContaining({ id: "provider/boot" })]),
+        expect.arrayContaining([
+          expect.objectContaining({ id: "provider/boot", effortLevels: ["minimal", "xhigh"] }),
+        ]),
       );
       one.send({ type: "create_project", root: null, cwd: base, name: "no git" });
       let workspaceId = "";
@@ -88,7 +98,23 @@ describe("dynamic Pi capabilities over Server WebSocket", () => {
       one.send({
         type: "add_agent",
         workspaceId,
+        name: "Invalid",
+        model: "provider/boot",
+        effort: "high",
+        avatar: "",
+        color: "",
+      });
+      await vi.waitFor(() =>
+        expect(one.frames).toContainEqual({
+          type: "error",
+          message: "provider/boot has no effort high",
+        }),
+      );
+      one.send({
+        type: "add_agent",
+        workspaceId,
         name: "Pi A",
+        effort: "max",
         model: "provider/model-a",
         avatar: "",
         color: "",
@@ -103,6 +129,27 @@ describe("dynamic Pi capabilities over Server WebSocket", () => {
       });
       await vi.waitFor(() => expect(sessions.size).toBe(3));
       const [, [a, sa], [b, sb]] = [...sessions];
+      const command = (content: string) =>
+        one.send({ type: "send_message", workspaceId, target: a, content });
+      command("/effort");
+      await vi.waitFor(() =>
+        expect(
+          one.frames
+            .filter((f) => f.type === "new_message")
+            .map((f) => (f.message as { content: string }).content),
+        ).toContain("Effort levels for provider/model-a are not yet known."),
+      );
+      expect(sa.getState().config.effort).toBe("max");
+      command("/model provider/boot");
+      command("/effort xhigh");
+      await vi.waitFor(() =>
+        expect(one.frames.filter((f) => f.type === "agent_updated").at(-1)?.agent).toMatchObject({
+          id: a,
+          effort: "xhigh",
+          effortLevels: ["minimal", "xhigh"],
+        }),
+      );
+      expect(sa.sent).toEqual([]);
       const model = (id: string) => ({
         id: `provider/${id}`,
         modelId: id,
@@ -134,13 +181,13 @@ describe("dynamic Pi capabilities over Server WebSocket", () => {
             (frame.commands as Array<{ name: string }>).some((c) => c.name === "a-only"),
         ),
       ).toBe(true);
-      sa.levels = ["minimal", "xhigh"];
+      sa.levels = ["low", "high"];
       sa.emit("thinking_levels");
       await vi.waitFor(() => {
         const update = one.frames
           .filter((f) => f.type === "agent_updated" && f.workspaceId === workspaceId)
           .at(-1);
-        expect(update?.agent).toMatchObject({ id: a, effortLevels: ["minimal", "xhigh"] });
+        expect(update?.agent).toMatchObject({ id: a, effortLevels: ["low", "high"] });
       });
       one.send({ type: "send_message", workspaceId, target: a, content: "/goal status" });
       await vi.waitFor(() =>
@@ -164,12 +211,23 @@ describe("dynamic Pi capabilities over Server WebSocket", () => {
         createdAt: Date.now(),
         expiresAt: Date.now() + 1000,
       };
+      const owner = { workspaceId, agentId: a, processGeneration: 7 };
+      const status = { key: "progress", text: "Ready" };
+      const uiSnapshot = [{ ...owner, statuses: [status], widgets: [] }];
+      const notice = {
+        ...owner,
+        change: { kind: "notify", level: "info", id: "n", message: "hello" },
+      };
+      sa.emit("extension_ui", { ...owner, change: { kind: "status", ...status } });
+      sa.emit("extension_ui", notice);
       sa.open(dialog);
       await vi.waitFor(() =>
         expect(one.frames).toContainEqual({ type: "ui_dialog_request", dialog }),
       );
       const two = await connect(port, sockets);
       const init = two.frames.find((f) => f.type === "init")!;
+      expect(one.frames).toContainEqual({ type: "extension_ui", event: notice });
+      expect(init.extensionUi).toEqual(uiSnapshot);
       expect(init.pendingDialogs).toEqual([dialog]);
       expect(init.models).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "provider/model-a" })]),
@@ -188,7 +246,11 @@ describe("dynamic Pi capabilities over Server WebSocket", () => {
       two.send({ type: "open_workspace", workspaceId });
       await vi.waitFor(() =>
         expect(two.frames).toContainEqual(
-          expect.objectContaining({ type: "workspace_messages", pendingDialogs: [dialog] }),
+          expect.objectContaining({
+            type: "workspace_messages",
+            pendingDialogs: [dialog],
+            extensionUi: uiSnapshot,
+          }),
         ),
       );
       const reply = {
@@ -229,6 +291,7 @@ describe("dynamic Pi capabilities over Server WebSocket", () => {
       const three = await connect(port, sockets);
       const again = three.frames.find((f) => f.type === "init")!;
       expect((again.commandsByAgent as typeof commandMap)[workspaceId][a]).toBeUndefined();
+      expect(again.extensionUi).toEqual([]);
       expect(again.pendingDialogs).toEqual([]);
     } finally {
       for (const socket of sockets) socket.terminate();

@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import TOML from "@iarna/toml";
+import { AGENT_PRESETS, type AgentPreset } from "./presets";
 
 export interface ServerConfig {
   remote_uploads_url?: string;
@@ -44,11 +45,16 @@ export interface PiConfig {
 // The model, and its effort, a new project's lead runs on, and the workers
 // it starts without naming one.
 export interface ProjectsConfig {
+  lead_name?: string;
+  lead_avatar?: string;
+  lead_color?: string;
   model?: string;
   effort?: string;
 }
 
 export interface AppConfig {
+  user: { name: string; avatar: string };
+  presets: AgentPreset[];
   server: ServerConfig;
   workspace: WorkspaceConfig;
   auth: AuthConfig | null;
@@ -62,6 +68,29 @@ function stringArray(value: unknown): string[] | undefined {
   return Array.isArray(value) && value.every((item) => typeof item === "string")
     ? value
     : undefined;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function readPresets(value: unknown): AgentPreset[] {
+  if (value === undefined || (Array.isArray(value) && !value.length)) return AGENT_PRESETS;
+  if (!Array.isArray(value)) throw new Error("Expected [[agent_presets]]");
+  return value.map((row: Record<string, unknown>, i) => {
+    const name = optionalString(row?.name);
+    const avatar = optionalString(row?.avatar);
+    const color = optionalString(row?.color);
+    if (!name || !avatar || !color)
+      throw new Error(`agent_presets[${i}] needs name, avatar and color`);
+    return {
+      name,
+      avatar,
+      color,
+      model: optionalString(row.model),
+      effort: optionalString(row.effort),
+    };
+  });
 }
 
 export function loadConfig(baseDir: string): AppConfig {
@@ -136,6 +165,9 @@ export function loadConfig(baseDir: string): AppConfig {
 
   const rawProjects = parsed.projects as Record<string, unknown> | undefined;
   const projects: ProjectsConfig = {
+    lead_name: optionalString(rawProjects?.lead_name),
+    lead_avatar: optionalString(rawProjects?.lead_avatar),
+    lead_color: optionalString(rawProjects?.lead_color),
     ...(typeof rawProjects?.model === "string" &&
       rawProjects.model && { model: rawProjects.model }),
     ...(typeof rawProjects?.effort === "string" &&
@@ -153,5 +185,20 @@ export function loadConfig(baseDir: string): AppConfig {
       }
     : undefined;
 
-  return { server, workspace, auth, hosts, providers, projects, pi };
+  const rawUser = parsed.user as Record<string, unknown> | undefined;
+  const user = {
+    name: optionalString(rawUser?.name) ?? "You",
+    avatar: optionalString(rawUser?.avatar) ?? "avatars/ykiko.jpg",
+  };
+  return {
+    server,
+    workspace,
+    auth,
+    hosts,
+    providers,
+    projects,
+    pi,
+    user,
+    presets: readPresets(parsed.agent_presets),
+  };
 }

@@ -113,6 +113,21 @@ describe("MessageItem", () => {
     ...over,
   });
 
+  it("renders the user's name and image or text avatar", () => {
+    const message = msg({ kind: "user", content: "Hello" });
+    const d = render(<MessageItem msg={message} agents={[]} />);
+    expect(d.getByAltText("You").getAttribute("src")).toBe("avatars/ykiko.jpg");
+    expect(d.getByText("You")).toBeTruthy();
+    d.rerender(
+      <MessageItem msg={message} agents={[]} user={{ name: "Ada", avatar: "avatars/ada.png" }} />,
+    );
+    expect(d.getByAltText("Ada").getAttribute("src")).toBe("avatars/ada.png");
+    d.rerender(<MessageItem msg={message} agents={[]} user={{ name: "Ada", avatar: "⭐" }} />);
+    expect(d.getByText("Ada")).toBeTruthy();
+    expect(d.getByText("⭐")).toBeTruthy();
+    expect(d.queryByRole("img")).toBeNull();
+  });
+
   it("renders subagents outside the collapsed events box", () => {
     const events: StreamEvent[] = [
       { kind: "thinking", content: "hmm" },
