@@ -166,7 +166,7 @@ AGENT_TEAM_PORT=9801 AGENT_TEAM_BASE_DIR=$PWD/.agent-team/dev node dist/server.j
 
 CI (`.github/workflows/ci.yml`) runs `check`, `test` and `build` on every push
 and pull request. Agent-facing project rules live in `.claude/CLAUDE.md`, with
-task-specific playbooks under `.claude/skills/` (deploy, capture-sdk,
+task-specific playbooks under `.agents/skills/` (deploy, capture-sdk,
 stream-debug, add-model, review).
 
 Codex event mapping is tested against recorded real interactions
@@ -283,7 +283,8 @@ webview/src/     React UI (Vite)
   sidebar/ workspace/ viewport/ dev/ fonts/
 scripts/         start script, deferred deploy, SDK capture + smoke tests, demo seed,
                  font and file-icon import
-.claude/         CLAUDE.md + skills: the rules and playbooks agents load when working here
+.claude/         CLAUDE.md: project rules for agents
+.agents/skills/  task-specific playbooks
 ```
 
 ## License

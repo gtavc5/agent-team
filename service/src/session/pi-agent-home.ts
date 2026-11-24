@@ -40,6 +40,7 @@ type SourceSettings = {
   enabledModels?: unknown;
   defaultProvider?: unknown;
   defaultModel?: unknown;
+  subagents?: unknown;
 };
 
 const INCLUDED_PACKAGES = [
@@ -675,6 +676,22 @@ export function prepareControlledPiAgentHome(
     for (const name of ["AGENTS.md", "AGENTS.local.md"]) {
       linkIfPresent(path.join(sourceAgentDir, name), path.join(piAgentDir, name));
     }
+    const agentsSource = path.resolve(sourceAgentDir, "agents");
+    const agentsDestination = path.join(piAgentDir, "agents");
+    const existing = fs.lstatSync(agentsDestination, { throwIfNoEntry: false });
+    if (fs.statSync(agentsSource, { throwIfNoEntry: false })?.isDirectory()) {
+      if (existing && !existing.isSymbolicLink()) {
+        // Keep definitions created locally before host agent routing was enabled.
+        const backup = fs.mkdtempSync(path.join(piAgentDir, "agents-backup-"));
+        fs.renameSync(agentsDestination, path.join(backup, "agents"));
+      }
+      if (!existing?.isSymbolicLink() || fs.readlinkSync(agentsDestination) !== agentsSource) {
+        linkIfPresent(agentsSource, agentsDestination);
+      }
+    } else if (existing?.isSymbolicLink()) {
+      // Runtime homes persist: do not retain a link from a previous preparation.
+      fs.unlinkSync(agentsDestination);
+    }
     const modelsSource = path.join(sourceAgentDir, "models-store.json");
     if (fs.existsSync(modelsSource))
       copyCredential(modelsSource, path.join(piAgentDir, "models-store.json"));
@@ -687,6 +704,9 @@ export function prepareControlledPiAgentHome(
   };
   for (const key of ["enabledModels", "defaultProvider", "defaultModel"] as const) {
     if (sourceSettings[key] !== undefined) settings[key] = sourceSettings[key];
+  }
+  if (options.mode === "runtime" && sourceSettings.subagents !== undefined) {
+    settings.subagents = sourceSettings.subagents;
   }
   const settingsPath = path.join(piAgentDir, "settings.json");
   writeJson(settingsPath, settings);

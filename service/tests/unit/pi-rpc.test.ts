@@ -290,6 +290,7 @@ describe("runBudgetedShutdown", () => {
 describe("prepareControlledPiAgentHome", () => {
   const providerSource = "npm:pi-antigravity-acp-provider";
   const subagentsSource = "npm:pi-subagents";
+  const subagents = { agentOverridesByProvider: { test: { reviewer: { model: "test/model" } } } };
 
   function packageRoot(sourceAgentDir: string, source: string): string {
     return path.join(sourceAgentDir, "npm", "node_modules", source.slice(4));
@@ -317,6 +318,7 @@ describe("prepareControlledPiAgentHome", () => {
     const sourceGeminiDir = path.join(root, "gemini");
     fs.mkdirSync(path.join(sourceAgentDir, "npm", "node_modules"), { recursive: true });
     fs.mkdirSync(sourceGeminiDir, { recursive: true });
+    fs.mkdirSync(path.join(sourceAgentDir, "agents"));
     const localPackages = ["nzh10-skills", "nzh10-skills/packages/pi-skillful"];
     for (const relative of localPackages) {
       fs.mkdirSync(path.join(sourceAgentDir, relative), { recursive: true });
@@ -354,6 +356,7 @@ describe("prepareControlledPiAgentHome", () => {
           "npm:pi-autoresearch",
           path.join(sourceAgentDir, "nzh10-skills/packages/pi-skillful"),
         ],
+        subagents,
         enabledModels: ["test/model"],
         defaultProvider: "test",
         defaultModel: "model",
@@ -404,6 +407,44 @@ describe("prepareControlledPiAgentHome", () => {
     );
   }
 
+  function expectIsolatedRouting(home: { settingsPath: string; piAgentDir: string }): void {
+    expect(JSON.parse(fs.readFileSync(home.settingsPath, "utf8"))).not.toHaveProperty("subagents");
+    expect(fs.readdirSync(home.piAgentDir)).not.toContain("agents");
+  }
+
+  it("reflects host routing and agent definitions in the persistent runtime home", () => {
+    const { sourceAgentDir, dataDir } = makeSource();
+    const options = { mode: "runtime" as const, sourceAgentDir, dataDir };
+    const home = prepareControlledPiAgentHome(options);
+    expect(JSON.parse(fs.readFileSync(home.settingsPath, "utf8"))).toHaveProperty(
+      "subagents",
+      subagents,
+    );
+    const agents = path.join(sourceAgentDir, "agents");
+    expect(fs.readlinkSync(path.join(home.piAgentDir, "agents"))).toBe(agents);
+
+    fs.rmdirSync(agents);
+    fs.unlinkSync(path.join(sourceAgentDir, "settings.json"));
+    expectIsolatedRouting(prepareControlledPiAgentHome(options));
+  });
+
+  it("preserves existing runtime agent definitions when switching to host agents", () => {
+    const { sourceAgentDir, dataDir } = makeSource();
+    const piAgentDir = path.join(dataDir, "pi-agent-home");
+    const agents = path.join(piAgentDir, "agents");
+    fs.mkdirSync(agents, { recursive: true });
+    fs.writeFileSync(path.join(agents, "local.md"), "local definition");
+    const options = { mode: "runtime" as const, sourceAgentDir, dataDir };
+    prepareControlledPiAgentHome(options);
+    prepareControlledPiAgentHome(options);
+    expect(fs.readlinkSync(agents)).toBe(path.join(sourceAgentDir, "agents"));
+    const backups = fs.readdirSync(piAgentDir).filter((name) => name.startsWith("agents-backup-"));
+    expect(backups).toHaveLength(1);
+    expect(fs.readFileSync(path.join(piAgentDir, backups[0], "agents/local.md"), "utf8")).toBe(
+      "local definition",
+    );
+  });
+
   it("builds a synthetic home without host credential symlinks", () => {
     const { sourceAgentDir } = makeSource();
     const home = prepareControlledPiAgentHome({ mode: "test-synthetic", sourceAgentDir });
@@ -414,6 +455,7 @@ describe("prepareControlledPiAgentHome", () => {
     expect(home.env.PI_CODING_AGENT_DIR).toBe(home.piAgentDir);
     expect(home.env.PI_OFFLINE).toBe("1");
     expect(home.env.GEMINI_HOME).toBe(home.geminiHome);
+    expectIsolatedRouting(home);
     expectNoSymlinks(home.piAgentDir);
     expectNoSymlinks(home.geminiHome!);
     expectControlledSettings(home.settingsPath);
@@ -792,6 +834,7 @@ describe("prepareControlledPiAgentHome", () => {
     expect(JSON.parse(fs.readFileSync(path.join(home.piAgentDir, "auth.json"), "utf8"))).toEqual({
       token: "secret",
     });
+    expectIsolatedRouting(home);
     expect(fs.lstatSync(path.join(home.piAgentDir, "auth.json")).mode & 0o777).toBe(0o600);
     expect(
       JSON.parse(fs.readFileSync(path.join(home.geminiHome!, "oauth_creds.json"), "utf8")),
