@@ -1,4 +1,6 @@
+import { ACP_PREPARE_STEP, inspectAcpRuntime } from "./acp-readiness";
 import {
+  ACP,
   CONFIGURED_EVENT,
   SNAPSHOT_EVENT,
   REFRESH_EVENT,
@@ -63,7 +65,9 @@ export default function piQuota(pi: ExtensionApi) {
       const samples = await Promise.all([...ids].map((p) => publish(p, ctx)));
       const lines = samples.map((s) =>
         s.availability !== "available"
-          ? `${s.provider}: ${s.availability}${s.reason ? ` (${s.reason})` : ""}`
+          ? s.provider === ACP && s.reason === "usage unavailable" && !inspectAcpRuntime().ready
+            ? `${ACP}: ${ACP_PREPARE_STEP}`
+            : `${s.provider}: ${s.availability}${s.reason ? ` (${s.reason})` : ""}`
           : [
               `${s.provider} quota`,
               ...s.groups.flatMap((g) =>

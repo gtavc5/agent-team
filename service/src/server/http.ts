@@ -6,6 +6,7 @@ import * as path from "path";
 import { pipeline } from "stream";
 import * as zlib from "zlib";
 import type { Auth } from "./auth";
+import { formatReport, type RuntimeReport } from "../config/diagnostics";
 import { NotRegularFile, readFileView, resolveFilePath } from "../repo/files";
 import { changes, fileDiff, NotARepository } from "../repo/diff";
 import { openInVSCode, VSCodeUnavailable } from "../repo/vscode";
@@ -60,6 +61,7 @@ export class HttpHandler {
     private openFile: (file: string, line: number | undefined) => Promise<void> = openInVSCode,
     // The notes of the project a workspace belongs to.
     private notesOf: (workspaceId: string) => string | undefined = () => undefined,
+    private diagnostics?: () => RuntimeReport,
   ) {}
 
   handle(req: http.IncomingMessage, res: http.ServerResponse): void {
@@ -83,6 +85,16 @@ export class HttpHandler {
           res.end();
           return;
         }
+      }
+
+      if (req.method === "GET" && pathname === "/api/diagnostics" && this.diagnostics) {
+        const report = this.diagnostics();
+        if (url.searchParams.get("format") === "text") {
+          res.setHeader("Content-Type", "text/plain; charset=utf-8");
+          res.setHeader("Cache-Control", "no-store");
+          res.end(formatReport(report));
+        } else json(res, 200, report);
+        return;
       }
 
       if (req.method === "POST" && pathname === "/debug/snapshot") {

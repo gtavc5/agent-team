@@ -164,7 +164,9 @@ it("renders compact quota rows on desktop with threshold colors, error/stale bad
   // Stale and error indicators are visible at a glance before expansion.
   expect(toggles[2].querySelector(".quota-badge-stale")?.textContent).toBe("stale");
   expect(toggles[3].querySelector(".quota-badge-error")?.textContent).toBe("!");
-  expect(toggles[4].querySelector(".quota-status-error")?.textContent).toContain("unavailable");
+  expect(toggles[3].querySelector(".quota-badge-stale")?.textContent).toBe("stale");
+  expect(toggles[4].querySelector(".quota-badge-error")).toBeNull();
+  expect(toggles[4].querySelector(".quota-summary")?.textContent).toBe("not configured");
 
   // Click expands Kimi inline directly underneath its row and shows all 3 windows.
   fireEvent.click(toggles[1]);
@@ -198,6 +200,39 @@ it("renders compact quota rows on desktop with threshold colors, error/stale bad
   // Refresh button works from the compact header.
   fireEvent.click(panel.querySelector<HTMLButtonElement>(".quota-refresh")!);
   expect(onRefresh).toHaveBeenCalledTimes(1);
+});
+
+it("gives explicit setup instructions and distinguishes warming from a transient quota error", () => {
+  const waitingRows = [
+    ["antigravity-acp", "waiting for ACP setup"],
+    ["openai-codex", "waiting for Pi session"],
+    ["kimi-coding", "usage unavailable"],
+  ] as const;
+  const view = renderSidebar({
+    refreshing: false,
+    acpPrepareStep: "yaat-service prepare-acp",
+    rows: waitingRows.map(([provider, reason]) => ({
+      provider,
+      reason,
+      name: "",
+      observedAt: NOW - 1,
+      availability: "unavailable",
+      windows: [],
+    })),
+  });
+  const [acp, codex, kimi] =
+    view.container.querySelectorAll<HTMLButtonElement>(".quota-row-toggle");
+  expect(acp.querySelector(".quota-summary")?.textContent).toBe("waiting for setup");
+  expect(codex.querySelector(".quota-summary")?.textContent).toBe("warming up");
+  expect(acp.querySelector(".quota-badge-error")).toBeNull();
+  expect(codex.querySelector(".quota-badge-error")).toBeNull();
+  expect(kimi.querySelector(".quota-badge-error")?.textContent).toBe("!");
+  expect(kimi.querySelector(".quota-summary")?.textContent).toContain("usage unavailable");
+  fireEvent.click(acp);
+  const details = document.getElementById(acp.getAttribute("aria-controls")!)!;
+  expect(details.textContent).toContain("Waiting for explicit ACP setup");
+  expect(details.querySelector("code")?.textContent).toBe("yaat-service prepare-acp");
+  expect(details.textContent).toContain("Not yet observed");
 });
 
 it("maintains >= 32px touch targets and zero horizontal overflow inside the 280px mobile drawer", async () => {

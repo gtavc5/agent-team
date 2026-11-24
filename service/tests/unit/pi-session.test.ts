@@ -6,6 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ACP_PREPARE_STEP } from "../../src/session/acp-readiness";
 import { PanelHttpServer, type PanelReadyReport } from "../../src/session/panel-http";
 import { PiRpcClient, type PiRpcSpawnOptions } from "../../src/session/pi-rpc";
 import { HostRegistry, LocalHost } from "../../src/session/host";
@@ -61,6 +62,7 @@ function harness(
     disposition?: string;
     delayedQuota?: boolean;
     enabledModels?: string[];
+    startupModel?: { provider: string; id: string };
     models?: Array<{
       provider: string;
       id: string;
@@ -153,7 +155,7 @@ function harness(
               sessionId,
               sessionFile,
               thinkingLevel: "low",
-              model: { provider: "mock", id: "test" },
+              model: override.startupModel ?? { provider: "mock", id: "test" },
             });
             break;
           case "get_available_models":
@@ -165,7 +167,14 @@ function harness(
             respond(frame, { levels: ["low", "high"] });
             break;
           case "get_commands":
-            respond(frame, { commands: [{ name: "skill:test", source: "skill" }] });
+            respond(frame, {
+              commands: [
+                { name: "skill:test", source: "skill" },
+                { name: "quota", source: "extension" },
+                { name: "antigravity-acp", source: "extension" },
+                { name: "gemini-acp", source: "extension" },
+              ],
+            });
             break;
           case "compact":
           case "steer":
@@ -347,6 +356,220 @@ describe("Pi boundary steering", () => {
       const expected = ["interrupted", "crash"].includes(outcome) ? "outcome_unknown" : outcome;
       expect(h.finish.mock.calls).toEqual([[expected]]);
       expect(h.client.wire.some((frame) => frame.type === "clear_queue")).toBe(false);
+    },
+  );
+});
+
+describe("PiSession ACP readiness", () => {
+  const acp = { provider: "antigravity-acp", id: "sample" };
+  const rejected = {
+    disposition: "rejected",
+    error: `Antigravity ACP runtime is not ready. ${ACP_PREPARE_STEP}`,
+  };
+
+  it.each([undefined, "antigravity-acp/sample", "sample"])(
+    "rejects an ACP turn on model %s before writing and retries in the same Pi after setup",
+    async (model) => {
+      const home = temp();
+      const h = harness({
+        config: {
+          model,
+          providerEnv: { HOME: home, USERPROFILE: home, PATH: "", AGY_ACP_BIN: "" },
+        },
+        startupModel: model ? undefined : acp,
+        models: [acp],
+      });
+      await h.session.ensureStarted();
+      expect(h.session.getAvailableModels().map((m) => m.id)).toEqual(["antigravity-acp/sample"]);
+      const onBeforeWrite = vi.fn();
+      expect(await h.session.send("hello", { onBeforeWrite })).toEqual(rejected);
+      expect(await h.session.send("/compact", { onBeforeWrite })).toEqual(rejected);
+      expect(onBeforeWrite).not.toHaveBeenCalled();
+      expect(h.clients[0].wire.some(({ type }) => type === "prompt" || type === "compact")).toBe(
+        false,
+      );
+
+      const dir = path.join(home, ".local", "opt", "agy-acp", "current");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "agy_acp_server.par"), "not run", { mode: 0o700 });
+      expect(await h.session.send("hello", { onBeforeWrite })).toEqual({ disposition: "started" });
+      expect(onBeforeWrite).toHaveBeenCalledOnce();
+      expect(h.factory).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("keeps other models and /quota usable but blocks upstream ACP runtime commands on a bad override", async () => {
+    const home = temp();
+    const bin = path.join(home, ".local", "bin");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, "agy_acp_server.par"), "not run", { mode: 0o700 });
+    const h = harness({
+      config: {
+        piAntigravityEntryPath: "/stub/acp-extension",
+        piOffline: false,
+        providerEnv: { HOME: home, AGY_ACP_BIN: path.join(home, "bad-binary") },
+      },
+      disposition: "handled",
+    });
+    await h.session.ensureStarted();
+    expect(h.session.getAvailableModels().map((m) => m.id)).toEqual(["mock/test"]);
+    expect(h.factory.mock.calls[0][0].env?.PI_OFFLINE).toBe("1");
+    for (const command of ["/antigravity-acp  quota", "/gemini-acp quota"]) {
+      expect(await h.session.send(command)).toEqual(rejected);
+    }
+    expect(await h.session.send("/quota")).toEqual({ disposition: "handled" });
+    expect(await h.session.send("hello")).toEqual({ disposition: "handled" });
+    expect(h.clients[0].wire.filter(({ type }) => type === "prompt").map((f) => f.message)).toEqual(
+      ["/quota", "hello"],
+    );
+  });
+
+  it("keeps an online non-catalog Pi online unless its loaded ACP runtime is missing", async () => {
+    const home = temp();
+    const runtime = path.join(home, "agy");
+    const withoutAcp = harness({
+      config: { piOffline: false, providerEnv: { AGY_ACP_BIN: runtime } },
+    });
+    await withoutAcp.session.ensureStarted();
+    expect(withoutAcp.factory.mock.calls[0][0].env?.PI_OFFLINE).toBeUndefined();
+
+    const withAcp = {
+      piOffline: false,
+      piAntigravityEntryPath: "/stub/acp-extension",
+      providerEnv: { AGY_ACP_BIN: runtime },
+    };
+    const missing = harness({ config: withAcp });
+    await missing.session.ensureStarted();
+    expect(missing.factory.mock.calls[0][0].env?.PI_OFFLINE).toBe("1");
+
+    fs.writeFileSync(runtime, "not run", { mode: 0o700 });
+    const ready = harness({ config: withAcp });
+    await ready.session.ensureStarted();
+    expect(ready.factory.mock.calls[0][0].env?.PI_OFFLINE).toBeUndefined();
+    const catalog = harness({ config: withAcp, options: { catalogOnly: true } });
+    await catalog.session.ensureStarted();
+    expect(catalog.factory.mock.calls[0][0].env?.PI_OFFLINE).toBe("1");
+  });
+
+  it("uses a caller-supplied Pi home without rewriting its ACP permissions", async () => {
+    const dir = temp();
+    const { piAgentDir } = config(dir);
+    const profileDir = path.join(piAgentDir!, "antigravity-acp-provider");
+    const profile = path.join(profileDir, "config.json");
+    fs.mkdirSync(profileDir);
+    fs.writeFileSync(profile, '{"permissions":"default","runtimeUpdates":"notify"}');
+    const entry = path.join(
+      piAgentDir!,
+      "npm/node_modules/pi-antigravity-acp-provider/extensions/index.ts",
+    );
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.writeFileSync(entry, "export {};");
+    fs.writeFileSync(
+      path.join(piAgentDir!, "settings.json"),
+      '{"packages":["npm:pi-antigravity-acp-provider"]}',
+    );
+    const h = harness({
+      config: {
+        piAgentDir,
+        piAcp: { permissions: "yolo" },
+        piOffline: false,
+        providerEnv: { AGY_ACP_BIN: path.join(dir, "missing") },
+      },
+    });
+    await h.session.ensureStarted();
+    expect(h.factory.mock.calls[0][0].env?.PI_OFFLINE).toBe("1");
+    expect(h.factory.mock.calls[0][0].env?.YAAT_PI_ANTIGRAVITY_ENTRY).toBe(fs.realpathSync(entry));
+    expect(fs.readFileSync(profile, "utf8")).toBe(
+      '{"permissions":"default","runtimeUpdates":"notify"}',
+    );
+  });
+
+  it("leaves a broken managed profile intact and still dispatches a non-ACP model online", async () => {
+    const dataDir = temp();
+    const provider = path.join(dataDir, "pi-antigravity-acp-provider");
+    const profile = path.join(dataDir, "pi-agent-home/antigravity-acp-provider/config.json");
+    fs.mkdirSync(path.dirname(profile), { recursive: true });
+    fs.writeFileSync(profile, "{");
+    fs.mkdirSync(path.join(provider, "extensions"), { recursive: true });
+    fs.writeFileSync(path.join(provider, "extensions/index.ts"), "export {};");
+    const h = harness({
+      config: { piAgentDir: undefined, dataDir, piPackages: [provider], piOffline: false },
+      disposition: "handled",
+    });
+    await h.session.ensureStarted();
+    expect(h.factory.mock.calls[0][0].env?.YAAT_PI_ANTIGRAVITY_ENTRY).toBeUndefined();
+    expect(h.factory.mock.calls[0][0].env?.PI_OFFLINE).toBeUndefined();
+    expect(await h.session.send("hello")).toEqual({ disposition: "handled" });
+    h.session.setModel("antigravity-acp/sample");
+    expect((await h.session.send("try ACP")).error).toContain(profile);
+    expect(fs.readFileSync(profile, "utf8")).toBe("{");
+  });
+
+  it("redirects setup and policy changes for both ACP aliases even with a ready runtime", async () => {
+    const runtime = path.join(temp(), "agy");
+    fs.writeFileSync(runtime, "not run", { mode: 0o700 });
+    const h = harness({
+      config: { providerEnv: { AGY_ACP_BIN: runtime } },
+      disposition: "handled",
+    });
+    const onBeforeWrite = vi.fn();
+    for (const alias of ["antigravity-acp", "gemini-acp"]) {
+      for (const cmd of ["setup", "qualify", "update", "update-runtime"]) {
+        const result = await h.session.send(`/${alias} ${cmd}`, { onBeforeWrite });
+        expect(result.disposition).toBe("rejected");
+        expect(result.error).toContain(ACP_PREPARE_STEP);
+      }
+      for (const cmd of [
+        "permissions",
+        "permissions  yolo",
+        "updates automatic",
+        "tool-activity",
+        "tool-activity off",
+      ]) {
+        const result = await h.session.send(`/${alias}  ${cmd}`, { onBeforeWrite });
+        expect(result.disposition).toBe("rejected");
+        expect(result.error).toContain("managed by YAAT");
+      }
+    }
+    expect(onBeforeWrite).not.toHaveBeenCalled();
+    expect(h.clients[0].wire.some(({ type }) => type === "prompt")).toBe(false);
+    expect(await h.session.send("/antigravity-acp updates")).toEqual({ disposition: "handled" });
+    expect(await h.session.send("/gemini-acp status")).toEqual({ disposition: "handled" });
+    expect(await h.session.send("/antigravity-acp quota")).toEqual({ disposition: "handled" });
+  });
+
+  it("still runs the all-provider quota command with an unavailable ACP default", async () => {
+    const home = temp();
+    const h = harness({
+      config: { providerEnv: { AGY_ACP_BIN: path.join(home, "missing") } },
+      startupModel: acp,
+      models: [acp],
+      disposition: "handled",
+    });
+    expect(await h.session.send("/quota")).toEqual({ disposition: "handled" });
+  });
+
+  it.each([
+    { catalogOnly: false, expected: "/pinned/pi" },
+    { catalogOnly: true, expected: "/pinned/pi" },
+    { catalogOnly: true, configBinary: "/configured/pi", expected: "/configured/pi" },
+    {
+      catalogOnly: true,
+      configBinary: "/configured/pi",
+      optionBinary: "/requested/pi",
+      expected: "/requested/pi",
+    },
+  ])(
+    "uses the installer Pi pin as fallback with catalogOnly=$catalogOnly",
+    async ({ catalogOnly, configBinary, optionBinary, expected }) => {
+      vi.stubEnv("YAAT_PI_BIN", "/pinned/pi");
+      const h = harness({
+        config: { piBinary: configBinary, piOffline: false },
+        options: { catalogOnly, piBinary: optionBinary },
+      });
+      await h.session.ensureStarted();
+      expect(h.factory.mock.calls[0][0].binary).toBe(expected);
+      expect(h.factory.mock.calls[0][0].env?.PI_OFFLINE).toBe(catalogOnly ? "1" : undefined);
     },
   );
 });

@@ -1,6 +1,5 @@
 import * as http from "http";
 import type { AddressInfo } from "net";
-import * as os from "node:os";
 import * as fs from "fs";
 import * as path from "path";
 import { execFile, spawn } from "child_process";
@@ -26,6 +25,7 @@ import {
   isLoggedEvent,
 } from "../workspace/state";
 import { loadConfig, AppConfig } from "../config/config";
+import { ModelSelectionError, type ModelDiscoveryIssue } from "../config/model-diagnostics";
 import {
   MODEL_OPTIONS,
   availableModelOptions,
@@ -34,12 +34,7 @@ import {
   isCodexCliAvailable,
   type ModelOption,
 } from "../config/presets";
-import {
-  CommandInfo,
-  StreamEvent,
-  type PiAvailableModel,
-  type SessionConfig,
-} from "../session/types";
+import { CommandInfo, StreamEvent, type PiAvailableModel } from "../session/types";
 import { HostRegistry, LocalHost } from "../session/host";
 import { codexProcessEnv, probeCodexAuth, type CodexAuthState } from "../session/codex";
 import { completeDirs, resolveWorkspacePath } from "../repo/dirs";
@@ -49,13 +44,23 @@ import { summarizeMessages, toWireMessage } from "../workspace/summary";
 import { ProjectManager, type ProjectHost } from "../project/manager";
 import { Auth } from "./auth";
 import { mergeLocalCommands } from "./commands";
+import {
+  codexModelIssue,
+  describeModelDiscovery,
+  piSessionConfig,
+  probePiCatalog,
+  type ModelDiscoverySnapshot,
+} from "./model-discovery";
 import { HttpHandler } from "./http";
-import { QuotaMonitor } from "./quota";
+import { QuotaMonitor, type QuotaRefreshOptions } from "./quota";
+import { inspectAcpRuntime, ACP_PREPARE_STEP } from "../session/acp-readiness";
 import { CodexQuotaSource } from "./native-codex-quota";
 import { QuotaAdapterRegistry } from "../session/quota/registry";
 import { piAdapters } from "../session/quota/pi-adapters";
-import { NATIVE_CODEX, unavailable, type PiQuotaReader } from "../session/quota-schema";
+import { ACP, NATIVE_CODEX, unavailable, type PiQuotaReader } from "../session/quota-schema";
 import { SystemMonitor } from "./system";
+import { serviceReport } from "../config/diagnostics";
+import { applyRuntimeEnvironment } from "../config/runtime";
 
 function stripEventsInnerEvents(events: StreamEvent[]): StreamEvent[] {
   return events.map((e) => {
@@ -72,6 +77,11 @@ const execFileAsync = promisify(execFile);
 // Protocol-level ping cadence; a client that misses one round is dropped.
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
+interface QuotaReadContext {
+  reader: PiQuotaReader | undefined;
+  acpReady: boolean;
+}
+
 export class Server {
   private httpServer: http.Server;
   // The port it listens on, once it does: the one the system chose for 0.
@@ -85,6 +95,7 @@ export class Server {
   private branchTimer: ReturnType<typeof setInterval> | null = null;
   private readonly commandsByAgent = new Map<string, Map<string, CommandInfo[]>>();
   private catalogModels: PiAvailableModel[] = [];
+  private piCatalogIssue?: ModelDiscoveryIssue;
   private catalogRevision = 0;
   private codexAuth: CodexAuthState = initialCodexAuthState();
   private recheckingCodexAuth: Promise<CodexAuthState> | null = null;
@@ -106,18 +117,29 @@ export class Server {
   private alive = new WeakSet<WebSocket>();
   private auth: Auth;
   private http: HttpHandler;
-  private codexQuota = new CodexQuotaSource(() => this.codexAuth.authenticated);
+  private codexQuota = new CodexQuotaSource(
+    () => this.codexAuth.authenticated && this.codexAuth.accountType === "chatgpt",
+  );
+  private acpQuotaReady?: boolean;
   private quota = new QuotaMonitor(
-    (quota) => this.broadcastUI({ type: "quota_snapshot", quota }),
-    new QuotaAdapterRegistry<PiQuotaReader | undefined>(
+    (quota) => this.broadcastUI({ type: "quota_snapshot", quota: this.quotaState(quota) }),
+    new QuotaAdapterRegistry<QuotaReadContext>(
       [
         this.codexQuota,
         ...piAdapters().ids.map((id) => ({
           id,
-          isConfigured: (reader: PiQuotaReader | undefined) => !!reader?.configured.includes(id),
-          unconfiguredReason: (reader: PiQuotaReader | undefined) =>
-            reader ? ("not configured" as const) : ("waiting for Pi session" as const),
-          fetchQuota: (reader: PiQuotaReader | undefined) => reader!.read(id),
+          isConfigured: ({ reader, acpReady }: QuotaReadContext) =>
+            (id !== ACP || acpReady) && !!reader?.configured.includes(id),
+          unconfiguredReason: ({ reader, acpReady }: QuotaReadContext) =>
+            id === ACP && !acpReady && reader?.configured.includes(ACP)
+              ? ("waiting for ACP setup" as const)
+              : reader
+                ? ("not configured" as const)
+                : ("waiting for Pi session" as const),
+          fetchQuota: ({ reader }: QuotaReadContext) =>
+            id === ACP && !inspectAcpRuntime().ready
+              ? Promise.resolve({ ...unavailable(id), reason: "waiting for ACP setup" as const })
+              : reader!.read(id),
         })),
       ],
       55_000,
@@ -134,6 +156,7 @@ export class Server {
     this.uploadsDir = path.join(baseDir, "uploads");
     if (!fs.existsSync(this.uploadsDir)) fs.mkdirSync(this.uploadsDir, { recursive: true });
     this.config = loadConfig(baseDir);
+    applyRuntimeEnvironment(this.config.server.proxy, this.config.pi?.acp?.binary);
     this.hostRegistry = this.initHosts();
     this.auth = new Auth(() => this.config.auth);
     this.git = new GitScanner(
@@ -157,6 +180,7 @@ export class Server {
         const project = this.workspaces.get(id)?.projectLink?.projectId;
         return project && this.projects.paths(project)?.notesDir;
       },
+      () => serviceReport(baseDir, this.config, this.modelDiscoverySnapshot()),
     );
     this.httpServer = http.createServer((req, res) => this.http.handle(req, res));
     this.wss = new WebSocketServer({
@@ -168,13 +192,17 @@ export class Server {
     });
     this.wss.on("connection", (ws) => this.onConnect(ws));
     this.heartbeatTimer = setInterval(() => this.sweepDeadClients(), HEARTBEAT_INTERVAL_MS);
+    this.checkAcpQuotaReadiness();
 
     this.restoring = this.restoreState().finally(() => {
       this.restored = true;
     });
     // The search index catches up with the history in the background.
     this.history.changed();
-    this.statusTimer = setInterval(() => this.broadcastSystemStatus(), 3000);
+    this.statusTimer = setInterval(() => {
+      this.checkAcpQuotaReadiness();
+      this.broadcastSystemStatus();
+    }, 3000);
     this.branchTimer = setInterval(() => {
       void this.git.scan();
     }, 3000);
@@ -204,9 +232,14 @@ export class Server {
     for (const [id, cfg] of Object.entries(this.config.hosts)) {
       registry.register(
         new LocalHost(id, cfg.label, {
-          pi: (s) => this.quota.accept(s),
-          piReaderReady: (providers) => this.refreshQuota(providers),
-          codex: (limits) => this.quota.accept(this.codexQuota.snapshot(limits, Date.now(), true)),
+          pi: (s) => {
+            if (s.provider !== ACP || inspectAcpRuntime().ready) this.quota.accept(s);
+          },
+          piReaderReady: (providers) => this.refreshQuota({ newlyReadable: providers }),
+          codex: (limits) => {
+            if (this.codexQuota.isConfigured())
+              this.quota.accept(this.codexQuota.snapshot(limits, Date.now(), true));
+          },
         }),
       );
     }
@@ -219,8 +252,24 @@ export class Server {
     return registry;
   }
 
-  private refreshQuota(newlyReadable?: readonly string[]): void {
-    if (!this.closing) void this.quota.refresh(() => this.piQuotaReader(), newlyReadable);
+  private quotaState(quota = this.quota.state()) {
+    return { ...quota, acpPrepareStep: ACP_PREPARE_STEP };
+  }
+
+  private checkAcpQuotaReadiness(): void {
+    if (this.closing) return;
+    const ready = inspectAcpRuntime().ready;
+    if (ready === this.acpQuotaReady) return;
+    this.acpQuotaReady = ready;
+    this.refreshQuota({ providers: [ACP], newlyReadable: ready ? [ACP] : [] });
+  }
+
+  private refreshQuota(options?: QuotaRefreshOptions): void {
+    if (!this.closing)
+      void this.quota.refresh(
+        () => ({ reader: this.piQuotaReader(), acpReady: inspectAcpRuntime().ready }),
+        options,
+      );
   }
 
   private piQuotaReader(): PiQuotaReader | undefined {
@@ -317,7 +366,7 @@ export class Server {
     const commands = mergeLocalCommands([]);
     this.sendJson(ws, {
       type: "init",
-      quota: this.quota.state(),
+      quota: this.quotaState(),
       // Identifies the served bundle; a client that reconnects and sees a
       // different id reloads itself (home-screen apps never reload on their own).
       buildId: this.http.buildId(),
@@ -916,11 +965,16 @@ export class Server {
     fs.watchFile(configPath, { interval: 2000 }, () => {
       const previousPresets = this.config.presets;
       try {
-        this.config = loadConfig(this.baseDir);
-      } catch (e) {
+        const next = loadConfig(this.baseDir);
+        // Service-level environment is fixed for the lifetime of this process.
+        next.server.proxy = this.config.server.proxy;
+        if (next.pi) next.pi.acp = this.config.pi?.acp;
+        this.config = next;
+      } catch {
         this.broadcastUI({
           type: "error",
-          message: `config.toml reload failed: ${e instanceof Error ? e.message : String(e)}`,
+          message:
+            "config.toml reload failed; previous settings are still in use. Run --doctor to inspect the file.",
         });
         return;
       }
@@ -1147,6 +1201,7 @@ export class Server {
     for (const wsState of states) {
       for (const agent of wsState.agents) {
         agent.session.config.providerEnv = this.resolveProviderEnv(agent.model);
+        if (agent.session.config.backend === "pi") agent.session.config.piAcp = this.config.pi?.acp;
       }
       const workspace = Workspace.fromState(
         wsState,
@@ -1223,21 +1278,24 @@ export class Server {
       this.projects.create(
         name?.trim() || (root ? path.basename(root) : "Untitled project"),
         root ?? null,
-        model || undefined,
+        model,
         cwd ?? undefined,
       ),
     );
   }
 
   private projectAction(ws: WebSocket, action: () => unknown): void {
+    const sendError = (error: unknown) =>
+      this.sendJson(ws, {
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+        ...(error instanceof ModelSelectionError && { issue: error.issue }),
+      });
     try {
       const result = action();
-      if (result instanceof Promise)
-        void result.catch((e: unknown) =>
-          this.sendJson(ws, { type: "error", message: e instanceof Error ? e.message : String(e) }),
-        );
-    } catch (e) {
-      this.sendJson(ws, { type: "error", message: e instanceof Error ? e.message : String(e) });
+      if (result instanceof Promise) void result.catch(sendError);
+    } catch (error) {
+      sendError(error);
     }
   }
 
@@ -1269,6 +1327,9 @@ export class Server {
         }),
       }),
       modelOptions: () => this.models,
+      modelDiscoveryIssue: () =>
+        (this.config.pi ? this.piCatalogIssue : undefined) ??
+        codexModelIssue(this.codexAuth.status),
       isLeadOnline: (project) =>
         Boolean(project.lead && this.hostRegistry.get(project.lead.hostId)?.connected),
       removeWorkspace: (id) => this.removeWorkspace(id),
@@ -1438,44 +1499,34 @@ export class Server {
     this.scheduleRetry(wsId, agentId, delay);
   }
 
-  private piConfig(): Partial<SessionConfig> {
-    return {
-      piPackages: this.config.pi?.packages,
-      piExcludePackages: this.config.pi?.exclude_packages,
-      piOffline: this.config.pi?.offline,
-    };
+  private piConfig() {
+    return piSessionConfig(this.config);
+  }
+
+  modelDiscoverySnapshot(): ModelDiscoverySnapshot {
+    return describeModelDiscovery(
+      this.config,
+      this.models,
+      this.piCatalogIssue,
+      this.codexAuth.status,
+    );
   }
 
   private async refreshPiCatalog(): Promise<void> {
     const revision = ++this.catalogRevision;
     if (this.closing) return;
-    // A configured Pi backend is discoverable even before the first workspace turn.
-    // Other installs obtain catalogs from their running Pi sessions.
-    const host = this.hostRegistry.getDefault();
-    if (!this.config.pi || !host?.discoverPiModels) {
-      this.catalogModels = [];
-      this.refreshModels();
-      return;
+    const { models, issue } = await probePiCatalog(
+      this.config,
+      this.baseDir,
+      this.hostRegistry.getDefault(),
+    );
+    if (this.closing || revision !== this.catalogRevision) return;
+    this.catalogModels = models;
+    this.piCatalogIssue = issue;
+    if (issue?.code === "pi_catalog_failed" || issue?.code === "pi_cli_missing") {
+      console.error(`[models] ${issue.impact} ${issue.nextStep}`);
     }
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yaat-pi-catalog-"));
-    try {
-      const models = await host.discoverPiModels({
-        ...this.piConfig(),
-        backend: "pi",
-        cwd: dir,
-        dataDir: this.baseDir,
-        piSessionDir: path.join(dir, "sessions"),
-        workspaceId: "model-catalog",
-      });
-      if (this.closing || revision !== this.catalogRevision) return;
-      this.catalogModels = models;
-      this.refreshModels();
-    } catch (error) {
-      if (!this.closing && revision === this.catalogRevision)
-        console.error("[models] Pi catalog unavailable", error);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
+    this.refreshModels();
   }
 
   private refreshLeadTools(workspace: Workspace): void {
@@ -1514,18 +1565,23 @@ export class Server {
   }
 
   private async probeCodexAuthState(): Promise<CodexAuthState> {
-    const wasAuthenticated = this.codexAuth.authenticated;
+    const wasQuotaConfigured = this.codexQuota.isConfigured();
     const prev = this.codexAuth;
-    const next = await probeCodexAuth(codexProcessEnv());
+    const state = await probeCodexAuth(codexProcessEnv());
+    // The legacy Codex auth frame should not relay arbitrary account RPC errors either.
+    const next = state.error ? { ...state, error: codexModelIssue(state.status)?.impact } : state;
     const notify = this.notifyCodexRecheck;
     this.notifyCodexRecheck = false;
     if (this.closing) return this.codexAuth;
     this.codexAuth = next;
-    if (!next.authenticated) {
-      const at = wasAuthenticated ? Date.now() : 0;
+    if (!this.codexQuota.isConfigured()) {
+      const at = wasQuotaConfigured ? Date.now() : 0;
       this.quota.accept({ ...unavailable(NATIVE_CODEX, at), reason: "not configured" });
     } else if (notify) {
-      this.refreshQuota([NATIVE_CODEX]);
+      this.refreshQuota({
+        providers: [NATIVE_CODEX],
+        newlyReadable: wasQuotaConfigured ? [] : [NATIVE_CODEX],
+      });
     }
     this.refreshModels();
     const changed =
@@ -1720,7 +1776,7 @@ export class Server {
 
   async close(): Promise<void> {
     this.closing = true;
-    this.quota.cancelQueuedRefresh();
+    this.quota.stop();
     if (!this.restored) await this.restoring.catch(() => undefined);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.projects.close();

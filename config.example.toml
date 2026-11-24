@@ -12,6 +12,13 @@
 # Replace 501 with your `id -u` (`yaat-service.sh init-config` fills this in automatically).
 # restart_command = ["launchctl", "kickstart", "-k", "gui/501/com.yaat.server"]
 
+# Outbound proxy for the service and children. Omitted keys inherit the service
+# environment. Restart after changing these; loopback always bypasses this proxy.
+# [server.proxy]
+# http_proxy = "http://127.0.0.1:7890"
+# https_proxy = "http://127.0.0.1:7890"
+# no_proxy = "example.internal"
+
 # Authentication (optional — remove this section to disable auth)
 [auth]
 username = "agent"
@@ -44,6 +51,13 @@ type = "local"
 # default_model = "provider/model"
 # default_effort = "medium"
 # offline = false  # allow Pi to access npm on startup (default: true)
+
+# YAAT owns the permission/update fields in its Pi profile, not the host profile.
+# yolo allows edits and commands without asking. Use default for confirmation.
+# [pi.acp]
+# permissions = "yolo"       # default | auto_edit | yolo
+# runtime_updates = "manual" # manual | notify | automatic
+# binary = "/absolute/path/to/agy_acp_server.par" # overrides AGY_ACP_BIN; restart required
 
 # Projects (optional): the model a new project's lead runs on, and the
 # workers it starts without naming one. Any model from the picker; effort if

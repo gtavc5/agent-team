@@ -90,7 +90,18 @@ beforeAll(async () => {
   fs.writeFileSync(path.join(web, "logo.png"), "png-bytes");
   authConfig = { ...AUTH };
   const auth = new Auth(() => authConfig);
-  handler = new HttpHandler(auth, web, uploads, base);
+  handler = new HttpHandler(
+    auth,
+    web,
+    uploads,
+    base,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => ({ facts: { pi: { value: "/test/pi", source: "instance pin" } }, issues: [] }),
+  );
   server = http.createServer((req, res) => handler.handle(req, res));
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   port = (server.address() as net.AddressInfo).port;
@@ -160,6 +171,21 @@ describe("session cookies", () => {
       authConfig = { ...AUTH };
     }
   });
+});
+
+it("serves the same runtime facts in both formats only after authentication", async () => {
+  const headers = { Cookie: await login() };
+  for (const suffix of ["", "?format=text"]) {
+    expect((await request(`/api/diagnostics${suffix}`)).status).toBe(302);
+    const response = await request(`/api/diagnostics${suffix}`, { headers });
+    expect(response.headers["cache-control"]).toBe("no-store");
+    if (suffix) expect(response.body.toString()).toBe("pi: /test/pi [instance pin]");
+    else
+      expect(JSON.parse(response.body.toString())).toMatchObject({
+        facts: { pi: { value: "/test/pi", source: "instance pin" } },
+        issues: [],
+      });
+  }
 });
 
 describe("static files", () => {

@@ -288,7 +288,7 @@ export function leadToolset(
       ...notesTools(api, id),
       {
         name: "start_session",
-        description: `Start a worker: a session in cwd whose first message is task. ${project.root ? "cwd is the repository or a worktree, reused: one whose sessions are idle or archived (project_status), clean, its branch merged or pushed; archive its idle session, then git -C <worktree> switch -c <branch> origin/main. A new worktree only when all are taken, at most four unless the user wants more." : "Use an existing directory; this project has no Git worktrees."} Models: ${models.join(", ")}.${presets ? ` Presets: ${presets}.` : ""}${dispatchHints ? ` Dispatch hints: ${dispatchHints}.` : ""}`,
+        description: `Start a worker: a session in cwd whose first message is task. ${project.root ? "cwd is the repository or a worktree, reused: one whose sessions are idle or archived (project_status), clean, its branch merged or pushed; archive its idle session, then git -C <worktree> switch -c <branch> origin/main. A new worktree only when all are taken, at most four unless the user wants more." : "Use an existing directory; this project has no Git worktrees."} Models: ${models.join(", ") || "none available"}.${presets ? ` Presets: ${presets}.` : ""}${dispatchHints ? ` Dispatch hints: ${dispatchHints}.` : ""}`,
         shape: {
           title: z.string(),
           cwd: z.string(),
@@ -300,7 +300,11 @@ export function leadToolset(
           model: z
             .string()
             .optional()
-            .describe(`Model override. Default ${models[0]} unless set by the preset`),
+            .describe(
+              models.length
+                ? `Model override. Default ${models[0]} unless set by the preset`
+                : "Model override. No models are available.",
+            ),
           effort: z
             .string()
             .optional()

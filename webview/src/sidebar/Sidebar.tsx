@@ -164,6 +164,20 @@ export function SystemStatusPanel({ status }: { status: SystemStatus }) {
   );
 }
 
+function quotaWaitingHint(row: QuotaRow): string | undefined {
+  switch (row.reason) {
+    case "not configured":
+      return "not configured";
+    case "waiting for ACP setup":
+      return "waiting for setup";
+    case "waiting for Pi session":
+    case "checking usage":
+      return "warming up";
+    default:
+      return row.observedAt === 0 && !row.reason ? "warming up" : undefined;
+  }
+}
+
 export function QuotaPanel({
   quota,
   now,
@@ -213,15 +227,22 @@ export function QuotaPanel({
             const open = expanded.has(key);
             const detailsId = `${panelId}-row-${index}`;
             const isUnavailable = row.availability !== "available";
+            const waitingHint = isUnavailable ? quotaWaitingHint(row) : undefined;
+            const isError = isUnavailable && !waitingHint;
+            const needsSetup = row.reason === "waiting for ACP setup";
             const isStale =
               row.windows.length > 0 &&
               (isUnavailable || (row.observedAt > 0 && displayTime - row.observedAt >= 60_000));
             const summaryWindows = selectSummaryWindows(row.windows);
-            const statusText = [row.availability, row.reason].filter(Boolean).join(" · ");
+            const statusText = needsSetup
+              ? "Waiting for explicit ACP setup"
+              : waitingHint
+                ? (row.reason ?? waitingHint)
+                : [row.availability, row.reason].filter(Boolean).join(" · ");
             const rowLabel = labels[index];
             return (
               <div
-                className={`quota-group${open ? " open" : ""}${isUnavailable ? " quota-group-error" : ""}${isStale ? " quota-group-stale" : ""}`}
+                className={`quota-group${open ? " open" : ""}${isError ? " quota-group-error" : ""}${isStale ? " quota-group-stale" : ""}`}
                 key={key}
               >
                 <button
@@ -237,58 +258,49 @@ export function QuotaPanel({
                   </span>{" "}
                   <span className="quota-name">{rowLabel}</span>{" "}
                   <span className="quota-summary">
-                    {isUnavailable && row.windows.length === 0 ? (
-                      <span className="quota-status-error">
-                        <span className="quota-badge quota-badge-error" aria-hidden="true">
+                    {waitingHint && <span className="quota-detail-meta">{waitingHint}</span>}
+                    {isError && (
+                      <span className="quota-status-error" title={statusText}>
+                        <span
+                          role="img"
+                          className="quota-badge quota-badge-error"
+                          aria-label={statusText}
+                        >
                           !
-                        </span>{" "}
-                        {row.availability}
+                        </span>
+                        {!row.windows.length && (row.reason ?? row.availability)}
                       </span>
-                    ) : (
-                      <>
-                        {isUnavailable && (
-                          <>
-                            <span
-                              role="img"
-                              className="quota-badge quota-badge-error"
-                              title={statusText}
-                              aria-label={statusText}
-                            >
-                              !
-                            </span>{" "}
-                          </>
-                        )}
-                        {!isUnavailable && isStale && (
-                          <>
-                            <span className="quota-badge quota-badge-stale">stale</span>{" "}
-                          </>
-                        )}
-                        {summaryWindows.map((w, wi) => {
-                          const pct = Math.round(w.usedPct);
-                          return (
-                            <span className="quota-metric" key={w.label}>
-                              {wi > 0 && (
-                                <>
-                                  {" "}
-                                  <span className="quota-sep" aria-hidden="true">
-                                    ·
-                                  </span>{" "}
-                                </>
-                              )}
-                              <span className="quota-win-label">{shortWindowLabel(w.label)}</span>{" "}
-                              <span className={`quota-pct quota-pct-${quotaTone(pct)}`}>
-                                {pct}%
-                              </span>
-                            </span>
-                          );
-                        })}
-                      </>
                     )}
+                    {isStale && <span className="quota-badge quota-badge-stale">stale</span>}
+                    {summaryWindows.map((w, wi) => {
+                      const pct = Math.round(w.usedPct);
+                      return (
+                        <span className="quota-metric" key={w.label}>
+                          {wi > 0 && (
+                            <span className="quota-sep" aria-hidden="true">
+                              ·
+                            </span>
+                          )}
+                          <span className="quota-win-label">{shortWindowLabel(w.label)}</span>{" "}
+                          <span className={`quota-pct quota-pct-${quotaTone(pct)}`}>{pct}%</span>
+                        </span>
+                      );
+                    })}
                   </span>
                 </button>
                 {open && (
                   <div id={detailsId} className="quota-details">
-                    {isUnavailable && <div className="quota-detail-status">{statusText}</div>}
+                    {isUnavailable && (
+                      <div className={isError ? "quota-detail-status" : "quota-detail-meta"}>
+                        {statusText}
+                        {needsSetup && quota.acpPrepareStep && (
+                          <>
+                            {": "}
+                            <code>{quota.acpPrepareStep}</code>
+                          </>
+                        )}
+                      </div>
+                    )}
                     {row.windows.map((w) => {
                       const pct = Math.round(w.usedPct);
                       return (
@@ -307,7 +319,7 @@ export function QuotaPanel({
                       );
                     })}
                     <div className="quota-detail-meta">
-                      {row.observedAt > 0
+                      {row.windows.length > 0 && row.observedAt > 0
                         ? `${isStale ? "stale · " : ""}Updated ${formatRelative(row.observedAt, displayTime)}`
                         : "Not yet observed"}
                     </div>
@@ -770,6 +782,17 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             </div>
           )}
         </div>
+      )}
+      {p.connected && (
+        <small className="system-status-panel">
+          <a href="api/diagnostics?format=text" target="_blank" rel="noreferrer">
+            Service diagnostics
+          </a>
+          {" · "}
+          <a href="api/diagnostics" target="_blank" rel="noreferrer">
+            JSON
+          </a>
+        </small>
       )}
       {p.quota && (
         <QuotaPanel quota={p.quota} refresh={p.onRefreshQuota} now={now} connected={p.connected} />

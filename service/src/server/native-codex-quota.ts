@@ -1,4 +1,6 @@
+import { codexProcessEnv, readCodexRateLimits } from "../session/codex";
 import type { RateLimitSnapshot } from "../session/codex-rpc";
+import type { QuotaProviderAdapter } from "../session/quota/registry";
 import {
   NATIVE_CODEX,
   snapshotSchema,
@@ -31,17 +33,26 @@ export function codexQuota(limits: RateLimitSnapshot | null, at = Date.now()): Q
   return parsed.success ? parsed.data : unavailable(NATIVE_CODEX, at);
 }
 
-import { codexProcessEnv, readCodexRateLimits } from "../session/codex";
-import type { QuotaProviderAdapter } from "../session/quota/registry";
 export class CodexQuotaSource implements QuotaProviderAdapter<unknown> {
   readonly id = NATIVE_CODEX;
   constructor(private readonly configured: () => boolean = () => true) {}
   isConfigured() {
     return this.configured();
   }
-  async fetchQuota() {
+  async fetchQuota(_ctx: unknown, signal: AbortSignal): Promise<QuotaSnapshot> {
+    const notConfigured = (): QuotaSnapshot => ({
+      ...unavailable(NATIVE_CODEX),
+      reason: "not configured",
+    });
+    if (!this.isConfigured()) return notConfigured();
     const at = Date.now();
-    return this.snapshot(await readCodexRateLimits(codexProcessEnv()), at);
+    const limits = await readCodexRateLimits(codexProcessEnv(), signal);
+    signal.throwIfAborted();
+    if (!this.isConfigured()) return notConfigured();
+    const snapshot = this.snapshot(limits, at);
+    return snapshot.availability === "available"
+      ? snapshot
+      : { ...snapshot, reason: "usage unavailable" };
   }
   private groups = new Map<string, { at: number; limits: RateLimitSnapshot }>();
   snapshot(limits: RateLimitSnapshot | null, at = Date.now(), sparse = false): QuotaSnapshot {

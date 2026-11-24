@@ -13,8 +13,9 @@ import { ProjectManager } from "../../src/project/manager";
 import { closeHistory, historyOf, saveIndex, saveWorkspace } from "../../src/workspace/state";
 import type { PiAvailableModel, PromptEnvelope, SessionConfig } from "../../src/session/types";
 import * as codex from "../../src/session/codex";
+import * as acpReadiness from "../../src/session/acp-readiness";
 import { LocalHost } from "../../src/session/host";
-import { QUOTA_TTL, type QuotaState } from "../../src/session/quota-schema";
+import { ACP, QUOTA_TTL, type QuotaState } from "../../src/session/quota-schema";
 import { FakeSession } from "./fakes";
 
 interface FakeTool {
@@ -33,7 +34,7 @@ interface Launch {
 
 let launches: Launch[] = [];
 let sessionsByAgent = new Map<string, TestSession>();
-const ENV_KEYS = ["HOME", "https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"];
+const ENV_KEYS = ["HOME", "AGY_ACP_BIN", "https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"];
 let savedEnv: Record<string, string | undefined>;
 
 class TestSession extends FakeSession {
@@ -411,6 +412,80 @@ describe("server restart with projects", () => {
     }
   });
 
+  it("gates ACP quota until live runtime readiness and refreshes only ACP on install", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    const { base, web } = seed();
+    const runtime = path.join(base, "agy_acp_server.par");
+    process.env.AGY_ACP_BIN = runtime;
+    const configured = [ACP, "kimi-coding"];
+    vi.mocked(codex.probeCodexAuth).mockResolvedValue({
+      cliAvailable: true,
+      authenticated: true,
+      status: "authenticated",
+      accountType: "chatgpt",
+      checkedAt: Date.now(),
+    });
+    const read = vi.fn((provider: string) =>
+      Promise.resolve({
+        provider,
+        observedAt: Date.now(),
+        availability: "available" as const,
+        groups: [{ name: "Plan", windows: [{ label: "weekly", usedPct: 42 }] }],
+      }),
+    );
+    vi.spyOn(LocalHost.prototype, "quotaReader").mockReturnValue({ configured, read });
+    const native = vi.spyOn(codex, "readCodexRateLimits").mockResolvedValue({
+      limitId: "codex",
+      planType: null,
+      primary: { usedPercent: 27, windowDurationMins: 300, resetsAt: null },
+      secondary: null,
+    });
+    const { server, frames, send, stop } = await start(base, web);
+    const latestQuota = () =>
+      frames.filter((f) => f.type === "quota_snapshot").at(-1)?.quota as QuotaState | undefined;
+    const acpRow = (quota?: QuotaState) => quota?.rows.find((r) => r.provider === ACP);
+    try {
+      const initQuota = frames.find((f) => f.type === "init")?.quota as QuotaState;
+      expect(initQuota.acpPrepareStep).toBe(acpReadiness.ACP_PREPARE_STEP);
+      expect(acpRow(initQuota)?.reason).toBe("waiting for ACP setup");
+      send({ type: "refresh_quota" });
+      await until(() => latestQuota()?.refreshing === false, "manual quota refresh");
+      expect(acpRow(latestQuota())?.reason).toBe("waiting for ACP setup");
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(read.mock.calls).toEqual([["kimi-coding"]]);
+
+      // The other providers are now past TTL, but a runtime transition must only read ACP.
+      vi.setSystemTime(Date.now() + QUOTA_TTL);
+      fs.writeFileSync(runtime, "", { mode: 0o755 });
+      await vi.advanceTimersByTimeAsync(3000);
+      await until(() => acpRow(latestQuota())?.availability === "available", "ACP install refresh");
+      const sample = acpRow(latestQuota());
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(read.mock.calls).toEqual([["kimi-coding"], [ACP]]);
+      expect(native).toHaveBeenCalledTimes(1);
+      expect(launches).toEqual([]);
+
+      fs.unlinkSync(runtime);
+      await vi.advanceTimersByTimeAsync(3000);
+      await until(() => acpRow(latestQuota())?.reason === "waiting for ACP setup", "ACP removal");
+      expect(acpRow(latestQuota())).toEqual({
+        ...sample,
+        availability: "unavailable",
+        reason: "waiting for ACP setup",
+      });
+      expect(read).toHaveBeenCalledTimes(2);
+
+      configured.splice(configured.indexOf(ACP), 1);
+      send({ type: "refresh_quota" });
+      await until(() => acpRow(latestQuota())?.reason === "not configured", "ACP not configured");
+      expect(read.mock.calls.filter(([provider]) => provider === ACP)).toHaveLength(1);
+    } finally {
+      stop();
+      await server.close();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     { order: "ready before control", overlap: false },
     { order: "control before ready", overlap: false },
@@ -422,6 +497,18 @@ describe("server restart with projects", () => {
     "recovers quota with $order (cold refresh in flight: $overlap)",
     async ({ order, overlap }) => {
       const { base, root, web } = seed();
+      vi.spyOn(acpReadiness, "inspectAcpRuntime").mockReturnValue({
+        ready: true,
+        value: "/mock/agy",
+        source: "test",
+      });
+      vi.mocked(codex.probeCodexAuth).mockResolvedValue({
+        cliAvailable: true,
+        authenticated: true,
+        status: "authenticated",
+        accountType: "chatgpt",
+        checkedAt: Date.now(),
+      });
       vi.spyOn(LocalHost.prototype, "createSession").mockRestore();
       vi.stubEnv("OPENAI_API_KEY", "test-key");
       vi.stubEnv("CODEX_API_KEY", undefined);
@@ -1413,6 +1500,36 @@ describe("rate limits on the server", () => {
       log.mockRestore();
     }
     fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  it("keeps API-key Codex models enabled but excludes the account from quota reads and retries", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const { base, web } = seed();
+    const readLimits = vi.spyOn(codex, "readCodexRateLimits").mockResolvedValue(null);
+    const { server, frames, send, stop } = await start(base, web);
+    const isNeutral = (quota: QuotaState) =>
+      quota.rows.some((r) => r.provider === "native-codex" && r.reason === "not configured");
+    try {
+      const init = frames.find((f) => f.type === "init")!;
+      expect(init.codexAuth).toMatchObject({ authenticated: true, accountType: "apiKey" });
+      expect(init.models).toContainEqual(expect.objectContaining({ backend: "codex" }));
+      expect(isNeutral(init.quota as QuotaState)).toBe(true);
+      send({ type: "refresh_quota" });
+      await until(
+        () =>
+          frames.some((f) => f.type === "quota_snapshot" && !(f.quota as QuotaState).refreshing),
+        "API-key quota refresh",
+      );
+      send({ type: "recheck_codex_auth" });
+      await until(() => frames.some((f) => f.type === "codex_auth_update"), "API-key recheck");
+      await vi.advanceTimersByTimeAsync(4 * QUOTA_TTL);
+      expect(readLimits).not.toHaveBeenCalled();
+      expect(isNeutral(server["quota"].state())).toBe(true);
+    } finally {
+      stop();
+      await server.close();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it("gates unauthenticated Codex models and quota on startup, keeps Pi openai-codex/*, and unlocks live via recheck_codex_auth", async () => {

@@ -3,7 +3,16 @@ import * as path from "path";
 import TOML from "@iarna/toml";
 import { AGENT_PRESETS, type AgentPreset } from "./presets";
 
+import {
+  readAcp,
+  readProxy,
+  RuntimeConfigError,
+  type AcpConfig,
+  type ProxyConfig,
+} from "./runtime";
+
 export interface ServerConfig {
+  proxy?: ProxyConfig;
   remote_uploads_url?: string;
   restart_command?: string[];
 }
@@ -35,6 +44,7 @@ export interface ProviderConfig {
 }
 
 export interface PiConfig {
+  acp?: AcpConfig;
   packages?: string[];
   exclude_packages?: string[];
   default_model?: string;
@@ -76,14 +86,14 @@ function optionalString(value: unknown): string | undefined {
 
 function readPresets(value: unknown): AgentPreset[] {
   if (value === undefined || (Array.isArray(value) && !value.length)) return AGENT_PRESETS;
-  if (!Array.isArray(value)) throw new Error("Expected [[agent_presets]]");
+  if (!Array.isArray(value)) throw new RuntimeConfigError("Expected [[agent_presets]]");
   return value.map((row: Record<string, unknown>, i) => {
     const name = optionalString(row?.name);
     const avatar = optionalString(row?.avatar);
     const color = optionalString(row?.color);
     const whenToUse = optionalString(row.when_to_use)?.trim();
     if (!name || !avatar || !color)
-      throw new Error(`agent_presets[${i}] needs name, avatar and color`);
+      throw new RuntimeConfigError(`agent_presets[${i}] needs name, avatar and color`);
     return {
       name,
       avatar,
@@ -103,12 +113,23 @@ export function loadConfig(baseDir: string): AppConfig {
     );
   }
   const raw = fs.readFileSync(configPath, "utf-8");
-  const parsed = TOML.parse(raw) as Record<string, unknown>;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = TOML.parse(raw);
+  } catch (error) {
+    // The parser message includes source lines, which can contain credentials.
+    const line = (error as { line?: number }).line;
+    throw Object.assign(
+      new Error(`Invalid config.toml${typeof line === "number" ? ` at line ${line + 1}` : ""}`),
+      { line },
+    );
+  }
 
   const serverSection = parsed.server as Record<string, unknown> | undefined;
   const server: ServerConfig = {
     remote_uploads_url: (serverSection?.remote_uploads_url as string) || undefined,
     restart_command: stringArray(serverSection?.restart_command),
+    proxy: readProxy(serverSection?.proxy),
   };
 
   const wsSection = parsed.workspace as Record<string, unknown> | undefined;
@@ -155,7 +176,7 @@ export function loadConfig(baseDir: string): AppConfig {
   if (rawAuth) {
     // A half-filled [auth] must not silently turn login off.
     for (const key of ["username", "password", "session_secret"]) {
-      if (!rawAuth[key]) throw new Error(`[auth] is missing ${key}`);
+      if (!rawAuth[key]) throw new RuntimeConfigError(`[auth] is missing ${key}`);
     }
     auth = {
       username: rawAuth.username as string,
@@ -179,6 +200,7 @@ export function loadConfig(baseDir: string): AppConfig {
   const rawPi = parsed.pi as Record<string, unknown> | undefined;
   const pi: PiConfig | undefined = rawPi
     ? {
+        acp: readAcp(rawPi.acp),
         packages: stringArray(rawPi.packages),
         exclude_packages: stringArray(rawPi.exclude_packages),
         default_model: typeof rawPi.default_model === "string" ? rawPi.default_model : undefined,

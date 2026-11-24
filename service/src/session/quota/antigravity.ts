@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ACP_PREPARE_STEP, inspectAcpRuntime } from "../acp-readiness";
 import { ACP, label, observedAt, snapshotSchema } from "../quota-schema";
 import type { PiQuotaContext } from "./pi-context";
 import type { QuotaProviderAdapter } from "./registry";
@@ -29,6 +30,8 @@ export const antigravityAdapter: QuotaProviderAdapter<PiQuotaContext> = {
   id: ACP,
   isConfigured: (ctx) => Boolean(ctx.modelRegistry.getProvider(ACP)),
   async fetchQuota(ctx) {
+    // Keep the route registered so the running Pi can pick up a new local install.
+    if (!inspectAcpRuntime().ready) throw new Error(ACP_PREPARE_STEP);
     const raw = await new Promise<unknown>((resolve) =>
       ctx.events.emit("antigravity-acp:quota:request", { reply: resolve }),
     );

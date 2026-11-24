@@ -1,5 +1,9 @@
 import { EventEmitter } from "node:events";
-import { expect, it, vi, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { expect, it, vi, beforeEach, afterEach } from "vitest";
+import { ACP_PREPARE_STEP } from "../../src/session/acp-readiness";
 import piQuota from "../../src/session/pi-quota";
 import {
   ACP,
@@ -12,6 +16,8 @@ import {
 } from "../../src/session/quota-schema";
 import { QuotaMonitor as Monitor } from "../../src/server/quota";
 import { codexQuota, CodexQuotaSource } from "../../src/server/native-codex-quota";
+import * as codex from "../../src/session/codex";
+import * as codexRpc from "../../src/session/codex-rpc";
 import { QuotaAdapterRegistry } from "../../src/session/quota/registry";
 import type { PiQuotaContext } from "../../src/session/quota/pi-context";
 type Reader = () => Promise<QuotaSnapshot>;
@@ -70,7 +76,48 @@ function fixture(
       command.handler("", { modelRegistry, model: { provider }, ui: { notify } }),
   };
 }
-afterEach(() => vi.useRealTimers());
+let runtimeDir: string;
+beforeEach(() => {
+  runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-quota-test-"));
+  const runtime = path.join(runtimeDir, "agy");
+  fs.writeFileSync(runtime, "not run", { mode: 0o700 });
+  vi.stubEnv("AGY_ACP_BIN", runtime);
+});
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  fs.rmSync(runtimeDir, { recursive: true, force: true });
+});
+
+it("skips unavailable ACP quota on both routes and retries on the same Pi once the runtime appears", async () => {
+  const runtime = path.join(runtimeDir, "later");
+  vi.stubEnv("AGY_ACP_BIN", runtime);
+  const { events, notify, run } = fixture();
+  const request = vi.fn(({ reply }: { reply: (value: unknown) => void }) =>
+    reply({
+      ok: true,
+      quota: {
+        at: Date.now(),
+        groups: [{ displayName: "A", buckets: [{ window: "5h", remainingFraction: 0.2 }] }],
+      },
+    }),
+  );
+  events.on("antigravity-acp:quota:request", request);
+  const refresh = events.listeners(REFRESH_EVENT)[0] as (request: unknown) => Promise<void>;
+  const reply = vi.fn();
+  await run();
+  await refresh({ provider: ACP, reply });
+  expect(request).not.toHaveBeenCalled();
+  expect(notify).toHaveBeenCalledWith(expect.stringContaining(ACP_PREPARE_STEP), "warning");
+  expect(reply).toHaveBeenLastCalledWith(expect.objectContaining({ availability: "unavailable" }));
+
+  fs.writeFileSync(runtime, "not run", { mode: 0o700 });
+  await refresh({ provider: ACP, reply });
+  expect(request).toHaveBeenCalledOnce();
+  expect(reply).toHaveBeenLastCalledWith(expect.objectContaining({ availability: "available" }));
+});
+
 it("shares the provider read between command, panel control and cached requests, publishing only quota fields", async () => {
   const { events, run, notify, snapshots } = fixture();
   const requests: { reply: (v: unknown) => void }[] = [];
@@ -299,6 +346,169 @@ it("limits refresh to one in flight and one read per TTL independently of passiv
   expect(q.state().rows.find((r) => r.provider === ACP)?.availability).toBe("available");
 });
 
+it.each([false, true])(
+  "preserves a full refresh during an ACP-only read (another ACP-only refresh queued last: %s)",
+  async (targetedLast) => {
+    const q = new TestQuotaMonitor();
+    let finishAcp!: (sample: QuotaSnapshot) => void;
+    const pending = new Promise<QuotaSnapshot>((resolve) => (finishAcp = resolve));
+    const acp = vi.fn(() => pending);
+    const codex = vi.fn(() =>
+      Promise.resolve({ ...group(Date.now(), "Codex plan", 7), provider: NATIVE_CODEX }),
+    );
+    const readers = () => [codex, acp];
+    const active = q.refresh(readers, { providers: [ACP] });
+    await q.refresh(readers);
+    if (targetedLast) await q.refresh(readers, { providers: [ACP] });
+    expect(codex).not.toHaveBeenCalled();
+    finishAcp(group(Date.now(), "ACP plan", 23));
+    await active;
+    expect(acp).toHaveBeenCalledTimes(1);
+    expect(codex).toHaveBeenCalledTimes(1);
+    expect(q.state().rows.every((row) => row.availability === "available")).toBe(true);
+  },
+);
+
+it("retries only the transient provider after TTL with bounded backoff, preserving its last sample", async () => {
+  vi.useFakeTimers();
+  const q = new TestQuotaMonitor();
+  const old = Date.now() - QUOTA_TTL;
+  q.accept(group(old, "ACP plan", 42));
+  const codex = vi.fn(() =>
+    Promise.resolve({ ...group(Date.now(), "Codex plan", 7), provider: NATIVE_CODEX }),
+  );
+  const acp = vi.fn().mockRejectedValue(new Error("temporary failure"));
+  const readers = () => [codex, acp];
+  await q.refresh(readers);
+  expect(q.state().rows.find((r) => r.provider === ACP)).toMatchObject({
+    observedAt: old,
+    reason: "usage unavailable",
+    windows: [{ label: "5h", usedPct: 42 }],
+  });
+  await vi.advanceTimersByTimeAsync(QUOTA_TTL - 1);
+  await q.refresh(readers);
+  expect(acp).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(acp).toHaveBeenCalledTimes(2);
+  acp.mockImplementation(() => Promise.resolve(group(Date.now(), "ACP plan", 26)));
+  await vi.advanceTimersByTimeAsync(2 * QUOTA_TTL - 1);
+  expect(acp).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(acp).toHaveBeenCalledTimes(3);
+  expect(q.state().rows.find((r) => r.provider === ACP)).toMatchObject({
+    availability: "available",
+    windows: [{ label: "5h", usedPct: 26 }],
+  });
+  await vi.advanceTimersByTimeAsync(10 * QUOTA_TTL);
+  expect(acp).toHaveBeenCalledTimes(3);
+  expect(codex).toHaveBeenCalledTimes(1);
+});
+
+it("exhausts transient retries and does not retry an unconfigured provider", async () => {
+  vi.useFakeTimers();
+  const q = new TestQuotaMonitor();
+  const codex = vi.fn(() =>
+    Promise.resolve({ ...unavailable(NATIVE_CODEX), reason: "not configured" as const }),
+  );
+  const acp = vi.fn().mockRejectedValue(new Error("retryable"));
+  await q.refresh(() => [codex, acp]);
+  await vi.advanceTimersByTimeAsync(10 * QUOTA_TTL);
+  expect(codex).toHaveBeenCalledTimes(1);
+  expect(acp).toHaveBeenCalledTimes(3);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("stops retrying a provider once a passive sample restores it", async () => {
+  vi.useFakeTimers();
+  const q = new TestQuotaMonitor();
+  const acp = vi.fn().mockRejectedValue(new Error("retryable"));
+  await q.refresh(() => [undefined, acp]);
+  await vi.advanceTimersByTimeAsync(1);
+  q.accept(group(Date.now(), "ACP plan", 23));
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(QUOTA_TTL);
+  expect(acp).toHaveBeenCalledTimes(1);
+});
+
+it("stops scheduled retries, queued refreshes and active registry waits on shutdown", async () => {
+  vi.useFakeTimers();
+  const codex = vi.fn().mockRejectedValue(new Error("retryable"));
+  let signal: AbortSignal | undefined;
+  const acp = vi.fn((_ctx: boolean, abort: AbortSignal) => {
+    signal = abort;
+    return new Promise<QuotaSnapshot>(() => {});
+  });
+  const source = new QuotaAdapterRegistry<boolean>([
+    { id: NATIVE_CODEX, isConfigured: () => true, fetchQuota: codex },
+    { id: ACP, isConfigured: (ready) => ready, fetchQuota: acp },
+  ]);
+  const q = new Monitor(() => {}, source);
+  await q.refresh(() => false);
+  const active = q.refresh(() => true, { newlyReadable: [ACP] });
+  await Promise.resolve();
+  await q.refresh(() => true, { newlyReadable: [NATIVE_CODEX] });
+  q.stop();
+  await active;
+  expect(signal?.aborted).toBe(true);
+  expect(q.state().refreshing).toBe(false);
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(10 * QUOTA_TTL);
+  expect(codex).toHaveBeenCalledTimes(1);
+  expect(acp).toHaveBeenCalledTimes(1);
+});
+
+it("closes the Codex quota app-server on shutdown without waiting for RPC or timeout", async () => {
+  vi.useFakeTimers();
+  let reply: ((msg: codexRpc.RpcMessage) => void) | undefined;
+  let disconnect: ((reason: string) => void) | undefined;
+  let markReadStarted!: () => void;
+  const readStarted = new Promise<void>((resolve) => (markReadStarted = resolve));
+  const write = vi.fn((msg: codexRpc.RpcMessage) => {
+    if (msg.method === "initialize") reply?.({ id: msg.id, result: {} });
+    if (msg.method === "account/rateLimits/read") markReadStarted();
+  });
+  const close = vi.fn(() => disconnect?.("closed"));
+  vi.spyOn(codexRpc, "spawnAppServer").mockReturnValue({
+    write,
+    close,
+    onMessage: (cb) => (reply = cb),
+    onClose: (cb) => (disconnect = cb),
+  });
+  const source = new CodexQuotaSource();
+  const q = new Monitor(() => {}, new QuotaAdapterRegistry([source]));
+  const ongoing = q.refresh(() => undefined);
+  await readStarted;
+  expect(close).not.toHaveBeenCalled();
+  q.stop();
+  await ongoing;
+  expect(close).toHaveBeenCalledTimes(1);
+  expect(write.mock.calls.map(([msg]) => msg.method)).toEqual([
+    "initialize",
+    "initialized",
+    "account/rateLimits/read",
+  ]);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("does not spawn a Codex quota app-server for an already cancelled read", async () => {
+  const spawn = vi.spyOn(codexRpc, "spawnAppServer").mockImplementation(() => {
+    throw new Error("Unexpected quota app-server spawn");
+  });
+  await expect(codex.readCodexRateLimits({}, AbortSignal.abort())).resolves.toBeNull();
+  expect(spawn).not.toHaveBeenCalled();
+});
+
+it("classifies an authenticated Codex read with no rate limit sample as transient", async () => {
+  vi.spyOn(codex, "readCodexRateLimits").mockResolvedValue(null);
+  expect(
+    await new CodexQuotaSource().fetchQuota(undefined, new AbortController().signal),
+  ).toMatchObject({
+    provider: NATIVE_CODEX,
+    availability: "unavailable",
+    reason: "usage unavailable",
+  });
+});
+
 it("gates CodexQuotaSource.isConfigured() on Codex auth state and recovers immediately once enabled", async () => {
   let authed = false;
   const source = new CodexQuotaSource(() => authed);
@@ -329,7 +539,7 @@ it("gates CodexQuotaSource.isConfigured() on Codex auth state and recovers immed
 
   authed = true;
   expect(source.isConfigured()).toBe(true);
-  await mon.refresh(() => undefined, [NATIVE_CODEX]);
+  await mon.refresh(() => undefined, { newlyReadable: [NATIVE_CODEX] });
   expect(fetchSpy).toHaveBeenCalledTimes(1);
   expect(mon.state().rows).toEqual([
     expect.objectContaining({

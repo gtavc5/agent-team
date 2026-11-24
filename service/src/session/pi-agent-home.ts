@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { SessionConfig } from "./types";
 
 export type ControlledPiAgentHomeMode = "runtime" | "test-synthetic" | "test-copied-creds";
 
@@ -22,6 +23,7 @@ export interface PrepareControlledPiAgentHomeOptions {
   excludePackages?: readonly string[];
   offline?: boolean;
   isolateGeminiHome?: boolean;
+  piAcp?: SessionConfig["piAcp"];
 }
 
 export interface ControlledPiAgentHome {
@@ -33,6 +35,7 @@ export interface ControlledPiAgentHome {
     piAntigravityEntryPath?: string;
   };
   geminiHome?: string;
+  piAcpProfileError?: string;
 }
 
 type SourceSettings = {
@@ -68,6 +71,16 @@ export function packageSource(entry: PiPackageEntry): string {
 
 function packageName(entry: PiPackageEntry): string {
   const source = packageSource(entry);
+  if (path.isAbsolute(source)) {
+    try {
+      const manifest = JSON.parse(
+        fs.readFileSync(path.join(source, "package.json"), "utf8").replace(/^\uFEFF/, ""),
+      ) as { name?: unknown };
+      if (manifest?.name === "pi-antigravity-acp-provider") return manifest.name;
+    } catch {
+      // Pi also accepts local directories without a package manifest.
+    }
+  }
   const withoutScheme = source.startsWith("npm:") ? source.slice(4) : source;
   return path.basename(withoutScheme.replace(/[\\/]$/, ""));
 }
@@ -598,8 +611,12 @@ export function discoverLocalPiPackages(
 ): LocalPiPackages {
   const entries = packageEntries(readSettings(sourceAgentDir), sourceAgentDir).filter(
     (entry) =>
-      INCLUDED_PACKAGES.includes(packageName(entry) as (typeof INCLUDED_PACKAGES)[number]) &&
-      fs.existsSync(candidatePath(packageSource(entry), sourceAgentDir)),
+      fs.existsSync(candidatePath(packageSource(entry), sourceAgentDir)) &&
+      INCLUDED_PACKAGES.includes(
+        packageName(
+          candidatePath(packageSource(entry), sourceAgentDir),
+        ) as (typeof INCLUDED_PACKAGES)[number],
+      ),
   );
   return resolveLocalPiPackages(entries, sourceAgentDir, excludePackages);
 }
@@ -611,6 +628,104 @@ function freshDirectory(prefix: string): string {
 function writeJson(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+}
+
+type PiAcpProfileState =
+  | { status: "missing" }
+  | { status: "valid"; settings: Record<string, unknown> }
+  | { status: "invalid"; reason: string };
+
+function piAcpProfilePath(agentDir: string): string {
+  return path.join(agentDir, "antigravity-acp-provider", "config.json");
+}
+
+function readPiAcpProfile(file: string): PiAcpProfileState {
+  const directory = path.dirname(file);
+  try {
+    for (const parent of [path.dirname(directory), directory]) {
+      const stat = fs.lstatSync(parent, { throwIfNoEntry: false });
+      if (!stat) return { status: "missing" };
+      if (!stat.isDirectory()) return { status: "invalid", reason: "not a regular directory" };
+    }
+    const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+    if (!stat) return { status: "missing" };
+    if (!stat.isFile()) return { status: "invalid", reason: "not a regular file" };
+    const previous: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (!previous || typeof previous !== "object" || Array.isArray(previous))
+      return { status: "invalid", reason: "expected a JSON object" };
+    const settings = previous as Record<string, unknown>;
+    if (
+      settings.permissions !== undefined &&
+      settings.permissions !== "yolo" &&
+      settings.permissions !== "default" &&
+      settings.permissions !== "auto_edit"
+    )
+      return { status: "invalid", reason: "invalid permissions mode" };
+    if (
+      settings.runtimeUpdates !== undefined &&
+      settings.runtimeUpdates !== "automatic" &&
+      settings.runtimeUpdates !== "notify" &&
+      settings.runtimeUpdates !== "manual"
+    )
+      return { status: "invalid", reason: "invalid runtime update mode" };
+    return { status: "valid", settings };
+  } catch (error) {
+    return {
+      status: "invalid",
+      reason: error instanceof SyntaxError ? "invalid JSON" : "unable to read profile",
+    };
+  }
+}
+
+export function inspectPiAcpProfile(
+  agentDir: string,
+  profile?: SessionConfig["piAcp"],
+):
+  | { path: string; status: "missing" | "valid" }
+  | { path: string; status: "invalid"; reason: string } {
+  const file = piAcpProfilePath(agentDir);
+  const state = readPiAcpProfile(file);
+  if (state.status === "invalid") return { path: file, ...state };
+  if (
+    state.status === "missing" ||
+    state.settings.permissions !== (profile?.permissions ?? "yolo") ||
+    state.settings.runtimeUpdates !== (profile?.runtime_updates ?? "manual")
+  ) {
+    let dir = path.dirname(file);
+    try {
+      while (!fs.statSync(dir, { throwIfNoEntry: false }) && dir !== path.dirname(dir))
+        dir = path.dirname(dir);
+      fs.accessSync(dir, fs.constants.W_OK | fs.constants.X_OK);
+    } catch {
+      return {
+        path: file,
+        status: "invalid",
+        reason: "unable to create or replace profile in its directory",
+      };
+    }
+  }
+  return { path: file, status: state.status };
+}
+
+function preparePiAcpProfile(agentDir: string, profile?: SessionConfig["piAcp"]): void {
+  const file = piAcpProfilePath(agentDir);
+  const state = readPiAcpProfile(file);
+  if (state.status === "invalid") throw new Error(state.reason);
+  const settings = state.status === "valid" ? state.settings : {};
+  const permissions = profile?.permissions ?? "yolo";
+  const runtimeUpdates = profile?.runtime_updates ?? "manual";
+  if (settings.permissions === permissions && settings.runtimeUpdates === runtimeUpdates) return;
+
+  const directory = path.dirname(file);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const temporary = fs.mkdtempSync(path.join(directory, ".profile-"));
+  try {
+    const staged = path.join(temporary, "config.json");
+    writeJson(staged, { ...settings, permissions, runtimeUpdates });
+    fs.renameSync(staged, file);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
 }
 
 function copyCredential(source: string, destination: string): void {
@@ -638,9 +753,6 @@ function prepareGeminiHome(sourceGeminiDir: string | undefined, copyCredentials:
       if (fs.existsSync(source)) copyCredential(source, path.join(geminiHome, name));
     }
   }
-  writeJson(path.join(geminiHome, "antigravity-acp-provider", "config.json"), {
-    runtimeUpdates: "manual",
-  });
   return geminiHome;
 }
 
@@ -655,11 +767,25 @@ export function prepareControlledPiAgentHome(
     options.mode === "runtime"
       ? path.join(options.dataDir!, "pi-agent-home")
       : freshDirectory("agent-team-pi-agent-home-");
-  fs.mkdirSync(piAgentDir, { recursive: true });
+  fs.mkdirSync(piAgentDir, { recursive: true, mode: 0o700 });
+  if (!fs.lstatSync(piAgentDir).isDirectory())
+    throw new Error("Managed Pi agent home must be a directory, not a symlink");
 
   const discovered = options.packages?.length
     ? resolveLocalPiPackages(options.packages, sourceAgentDir, options.excludePackages)
     : discoverLocalPiPackages(sourceAgentDir, options.excludePackages);
+  let piAcpProfileError: string | undefined;
+  if (discovered.piAntigravityEntryPath) {
+    try {
+      preparePiAcpProfile(piAgentDir, options.piAcp);
+    } catch {
+      piAcpProfileError = `Antigravity ACP is disabled. Repair the managed profile at ${piAcpProfilePath(piAgentDir)} and restart the session.`;
+      discovered.piAntigravityEntryPath = undefined;
+      discovered.packages = discovered.packages.filter(
+        (entry) => packageName(entry) !== "pi-antigravity-acp-provider",
+      );
+    }
+  }
 
   const authSource = path.join(sourceAgentDir, "auth.json");
   const authDestination = path.join(piAgentDir, "auth.json");
@@ -740,5 +866,6 @@ export function prepareControlledPiAgentHome(
       piAntigravityEntryPath: discovered.piAntigravityEntryPath,
     },
     ...(geminiHome && { geminiHome }),
+    ...(piAcpProfileError && { piAcpProfileError }),
   };
 }

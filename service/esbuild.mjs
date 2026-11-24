@@ -7,7 +7,7 @@ const watch = process.argv.includes("--watch");
 function copyPiBridge() {
   fs.mkdirSync("../dist", { recursive: true });
   fs.cpSync("src/session/quota", "../dist/quota", { recursive: true });
-  for (const file of ["pi-panel-bridge.ts", "pi-quota.ts", "quota-schema.ts"]) {
+  for (const file of ["acp-readiness.ts", "pi-panel-bridge.ts", "pi-quota.ts", "quota-schema.ts"]) {
     fs.copyFileSync(path.resolve("src/session", file), path.resolve("../dist", file));
   }
 }

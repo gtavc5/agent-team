@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { ACP_PREPARE_STEP, inspectAcpRuntime } from "../service/src/session/acp-readiness";
 import {
   discoverLocalPiPackages,
   packageSource,
@@ -188,6 +189,7 @@ async function verifyRun(): Promise<RunReport> {
         sourceAgentDir,
         sourceGeminiDir,
         packages: dependencies,
+        piAcp: { permissions: "default", runtime_updates: "manual" },
       });
     } finally {
       if (previousTmpDir === undefined) delete process.env.TMPDIR;
@@ -218,11 +220,8 @@ async function verifyRun(): Promise<RunReport> {
       TMPDIR: root,
       AGY_ACP_BIN: "",
     };
-    const installedRuntime =
-      process.env.AGY_ACP_BIN ||
-      path.join(hostHome, ".local", "opt", "agy-acp", "current", "agy_acp_server.par");
-    if (!fs.existsSync(installedRuntime))
-      throw new Error("No local ACP runtime; install it or set AGY_ACP_BIN");
+    const { ready, value: installedRuntime } = inspectAcpRuntime();
+    if (!ready) throw new Error(ACP_PREPARE_STEP);
     const runtime = path.join(root, "runtime");
     fs.mkdirSync(runtime);
     // Dereference any source link; the copied executable and its sibling are private to the run.
@@ -233,12 +232,6 @@ async function verifyRun(): Promise<RunReport> {
       if (fs.existsSync(file)) fs.copyFileSync(file, path.join(runtime, path.basename(file)));
     }
     env.AGY_ACP_BIN = path.join(runtime, path.basename(installedRuntime));
-    const configDir = path.join(home.piAgentDir, "antigravity-acp-provider");
-    fs.mkdirSync(configDir);
-    fs.writeFileSync(
-      path.join(configDir, "config.json"),
-      JSON.stringify({ runtimeUpdates: "manual", permissions: "default" }),
-    );
     const agentsDir = path.join(home.piAgentDir, "agents");
     fs.mkdirSync(agentsDir);
     fs.writeFileSync(

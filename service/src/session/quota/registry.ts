@@ -38,7 +38,7 @@ export class QuotaAdapterRegistry<C> {
     };
   }
 
-  read(id: string, ctx: C): Promise<QuotaSnapshot> {
+  read(id: string, ctx: C, signal?: AbortSignal): Promise<QuotaSnapshot> {
     const adapter = this.adapters.get(id);
     if (!adapter)
       return Promise.resolve({
@@ -51,16 +51,21 @@ export class QuotaAdapterRegistry<C> {
     const pending = this.pending.get(id);
     if (pending) return pending;
     const abort = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        abort.abort();
-        reject(new Error("Quota timed out"));
-      }, this.timeoutMs);
+    const cancel = () => abort.abort();
+    if (signal?.aborted) cancel();
+    else signal?.addEventListener("abort", cancel, { once: true });
+    const timer = setTimeout(cancel, this.timeoutMs);
+    const cancelled = new Promise<never>((_, reject) => {
+      const rejectRead = () => reject(new Error("Quota read cancelled or timed out"));
+      if (abort.signal.aborted) rejectRead();
+      else abort.signal.addEventListener("abort", rejectRead, { once: true });
     });
     const work = Promise.race([
-      Promise.resolve().then(() => adapter.fetchQuota(ctx, abort.signal)),
-      timeout,
+      Promise.resolve().then(() => {
+        abort.signal.throwIfAborted();
+        return adapter.fetchQuota(ctx, abort.signal);
+      }),
+      cancelled,
     ])
       .then((raw) => {
         const s = snapshotSchema.parse(raw);
@@ -70,6 +75,7 @@ export class QuotaAdapterRegistry<C> {
       .catch((): QuotaSnapshot => ({ ...unavailable(id, startedAt), reason: "usage unavailable" }))
       .finally(() => {
         clearTimeout(timer);
+        signal?.removeEventListener("abort", cancel);
         this.pending.delete(id);
       });
     if (!adapter.coalescesByCredential) this.pending.set(id, work);

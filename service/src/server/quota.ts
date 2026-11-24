@@ -6,6 +6,16 @@ import {
   type QuotaSnapshot,
 } from "../session/quota-schema";
 import type { QuotaAdapterRegistry } from "../session/quota/registry";
+
+const MAX_QUOTA_RETRIES = 2;
+export interface QuotaRefreshOptions {
+  providers?: readonly string[];
+  newlyReadable?: readonly string[];
+}
+interface QuotaRefresh<C> extends QuotaRefreshOptions {
+  context: () => C;
+}
+
 export class QuotaMonitor<C> {
   private providers = new Map<
     string,
@@ -16,8 +26,13 @@ export class QuotaMonitor<C> {
     }
   >();
   private lastAttempt = new Map<string, number>();
+  private readonly retries = new Map<
+    string,
+    { count: number; timer?: ReturnType<typeof setTimeout> }
+  >();
+  private readonly shutdown = new AbortController();
   private refreshing = false;
-  private queuedRefresh?: { context: () => C; newlyReadable: Set<string> };
+  private queuedRefresh?: QuotaRefresh<C>;
 
   constructor(
     private readonly changed: (state: QuotaState) => void,
@@ -34,7 +49,10 @@ export class QuotaMonitor<C> {
     };
   }
   accept(s: QuotaSnapshot, confirmedAt?: number) {
-    if (this.merge(s, confirmedAt)) this.changed(this.state());
+    if (this.shutdown.signal.aborted || !this.merge(s, confirmedAt)) return;
+    if (s.availability === "available" || s.reason !== "usage unavailable")
+      this.clearRetry(s.provider);
+    this.changed(this.state());
   }
   private merge(s: QuotaSnapshot, confirmedAt?: number): boolean {
     let p = this.providers.get(s.provider);
@@ -131,58 +149,98 @@ export class QuotaMonitor<C> {
     return changed;
   }
 
-  cancelQueuedRefresh(): void {
+  stop(): void {
+    this.shutdown.abort();
     this.queuedRefresh = undefined;
+    for (const id of this.retries.keys()) this.clearRetry(id);
   }
 
-  async refresh(context: () => C, newlyReadable?: readonly string[]) {
+  private clearRetry(id: string, resetCount = true): void {
+    const retry = this.retries.get(id);
+    if (!retry) return;
+    clearTimeout(retry.timer);
+    retry.timer = undefined;
+    if (resetCount) this.retries.delete(id);
+  }
+
+  private scheduleRetry(id: string, context: () => C): void {
+    const count = this.retries.get(id)?.count ?? 0;
+    if (count >= MAX_QUOTA_RETRIES) return;
+    const timer = setTimeout(
+      () => {
+        void this.refresh(context, { providers: [id] });
+      },
+      QUOTA_TTL * 2 ** count,
+    );
+    timer.unref();
+    this.retries.set(id, { count: count + 1, timer });
+  }
+
+  async refresh(context: () => C, options?: QuotaRefreshOptions) {
+    if (this.shutdown.signal.aborted) return;
     if (this.refreshing) {
-      if (newlyReadable) {
-        this.queuedRefresh = {
-          context,
-          newlyReadable: new Set([...(this.queuedRefresh?.newlyReadable ?? []), ...newlyReadable]),
-        };
-      }
+      const queued = this.queuedRefresh;
+      this.queuedRefresh = {
+        context,
+        // A full refresh subsumes any queued provider-specific refreshes.
+        providers:
+          options?.providers && (!queued || queued.providers)
+            ? [...new Set([...(queued?.providers ?? []), ...options.providers])]
+            : undefined,
+        newlyReadable: [
+          ...new Set([...(queued?.newlyReadable ?? []), ...(options?.newlyReadable ?? [])]),
+        ],
+      };
       return;
     }
     this.refreshing = true;
     this.changed(this.state());
     try {
-      let next: typeof this.queuedRefresh = { context, newlyReadable: new Set(newlyReadable) };
-      while (next) {
+      let next: QuotaRefresh<C> | undefined = { context, ...options };
+      while (next && !this.shutdown.signal.aborted) {
         this.queuedRefresh = undefined;
-        await this.readProviders(next.context(), next.newlyReadable);
+        await this.readProviders(next);
         next = this.queuedRefresh;
       }
     } finally {
       this.refreshing = false;
-      this.changed(this.state());
+      if (!this.shutdown.signal.aborted) this.changed(this.state());
     }
   }
 
-  private async readProviders(ctx: C, newlyReadable: ReadonlySet<string>) {
+  private async readProviders({ context, providers, newlyReadable }: QuotaRefresh<C>) {
+    const ctx = context();
     const now = Date.now();
     const run = async (id: string) => {
       if (!this.registry.configured(id, ctx)) {
+        this.clearRetry(id);
         this.accept(this.registry.unconfigured(id, ctx, now));
         return;
       }
-      // A newly readable provider can recover from a failed read without waiting for the cooldown.
-      if (!newlyReadable.has(id) && now - (this.lastAttempt.get(id) ?? -Infinity) < QUOTA_TTL)
+      // A newly readable provider can recover without waiting for the previous cooldown.
+      const justReady = newlyReadable?.includes(id);
+      if (justReady) this.clearRetry(id);
+      else if (now - (this.lastAttempt.get(id) ?? -Infinity) < QUOTA_TTL) return;
+      const rows = [...(this.providers.get(id)?.rows.values() ?? [])];
+      if (rows.every((r) => r.availability === "available" && now - r.observedAt < QUOTA_TTL))
         return;
-      if (
-        [...(this.providers.get(id)?.rows.values() ?? [])].every(
-          (r) => r.availability === "available" && now - r.observedAt < QUOTA_TTL,
-        )
-      )
-        return;
-      this.lastAttempt.set(id, now);
-      try {
-        this.accept(await this.registry.read(id, ctx), now);
-      } catch {
-        this.accept({ ...unavailable(id, now), reason: "usage unavailable" });
+      if (rows.some((r) => r.reason === "waiting for ACP setup")) {
+        this.accept({ ...unavailable(id, now), reason: "checking usage" });
       }
+      this.lastAttempt.set(id, now);
+      this.clearRetry(id, false);
+      const result = await this.registry.read(id, ctx, this.shutdown.signal);
+      if (this.shutdown.signal.aborted) return;
+      this.accept(result, now);
+      if (
+        result.reason === "usage unavailable" &&
+        [...(this.providers.get(id)?.rows.values() ?? [])].some((r) => r.reason === result.reason)
+      )
+        this.scheduleRetry(id, context);
+      else this.clearRetry(id);
     };
-    await Promise.all(this.registry.ids.map(run));
+    await Promise.all(
+      this.registry.ids.filter((id) => !providers || providers.includes(id)).map(run),
+    );
   }
 }

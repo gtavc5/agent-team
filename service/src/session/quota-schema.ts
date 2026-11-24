@@ -44,7 +44,14 @@ export const snapshotSchema = z
     observedAt,
     availability: z.enum(["available", "unavailable", "unsupported"]),
     reason: z
-      .enum(["not configured", "waiting for Pi session", "usage unavailable", "no quota adapter"])
+      .enum([
+        "not configured",
+        "waiting for ACP setup",
+        "waiting for Pi session",
+        "checking usage",
+        "usage unavailable",
+        "no quota adapter",
+      ])
       .optional(),
     groups: z
       .array(group)
@@ -68,6 +75,7 @@ export interface QuotaRow {
   windows: QuotaWindow[];
 }
 export interface QuotaState {
+  acpPrepareStep?: string;
   refreshing: boolean;
   rows: QuotaRow[];
 }

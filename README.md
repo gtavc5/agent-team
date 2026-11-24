@@ -97,7 +97,7 @@ new work. The panel provides the orchestration and UI, not a model of its own.
 
 ### Account quota
 
-The sidebar shows last-observed account limits separately from CPU and memory. Refresh reads native Codex limits and asks one connected Pi session for its registered providers. Antigravity ACP uses the provider’s `/usage` event; Pi OAuth logins for `openai-codex` and `kimi-coding` use their respective read-only account usage endpoints. None starts a model turn. Without a source, last-known bars retain their observation time. Pi providers without a verified quota reader report unsupported.
+The sidebar shows last-observed account limits separately from CPU and memory. Refresh reads native Codex limits and asks one connected Pi session for its registered providers. Antigravity ACP uses the provider’s `/usage` event; Pi OAuth logins for `openai-codex` and `kimi-coding` use their respective read-only account usage endpoints. None starts a model turn. An unconfigured backend is neutral, not a quota failure. While Pi or ACP is getting ready, the sidebar shows what it is waiting for. Installing the ACP runtime triggers a new read from a connected Pi session. A transient read failure retries that provider at most twice; last-known bars retain their original observation time. Pi providers without a verified quota reader report unsupported.
 
 Pi sessions load `/quota` automatically. To use the same command in standalone Pi, run `pi -e /path/to/yaat/service/src/session/pi-quota.ts` from an installed checkout. `/quota` checks all registered providers regardless of the current model. Enable `pi-antigravity-acp-provider` for ACP readings. OAuth quota comes from Pi’s credential resolver, not from the native Codex login. No account pooling or credential switching is performed.
 
@@ -122,10 +122,12 @@ For a guided single-command service setup (macOS `launchd` and Linux
 ```bash
 git clone https://github.com/16bit-ykiko/agent-team.git
 cd agent-team
-./scripts/setup-prereqs.sh --install   # check/install Node.js 26+, Python/pip, Pi runtime & packages
-npm install
+./scripts/setup-prereqs.sh --install   # check/install Node.js 26+, Pi CLI & packages
+./scripts/yaat-service.sh install-deps
 ./scripts/yaat-service.sh install
 ```
+
+For setup problems, open **Service diagnostics** in the sidebar, or run `AGENT_TEAM_BASE_DIR="$HOME/.yaat" scripts/start-server.sh --doctor --json` after building. The report identifies the failed step and how to fix it. ACP is optional; prepare its runtime explicitly before using ACP models ([instructions](docs/DEPLOY.md#optional-antigravity-acp-runtime)).
 
 Or run directly in the foreground:
 

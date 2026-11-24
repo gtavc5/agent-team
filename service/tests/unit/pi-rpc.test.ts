@@ -7,6 +7,7 @@ import { PassThrough, Writable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   discoverLocalPiPackages,
+  inspectPiAcpProfile,
   prepareControlledPiAgentHome,
   type PiPackageEntry,
 } from "../../src/session/pi-agent-home";
@@ -459,14 +460,181 @@ describe("prepareControlledPiAgentHome", () => {
     expectNoSymlinks(home.piAgentDir);
     expectNoSymlinks(home.geminiHome!);
     expectControlledSettings(home.settingsPath);
+    expect(fs.existsSync(path.join(home.geminiHome!, "antigravity-acp-provider"))).toBe(false);
     expect(
       JSON.parse(
         fs.readFileSync(
-          path.join(home.geminiHome!, "antigravity-acp-provider", "config.json"),
+          path.join(home.piAgentDir, "antigravity-acp-provider", "config.json"),
           "utf8",
         ),
       ),
-    ).toEqual({ runtimeUpdates: "manual" });
+    ).toEqual({ permissions: "yolo", runtimeUpdates: "manual" });
+  });
+
+  it("atomically applies the managed ACP profile without changing unrelated or standalone settings", () => {
+    const { sourceAgentDir, dataDir } = makeSource();
+    const standalone = path.join(sourceAgentDir, "antigravity-acp-provider", "config.json");
+    fs.mkdirSync(path.dirname(standalone), { recursive: true });
+    fs.writeFileSync(standalone, '{"runtimeUpdates":"automatic"}');
+    const options = { mode: "runtime", sourceAgentDir, dataDir } as const;
+    const home = prepareControlledPiAgentHome(options);
+    const profile = path.join(home.piAgentDir, "antigravity-acp-provider", "config.json");
+    fs.writeFileSync(profile, '{"toolActivity":"full","nested":{"sample":true}}');
+    const configured = {
+      ...options,
+      piAcp: { permissions: "auto_edit", runtime_updates: "notify" },
+    } as const;
+    prepareControlledPiAgentHome(configured);
+    expect(JSON.parse(fs.readFileSync(profile, "utf8"))).toEqual({
+      toolActivity: "full",
+      nested: { sample: true },
+      permissions: "auto_edit",
+      runtimeUpdates: "notify",
+    });
+    expect(fs.readdirSync(path.dirname(profile))).toEqual(["config.json"]);
+    const previous = fs.statSync(profile);
+    prepareControlledPiAgentHome(configured);
+    expect(fs.statSync(profile).mtimeMs).toBe(previous.mtimeMs);
+    expect(fs.statSync(profile).ino).toBe(previous.ino);
+    expect(fs.readFileSync(standalone, "utf8")).toBe('{"runtimeUpdates":"automatic"}');
+  });
+
+  it.skipIf(process.platform === "win32")("does not follow a managed ACP profile symlink", () => {
+    const { sourceAgentDir, dataDir } = makeSource();
+    const options = { mode: "runtime", sourceAgentDir, dataDir } as const;
+    const home = prepareControlledPiAgentHome(options);
+    const profile = path.join(home.piAgentDir, "antigravity-acp-provider", "config.json");
+    const standalone = path.join(sourceAgentDir, "config.json");
+    fs.writeFileSync(standalone, "{}");
+    fs.unlinkSync(profile);
+    fs.symlinkSync(standalone, profile);
+    expect(
+      prepareControlledPiAgentHome(options).resolvedPackages.piAntigravityEntryPath,
+    ).toBeUndefined();
+    expect(inspectPiAcpProfile(home.piAgentDir)).toEqual({
+      path: profile,
+      status: "invalid",
+      reason: "not a regular file",
+    });
+    expect(fs.readFileSync(standalone, "utf8")).toBe("{}");
+    expect(fs.lstatSync(profile).isSymbolicLink()).toBe(true);
+  });
+
+  it.each([
+    { contents: '{"permissions":"default",', reason: "invalid JSON" },
+    { contents: '{"permissions":"unexpected"}', reason: "invalid permissions mode" },
+    { contents: "[]", reason: "expected a JSON object" },
+  ])("quarantines only ACP when the managed profile has $reason", ({ contents, reason }) => {
+    const { sourceAgentDir, dataDir } = makeSource();
+    const options = { mode: "runtime", sourceAgentDir, dataDir } as const;
+    const agentDir = path.join(dataDir, "pi-agent-home");
+    const profile = path.join(agentDir, "antigravity-acp-provider", "config.json");
+    expect(inspectPiAcpProfile(agentDir)).toEqual({ path: profile, status: "missing" });
+    expect(fs.existsSync(agentDir)).toBe(false);
+    const initial = prepareControlledPiAgentHome(options);
+    expect(inspectPiAcpProfile(agentDir)).toEqual({ path: profile, status: "valid" });
+    fs.writeFileSync(profile, contents);
+    expect(inspectPiAcpProfile(agentDir)).toEqual({ path: profile, status: "invalid", reason });
+
+    const broken = prepareControlledPiAgentHome(options);
+    expect(broken.piAcpProfileError).toContain(profile);
+    expect(broken.resolvedPackages.piAntigravityEntryPath).toBeUndefined();
+    expect(broken.resolvedPackages.piSubagentsRoot).toBe(initial.resolvedPackages.piSubagentsRoot);
+    expect(fs.readFileSync(broken.settingsPath, "utf8")).not.toContain(
+      "pi-antigravity-acp-provider",
+    );
+    expect(fs.readFileSync(profile, "utf8")).toBe(contents);
+
+    fs.writeFileSync(profile, '{"permissions":"default","runtimeUpdates":"manual"}');
+    const repaired = prepareControlledPiAgentHome({
+      ...options,
+      piAcp: { permissions: "default" },
+    });
+    expect(repaired.piAcpProfileError).toBeUndefined();
+    expect(repaired.resolvedPackages.piAntigravityEntryPath).toBe(
+      initial.resolvedPackages.piAntigravityEntryPath,
+    );
+    expect(fs.readFileSync(profile, "utf8")).toBe(
+      '{"permissions":"default","runtimeUpdates":"manual"}',
+    );
+  });
+
+  it("identifies a renamed ACP checkout by its manifest before starting Pi", () => {
+    const { sourceAgentDir, dataDir } = makeSource();
+    const alias = path.join(sourceAgentDir, "google-acp");
+    fs.renameSync(packageRoot(sourceAgentDir, providerSource), alias);
+    fs.writeFileSync(
+      path.join(alias, "package.json"),
+      JSON.stringify({
+        name: "pi-antigravity-acp-provider",
+        pi: { extensions: ["./extensions/index.ts"] },
+      }),
+    );
+    const options = {
+      mode: "runtime",
+      packages: [alias],
+      offline: false,
+      sourceAgentDir,
+      dataDir,
+    } as const;
+    const home = prepareControlledPiAgentHome(options);
+    expect(home.resolvedPackages.piAntigravityEntryPath).toBe(
+      fs.realpathSync(path.join(alias, "extensions/index.ts")),
+    );
+    expect(inspectPiAcpProfile(home.piAgentDir).status).toBe("valid");
+    const excluded = prepareControlledPiAgentHome({
+      ...options,
+      excludePackages: ["pi-antigravity-acp-provider"],
+    });
+    expect(JSON.parse(fs.readFileSync(excluded.settingsPath, "utf8"))).toMatchObject({
+      packages: [],
+    });
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "checks directory access only when staging a managed profile is necessary",
+    () => {
+      const { sourceAgentDir, dataDir } = makeSource();
+      const options = { mode: "runtime", sourceAgentDir, dataDir } as const;
+      const home = prepareControlledPiAgentHome(options);
+      const profile = inspectPiAcpProfile(home.piAgentDir);
+      const dir = path.dirname(profile.path);
+      fs.chmodSync(dir, 0o500);
+      try {
+        expect(inspectPiAcpProfile(home.piAgentDir).status).toBe("valid");
+        const policy = { permissions: "default" } as const;
+        expect(inspectPiAcpProfile(home.piAgentDir, policy).status).toBe("invalid");
+        expect(
+          prepareControlledPiAgentHome({ ...options, piAcp: policy }).piAcpProfileError,
+        ).toBeDefined();
+      } finally {
+        fs.chmodSync(dir, 0o700);
+      }
+      fs.unlinkSync(profile.path);
+      fs.chmodSync(dir, 0o500);
+      try {
+        expect(inspectPiAcpProfile(home.piAgentDir).status).toBe("invalid");
+      } finally {
+        fs.chmodSync(dir, 0o700);
+      }
+    },
+  );
+
+  it("ignores a malformed profile when the ACP package is excluded", () => {
+    const { sourceAgentDir, dataDir } = makeSource();
+    const options = {
+      mode: "runtime",
+      sourceAgentDir,
+      dataDir,
+      excludePackages: [providerSource],
+    } as const;
+    const home = prepareControlledPiAgentHome(options);
+    const { path: profile } = inspectPiAcpProfile(home.piAgentDir);
+    expect(fs.existsSync(path.dirname(profile))).toBe(false);
+    fs.mkdirSync(path.dirname(profile));
+    fs.writeFileSync(profile, "{");
+    expect(prepareControlledPiAgentHome(options).piAcpProfileError).toBeUndefined();
+    expect(fs.readFileSync(profile, "utf8")).toBe("{");
   });
 
   it("discovers local packages when packages is empty", () => {

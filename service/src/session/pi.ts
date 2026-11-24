@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { PanelToolset } from "../project/tools";
+import { ACP_PREPARE_STEP, inspectAcpRuntime } from "./acp-readiness";
 import type { BoundarySteer, HostSessionHandle } from "./host";
 import { PanelHttpServer, type PanelHttpAddress } from "./panel-http";
 import { discoverLocalPiPackages, prepareControlledPiAgentHome } from "./pi-agent-home";
@@ -32,6 +33,7 @@ import {
 } from "./pi-subagents";
 import { decodeExtensionUi } from "./pi-extension-ui";
 import { extractPiToolResultText, formatPiToolUse } from "./pi-tool-format";
+import { ACP } from "./quota-schema";
 import type {
   ActiveAsyncRunRecord,
   BackgroundTask,
@@ -66,6 +68,12 @@ export interface PiSessionOptions {
   readyTimeoutMs?: number;
   catalogOnly?: boolean;
   dialogFallbackTimeoutMs?: number;
+}
+
+export class PiModelsFilteredError extends Error {
+  constructor() {
+    super("No Pi models matched enabledModels");
+  }
 }
 
 type Json = Record<string, unknown>;
@@ -253,6 +261,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private appliedPanelTools: PanelToolset | null = null;
   private panelToolsError?: string;
   private rpc?: PiRpcClient;
+  private rpcEnv?: NodeJS.ProcessEnv;
   private compactingRpc?: PiRpcClient;
   private compactionBoundary?: { pending?: Promise<void> };
   private starting?: Promise<void>;
@@ -431,13 +440,15 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   }
 
   private prepareAgentHome() {
-    if (!this.config.piAgentDir)
-      this.home ??= prepareControlledPiAgentHome({
+    // Explicit piAgentDir is caller-owned. A managed runtime home is refreshed on respawn.
+    if (!this.config.piAgentDir && (!this.home || this.config.dataDir))
+      this.home = prepareControlledPiAgentHome({
         mode: this.config.dataDir ? "runtime" : "test-synthetic",
         dataDir: this.config.dataDir,
         packages: this.config.piPackages,
         excludePackages: this.config.piExcludePackages,
         offline: this.config.piOffline,
+        piAcp: this.config.piAcp,
       });
     const agentDir = this.config.piAgentDir ?? this.home!.piAgentDir;
     const settingsFile = path.join(agentDir, "settings.json");
@@ -447,13 +458,15 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     const packages =
       this.home?.resolvedPackages ??
       (Array.isArray(settings.packages) && settings.packages.length
-        ? discoverLocalPiPackages(this.config.piAgentDir, this.config.piExcludePackages)
+        ? discoverLocalPiPackages(this.config.piAgentDir)
         : {});
     this.piSubagentsRoot ??= packages.piSubagentsRoot;
     return {
       agentDir,
       settings,
-      providerEntry: this.config.piAntigravityEntryPath ?? packages.piAntigravityEntryPath,
+      providerEntry: this.home?.piAcpProfileError
+        ? undefined
+        : (this.config.piAntigravityEntryPath ?? packages.piAntigravityEntryPath),
     };
   }
 
@@ -541,9 +554,17 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         "PI_SESSION_FILE",
       ])
         delete env[name];
-      if (this.config.piOffline === false) delete env.PI_OFFLINE;
+      // Pi's online RPC startup refresh can bootstrap ACP, even with another provider selected.
+      // PI_OFFLINE suppresses background model refresh for all providers in this child only.
+      if (
+        this.options.catalogOnly ||
+        this.config.piOffline !== false ||
+        (providerEntry && !inspectAcpRuntime(env, this.normalizedCwd).ready)
+      )
+        env.PI_OFFLINE = "1";
+      else delete env.PI_OFFLINE;
       const rpc = (this.options.rpcFactory ?? PiRpcClient.spawn)({
-        binary: this.options.piBinary ?? this.config.piBinary,
+        binary: this.options.piBinary ?? this.config.piBinary ?? process.env.YAAT_PI_BIN,
         args: [
           "--mode",
           "rpc",
@@ -558,7 +579,6 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         env: {
           ...env,
           PI_CODING_AGENT_DIR: agentDir,
-          ...(this.config.piOffline !== false && { PI_OFFLINE: "1" }),
           YAAT_PANEL_URL: baseUrl,
           YAAT_PANEL_KEY: this.sessionKey,
           YAAT_PANEL_TOKEN: token,
@@ -568,6 +588,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         },
       });
       this.levels = undefined;
+      this.rpcEnv = env;
       this.rpc = rpc;
       this.tainted = false;
       rpc.on("event", (event: unknown) => {
@@ -612,7 +633,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         rpc.getAvailableThinkingLevels(timeout),
       ]);
       if (!this.current(generation, rpc)) throw new Error("Pi startup cancelled");
-      const available = models.flatMap((model) => {
+      const available = models.flatMap((row) => {
+        const model = object(row);
         const provider = text(model.provider),
           modelId = text(model.id ?? model.modelId);
         return provider && modelId
@@ -629,8 +651,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
             ]
           : [];
       });
-      if (providerEntry && !available.some((model) => model.provider === "antigravity-acp"))
-        throw new Error("Pi antigravity-acp model provider is unavailable");
+      if (this.options.catalogOnly && available.length !== models.length)
+        throw new Error("Malformed Pi model catalog");
       const enabledModels = Array.isArray(settings.enabledModels)
         ? settings.enabledModels.filter(
             (value): value is string => typeof value === "string" && value.length > 0,
@@ -646,6 +668,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
             ),
           )
         : available;
+      if (this.options.catalogOnly && available.length > 0 && this.models.length === 0)
+        throw new PiModelsFilteredError();
       this.commands = commands.flatMap((command) =>
         typeof command.name === "string"
           ? [
@@ -700,6 +724,52 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     );
   }
 
+  private resolveModel(desired: string): PiAvailableModel | undefined {
+    const exact = this.models.find((model) => model.id === desired);
+    if (exact) return exact;
+    const matches = this.models.filter((model) => model.modelId === desired);
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  private acpPromptError(input: string, compact: boolean): string | undefined {
+    const runtimeError = () =>
+      this.home?.piAcpProfileError ??
+      (inspectAcpRuntime(this.rpcEnv, this.normalizedCwd).ready
+        ? undefined
+        : `Antigravity ACP runtime is not ready. ${ACP_PREPARE_STEP}`);
+    if (!compact && input.startsWith("/")) {
+      // Match Pi's extension command parser and the provider's exact argument handling.
+      const space = input.indexOf(" ");
+      const name = input.slice(1, space === -1 ? undefined : space);
+      if (name === ACP || name === "gemini-acp") {
+        const args = space === -1 ? "" : input.slice(space + 1).trim();
+        if (["setup", "qualify", "update", "update-runtime"].includes(args))
+          return `Manage the Antigravity ACP runtime outside YAAT. ${ACP_PREPARE_STEP}`;
+        if (
+          args === "permissions" ||
+          args.startsWith("permissions ") ||
+          args.startsWith("updates ") ||
+          args === "tool-activity" ||
+          args.startsWith("tool-activity ")
+        )
+          return "Antigravity ACP permissions and runtime update policy are managed by YAAT. Configure [pi.acp] and restart YAAT; edit tool activity in the managed Pi profile.";
+        if (args === "quota") return runtimeError();
+      }
+      if (
+        (name === "quota" || name === ACP || name === "gemini-acp") &&
+        this.commands.some((command) => command.name === name && command.source === "extension")
+      )
+        return;
+    }
+    if (
+      [this.model.desired, this.model.applied].some(
+        (model) =>
+          model && (model.startsWith(`${ACP}/`) || this.resolveModel(model)?.provider === ACP),
+      )
+    )
+      return runtimeError();
+  }
+
   async send(input: string | PromptEnvelope, hooks?: SendHooks): Promise<SendReceipt> {
     if (this.disposed || this.isRunning) throw new Error("Pi session is busy or disposed");
     const envelope = typeof input === "string" ? { inputId: randomUUID(), text: input } : input;
@@ -728,6 +798,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
             "Pi is already processing a turn",
           );
         if (!this.live(turn) || this.interrupting) throw new Error("Pi prompt dispatch cancelled");
+        const acpError = this.acpPromptError(envelope.text, Boolean(compact));
+        if (acpError) throw new PiRpcResponseError(compact ? "compact" : "prompt", acpError);
         hooks?.onBeforeWrite?.({
           inputId: envelope.inputId,
           reportId: envelope.reportId,
@@ -893,13 +965,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       };
       const previousModel = this.model.applied;
       await apply(this.model, async (desired) => {
-        const model =
-          this.models.find((item) => item.id === desired) ??
-          this.models.find(
-            (item) =>
-              item.modelId === desired &&
-              this.models.filter((candidate) => candidate.modelId === desired).length === 1,
-          );
+        const model = this.resolveModel(desired);
         const slash = desired.indexOf("/");
         if (!model && slash <= 0) throw new Error(`Ambiguous or unavailable Pi model: ${desired}`);
         await rpc.setModel(

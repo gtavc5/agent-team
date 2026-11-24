@@ -483,8 +483,10 @@ describe("ProjectManager", () => {
     await expect(call(lead, "start_session", { ...args, preset: "Scout" })).rejects.toThrow(
       'Ambiguous preset "Scout"',
     );
-    await expect(call(lead, "start_session", { ...args, preset: "Offline" })).rejects.toThrow(
-      "Unknown model mock/offline",
+    await expect(call(lead, "start_session", { ...args, preset: "Offline" })).rejects.toMatchObject(
+      {
+        issue: { code: "invalid_explicit_model", source: "agent_presets.model", value: null },
+      },
     );
     expect(createWorkspace).not.toHaveBeenCalled();
     const tool = session(lead).panelTools!.tools.find((t) => t.name === "start_session")!;
@@ -653,7 +655,9 @@ describe("ProjectManager", () => {
   it("takes a Codex model for the lead and its workers, not an unknown one", async () => {
     const { manager, root, workspaces, call } = setup();
     fs.mkdirSync(path.join(root, "wt"), { recursive: true });
-    expect(() => manager.create("x", root, "gpt-5")).toThrow("Unknown model for a lead: gpt-5");
+    expect(() => manager.create("x", root, "gpt-5")).toThrow(
+      "The selected model is not in the available model catalog.",
+    );
     const project = manager.create("clice", root, "gpt-5.5");
     const lead = workspaces.get(project.leadWorkspaceId!)!;
     expect([...lead.agents.values()][0].info.model).toBe("gpt-5.5");
@@ -670,6 +674,29 @@ describe("ProjectManager", () => {
     expect([...codex.agents.values()][0].info.model).toBe("gpt-5.5");
   });
 
+  it("does not invent a default model for new leads, worker tools, or starts", async () => {
+    const { host, manager, root, create, call, session, workspaces } = setup();
+    const { lead } = create("existing lead");
+    host.modelOptions = () => [];
+    const tool = manager.toolsFor(lead)!.tools.find((tool) => tool.name === "start_session")!;
+    expect(tool.description).toContain("Models: none available.");
+    expect(tool.description).not.toContain("gpt-6-astra");
+    expect((tool.shape.model as z.ZodString).description).toBe(
+      "Model override. No models are available.",
+    );
+    session(lead).setPanelTools(manager.toolsFor(lead));
+
+    const args = { title: "worker", cwd: "wt", task: "work" };
+    await expect(call(lead, "start_session", args)).rejects.toMatchObject({
+      issue: { code: "no_models_available" },
+    });
+    expect(() => manager.create("new lead", null, undefined, root)).toThrow(
+      "No models are available to start a session.",
+    );
+    expect(workspaces.size).toBe(1);
+    expect(manager.list()).toHaveLength(1);
+  });
+
   it("refuses bad input before creating anything", async () => {
     const { create, call, workspaces } = setup();
     const { lead } = create("clice");
@@ -678,7 +705,9 @@ describe("ProjectManager", () => {
     ).rejects.toThrow("worktree add");
     await expect(
       call(lead, "start_session", { title: "x", cwd: "wt", task: "t", model: "gpt-5" }),
-    ).rejects.toThrow("Unknown model gpt-5");
+    ).rejects.toMatchObject({
+      issue: { code: "invalid_explicit_model", source: "request.model", value: null },
+    });
     await expect(
       call(lead, "start_session", { title: "x", cwd: "wt", task: "t", objective_id: "core/x" }),
     ).rejects.toThrow("No objective core/x");

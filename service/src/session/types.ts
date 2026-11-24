@@ -280,11 +280,16 @@ export interface SessionConfig {
   dataDir?: string;
   uploadsDir?: string;
   normalizedCwd?: string;
+  // Caller-owned override; YAAT only manages profiles in homes it prepares itself.
   piAgentDir?: string;
   piSessionDir?: string;
   piBridgeExtensionPath?: string;
   piSubagentsRoot?: string;
   piAntigravityEntryPath?: string;
+  piAcp?: {
+    permissions?: "yolo" | "default" | "auto_edit";
+    runtime_updates?: "automatic" | "notify" | "manual";
+  };
   piPackages?: string[];
   piExcludePackages?: string[];
   piOffline?: boolean;

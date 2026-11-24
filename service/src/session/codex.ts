@@ -1069,9 +1069,17 @@ function changeList(changes: Array<{ path: string; kind: { type: string } }>): s
 // short-lived app-server costs no quota. Null without a ChatGPT login.
 export async function readCodexRateLimits(
   env: NodeJS.ProcessEnv = process.env,
+  signal?: AbortSignal,
 ): Promise<RateLimitSnapshot | null> {
+  if (signal?.aborted) return null;
   let client: AppServerClient | null = null;
-  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000).unref());
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancel!: () => void;
+  const interrupted = new Promise<null>((resolve) => {
+    cancel = () => resolve(null);
+    timer = setTimeout(cancel, 15_000).unref();
+    signal?.addEventListener("abort", cancel, { once: true });
+  });
   const read = async () => {
     const transport = CodexSession.hooks?.transport
       ? null
@@ -1083,6 +1091,7 @@ export async function readCodexRateLimits(
       close: () => {},
     });
     await client.initialize();
+    signal?.throwIfAborted();
     const res = await client.request<{ rateLimits: RateLimitSnapshot }>(
       "account/rateLimits/read",
       null,
@@ -1090,10 +1099,12 @@ export async function readCodexRateLimits(
     return res.rateLimits;
   };
   try {
-    return await Promise.race([read(), timeout]);
+    return await Promise.race([read(), interrupted]);
   } catch {
     return null;
   } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", cancel);
     (client as AppServerClient | null)?.close();
   }
 }

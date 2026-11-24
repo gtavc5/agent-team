@@ -4,7 +4,7 @@ Three commands from a fresh clone:
 
 ```bash
 ./scripts/setup-prereqs.sh --install
-npm install
+./scripts/yaat-service.sh install-deps
 ./scripts/yaat-service.sh install
 ```
 
@@ -25,7 +25,28 @@ Verify the server is serving on `http://127.0.0.1:9800`:
 - **Layer 1 — [`scripts/setup-prereqs.sh`](../scripts/setup-prereqs.sh):** one-time machine prerequisites (Node.js 26+, Pi runtime and packages).
 - **Layer 2 — [`scripts/yaat-service.sh`](../scripts/yaat-service.sh) + [`scripts/start-server.sh`](../scripts/start-server.sh):** config generation, build, OS service registration, health check, and safe deferred self-redeploy.
 
-`start-server.sh` always prepends Homebrew (`/opt/homebrew/bin`), pixi, and `~/.local/bin` to `PATH`, checks Node >= 26, `dist/server.js`, and `config.toml`, then `exec`s `node dist/server.js`.
+Run installation from a shell where your preferred Node 26+ and Pi are available. Service startup and deferred deploy use the instance's verified executables without loading a login shell. After removing or moving a pinned installation, run the installer again with the intended toolchain. Python/pip and OpenSSL are not server prerequisites; Node crypto can generate login secrets.
+
+### Diagnose a new installation
+
+Open **Service diagnostics** in the sidebar for the running service's effective settings and last model probe. **JSON** exposes the same report to an agent (`GET api/diagnostics`, with the panel's normal authentication). Each issue gives a stage, stable code, effective value/source, affected capability, and next step. Proxy values and provider credentials are not printed.
+
+After building, you can diagnose an instance even if the service did not start:
+
+```bash
+AGENT_TEAM_BASE_DIR="$HOME/.yaat" scripts/start-server.sh --doctor
+AGENT_TEAM_BASE_DIR="$HOME/.yaat" scripts/start-server.sh --doctor --json
+```
+
+This uses the instance toolchain and config, probes the real model catalog and native Codex account without a model turn, and exits nonzero if there is no usable model or config. The CLI inherits the environment of its caller: use the panel report when comparing a terminal to the actual `systemd --user` or `launchd` environment.
+
+### Optional Antigravity ACP runtime
+
+YAAT does not install a missing ACP runtime on startup, first prompt, or quota refresh. Other configured providers remain usable. As the service user, start standalone `pi` with `pi-antigravity-acp-provider` enabled and run `/antigravity-acp setup` to explicitly prepare the managed runtime. Alternatively, set `[pi.acp].binary` in `config.toml` to an existing executable. An invalid explicit override blocks ACP rather than selecting another binary silently.
+
+Catalog probes use Pi's offline mode. If ACP is loaded but its runtime is missing, normal Pi sessions also skip online background model refresh: the provider can otherwise start its installer while refreshing the catalog, even for a non-ACP session. Other providers can still serve prompts. Once a runtime exists, a new session uses the configured online/offline policy; `automatic` explicitly permits managed-runtime updates.
+
+YAAT manages `permissions` and `runtimeUpdates` in its own `pi-agent-home/antigravity-acp-provider/config.json`, not the host profile. Defaults are `yolo` (commands and edits without confirmation) and `manual` (no automatic runtime upgrades). To request confirmation, set `[pi.acp].permissions = "default"`. With a custom runtime, diagnostics report enforcement as **unverified**. Configure outbound proxies in `[server.proxy]`; see `config.example.toml`. Restart the service after changing these ACP or proxy settings.
 
 ---
 
@@ -112,6 +133,7 @@ To register a separate background service for dev, pass distinct `--label`, `--p
 
 | Command                      | Purpose                                                                                                   |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `install-deps`               | Install checkout dependencies with the selected Node and npm                                              |
 | `init-config`                | Create base dir (`700`) and `config.toml` (`600`); keeps existing unless `--force`                        |
 | `install`                    | Init config if missing, `npm run build` (unless `--no-build`), write & load service (unless `--no-start`) |
 | `start` / `stop` / `restart` | Control the registered `launchd` / `systemd --user` service                                               |

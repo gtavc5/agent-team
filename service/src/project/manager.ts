@@ -12,6 +12,13 @@ import {
 import * as fs from "fs";
 import * as os from "os";
 import type { ProjectsConfig } from "../config/config";
+import {
+  invalidExplicitModel,
+  ModelSelectionError,
+  noModelsAvailable,
+  selectDefaultModel,
+  type ModelDiscoveryIssue,
+} from "../config/model-diagnostics";
 import * as path from "path";
 import {
   AGENT_PRESETS,
@@ -77,7 +84,7 @@ const TASK_ISSUES_SHOWN = 10;
 // its commit only.
 const AGES_COUNTED = 40;
 
-// A long-lived lead has the whole project in its context.
+// Model for seeded demo sessions, not a runtime fallback.
 export const LEAD_MODEL = "gpt-6-astra";
 
 // A lead asked to start everything at once must not spawn a burst of CLI
@@ -111,6 +118,7 @@ export interface ProjectHost {
   // config.toml's [projects]: the model and effort leads default to.
   isLeadOnline?(project: Project): boolean;
   modelOptions?(): ModelOption[];
+  modelDiscoveryIssue?(): ModelDiscoveryIssue | undefined;
   projectDefaults?(): ProjectsConfig;
   agentPresets?(): AgentPreset[];
   // Deletes a workspace without the project bookkeeping of a user delete.
@@ -206,17 +214,23 @@ export class ProjectManager {
     return (this.host.modelOptions?.() ?? MODEL_OPTIONS).map((model) => model.id);
   }
 
-  private defaultModel(): { model: string; effort?: string } {
-    const { model, effort } = this.host.projectDefaults?.() ?? {};
-    if (!model || !this.panelModels().includes(model))
-      return { model: this.panelModels()[0] ?? LEAD_MODEL };
+  private defaultModel(models: string[]): { model?: string; effort?: string } {
+    const { model: configured, effort } = this.host.projectDefaults?.() ?? {};
+    const model = selectDefaultModel(models, configured);
     return {
       model,
-      ...(effort &&
+      ...(model &&
+        model === configured &&
+        effort &&
         effortLevelsForModel(model, this.host.modelOptions?.())?.includes(effort) !== false && {
           effort,
         }),
     };
+  }
+
+  private missingDefaultModel(): ModelSelectionError {
+    const issue = this.host.modelDiscoveryIssue?.();
+    return issue ? new ModelSelectionError(issue) : noModelsAvailable();
   }
 
   private agentPresets(): AgentPreset[] {
@@ -224,11 +238,11 @@ export class ProjectManager {
   }
 
   create(name: string, root: string | null, model?: string, cwd?: string): Project {
-    const defaults = this.defaultModel();
+    const models = this.panelModels();
+    const defaults = this.defaultModel(models);
+    if (model !== undefined && !models.includes(model)) throw invalidExplicitModel("request.model");
     model ??= defaults.model;
-    if (!this.panelModels().includes(model)) {
-      throw new Error(`Unknown model for a lead: ${model}`);
-    }
+    if (model === undefined) throw this.missingDefaultModel();
     const taken = root !== null && this.store.list().find((p) => sameRoot(p.root, root));
     if (taken) throw new Error(`${root} is already the project "${taken.name}"`);
     const project = this.store.create(name, root);
@@ -563,8 +577,9 @@ export class ProjectManager {
 
   // What a lead may start workers on, its default first.
   private workerModels(): string[] {
-    const first = this.defaultModel().model;
-    return [first, ...this.panelModels().filter((m) => m !== first)];
+    const models = this.panelModels();
+    const first = this.defaultModel(models).model;
+    return first ? [first, ...models.filter((m) => m !== first)] : models;
   }
 
   // The tools a project workspace's agents get: the lead's or a worker's.
@@ -1116,12 +1131,14 @@ export class ProjectManager {
       }
       chosen = matches[0];
     }
-    const defaults = this.defaultModel();
-    const model = a.model ?? chosen?.model ?? defaults.model;
-    const models = this.workerModels();
-    if (!models.includes(model)) {
-      throw new Error(`Unknown model ${model}; one of: ${models.join(", ")}`);
+    const models = this.panelModels();
+    const defaults = this.defaultModel(models);
+    const explicit = a.model ?? chosen?.model;
+    if (explicit !== undefined && !models.includes(explicit)) {
+      throw invalidExplicitModel(a.model !== undefined ? "request.model" : "agent_presets.model");
     }
+    const model = explicit ?? defaults.model;
+    if (model === undefined) throw this.missingDefaultModel();
     const levels = effortLevelsForModel(model, this.host.modelOptions?.());
     if (a.effort && levels && !levels.includes(a.effort)) {
       throw new Error(
