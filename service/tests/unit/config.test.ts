@@ -82,6 +82,42 @@ color="green"`),
     ]);
   });
 
+  it("reads optional preset dispatch hints, trimming and ignoring blank values", () => {
+    const cfg = loadConfig(
+      writeConfig(`
+[[agent_presets]]
+name="Scout"
+avatar="S"
+color="blue"
+when_to_use="  Broad codebase exploration  "
+[[agent_presets]]
+name="Plain"
+avatar="P"
+color="green"
+[[agent_presets]]
+name="Empty"
+avatar="E"
+color="red"
+when_to_use=""
+[[agent_presets]]
+name="Blank"
+avatar="B"
+color="yellow"
+when_to_use="   "`),
+    );
+    expect(cfg.presets).toEqual([
+      {
+        name: "Scout",
+        avatar: "S",
+        color: "blue",
+        when_to_use: "Broad codebase exploration",
+      },
+      { name: "Plain", avatar: "P", color: "green" },
+      { name: "Empty", avatar: "E", color: "red" },
+      { name: "Blank", avatar: "B", color: "yellow" },
+    ]);
+  });
+
   it("reads Pi and restart settings", () => {
     const d = writeConfig(`
 [server]

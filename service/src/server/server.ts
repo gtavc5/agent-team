@@ -920,7 +920,11 @@ export class Server {
       const presets = this.config.presets;
       if (
         presets.length !== previousPresets.length ||
-        presets.some((preset, i) => preset.name !== previousPresets[i].name)
+        presets.some(
+          (preset, i) =>
+            preset.name !== previousPresets[i].name ||
+            preset.when_to_use !== previousPresets[i].when_to_use,
+        )
       ) {
         for (const workspace of this.workspaces.values()) {
           if (workspace.projectLink?.role === "lead") this.refreshLeadTools(workspace);

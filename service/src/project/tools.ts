@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentPreset } from "../config/presets";
 import { ENTRY_KINDS, type EntryKind } from "../workspace/history-index";
 import { NOTE_SLUG_PATTERN, type Note, type NoteSummary } from "./notes";
 import type { Project } from "./store";
@@ -244,10 +245,22 @@ export function leadToolset(
   project: Project,
   notesDir: string,
   models: string[],
-  presetNames: string[] = [],
+  agentPresets: Array<Pick<AgentPreset, "name" | "when_to_use">> = [],
 ): PanelToolset {
   const id = project.id;
-  const presets = selectablePresetNames(presetNames);
+  const presets = selectablePresetNames(agentPresets.map((preset) => preset.name));
+  const presetCounts = new Map<string, number>();
+  for (const preset of agentPresets)
+    presetCounts.set(preset.name, (presetCounts.get(preset.name) ?? 0) + 1);
+  const dispatchHints = agentPresets
+    .flatMap((preset) => {
+      const hint = preset.when_to_use?.trim();
+      // Duplicate names are ambiguous and omitted from the selectable presets too.
+      return hint && presetCounts.get(preset.name) === 1
+        ? [`${JSON.stringify(preset.name)}: ${hint}`]
+        : [];
+    })
+    .join("; ");
   return {
     instructions: [
       `You are the lead agent of the project "${project.name}" (${project.root ? `repository ${project.root}` : "no Git repository"}).`,
@@ -275,7 +288,7 @@ export function leadToolset(
       ...notesTools(api, id),
       {
         name: "start_session",
-        description: `Start a worker: a session in cwd whose first message is task. ${project.root ? "cwd is the repository or a worktree, reused: one whose sessions are idle or archived (project_status), clean, its branch merged or pushed; archive its idle session, then git -C <worktree> switch -c <branch> origin/main. A new worktree only when all are taken, at most four unless the user wants more." : "Use an existing directory; this project has no Git worktrees."} Models: ${models.join(", ")}.${presets ? ` Presets: ${presets}.` : ""}`,
+        description: `Start a worker: a session in cwd whose first message is task. ${project.root ? "cwd is the repository or a worktree, reused: one whose sessions are idle or archived (project_status), clean, its branch merged or pushed; archive its idle session, then git -C <worktree> switch -c <branch> origin/main. A new worktree only when all are taken, at most four unless the user wants more." : "Use an existing directory; this project has no Git worktrees."} Models: ${models.join(", ")}.${presets ? ` Presets: ${presets}.` : ""}${dispatchHints ? ` Dispatch hints: ${dispatchHints}.` : ""}`,
         shape: {
           title: z.string(),
           cwd: z.string(),

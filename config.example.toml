@@ -69,12 +69,15 @@ type = "local"
 # Otherwise workers pick the least-used identity matching model and effort,
 # then model alone, then presets without a model, then built-ins.
 # Model and effort are optional defaults in the Add Agent dialog; use an exact picker ID.
+# when_to_use is optional short dispatch guidance shown only to project leads in
+# start_session; blank values are ignored. Keep it beside the preset it describes.
 # [[agent_presets]]
 # name = "Scout"
 # avatar = "🔎"
 # color = "#789abc"
 # model = "provider/model"
 # effort = "medium"
+# when_to_use = "Broad codebase exploration and fact-finding"
 
 # External LLM providers (optional)
 # The provider name must be a prefix of the model ID you want to route.

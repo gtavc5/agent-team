@@ -81,6 +81,7 @@ function readPresets(value: unknown): AgentPreset[] {
     const name = optionalString(row?.name);
     const avatar = optionalString(row?.avatar);
     const color = optionalString(row?.color);
+    const whenToUse = optionalString(row.when_to_use)?.trim();
     if (!name || !avatar || !color)
       throw new Error(`agent_presets[${i}] needs name, avatar and color`);
     return {
@@ -89,6 +90,7 @@ function readPresets(value: unknown): AgentPreset[] {
       color,
       model: optionalString(row.model),
       effort: optionalString(row.effort),
+      ...(whenToUse && { when_to_use: whenToUse }),
     };
   });
 }

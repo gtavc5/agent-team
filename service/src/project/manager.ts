@@ -578,7 +578,7 @@ export class ProjectManager {
           project,
           this.store.notesDir(project.id),
           this.workerModels(),
-          this.agentPresets().map((preset) => preset.name),
+          this.agentPresets(),
         )
       : workerToolset(
           this.api,

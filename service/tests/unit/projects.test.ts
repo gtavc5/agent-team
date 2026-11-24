@@ -284,6 +284,47 @@ describe("panel tool arguments", () => {
     expect(byName(set).start_session.description).toContain("a worktree, reused");
   });
 
+  it("shows preset dispatch hints only in the lead's start_session description", () => {
+    const scoutHint = "Map unfamiliar repositories before implementation";
+    const reviewHint = "Audit diffs for correctness regressions";
+    const lead = leadToolset(
+      api,
+      project,
+      "/notes",
+      ["m"],
+      [
+        { name: "Scout", when_to_use: scoutHint },
+        { name: "Reviewer", when_to_use: reviewHint },
+        { name: "Plain" },
+        { name: "Blank", when_to_use: "   " },
+      ],
+    );
+    const description = byName(lead).start_session.description;
+    expect(description).toContain(
+      `Dispatch hints: "Scout": ${scoutHint}; "Reviewer": ${reviewHint}.`,
+    );
+    expect(description).not.toContain("Blank:");
+    expect(lead.instructions).not.toContain("Dispatch hints");
+
+    const withoutHints = byName(
+      leadToolset(api, project, "/notes", ["m"], [{ name: "Scout" }, { name: "Reviewer" }]),
+    ).start_session.description;
+    expect(withoutHints).toContain('Presets: "Scout", "Reviewer".');
+    expect(withoutHints).not.toContain("Dispatch hints");
+
+    for (const worker of [
+      workerToolset(api, "ws-w", project, "/notes"),
+      workerToolset(api, "ws-i", project, "/notes", true),
+      workerToolset(api, "ws-u", project, "/notes", false, true),
+    ]) {
+      expect(worker.instructions).not.toContain("Dispatch hints");
+      for (const hint of [scoutHint, reviewHint]) {
+        expect(worker.instructions).not.toContain(hint);
+        for (const tool of worker.tools) expect(tool.description).not.toContain(hint);
+      }
+    }
+  });
+
   it("tell the lead and its workers to delete what is done or replaced, in a few thousand characters", () => {
     const lead = leadToolset(api, project, "/notes", ["gpt-6-astra"]).instructions;
     const worker = workerToolset(api, "ws-w", project, "/notes").instructions;
@@ -348,6 +389,23 @@ describe("ProjectManager", () => {
     for (const expected of [first, second, first]) {
       await call(lead, "start_session", { title: "worker", cwd: "wt", task: "work" });
       expect([...workers().at(-1)!.agents.values()][0].info).toMatchObject(expected);
+    }
+  });
+
+  it("wires configured dispatch hints into lead tools but never worker tools", async () => {
+    const { host, create, call, manager, workers } = setup();
+    const hint = "Use Scout for repository reconnaissance";
+    host.agentPresets = () => [{ name: "Scout", avatar: "S", color: "blue", when_to_use: hint }];
+    const { lead } = create("dispatch hints");
+    const leadStart = manager.toolsFor(lead)!.tools.find((tool) => tool.name === "start_session")!;
+    expect(leadStart.description).toContain(`Dispatch hints: "Scout": ${hint}.`);
+
+    await call(lead, "start_session", { title: "worker", cwd: "wt", task: "work" });
+    const worker = manager.toolsFor(workers()[0])!;
+    expect(worker.instructions).not.toContain(hint);
+    for (const tool of worker.tools) {
+      expect(tool.description).not.toContain(hint);
+      expect(tool.description).not.toContain("Dispatch hints");
     }
   });
 

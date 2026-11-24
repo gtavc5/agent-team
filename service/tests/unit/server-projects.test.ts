@@ -613,7 +613,7 @@ describe("server restart with projects", () => {
     },
   );
 
-  it("sends identities on init and refreshes preset names in lead tools on config reload", async () => {
+  it("sends identities on init and refreshes preset names and hints in lead tools on config reload", async () => {
     const setPanelTools = vi.spyOn(TestSession.prototype, "setPanelTools");
     const startSessionDescription = () =>
       setPanelTools.mock.calls
@@ -622,7 +622,8 @@ describe("server restart with projects", () => {
         .at(-1);
     const { base, web } = seed();
     const config = path.join(base, "config.toml");
-    const source = '[user]\nname="Ada"\n[[agent_presets]]\nname="One"\ncolor="blue"\navatar="1"';
+    const source =
+      '[user]\nname="Ada"\n[[agent_presets]]\nname="One"\ncolor="blue"\navatar="1"\nwhen_to_use="First dispatch hint"';
     fs.writeFileSync(config, source);
     const { frames, stop } = await start(base, web);
     try {
@@ -631,7 +632,14 @@ describe("server restart with projects", () => {
         presets: [{ name: "One" }],
       });
       expect(startSessionDescription()).toContain('Presets: "One".');
-      fs.writeFileSync(config, source.replace("Ada", "Other").replace("One", "Two"));
+      expect(startSessionDescription()).toContain('Dispatch hints: "One": First dispatch hint.');
+      fs.writeFileSync(
+        config,
+        source
+          .replace("Ada", "Other")
+          .replace("One", "Two")
+          .replace("First dispatch hint", "Second dispatch hint"),
+      );
       await vi.waitFor(
         () =>
           expect(frames.find((f) => f.type === "identities_update")).toMatchObject({
@@ -641,7 +649,48 @@ describe("server restart with projects", () => {
         { timeout: 3500 },
       );
       expect(startSessionDescription()).toContain('Presets: "Two".');
+      expect(startSessionDescription()).toContain('Dispatch hints: "Two": Second dispatch hint.');
       expect(startSessionDescription()).not.toContain('"One"');
+      expect(startSessionDescription()).not.toContain("First dispatch hint");
+    } finally {
+      stop();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes existing lead tools when only a preset dispatch hint changes or is removed", async () => {
+    const setPanelTools = vi.spyOn(TestSession.prototype, "setPanelTools");
+    const startSessionDescription = () =>
+      setPanelTools.mock.calls
+        .map(([set]) => set?.tools.find((tool) => tool.name === "start_session")?.description)
+        .filter((description) => description !== undefined)
+        .at(-1);
+    const { base, web } = seed();
+    const config = path.join(base, "config.toml");
+    const preset = '[[agent_presets]]\nname="One"\ncolor="blue"\navatar="1"';
+    fs.writeFileSync(config, `${preset}\nwhen_to_use="First dispatch hint"`);
+    const { stop } = await start(base, web);
+    try {
+      expect(startSessionDescription()).toContain('Dispatch hints: "One": First dispatch hint.');
+
+      fs.writeFileSync(config, `${preset}\nwhen_to_use="Second dispatch hint"`);
+      await vi.waitFor(
+        () =>
+          expect(startSessionDescription()).toContain(
+            'Dispatch hints: "One": Second dispatch hint.',
+          ),
+        { timeout: 3500 },
+      );
+      expect(startSessionDescription()).not.toContain("First dispatch hint");
+
+      fs.writeFileSync(config, preset);
+      await vi.waitFor(
+        () => {
+          expect(startSessionDescription()).toContain('Presets: "One".');
+          expect(startSessionDescription()).not.toContain("Dispatch hints");
+        },
+        { timeout: 3500 },
+      );
     } finally {
       stop();
       fs.rmSync(base, { recursive: true, force: true });

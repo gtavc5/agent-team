@@ -8,6 +8,7 @@ export interface AgentPreset {
   color: string;
   model?: string;
   effort?: string;
+  when_to_use?: string;
 }
 
 export const AGENT_PRESETS: AgentPreset[] = [
