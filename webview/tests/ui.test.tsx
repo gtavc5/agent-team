@@ -987,6 +987,48 @@ describe("live thinking", () => {
     ...over,
   });
 
+  it.each(["", "\n  "])(
+    "does not offer controls or an empty body for %j live thinking",
+    (liveThinking) => {
+      vi.setSystemTime(10_000);
+      const { container, queryByRole } = render(
+        <MessageItem msg={live({ liveThinking, liveThinkingSince: 10_000 })} agents={[agent]} />,
+      );
+      const header = container.querySelector<HTMLElement>(".step-header")!;
+      expect(header.textContent).toBe("Thinking · 0s");
+      expect(header.classList.contains("step-header-static")).toBe(true);
+      expect(queryByRole("button", { name: "Expand steps" })).toBeNull();
+      expect(container.querySelector(".events-list")).toBeNull();
+      expect(container.querySelector(".trace-collapse")).toBeNull();
+      fireEvent.click(header);
+      expect(container.querySelector(".events-list")).toBeNull();
+    },
+  );
+
+  it("turns the same empty thinking box into an expandable trace when text arrives", () => {
+    vi.setSystemTime(10_000);
+    const view = (liveThinking: string) => (
+      <MessageItem msg={live({ liveThinking, liveThinkingSince: 10_000 })} agents={[agent]} />
+    );
+    const { container, rerender, getByRole } = render(view(""));
+    const box = container.querySelector(".step-group")!;
+    const header = container.querySelector(".step-header")!;
+
+    rerender(view("Weighing the options."));
+    expect(container.querySelector(".step-group")).toBe(box);
+    expect(container.querySelector(".step-header")).toBe(header);
+    const toggle = getByRole("button", { name: "Expand steps" });
+    fireEvent.click(toggle);
+    expect(getByRole("button", { name: "Collapse step trace" })).toBeTruthy();
+    expect(container.querySelector(".live-thinking")!.textContent).toContain(
+      "Weighing the options.",
+    );
+
+    rerender(view("Weighing the options. Still thinking."));
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector(".live-thinking")!.textContent).toContain("Still thinking.");
+  });
+
   it("streams the whole block as an item of an open step box, with a ticking timer", () => {
     vi.setSystemTime(10_000);
     const events = [

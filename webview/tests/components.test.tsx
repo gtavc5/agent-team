@@ -36,8 +36,13 @@ describe("SubAgentItem", () => {
     );
   });
 
-  it("does not show a bottom collapse control on an empty subagent", () => {
-    const { getByRole, queryByRole } = render(<SubAgentItem ev={sa()} />);
+  it.each([
+    ["empty", {}],
+    ["loading", { eventCount: 1, events: [] }],
+    ["empty-thinking", { events: [{ kind: "thinking", content: "", contentLength: 0 }] }],
+    ["whitespace-thinking", { events: [{ kind: "thinking", content: "\n  ", contentLength: 0 }] }],
+  ])("does not show a bottom collapse control on a %s subagent", (_name, over) => {
+    const { getByRole, queryByRole } = render(<SubAgentItem ev={sa(over)} />);
     fireEvent.click(getByRole("button", { name: "Expand subagent: explore the repo" }));
     expect(queryByRole("button", { name: "Collapse subagent trace" })).toBeNull();
   });
@@ -112,6 +117,29 @@ describe("StepGroup", () => {
     expect(queryByRole("button", { name: "Collapse step trace" })).toBeNull();
     expect(document.activeElement).toBe(getByRole("button", { name: "Expand steps" }));
   });
+  it.each(["", "\n  "])(
+    "keeps %j persisted thinking static even when steps default open",
+    (content) => {
+      const { container, queryByRole } = render(
+        <StepGroup
+          defaultOpen
+          group={{
+            step: 0,
+            events: [{ kind: "thinking", content, contentLength: 0 }],
+          }}
+        />,
+      );
+      const header = container.querySelector<HTMLElement>(".step-header")!;
+      expect(header.textContent).toBe("1 thinking");
+      expect(header.classList.contains("step-header-static")).toBe(true);
+      expect(queryByRole("button", { name: "Expand steps" })).toBeNull();
+      expect(container.querySelector(".events-list")).toBeNull();
+      expect(container.querySelector(".trace-collapse")).toBeNull();
+      fireEvent.click(header);
+      expect(container.querySelector(".events-list")).toBeNull();
+    },
+  );
+
   it("omits the step box entirely when a segment only contains a subagent", () => {
     const { container } = render(<StepGroup group={{ step: 0, events: [sa()] }} />);
     expect(container.querySelector(".step-group")).toBeNull();

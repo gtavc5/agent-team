@@ -95,14 +95,14 @@ it.each([320, 1200])(
 );
 
 it.each([
-  [320, "step"],
-  [320, "subagent"],
+  [390, "step"],
+  [390, "subagent"],
   [1200, "step"],
   [1200, "subagent"],
 ] as const)(
   "collapsing the %ipx %s trace from the bottom restores its off-screen header",
   async (width, trace) => {
-    await page.viewport(width, 720);
+    await page.viewport(width, width === 390 ? 844 : 720);
     const { container, getByRole } = render(
       <div className="messages" style={{ height: 360, overflowAnchor: "none" }}>
         <div style={{ flex: "none", height: 210 }} />
@@ -138,8 +138,10 @@ it.each([
     const toggle = get(header, "button");
     fireEvent.click(toggle);
     const footer = getByRole("button", { name: `Collapse ${trace} trace` });
-    expect(rect(footer).height).toBeGreaterThanOrEqual(width === 320 ? 44 : 26);
+    expect(rect(footer).height).toBeGreaterThanOrEqual(width === 390 ? 44 : 26);
     if (width === 1200) expect(rect(footer).height).toBeLessThan(44);
+    expect(rect(footer).width).toBeCloseTo(rect(footer.parentElement!).width, 1);
+    expect(scroller.scrollWidth).toBeLessThanOrEqual(scroller.clientWidth + 1);
     scroller.scrollTop += rect(footer).bottom - rect(scroller).bottom + 16;
     expect(rect(footer).top).toBeGreaterThan(rect(scroller).top);
     expect(rect(footer).bottom).toBeLessThan(rect(scroller).bottom);
@@ -149,6 +151,63 @@ it.each([
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(rect(header).top).toBeGreaterThanOrEqual(rect(scroller).top - 1);
     expect(rect(header).bottom).toBeLessThan(rect(scroller).bottom);
+  },
+);
+
+it.each([
+  [390, 844],
+  [1200, 800],
+])(
+  "keeps empty thinking static and the expanded footer proportional at %ipx",
+  async (width, height) => {
+    await page.viewport(width, height);
+    const since = Date.now();
+    const view = (liveThinking: string) => (
+      <div className="messages">
+        <MessageItem
+          msg={{
+            ...message,
+            content: "",
+            events: [],
+            status: "streaming",
+            liveThinking,
+            liveThinkingSince: since,
+          }}
+          agents={[agent]}
+        />
+      </div>
+    );
+    const { container, rerender } = render(view(""));
+    await document.fonts.ready;
+    const box = get(container, ".step-group");
+    const header = get(container, ".step-header");
+    const status = get(header, ".chip-live");
+    const headerHeight = rect(header).height;
+    const statusLeft = rect(status).left;
+    expect(container.querySelector(".trace-header-toggle")).toBeNull();
+    expect(container.querySelector(".events-list")).toBeNull();
+    expect(container.querySelector(".trace-collapse")).toBeNull();
+
+    rerender(view("Reasoning through the trace layout."));
+    expect(get(container, ".step-group")).toBe(box);
+    expect(get(container, ".step-header")).toBe(header);
+    expect(rect(header).height).toBe(headerHeight);
+    expect(rect(get(header, ".chip-live")).left).toBeCloseTo(statusLeft, 1);
+    fireEvent.click(get(header, ".trace-header-toggle"));
+
+    const footer = get(container, ".trace-collapse");
+    const footerBar = get(container, ".trace-collapse-footer");
+    const events = get(container, ".events-list");
+    expect(rect(footer).height).toBeGreaterThanOrEqual(width === 390 ? 44 : 26);
+    if (width === 1200) expect(rect(footer).height).toBeLessThan(44);
+    expect(Number.parseFloat(getComputedStyle(footer).fontSize)).toBe(width === 390 ? 12 : 11);
+    expect(getComputedStyle(footer).color).toBe("rgb(149, 155, 166)");
+    expect(rect(footerBar).width).toBeCloseTo(rect(events).width, 1);
+    expect(rect(footer).width).toBeCloseTo(rect(footerBar).width, 1);
+    expect(rect(footer).left).toBeGreaterThanOrEqual(rect(footerBar).left - 0.5);
+    expect(rect(footer).right).toBeLessThanOrEqual(rect(footerBar).right + 0.5);
+    expect(container.scrollWidth).toBeLessThanOrEqual(container.clientWidth + 1);
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width);
   },
 );
 

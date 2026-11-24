@@ -542,6 +542,10 @@ function BottomCollapse({ onClick, label }: { onClick: () => void; label: string
   );
 }
 
+function hasVisibleEventBody(ev: StreamEvent): boolean {
+  return ev.kind !== "thinking" || !!ev.content.trim() || (ev.contentLength ?? 0) > 0;
+}
+
 export const SubAgentItem = memo(function SubAgentItem({
   ev,
   onLoadEvents,
@@ -576,7 +580,7 @@ export const SubAgentItem = memo(function SubAgentItem({
   const statusCls = isRunning ? "running" : (sa.status ?? "failed");
 
   const allInner = sa.events ?? [];
-  const hasBody = !!(sa.prompt || sa.summary || sa.usage || allInner.length);
+  const hasBody = !!(sa.prompt || sa.summary || sa.usage || allInner.some(hasVisibleEventBody));
 
   const handleToggle = () => {
     const willOpen = !open;
@@ -790,7 +794,8 @@ function StepBox({
   defaultOpen?: boolean;
 }) {
   const [toggled, setToggled] = useState<boolean | null>(null);
-  const open = toggled ?? defaultOpen;
+  const hasBody = !!live?.trim() || events.some(hasVisibleEventBody);
+  const open = hasBody && (toggled ?? defaultOpen);
   const bottom = useBottomCollapse(open, () => setToggled(false));
   if (events.length === 0 && live == null) return null;
   const toggle = () => {
@@ -809,16 +814,24 @@ function StepBox({
   }
   return (
     <div className={`step-group${open ? " open" : ""}`}>
-      <div className="step-header" ref={bottom.header} onClick={toggle}>
-        <button
-          type="button"
-          className="events-toggle trace-header-toggle"
-          ref={bottom.toggle}
-          aria-expanded={open}
-          aria-label={open ? "Collapse steps" : "Expand steps"}
-        >
-          {open ? "▾" : "▸"}
-        </button>
+      <div
+        className={`step-header${hasBody ? "" : " step-header-static"}`}
+        ref={bottom.header}
+        onClick={hasBody ? toggle : undefined}
+      >
+        {hasBody ? (
+          <button
+            type="button"
+            className="events-toggle trace-header-toggle"
+            ref={bottom.toggle}
+            aria-expanded={open}
+            aria-label={open ? "Collapse steps" : "Expand steps"}
+          >
+            {open ? "▾" : "▸"}
+          </button>
+        ) : (
+          <span className="trace-header-placeholder" aria-hidden="true" />
+        )}
         {events.length > 0 && <span className="step-summary">{stepSummary(events)}</span>}
         {standaloneSince != null && <StepThinkingStatus since={standaloneSince} />}
         {!open && tools.length > 0 && <StepTools tools={tools} />}
