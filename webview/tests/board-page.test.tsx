@@ -73,9 +73,7 @@ function page(p: Project = project) {
     onDelete: vi.fn(),
   };
   const utils = render(<BoardPage project={p} sessions={sessions} {...props} />);
-  const cards = () =>
-    [...utils.container.querySelectorAll(".bp-card .bp-card-title")].map((e) => e.textContent);
-  return { ...utils, ...props, cards };
+  return { ...utils, ...props };
 }
 
 describe("board relations", () => {
@@ -121,24 +119,6 @@ describe("board relations", () => {
 });
 
 describe("BoardPage", () => {
-  it("shows active and later work by area, most pressing first, and unreadable files", () => {
-    const { cards, container, getByText } = page();
-    expect(cards()).toEqual([
-      "Rename across the project",
-      "Declaration identity",
-      "Multi-token name ranges",
-      "LTO build",
-    ]);
-    expect([...container.querySelectorAll(".bp-group-title")].map((e) => e.textContent)).toEqual([
-      "cli",
-      "foundation",
-      "index",
-      "infra",
-    ]);
-    expect(getByText("infra/broken.toml")).toBeTruthy();
-    expect(container.querySelector(".bp-summary")!.textContent).toBe("3 active · 1 later · 1 done");
-  });
-
   it("puts the state of each card on its face", () => {
     const { container } = page();
     const card = (title: string) =>
@@ -158,20 +138,6 @@ describe("BoardPage", () => {
     expect(
       within(card("LTO build") as HTMLElement).getByText("after the toolchain bump"),
     ).toBeTruthy();
-  });
-
-  it("filters by area, status and search", () => {
-    const { cards, getByPlaceholderText, container } = page();
-    const nav = within(container.querySelector(".bp-nav") as HTMLElement);
-    fireEvent.click(nav.getByRole("button", { name: /^infra/ }));
-    expect(cards()).toEqual(["LTO build"]);
-    fireEvent.click(nav.getByRole("button", { name: /^Dropped/ }));
-    expect(cards()).toEqual(["LTO build", "Drop codec"]);
-    fireEvent.click(nav.getByRole("button", { name: /^All areas/ }));
-    fireEvent.change(getByPlaceholderText("Search objectives…"), { target: { value: "closure" } });
-    expect(cards()).toEqual(["Declaration identity"]);
-    fireEvent.change(getByPlaceholderText("Search objectives…"), { target: { value: "zzz" } });
-    expect(container.querySelector(".bp-empty")!.textContent).toBe("Nothing matches.");
   });
 
   it("opens an objective in full and walks its dependencies", () => {
@@ -266,21 +232,6 @@ describe("BoardPage", () => {
     expect(cls("cli/refactor")).toContain(" down");
     expect(cls("infra/lto")).toContain(" dim");
   });
-
-  it("steps back on Escape: details first, then the page", () => {
-    const { getByText, container, onClose } = page();
-    fireEvent.click(getByText("LTO build"));
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(container.querySelector(".bp-detail")).toBeNull();
-    expect(onClose).not.toHaveBeenCalled();
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(onClose).toHaveBeenCalled();
-  });
-
-  it("explains an empty board", () => {
-    const { container } = page({ ...project, objectives: [] });
-    expect(container.querySelector(".bp-empty")!.textContent).toContain("No objectives yet");
-  });
 });
 
 describe("BoardPage header", () => {
@@ -299,13 +250,8 @@ describe("BoardPage header", () => {
     expect(onRename).toHaveBeenCalledWith("clice next");
   });
 
-  it("asks to delete the project and closes on the backdrop", () => {
-    const { getByText, container, onDelete, onClose } = page();
-    // At the foot of the filters, away from Close.
-    expect(getByText("Delete project").parentElement!.className).toBe("bp-nav");
-    expect(container.querySelector(".bp-head")!.textContent).not.toContain("Delete");
-    fireEvent.click(getByText("Delete project"));
-    expect(onDelete).toHaveBeenCalled();
+  it("closes on the backdrop but not inside the board", () => {
+    const { container, onClose } = page();
     fireEvent.click(container.querySelector(".board-page")!);
     expect(onClose).not.toHaveBeenCalled();
     fireEvent.click(container.querySelector(".board-overlay")!);

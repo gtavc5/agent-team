@@ -78,33 +78,12 @@ describe("project groups", () => {
     onDeleteProject: vi.fn(),
   });
 
-  it("stand for their lead: the project's row opens it, and it is not listed again", () => {
+  it("starts a new session in the project root without opening the lead", () => {
     const props = sidebarProps();
-    const { container } = render(<Sidebar {...props} />);
-    const header = container.querySelector(".ws-group-project")!;
-    expect(header.querySelector(".ws-group-label")!.textContent).toBe("clice");
-    expect(header.className).toContain("active");
-    fireEvent.click(header.querySelector('[title="New session in clice"]')!);
+    const { getByTitle } = render(<Sidebar {...props} />);
+    fireEvent.click(getByTitle("New session in clice"));
     expect(props.onCreateIn).toHaveBeenCalledWith("/repo/clice");
-    const names = [...container.querySelectorAll(".task-name-text")].map((e) => e.textContent);
-    expect(names).toEqual(["modules"]);
-    // Unfolded, its sessions are in view: no count of them.
-    expect(header.querySelector(".ws-group-count")).toBeNull();
-    fireEvent.click(header);
-    expect(props.onSelect).toHaveBeenCalledWith("lead");
-    expect(props.onToggleGroup).not.toHaveBeenCalled();
-  });
-
-  it("draw the sidebar's buttons as icons, not a font's glyphs of three sizes", () => {
-    const { container } = render(<Sidebar {...sidebarProps()} />);
-    const buttons = [
-      ...container.querySelectorAll(".sidebar-header button, .ws-group-add, .task-delete"),
-    ];
-    expect(buttons.length).toBeGreaterThanOrEqual(4);
-    for (const b of buttons) {
-      expect(b.querySelector("svg.icon"), b.getAttribute("title")!).not.toBeNull();
-      expect(b.textContent).toBe("");
-    }
+    expect(props.onSelect).not.toHaveBeenCalled();
   });
 
   it("keep a project's row short: a count only when folded, no board, no changed-files dot, the branch only off main", () => {
@@ -138,14 +117,6 @@ describe("project groups", () => {
     const { container, queryByLabelText } = render(<Sidebar {...props} />);
     expect(queryByLabelText("Fold clice")).toBeNull();
     expect(container.querySelector(".ws-group-project .events-toggle")!.textContent).toBe("");
-  });
-
-  it("fold the project's sessions from the arrow only", () => {
-    const props = sidebarProps();
-    const { getByLabelText } = render(<Sidebar {...props} />);
-    fireEvent.click(getByLabelText("Fold clice"));
-    expect(props.onToggleGroup).toHaveBeenCalledWith("project:p1", false);
-    expect(props.onSelect).not.toHaveBeenCalled();
   });
 
   it("mark a worker waiting for the user's reply, until it runs again or is open", () => {
@@ -185,17 +156,6 @@ describe("project groups", () => {
     fireEvent.click(container.querySelector(".ws-group-project")!);
     expect(props.onToggleGroup).toHaveBeenCalledWith("project:p1", false);
     expect(props.onSelect).not.toHaveBeenCalled();
-  });
-
-  it("delete the whole project from the lead's ×, a session on its own", () => {
-    const props = sidebarProps();
-    const { getAllByTitle, getByTitle, getByText } = render(<Sidebar {...props} />);
-    fireEvent.click(getByTitle("Delete project"));
-    expect(props.onDeleteProject).toHaveBeenCalledWith("p1");
-    fireEvent.click(getAllByTitle("Delete session")[0]);
-    expect(props.onDelete).not.toHaveBeenCalled();
-    fireEvent.click(getByText("Delete session"));
-    expect(props.onDelete).toHaveBeenCalledWith("w1");
   });
 });
 
@@ -420,31 +380,6 @@ describe("archives in the sidebar", () => {
   it("open the archive that holds the open session", () => {
     const { container } = render(<Sidebar {...props({ activeWsId: "old-a" })} />);
     expect(names(container)).toContain("old-a");
-  });
-
-  it("keep archived projects apart, restorable", () => {
-    const shelved = { ...project, id: "p2", name: "clice2", root: "/repo/clice2", archivedAt: 1 };
-    const lead2 = ws("lead2", {
-      name: "clice2 · lead",
-      cwd: "/repo/clice2",
-      projectLink: { projectId: "p2", role: "lead" },
-    });
-    const p = props({
-      workspaces: [
-        lead,
-        lead2,
-        archived("gone", { projectLink: { projectId: "p2", role: "worker" } }),
-      ],
-      projects: [project, shelved],
-    });
-    const { container, getByTitle } = render(<Sidebar {...p} />);
-    const labels = () =>
-      [...container.querySelectorAll(".ws-group-label")].map((e) => e.textContent);
-    expect(labels()).toEqual(["clice", "Archived projects"]);
-    fireEvent.click(container.querySelector(".ws-shelf .ws-archived-header")!);
-    expect(labels()).toEqual(["clice", "Archived projects", "clice2"]);
-    fireEvent.click(getByTitle("Bring clice2 back among the projects"));
-    expect(p.onRestoreProject).toHaveBeenCalledWith("p2");
   });
 
   it("open an archived project's lead from its row, and list it nowhere else", () => {

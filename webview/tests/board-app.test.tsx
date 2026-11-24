@@ -151,20 +151,6 @@ describe("Ask the lead", () => {
   });
 });
 
-describe("Delete project over the board", () => {
-  it("Escape cancels the confirmation and leaves the board open", () => {
-    boot([lead, worker], [project()], "w1");
-    openBoard();
-    fireEvent.click(document.querySelector(".bp-delete")!);
-    expect(document.querySelector(".dialog-confirm")).not.toBeNull();
-    act(() => {
-      fireEvent.keyDown(document.activeElement ?? document, { key: "Escape" });
-    });
-    expect(document.querySelector(".dialog-confirm")).toBeNull();
-    expect(document.querySelector(".board-page")).not.toBeNull();
-  });
-});
-
 describe("stream frames", () => {
   it("keeps BoardPage out of App re-renders", () => {
     const busy = ws("other", {

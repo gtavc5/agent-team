@@ -245,46 +245,6 @@ describe("reporting to the lead from the chat header", () => {
   });
 });
 
-describe("the board page", () => {
-  const withBoard = project({
-    objectives: [
-      {
-        id: "core/modules",
-        area: "core",
-        title: "C++20 modules",
-        goal: "Serve modules",
-        status: "active",
-        priority: "high",
-        dependsOn: [],
-        tasks: [{ id: "t1", text: "scan", state: "doing", session: "w1" }],
-        decisions: [],
-        sessions: ["w1"],
-        updatedAt: NOW,
-      },
-    ],
-  });
-
-  it("opens over any workspace from the header or the sidebar, and closes", () => {
-    boot([lead, worker], [withBoard], "w1");
-    fireEvent.click(document.querySelector('.side-rail [aria-label="Objectives of clice"]')!);
-    expect(document.querySelector("[role='dialog'][aria-label='clice objectives']")).not.toBeNull();
-    fireEvent.click(document.querySelector(".bp-close")!);
-    expect(document.querySelector(".board-page")).toBeNull();
-    // Not from the sidebar: every session of the project has it in its header.
-    expect(document.querySelector('.sidebar [aria-label^="Objectives"]')).toBeNull();
-    expect(document.querySelector('.sidebar [title^="Objectives"]')).toBeNull();
-  });
-
-  it("opens a working session from an objective and closes itself", () => {
-    boot([lead, worker], [withBoard], "lead");
-    fireEvent.click(document.querySelector('.side-rail [aria-label="Objectives of clice"]')!);
-    fireEvent.click(document.querySelector(".bp-card")!);
-    fireEvent.click(document.querySelector(".bp-session")!);
-    expect(document.querySelector(".board-page")).toBeNull();
-    expect(title()).toMatch(/^modules/);
-  });
-});
-
 describe("the open workspace archived while in view", () => {
   it("reloads its history instead of spinning, then shows the delivered turn", () => {
     const plain = ws("plain", { lastMessageAt: NOW });

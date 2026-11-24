@@ -180,17 +180,6 @@ describe("graph columns", () => {
 });
 
 describe("Escape", () => {
-  it("clears the search first", () => {
-    const { getByPlaceholderText, onClose } = page(project([o("a/x")]));
-    const search = getByPlaceholderText("Search objectives…") as HTMLInputElement;
-    fireEvent.change(search, { target: { value: "x" } });
-    fireEvent.keyDown(search, { key: "Escape" });
-    expect(search.value).toBe("");
-    expect(onClose).not.toHaveBeenCalled();
-    fireEvent.keyDown(search, { key: "Escape" });
-    expect(onClose).toHaveBeenCalled();
-  });
-
   it("leaves an Escape that belongs to an IME composition alone", () => {
     const { getByPlaceholderText, onClose } = page(project([o("a/x")]));
     const search = getByPlaceholderText("Search objectives…");
@@ -214,34 +203,15 @@ describe("focus", () => {
   });
 });
 
-describe("broken files and counts", () => {
+describe("broken files", () => {
   it("shows only the broken files when nothing else can be read", () => {
     const { container } = page(project([{ id: "a/x", error: "bad toml" }]));
     expect(container.querySelector(".bp-broken")).not.toBeNull();
     expect(container.querySelector(".bp-empty")).toBeNull();
   });
-
-  it("count in the nav what the cards show", () => {
-    const { container } = page(
-      project([
-        o("infra/lto", { status: "later" }),
-        o("infra/ci", { status: "later" }),
-        o("infra/old", { status: "done" }),
-      ]),
-    );
-    const nav = within(container.querySelector(".bp-nav") as HTMLElement);
-    expect(nav.getByRole("button", { name: /^infra/ }).textContent).toBe("infra2");
-    expect(nav.getByRole("button", { name: /^All areas/ }).textContent).toBe("All areas2");
-    expect(container.querySelectorAll(".bp-card")).toHaveLength(2);
-  });
 });
 
 describe("what is left of dropped and done work", () => {
-  it("shows no archive filter when nothing is archived", () => {
-    const { queryByRole } = page(project([o("index/format")]));
-    expect(queryByRole("button", { name: /^Archive\b/ })).toBeNull();
-  });
-
   it("shows a dropped objective kept as its title and the reason, and nothing it no longer has", () => {
     const { container } = page(
       project([

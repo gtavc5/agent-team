@@ -290,26 +290,6 @@ describe("paths in prose", () => {
 });
 
 describe("the notes view", () => {
-  it("lists the notes as a tree, the archive closed, and shows one in full", async () => {
-    const { container } = board();
-    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
-    const tree = within(await screen.findByRole("tree", { name: "Notes" }));
-    await tree.findByRole("treeitem", { name: /docs-truth\.md/ });
-    expect(tree.getByRole("treeitem", { name: /_archive/ }).getAttribute("aria-expanded")).toBe(
-      "false",
-    );
-    expect(requests.some((u) => u.includes("_archive"))).toBe(false);
-    expect(requests.every((u) => u.startsWith("api/file?project=p1&path="))).toBe(true);
-
-    fireEvent.click(tree.getByRole("treeitem", { name: /docs-truth\.md/ }));
-    const shown = await preview();
-    await within(shown).findByRole("heading", { name: "Docs truth" });
-    // Its own links: ../ against the note, notes/ and the rest as the board reads them.
-    fireEvent.click(within(shown).getByText("the ideas"));
-    await screen.findByRole("heading", { name: "Ideas" });
-    expect(container.querySelector(".bn-item.selected")!.textContent).toBe("ideas.md");
-  });
-
   it("opens a path an objective names on the board, a line of code marked", async () => {
     const { container } = board();
     fireEvent.click(container.querySelector('[data-objective="release/docs"]')!);

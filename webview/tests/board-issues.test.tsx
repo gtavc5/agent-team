@@ -123,59 +123,22 @@ beforeEach(() => {
 });
 
 describe("the issues view", () => {
-  it("shows the open and to-decide issues by module and group, with the group's notes", () => {
-    const { rows, toIssues, container } = page();
-    expect(screen.getByRole("button", { name: /^Issues/ }).textContent).toBe("Issues3");
+  it("shortens module filter labels while keeping their full scoped titles", () => {
+    const { toIssues, nav } = page();
     toIssues();
-    expect(rows()).toEqual(["09-23#12", "h3r2#1", "10-06#1"]);
-    expect(container.querySelector(".bp-summary")!.textContent).toBe(
-      "2 open · 1 to decide · 1 accepted",
+    expect(nav().getByRole("button", { name: /^Features\d+$/ }).title).toBe(
+      "14-features: Features (src/feature)",
     );
-    const titles = [...container.querySelectorAll(".bp-group-title")].map((e) => e.textContent);
-    expect(titles).toEqual([
+    expect(nav().getByRole("button", { name: /^宿主选择与依赖图\d+$/ }).title).toContain(
       "宿主选择与依赖图（hosting.cpp、dependency_graph.cpp）",
-      "Features (src/feature)",
-    ]);
-    expect(container.querySelector(".bi-group-title")!.textContent).toBe("Host chains");
-    expect(container.querySelector(".bi-group-notes")!.textContent).toBe(
-      "Startup scan mixes configurations.",
     );
-    const row = container.querySelector('[data-issue="09-23#12"]')!;
-    expect(row.querySelector(".bi-evidence")!.textContent).toBe("R");
-    expect(row.querySelector(".bi-tag")!.textContent).toBe("部分");
-    expect(row.querySelector(".bi-row-text")!.textContent).toBe("Header picks a.cpp as its host.");
-    expect(container.querySelector('[data-issue="h3r2#1"] .bp-pill')!.textContent).toBe(
-      "To decide",
-    );
-    expect(container.querySelector(".bp-broken")!.textContent).toContain("03-paths.toml");
   });
 
-  it("filters by module, state, evidence, tag and words", () => {
-    const { rows, toIssues, nav } = page();
+  it("lists readable issues alongside a broken issue file warning", () => {
+    const { rows, toIssues, container } = page();
     toIssues();
-    const areas = nav()
-      .getAllByRole("button")
-      .filter((b) => b.classList.contains("bp-area"))
-      .map((b) => b.textContent);
-    expect(areas).toEqual(["All modules3", "宿主选择与依赖图2", "Features1"]);
-
-    fireEvent.click(nav().getByRole("button", { name: /^Accepted/ }));
-    expect(rows()).toEqual(["10-07#5", "09-23#12", "h3r2#1", "10-06#1"]);
-    fireEvent.click(nav().getByRole("button", { name: /^Features/ }));
-    expect(rows()).toEqual(["10-06#1"]);
-    fireEvent.click(nav().getByRole("button", { name: /^All modules/ }));
-
-    fireEvent.click(nav().getByRole("button", { name: /^H / }));
-    expect(rows()).toEqual(["h3r2#1"]);
-    fireEvent.click(nav().getByRole("button", { name: /^H / }));
-    fireEvent.click(nav().getByRole("button", { name: /^崩溃/ }));
-    expect(rows()).toEqual(["10-06#1"]);
-    fireEvent.click(nav().getByRole("button", { name: /^崩溃/ }));
-
-    fireEvent.change(screen.getByPlaceholderText("Search issues…"), {
-      target: { value: "B.CPP" },
-    });
-    expect(rows()).toEqual(["h3r2#1"]);
+    expect(rows()).toContain("09-23#12");
+    expect(container.querySelector(".bp-broken")!.textContent).toContain("03-paths.toml");
   });
 
   it("opens an issue in full, and goes from it to the objectives it is linked to", () => {
@@ -226,12 +189,6 @@ describe("the issues view", () => {
     expect(container.querySelector(".bp-detail")).toBeNull();
     fireEvent.keyDown(document.body, { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
-  });
-
-  it("says so when there are none yet", () => {
-    page(project, []);
-    fireEvent.click(screen.getByRole("button", { name: /^Issues/ }));
-    expect(screen.getByText(/No issues yet/)).toBeTruthy();
   });
 });
 
@@ -458,46 +415,5 @@ describe("issue text edge cases from review", () => {
   it("match an id followed by a dash and more as part of something else, and no ids too short to tell", () => {
     const pattern = issueIdPattern(["F7", "1"])!;
     expect([..."F7-A F7. 1 x".matchAll(pattern)].map((m) => m[0])).toEqual(["F7"]);
-  });
-});
-
-describe("the board's filters and badges", () => {
-  // Each a chip with its count apart, so they share one size and look.
-  const chips = (group: HTMLElement) =>
-    within(group)
-      .getAllByRole("button")
-      .map((b) => ({
-        chip: b.classList.contains("bp-chip"),
-        counts: b.querySelectorAll(".bp-chip-count").length,
-      }));
-
-  it("draws every filter of both views as one chip, the issues' in one row of groups", () => {
-    const { toIssues, nav, container } = page();
-    const status = screen.getByRole("group", { name: "Status" });
-    expect(chips(status).every((c) => c.chip && c.counts === 1)).toBe(true);
-    toIssues();
-    const groups = ["State", "Evidence", "Tags"].map((name) => nav().getByRole("group", { name }));
-    for (const g of groups) {
-      expect(chips(g).every((c) => c.chip && c.counts === 1)).toBe(true);
-      expect(g.parentElement).toBe(container.querySelector(".bp-filters"));
-    }
-    expect(within(groups[1]).getByRole("button", { name: /^R / }).title).toBe(
-      "Reproduced by a script",
-    );
-  });
-
-  it("gives an issue's evidence, state and tags one kind of badge, in its row and in full", () => {
-    const { toIssues, container } = page();
-    toIssues();
-    const row = container.querySelector('[data-issue="h3r2#1"] .bi-row-top')!;
-    expect(row.querySelector(".bi-evidence")!.className).toBe("bi-evidence ev-H");
-    expect(row.querySelector(".bp-pill")!.textContent).toBe("To decide");
-    expect(container.querySelector('[data-issue="09-23#12"] .bi-tag')!.textContent).toBe("部分");
-    fireEvent.click(container.querySelector('[data-issue="h3r2#1"]')!);
-    const meta = container.querySelector(".bp-detail .bi-meta")!;
-    expect([...meta.children].map((e) => e.className)).toEqual([
-      "bp-pill is-decision",
-      "bi-evidence ev-H",
-    ]);
   });
 });

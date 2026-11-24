@@ -814,7 +814,9 @@ function StepTools({ tools }: { tools: string[] }) {
   const [fadeStart, setFadeStart] = useState(false);
   const [fadeEnd, setFadeEnd] = useState(false);
   const measure = useCallback(() => {
-    const el = strip.current!;
+    // A queued resize can arrive after React clears the ref, before effect cleanup.
+    const el = strip.current;
+    if (!el) return;
     setFadeStart(el.scrollLeft > 1);
     setFadeEnd(el.scrollWidth - el.clientWidth - el.scrollLeft > 1);
   }, []);
