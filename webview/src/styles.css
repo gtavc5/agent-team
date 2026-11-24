@@ -2303,6 +2303,7 @@ button.action-target:hover {
 }
 .input-row .chat-input {
   flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   color: var(--text-primary);
@@ -2345,11 +2346,76 @@ button.action-target:hover {
   opacity: 0.4;
   cursor: not-allowed;
 }
-.btn-abort {
-  background: var(--error) !important;
+.input-row .btn-abort {
+  background: var(--error);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 34px;
+  padding: 0 6px;
 }
-.btn-abort:hover {
+.input-row .btn-abort:hover {
+  background: var(--error);
   filter: brightness(1.1);
+}
+.btn-abort .icon {
+  fill: currentColor;
+}
+.composer-stop {
+  position: relative;
+  flex: none;
+}
+.stop-count {
+  border-radius: 10px;
+  padding: 1px 4px;
+  background: rgba(0, 0, 0, 0.28);
+  font-size: 11px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.stop-popover {
+  position: absolute;
+  z-index: 5;
+  right: 0;
+  bottom: 100%;
+  width: min(224px, calc(100vw - 70px));
+}
+@media (hover: hover) {
+  .stop-popover {
+    /* The transparent gap remains part of the pointer target. */
+    padding-bottom: 6px;
+  }
+}
+.stop-actions {
+  max-height: min(240px, 40dvh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+.input-row .stop-actions button {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 36px;
+  padding: 8px 10px;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+}
+.input-row .stop-actions button:is(:hover, :focus-visible) {
+  background: var(--bg-tertiary);
+}
+.input-row .stop-actions button:last-child {
+  border-top: 1px solid var(--border);
+  color: var(--error);
 }
 /* Fixed-width primary slot so Send ↔ Queue morphing causes no layout shift. */
 .btn-primary-slot {
@@ -2357,10 +2423,6 @@ button.action-target:hover {
 }
 .input-row .btn-icon {
   display: none;
-}
-.btn-abort-others {
-  font-size: 11px;
-  opacity: 0.85;
 }
 .btn-attach {
   background: transparent !important;
@@ -2370,7 +2432,6 @@ button.action-target:hover {
   width: 34px;
   min-width: 34px;
   height: 34px;
-  font-size: 20px !important;
   line-height: 1;
   display: flex;
   align-items: center;
@@ -3401,7 +3462,8 @@ button.quote-bar-content:focus-visible {
     font-size: 14px;
     opacity: 0.6;
   }
-  .input-row button {
+  .input-row > button,
+  .input-row .btn-abort {
     width: 34px;
     min-width: 34px;
     height: 34px;
@@ -3417,7 +3479,7 @@ button.quote-bar-content:focus-visible {
     display: none;
   }
   .input-row .btn-icon {
-    display: inline;
+    display: flex;
   }
   .btn-primary-slot {
     min-width: 34px;
@@ -3425,14 +3487,11 @@ button.quote-bar-content:focus-visible {
   .btn-attach {
     background: transparent !important;
     color: var(--text-secondary) !important;
-    font-size: 22px !important;
   }
-  .btn-abort {
-    font-size: 12px;
-  }
-  .btn-abort-others {
-    opacity: 1;
-    font-size: 13px;
+  .input-row .composer-stop .btn-abort {
+    width: auto;
+    padding: 0 6px;
+    border-radius: 17px;
   }
   .command-popup,
   .mention-popup {

@@ -190,11 +190,104 @@ describe("Stop in the app", () => {
   };
 
   it("stops only the turn of a working agent", () => {
-    const sock = boot([ws("w", [agent("a", { busy: true, state: "working" })])]);
-    fireEvent.click(document.querySelector(".btn-abort")!);
+    const sock = boot([ws("w", [agent("a"), agent("b", { isDefault: false, state: "working" })])]);
+    const row = within(document.querySelector<HTMLElement>(".input-row")!);
+    expect(row.queryByRole("group")).toBeNull();
+    fireEvent.click(row.getByRole("button", { name: "Stop b" }));
     expect(sock.frames().filter((f) => f.type === "interrupt" || f.type === "abort")).toEqual([
-      { type: "interrupt", workspaceId: "w", agentId: "a" },
+      { type: "interrupt", workspaceId: "w", agentId: "b" },
     ]);
+  });
+
+  it("lists only working agents, including a legacy busy agent, and stops the chosen turns", () => {
+    const sock = boot([
+      ws("w", [
+        agent("a", { state: "working", busy: false }),
+        agent("b", { busy: true }),
+        agent("waiting", { state: "waiting", busy: true }),
+        agent("sleeping", { state: "sleeping", busy: true }),
+      ]),
+    ]);
+    const row = within(document.querySelector<HTMLElement>(".input-row")!);
+    const toggle = row.getByRole("button", { name: "Stop running agents (2)" });
+    expect(row.queryByRole("button", { name: "Queue" })).toBeNull();
+    fireEvent.change(row.getByRole("textbox"), { target: { value: "next turn" } });
+    expect(row.getByRole<HTMLButtonElement>("button", { name: "Queue" }).disabled).toBe(false);
+
+    fireEvent.click(toggle);
+    const group = () => within(row.getByRole("group", { name: "Stop running turns" }));
+    expect(
+      group()
+        .getAllByRole("button")
+        .map((b) => b.textContent),
+    ).toEqual(["Stop a", "Stop b", "Stop all (2)"]);
+    fireEvent.click(group().getByRole("button", { name: "Stop b" }));
+    expect(row.queryByRole("group")).toBeNull();
+    fireEvent.click(toggle);
+    fireEvent.click(group().getByRole("button", { name: "Stop all (2)" }));
+    expect(sock.frames().filter((f) => f.type === "interrupt" || f.type === "abort")).toEqual([
+      { type: "interrupt", workspaceId: "w", agentId: "b" },
+      { type: "interrupt", workspaceId: "w", agentId: "a" },
+      { type: "interrupt", workspaceId: "w", agentId: "b" },
+    ]);
+  });
+
+  it("delays hover opening and cancels a brief pass over the stop control", () => {
+    boot([ws("w", [agent("a", { busy: true }), agent("b", { busy: true })])]);
+    const row = within(document.querySelector<HTMLElement>(".input-row")!);
+    const toggle = row.getByRole("button", { name: "Stop running agents (2)" });
+    const mouse = (type: string) =>
+      fireEvent(toggle, new PointerEvent(type, { pointerType: "mouse", bubbles: true }));
+    const advance = (ms: number) =>
+      act(() => {
+        vi.advanceTimersByTime(ms);
+      });
+    const expanded = () => toggle.getAttribute("aria-expanded");
+    // jsdom does not implement matchMedia. Without it this is click-only.
+    mouse("pointerover");
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({ matches: true })),
+    );
+    vi.useFakeTimers();
+    try {
+      mouse("pointerover");
+      advance(100);
+      expect(expanded()).toBe("false");
+      mouse("pointerout");
+      advance(150);
+      expect(expanded()).toBe("false");
+      mouse("pointerover");
+      advance(150);
+      expect(expanded()).toBe("true");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("supports keyboard navigation and restores trigger focus on Escape", () => {
+    const sock = boot([ws("w", [agent("a", { busy: true }), agent("b", { busy: true })])]);
+    const row = within(document.querySelector<HTMLElement>(".input-row")!);
+    const toggle = row.getByRole("button", { name: "Stop running agents (2)" });
+    fireEvent.click(toggle);
+    toggle.focus();
+    fireEvent.keyDown(toggle, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(row.getByRole("button", { name: "Stop a" }));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(row.getByRole("button", { name: "Stop all (2)" }));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(row.queryByRole("group")).toBeNull();
+    expect(sock.frames().some((f) => f.type === "interrupt")).toBe(false);
+
+    fireEvent.click(toggle);
+    act(() => row.getByRole("textbox").focus());
+    expect(row.queryByRole("group")).toBeNull();
+
+    act(() => sock.receive({ type: "agent_state", workspaceId: "w", agentId: "a", state: "idle" }));
+    expect(row.getByRole("button", { name: "Stop b" })).toBeTruthy();
+    expect(row.queryByRole("button", { name: "Stop running agents (2)" })).toBeNull();
   });
 
   it("leaves an agent that only waits on background work to its card's own stops", () => {

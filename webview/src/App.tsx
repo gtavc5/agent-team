@@ -11,6 +11,8 @@ import {
 } from "./state/useServer";
 import { groupWorkspaces } from "./sidebar/groups";
 import { agentQueues, agentState, isAgentActive, pillLabel } from "./workspace/agents";
+import { StopControl } from "./composer/StopControl";
+import { Icon } from "./panels/Icon";
 import { SidePanel } from "./panels/SidePanel";
 import { Rail, type RailItem } from "./panels/Rail";
 import { AgentsPanel, type AgentsPanelActions } from "./panels/AgentsPanel";
@@ -1141,7 +1143,7 @@ export function App() {
     return activeWs.agents.find((a) => a.isDefault) ?? activeWs.agents[0];
   }, [activeWs, mentionTarget]);
   const targetBusy = !!targetAgent && agentQueues(targetAgent);
-  const othersRunning = activeWs?.agents.some((a) => a.busy && a.id !== targetAgent?.id) ?? false;
+  const busyAgents = activeWs?.agents.filter(agentQueues) ?? [];
 
   useEffect(() => {
     selectCommandAgent(activeWs?.id ?? null, targetAgent?.id ?? null);
@@ -1302,6 +1304,8 @@ export function App() {
   // Set while a send is in flight (uploading, or waiting on a liveness probe)
   // so a second tap cannot send the same draft twice.
   const [sending, setSending] = useState(false);
+  const hasDraft = hasInput || pendingImages.length > 0;
+  const showPrimary = !targetBusy || hasDraft || sending || uploading;
   const sendingRef = useRef(false);
   const handleSend = useCallback(async () => {
     const text = (textareaRef.current?.value ?? "").trim();
@@ -1804,8 +1808,9 @@ export function App() {
                     onClick={() => fileInputRef.current?.click()}
                     disabled={!hasAgents || projectSealed}
                     title="Attach image"
+                    aria-label="Attach image"
                   >
-                    +
+                    <Icon name="plus" />
                   </button>
                   <textarea
                     ref={textareaRef}
@@ -1847,55 +1852,38 @@ export function App() {
                     }
                     rows={1}
                   />
-                  {othersRunning && !projectSealed && (
+                  {!projectSealed && (
+                    <StopControl
+                      key={activeWs.id}
+                      busyAgents={busyAgents}
+                      onStop={(agentId) => interrupt(activeWs.id, agentId)}
+                    />
+                  )}
+                  {showPrimary && (
                     <button
-                      className="btn-abort btn-abort-others"
-                      title="Stop what every agent is doing now; background tasks keep going"
-                      onClick={() => interrupt(activeWs.id)}
+                      className="btn-primary-slot"
+                      onClick={() => {
+                        void handleSend();
+                      }}
+                      disabled={!hasDraft || !hasAgents || sending || uploading || projectSealed}
+                      aria-busy={sending || uploading || undefined}
+                      aria-label={uploading ? "Uploading..." : targetBusy ? "Queue" : "Send"}
+                      title={
+                        targetBusy
+                          ? `${targetAgent.name} is busy — message will run next`
+                          : targetAgent && activeWs.agents.length > 1
+                            ? `Send to ${targetAgent.name}`
+                            : "Send"
+                      }
                     >
-                      <span className="btn-text">Stop all</span>
+                      <span className="btn-text">
+                        {uploading ? "Uploading..." : targetBusy ? "Queue" : "Send"}
+                      </span>
                       <span className="btn-icon" aria-hidden="true">
-                        ⏹
+                        <Icon name={uploading ? "pending" : targetBusy ? "queue" : "up"} />
                       </span>
                     </button>
                   )}
-                  {targetBusy && !projectSealed && (
-                    <button
-                      className="btn-abort"
-                      title={`Stop ${targetAgent.name}'s turn; background tasks keep going`}
-                      onClick={() => interrupt(activeWs.id, targetAgent.id)}
-                    >
-                      ◼
-                    </button>
-                  )}
-                  <button
-                    className="btn-primary-slot"
-                    onClick={() => {
-                      void handleSend();
-                    }}
-                    disabled={
-                      (!hasInput && pendingImages.length === 0) ||
-                      !hasAgents ||
-                      sending ||
-                      uploading ||
-                      projectSealed
-                    }
-                    aria-busy={sending || uploading || undefined}
-                    title={
-                      targetBusy
-                        ? `${targetAgent.name} is busy — message will run next`
-                        : targetAgent && activeWs.agents.length > 1
-                          ? `Send to ${targetAgent.name}`
-                          : "Send"
-                    }
-                  >
-                    <span className="btn-text">
-                      {uploading ? "Uploading..." : targetBusy ? "Queue" : "Send"}
-                    </span>
-                    <span className="btn-icon" aria-hidden="true">
-                      {uploading ? "…" : targetBusy ? "⇥" : "↑"}
-                    </span>
-                  </button>
                 </div>
                 <ExtensionUi
                   workspace={activeWs}
