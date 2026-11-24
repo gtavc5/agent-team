@@ -295,9 +295,10 @@ export class HttpHandler {
   // and only its notes and repository are read.
   private handleFile(url: URL, raw: boolean, res: http.ServerResponse): void {
     const input = url.searchParams.get("path") ?? "";
+    const literalPath = url.searchParams.get("literal") === "1";
     const project = url.searchParams.get("project");
     if (project === null) {
-      const found = this.workspacePath(url.searchParams.get("ws") ?? "", input);
+      const found = this.workspacePath(url.searchParams.get("ws") ?? "", input, literalPath);
       return this.sendFile(found.abs, raw, res, undefined, found.ref);
     }
     this.projectPath(project, input).then(
@@ -312,8 +313,18 @@ export class HttpHandler {
   // Sessions of a project write notes/... for its notes, as its board does;
   // a file at that path in the workspace's own folder comes first. A note
   // comes with `ref`, its notes/... path, for the notes/... links in it.
-  private workspacePath(ws: string, input: string): { abs: string; ref?: string } {
-    const own = resolveFilePath(this.cwdOf(ws) ?? os.homedir(), input || ".");
+  private workspacePath(
+    ws: string,
+    input: string,
+    literalPath = false,
+  ): { abs: string; ref?: string } {
+    const own = resolveFilePath(
+      this.cwdOf(ws) ?? os.homedir(),
+      input || ".",
+      process.platform,
+      literalPath,
+    );
+    if (literalPath) return { abs: own };
     const notes = this.notesOf(ws);
     if (!notes) return { abs: own };
     const p = input.trim();
@@ -478,7 +489,7 @@ export class HttpHandler {
         if (!res.headersSent) fail(e);
       });
       stream.once("open", () => {
-        const ext = path.extname(abs).toLowerCase();
+        const ext = path.extname(abs).trim().toLowerCase();
         res.setHeader("Content-Type", MIME[ext] ?? "application/octet-stream");
         // A previewed .html/.svg must not run script on the app's origin; a
         // sandboxed PDF would not render at all.

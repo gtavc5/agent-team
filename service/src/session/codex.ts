@@ -903,8 +903,12 @@ export class CodexSession extends EventEmitter {
         this.toolResult(item, text, item.success === false, item.durationMs);
         break;
       }
-      case "webSearch":
       case "imageView":
+        // The path on the call is the useful payload; the empty result still
+        // settles its timer and pairs with the tool_use in every projection.
+        this.toolResult(item, "");
+        break;
+      case "webSearch":
       case "collabAgentToolCall":
         this.toolResult(item, "done");
         break;

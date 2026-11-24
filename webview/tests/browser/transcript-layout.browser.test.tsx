@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { page, cdp, userEvent } from "vitest/browser";
 import type {} from "@vitest/browser-playwright";
 import {
@@ -10,6 +10,7 @@ import {
   SubAgentItem,
 } from "../../src/chat/messages";
 import { CreateWorkspaceDialog } from "../../src/workspace/dialogs";
+import { FileOpenContext } from "../../src/chat/fileRef";
 import { BoardPage } from "../../src/project/BoardPage";
 import { GitBar } from "../../src/workspace/GitBar";
 import "../../src/fonts/sarasa-mono-sc/regular/result.css";
@@ -242,6 +243,39 @@ it("restores keyboard focus and keeps the last collapsed card in view with norma
   expect(document.activeElement).toBe(toggle);
   expect(rect(header).top).toBeGreaterThanOrEqual(rect(scroller).top - 1);
   expect(rect(header).bottom).toBeLessThanOrEqual(rect(scroller).bottom + 1);
+});
+
+it("opens a ViewImage path by mouse and keyboard with visible file-link affordance", async () => {
+  await page.viewport(800, 600);
+  const open = vi.fn();
+  const imagePath = "C:\\captures\\one.png";
+  const { container } = render(
+    <FileOpenContext.Provider value={open}>
+      <div className="messages">
+        <EventItem
+          ev={{
+            kind: "tool_use",
+            toolName: "ViewImage",
+            toolUseId: "image-1",
+            content: `**ViewImage** \`${imagePath}\``,
+            toolResult: "done",
+          }}
+        />
+      </div>
+    </FileOpenContext.Provider>,
+  );
+  const ref = get(container, ".event-summary-line code");
+  expect(ref.getAttribute("role")).toBe("button");
+  expect(getComputedStyle(ref).cursor).toBe("pointer");
+  expect(container.querySelector(".btn-diff")).toBeNull();
+  await page.elementLocator(ref).click();
+  expect(open).toHaveBeenCalledExactlyOnceWith(imagePath, { literalPath: true });
+  ref.focus();
+  expect(document.activeElement).toBe(ref);
+  await userEvent.keyboard("{Enter}");
+  await userEvent.keyboard(" ");
+  expect(open).toHaveBeenCalledTimes(3);
+  expect(open).toHaveBeenLastCalledWith(imagePath, { literalPath: true });
 });
 
 it("wraps shell commands and tool paths without letting a long name displace controls", async () => {

@@ -464,6 +464,46 @@ describe("file previews", () => {
     expect(view.entries[0]).toMatchObject({ name: "zz-sub", dir: true });
   });
 
+  it("preserves a literal filename in previews and raw downloads", async () => {
+    const ordinary = path.join(dir, "spaced.png");
+    const spaced = `${ordinary} `;
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    fs.writeFileSync(ordinary, png);
+    fs.writeFileSync(spaced, png);
+    // Ordinary references keep their historical trimming; an explicit
+    // literal path selects the distinct file whose name ends in a space.
+    const trimmed = JSON.parse((await get("file", spaced)).body.toString()) as { path: string };
+    expect(trimmed.path).toBe(ordinary);
+    const query = `path=${encodeURIComponent(spaced)}&literal=1`;
+    const preview = await request(`/api/file?${query}`, { headers: { Cookie: cookie } });
+    expect(preview.status).toBe(200);
+    const view = JSON.parse(preview.body.toString()) as { path: string; kind: string };
+    expect(view).toMatchObject({ path: spaced, kind: "image" });
+    const raw = await request(`/api/file/raw?${query}`, { headers: { Cookie: cookie } });
+    expect(raw.status).toBe(200);
+    expect(raw.headers["content-type"]).toBe("image/png");
+    expect(raw.body.equals(png)).toBe(true);
+    expect(resolveFilePath("C:\\repo", " one.png", "win32", true)).toBe("C:\\repo\\ one.png");
+  });
+
+  it("keeps literal dot segments through symlink resolution", async () => {
+    const root = path.join(dir, "resolve");
+    const other = path.join(root, "other");
+    fs.mkdirSync(path.join(other, "sub"), { recursive: true });
+    fs.symlinkSync(path.join(other, "sub"), path.join(root, "link"), "dir");
+    const normalized = path.join(root, "one.txt");
+    const throughLink = path.join(other, "one.txt");
+    fs.writeFileSync(normalized, "normalized first");
+    fs.writeFileSync(throughLink, "filesystem first");
+    const input = `${root}${path.sep}link${path.sep}..${path.sep}one.txt`;
+    expect((await get("file/raw", input)).body.toString()).toBe("normalized first");
+    const literal = await request(`/api/file/raw?path=${encodeURIComponent(input)}&literal=1`, {
+      headers: { Cookie: cookie },
+    });
+    expect(literal.status).toBe(200);
+    expect(literal.body.toString()).toBe("filesystem first");
+  });
+
   it("resolves Windows drive paths and RFC 8089 /C:/... file URIs without doubling drives", () => {
     expect(resolveFilePath("C:\\repo", "C:/Users/me/Desktop/report.md", "win32")).toBe(
       "C:\\Users\\me\\Desktop\\report.md",

@@ -48,9 +48,23 @@ export function summarizeEvent(e: StreamEvent): StreamEvent {
         }
         break;
       }
+      const viewImage =
+        e.toolName === "ViewImage" ||
+        (!e.toolName && (e.content ?? "").startsWith("**ViewImage**"));
       base.content = firstLine(e.content ?? "");
+      // A multiline filename is cut even when its first line is short.
+      if (viewImage && (e.content ?? "").includes("\n") && !base.content.endsWith("…")) {
+        base.content += "…";
+      }
       base.bodyLength = (e.content ?? "").length;
-      if (e.toolResult != null) base.resultLength = e.toolResult.length;
+      if (e.toolResult != null) {
+        base.resultLength = e.toolResult.length;
+        // A length-only summary cannot tell legacy "done" from real
+        // four-character output. Keep just the placeholders the row hides.
+        if (viewImage && (e.toolResult === "" || e.toolResult === "done")) {
+          base.toolResult = e.toolResult;
+        }
+      }
       break;
     case "compact":
     case "notice":

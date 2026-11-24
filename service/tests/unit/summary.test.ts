@@ -32,6 +32,37 @@ describe("summarizeEvent", () => {
     });
   });
 
+  it("distinguishes ViewImage placeholders from real four-character results", () => {
+    for (const toolResult of ["", "done"]) {
+      expect(
+        summarizeEvent(
+          ev("tool_use", {
+            toolName: "ViewImage",
+            content: "**ViewImage** `/tmp/one.png`",
+            toolResult,
+          }),
+        ),
+      ).toMatchObject({ toolResult, resultLength: toolResult.length });
+    }
+    const real = summarizeEvent(
+      ev("tool_use", {
+        toolName: "ViewImage",
+        content: "**ViewImage** `/tmp/one.png`",
+        toolResult: "real",
+      }),
+    );
+    expect(real.resultLength).toBe(4);
+    expect(real).not.toHaveProperty("toolResult");
+    const multiline = summarizeEvent(
+      ev("tool_use", {
+        toolName: "ViewImage",
+        content: "**ViewImage** `artifacts/one.png\nfinal.png`",
+        toolResult: "",
+      }),
+    );
+    expect(multiline.content.endsWith("…")).toBe(true);
+  });
+
   it("keeps what a panel call sent and got back, as a banner's text, and whether it failed", () => {
     const content = "**message_session** `ws-9`\n\n> please rebase";
     expect(

@@ -333,11 +333,12 @@ export function FilesPanel({
       </button>
     );
 
+  const literal = ref.literalPath ? "&literal=1" : "";
   useEffect(() => {
     if (changesOnly) return;
     let cancelled = false;
     setLoad({ loading: true });
-    const query = `ws=${encodeURIComponent(wsId)}&path=${encodeURIComponent(ref.path)}`;
+    const query = `ws=${encodeURIComponent(wsId)}&path=${encodeURIComponent(ref.path)}${literal}`;
     fetch(`api/file?${query}`)
       .then(async (res) => {
         const body = (await res.json()) as FileView & { error?: string };
@@ -350,11 +351,11 @@ export function FilesPanel({
     return () => {
       cancelled = true;
     };
-  }, [wsId, ref.path, changesOnly]);
+  }, [wsId, ref.path, ref.literalPath, changesOnly, literal]);
 
   const view = "view" in load ? load.view : null;
   const path = view?.path ?? ("path" in load && load.path ? load.path : ref.path);
-  const raw = `api/file/raw?ws=${encodeURIComponent(wsId)}&path=${encodeURIComponent(path)}`;
+  const raw = `api/file/raw?ws=${encodeURIComponent(wsId)}&path=${encodeURIComponent(path)}${literal}`;
   const isMarkdown = view?.kind === "text" && languageFor(path) === "markdown";
   const go = (next: FileRef) => {
     setSource(!!next.line);

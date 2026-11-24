@@ -22,18 +22,31 @@ export type FileView =
   | { kind: "image" | "binary"; path: string; size: number };
 
 // "~/x" is under home, a relative path under the workspace directory.
+// Literal paths skip reference trimming and home shorthand expansion.
 export function resolveFilePath(
   cwd: string,
   input: string,
   platform: NodeJS.Platform = process.platform,
+  literalPath = false,
 ): string {
   const pathMod = platform === "win32" ? path.win32 : path.posix;
-  let p = input.trim();
+  let p = literalPath ? input : input.trim();
   // Strip RFC 8089 leading slash from "/C:/..." so path.win32.resolve does not
   // prepend the current drive letter and produce "C:\C:\...".
   if (platform === "win32" && /^\/[A-Za-z]:[\\/]/.test(p)) p = p.slice(1);
-  if (p === "~" || p.startsWith("~/") || (platform === "win32" && p.startsWith("~\\"))) {
+  if (
+    !literalPath &&
+    (p === "~" || p.startsWith("~/") || (platform === "win32" && p.startsWith("~\\")))
+  ) {
     return pathMod.join(os.homedir(), p.slice(1));
+  }
+  if (literalPath) {
+    if (pathMod.isAbsolute(p)) return p;
+    // Resolving drive-relative syntax needs the platform's cwd rules. Other
+    // relative paths stay verbatim: normalizing `..` before the kernel walks
+    // a symlink can select a different file than the path Codex displayed.
+    if (platform === "win32" && /^[A-Za-z]:/.test(p)) return pathMod.resolve(cwd, p);
+    return cwd.endsWith(pathMod.sep) ? `${cwd}${p}` : `${cwd}${pathMod.sep}${p}`;
   }
   return pathMod.resolve(cwd, p);
 }
@@ -79,7 +92,7 @@ export async function readFileView(abs: string): Promise<FileView> {
     };
   }
   if (!stat.isFile()) throw new NotRegularFile();
-  if (IMAGE_EXTS.has(path.extname(abs).toLowerCase())) {
+  if (IMAGE_EXTS.has(path.extname(abs).trim().toLowerCase())) {
     return { kind: "image", path: abs, size: stat.size };
   }
   const file = await fs.promises.open(abs, "r");

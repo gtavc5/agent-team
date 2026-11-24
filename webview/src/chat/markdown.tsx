@@ -226,18 +226,21 @@ function IssueLink({ id, children }: { id: string; children: ReactNode }) {
   );
 }
 
-function FileRefCode({
+export function FileRefCode({
   target,
   title,
   className,
   children,
+  onOpen,
 }: {
   target: string;
   title?: string;
   className?: string;
   children: ReactNode;
+  onOpen?: (target: string) => void;
 }) {
   const openFile = useContext(FileOpenContext)!;
+  const open = onOpen ?? openFile;
   // A drag selecting the path to copy it ends in a click on it; a click,
   // on a selected path too, does not move.
   const pressedAt = useRef<{ x: number; y: number } | null>(null);
@@ -254,12 +257,12 @@ function FileRefCode({
         const from = pressedAt.current;
         const dragged = !!from && Math.hypot(e.clientX - from.x, e.clientY - from.y) > 3;
         if (dragged && !(window.getSelection()?.isCollapsed ?? true)) return;
-        openFile(target);
+        open(target);
       }}
       onKeyDown={(e) => {
         if (e.key !== "Enter" && e.key !== " ") return;
         e.preventDefault();
-        openFile(target);
+        open(target);
       }}
     >
       {children}

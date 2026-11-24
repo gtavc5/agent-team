@@ -1,11 +1,20 @@
 import { createContext } from "react";
 
+export interface FileOpenOptions {
+  // Do not parse line suffixes or anchors out of an already-extracted path.
+  literalPath?: boolean;
+}
+
 // Opens a file reference ("src/a.ts:12-20", "/tmp/report.md") in the file
 // viewer; null outside a workspace view, where references stay plain text.
-export const FileOpenContext = createContext<((ref: string) => void) | null>(null);
+export const FileOpenContext = createContext<
+  ((ref: string, options?: FileOpenOptions) => void) | null
+>(null);
 
 export interface FileRef {
   path: string;
+  // Preserve the name byte-for-byte through preview and raw-file requests.
+  literalPath?: boolean;
   line?: number;
   endLine?: number;
 }

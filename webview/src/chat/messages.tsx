@@ -15,7 +15,8 @@ import type { Message, MessageOrigin, AgentInfo, StreamEvent } from "../state/us
 import { isTerminalSubagent, timelineBlocks, type TimelineBlock } from "./events";
 import { toolNameOf, toolSummary } from "../state/stream";
 import { copySelectionAsMarkdown } from "./clipboard";
-import { CodeBlock, CopyButton, MdBlock, StreamingMdBlock } from "./markdown";
+import { CodeBlock, CopyButton, FileRefCode, MdBlock, StreamingMdBlock } from "./markdown";
+import { FileOpenContext } from "./fileRef";
 import { DEFAULT_USER } from "../state/useServer";
 import { AgentAvatar, Avatar, isImageAvatar } from "../workspace/avatar";
 import { formatTokens, formatDuration, formatRunTime } from "../format";
@@ -343,6 +344,54 @@ function formatSize(len: number): string {
   return len > 1000 ? `${(len / 1000).toFixed(len < 10000 ? 1 : 0)}k chars` : `${len} chars`;
 }
 
+// Strip Codex's outer Markdown delimiters only. toolSummary also removes
+// backticks from the filename itself, which would open a different file.
+function viewImagePathOf(ev: StreamEvent): string {
+  const body = (ev.content ?? "").replace(/^\*\*[^*]+\*\*\s*/, "");
+  if (!body.startsWith("`")) return body.trim();
+  const inner = body.slice(1);
+  return inner.endsWith("`") ? inner.slice(0, -1) : inner;
+}
+
+function ViewImagePath({
+  path,
+  truncated,
+  onLoadDetails,
+}: {
+  path: string;
+  truncated: boolean;
+  onLoadDetails?: () => void;
+}) {
+  const openFile = useContext(FileOpenContext);
+  const pending = useRef(false);
+  const open = useCallback(
+    (target: string) => {
+      if (truncated) {
+        pending.current = true;
+        // A send can be dropped while disconnected: every activation may retry.
+        onLoadDetails?.();
+        return;
+      }
+      pending.current = false;
+      openFile?.(target, { literalPath: true });
+    },
+    [onLoadDetails, openFile, truncated],
+  );
+  // Loading message details replaces this row's props without remounting it.
+  // Only then open, using the now-complete path rather than its ellipsis.
+  useEffect(() => {
+    if (!pending.current || truncated || !path || !openFile) return;
+    open(path);
+  }, [open, openFile, path, truncated]);
+
+  if (!openFile || !path) return <code>{path}</code>;
+  return (
+    <FileRefCode target={path} title="Open image in Files" onOpen={open}>
+      {path}
+    </FileRefCode>
+  );
+}
+
 export const EventItem = memo(function EventItem({
   ev,
   onLoadDetails,
@@ -368,7 +417,11 @@ export const EventItem = memo(function EventItem({
   const isToolUse = ev.kind === "tool_use";
   const isThinking = ev.kind === "thinking";
   const toolName = isToolUse ? toolNameOf(ev) : null;
-  const summary = isToolUse ? toolSummary(ev) : "";
+  const summary = isToolUse
+    ? toolName === "ViewImage"
+      ? viewImagePathOf(ev)
+      : toolSummary(ev)
+    : "";
   const label = toolName
     ? chipLabelFor(toolName)
     : isThinking
@@ -386,13 +439,24 @@ export const EventItem = memo(function EventItem({
   // Multi-line tool calls (Bash commands, edits) always show their body;
   // single-line ones (Read, Grep) get a summary and an optional details toggle.
   const bodyLen = ev.bodyLength ?? ev.content.length;
-  const multiLine = isToolUse && (ev.content.includes("\n") || bodyLen > ev.content.length);
+  const multiLine =
+    isToolUse &&
+    toolName !== "ViewImage" &&
+    (ev.content.includes("\n") || bodyLen > ev.content.length);
   const showBodyByDefault = isToolUse && (multiLine || !summary);
-  const hasHiddenBody = isToolUse && !showBodyByDefault && bodyLen > summary.length + 16;
+  const hasHiddenBody =
+    isToolUse && toolName !== "ViewImage" && !showBodyByDefault && bodyLen > summary.length + 16;
   const resultLen = isResult
     ? (ev.contentLength ?? ev.content.length)
     : (ev.resultLength ?? ev.toolResult?.length ?? 0);
-  const hasResult = isToolUse && (ev.toolResult != null || ev.resultLength != null);
+  const placeholderResult =
+    toolName === "ViewImage" &&
+    !ev.toolResultIsError &&
+    (ev.toolResult === "" ||
+      ev.toolResult === "done" ||
+      (ev.toolResult == null && ev.resultLength === 0));
+  const hasResult =
+    isToolUse && !placeholderResult && (ev.toolResult != null || ev.resultLength != null);
   // A summarised body renders as a placeholder until the details arrive.
   const bodyMissing = summarized && !isToolUse && !ev.content && (ev.contentLength ?? 0) > 0;
   const toolBodyMissing =
@@ -437,7 +501,11 @@ export const EventItem = memo(function EventItem({
       {isToolUse && summary && (
         <div className="event-summary-line">
           {!summaryCut && <CopyButton text={() => summary} />}
-          <code>{summary}</code>
+          {toolName === "ViewImage" ? (
+            <ViewImagePath path={summary} truncated={summaryCut} onLoadDetails={onLoadDetails} />
+          ) : (
+            <code>{summary}</code>
+          )}
         </div>
       )}
       {(bodyMissing || (toolBodyMissing && !bodyOpen)) && (

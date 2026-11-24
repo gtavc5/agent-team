@@ -21,7 +21,7 @@ import { AgentsPanel, type AgentsPanelActions } from "./panels/AgentsPanel";
 import { workCount } from "./panels/SessionTasks";
 import { FilesPanel, type CodeQuote } from "./panels/FilesPanel";
 import { fileRoots, scopeSessions, scopeSummary, sessionState, stateSummary } from "./panels/scope";
-import { FileOpenContext, splitFileRef, type FileRef } from "./chat/fileRef";
+import { FileOpenContext, splitFileRef, type FileOpenOptions, type FileRef } from "./chat/fileRef";
 import { extractImageFiles, installMacCtrlClipboard } from "./chat/clipboard";
 import { installMacTextKeys } from "./chat/textKeys";
 import { isImeKeyEvent } from "./chat/ime";
@@ -591,11 +591,16 @@ export function App() {
   // Opens a file named in the chat, relative to a workspace's folder: a
   // message delivered from another session names paths in that session's.
   const fileOpener = useMemo(() => {
-    const byWs = new Map<string, (ref: string) => void>();
+    const byWs = new Map<string, (ref: string, options?: FileOpenOptions) => void>();
     return (wsId: string) => {
       let open = byWs.get(wsId);
       if (!open) {
-        open = (ref) => showFile(wsId, splitFileRef(ref), fileScope);
+        open = (ref, options) =>
+          showFile(
+            wsId,
+            options?.literalPath ? { path: ref, literalPath: true } : splitFileRef(ref),
+            fileScope,
+          );
         byWs.set(wsId, open);
       }
       return open;

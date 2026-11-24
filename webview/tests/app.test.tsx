@@ -536,6 +536,33 @@ describe("files panel", () => {
     expect(lastFetch()).toBe("api/file?ws=w2&path=.");
     expect(panel()!.querySelector(".dir-view")).not.toBeNull();
   });
+  it.each(["C:\\captures\\one#final.png", "artifacts/one`two.png"])(
+    "opens a ViewImage filename literally: %s",
+    async (path) => {
+      boot([
+        {
+          ...settled(1),
+          content: "",
+          events: [
+            {
+              kind: "tool_use",
+              toolName: "ViewImage",
+              toolUseId: "image-1",
+              content: `**ViewImage** \`${path}\``,
+              toolResult: "",
+              contentOffset: 0,
+            },
+          ],
+        },
+      ]);
+      fireEvent.click(document.querySelector(".step-header")!);
+      fireEvent.click(document.querySelector(".event-summary-line .file-ref")!);
+      await act(async () => {});
+      expect(lastFetch()).toBe(`api/file?ws=w1&path=${encodeURIComponent(path)}&literal=1`);
+      expect(panel()!.querySelector(".fp-btn[href]")?.getAttribute("href")).toContain("&literal=1");
+    },
+  );
+
   it("quotes lines picked in a file into the composer, under their path", async () => {
     boot([{ ...settled(1), content: "Changed `src/a.ts:3`." }]);
     const input = document.querySelector("textarea")!;

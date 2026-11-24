@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { z } from "zod";
 import { codexFields, withId } from "./fixtures/codex-wire";
 import { CodexSession } from "../../src/session/codex";
-import type { RpcMessage, Transport } from "../../src/session/codex-rpc";
+import type { RpcMessage, ThreadItem, Transport } from "../../src/session/codex-rpc";
 import type { StreamEvent } from "../../src/session/types";
 import { HostRegistry, LocalHost } from "../../src/session/host";
 import { Workspace } from "../../src/workspace/workspace";
@@ -248,6 +248,42 @@ describe("codex app-server session", () => {
       await host.close();
     }
   });
+  it("settles an image view with an empty result and its measured duration", () => {
+    const { session, events } = makeSession();
+    // Exercise the typed item mapping below the notification envelope: no
+    // recorded imageView RPC frame exists to replay through FakeServer.
+    const mapping = session as unknown as {
+      itemStarted(item: ThreadItem): void;
+      itemCompleted(item: ThreadItem): void;
+    };
+    const item: Extract<ThreadItem, { type: "imageView" }> = {
+      type: "imageView",
+      id: "img1",
+      path: "C:\\captures\\one.png",
+    };
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValue(10_000);
+      mapping.itemStarted(item);
+      clock.mockReturnValue(10_750);
+      mapping.itemCompleted(item);
+      // A repeated completion cannot reopen or settle the call a second time.
+      mapping.itemCompleted(item);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(events).toEqual([
+      {
+        kind: "tool_use",
+        toolName: "ViewImage",
+        content: "**ViewImage** `C:\\captures\\one.png`",
+        toolUseId: "img1",
+        startedAt: 10_000,
+      },
+      { kind: "tool_result", content: "", toolUseId: "img1", durationMs: 750 },
+    ]);
+  });
+
   it("forwards validated arguments only for known panel tools on the owning thread", async () => {
     const { session } = makeSession();
     const handler = vi.fn((args: Record<string, unknown>) => Promise.resolve(String(args.text)));
