@@ -339,7 +339,14 @@ function copySubagentExecution(target: StreamEvent, source: StreamEvent): void {
 // Apply an inner event to a subagent's transcript. Carriers nest: a
 // grandchild's event arrives as progress(child, _innerEvent: progress(grand,
 // _innerEvent: ev)), so recurse into the nested start's own transcript.
-function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): void {
+function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): boolean {
+  if (
+    innerEvent.kind === "tool_use" &&
+    innerEvent.toolUseId &&
+    saEvents.some((e) => e.kind === "tool_use" && e.toolUseId === innerEvent.toolUseId)
+  ) {
+    return false;
+  }
   if (innerEvent.kind === "tool_result" && innerEvent.toolUseId) {
     const i = saEvents.findIndex(
       (e) => e.kind === "tool_use" && e.toolUseId === innerEvent.toolUseId,
@@ -349,7 +356,7 @@ function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): void
       if (innerEvent.isMarkdown) saEvents[i].toolResultIsMarkdown = true;
       if (innerEvent.isError) saEvents[i].toolResultIsError = true;
       if (innerEvent.durationMs != null) saEvents[i].durationMs = innerEvent.durationMs;
-      return;
+      return true;
     }
   }
   if (innerEvent.kind === "subagent_progress" && innerEvent.subagent?.taskId) {
@@ -359,16 +366,16 @@ function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): void
       const si = saEvents.findIndex(
         (e) => e.kind === "subagent_start" && e.subagent?.taskId === nid,
       );
-      if (si >= 0) applyInnerEvent((saEvents[si].subagent!.events ??= []), nested);
+      if (si >= 0) return applyInnerEvent((saEvents[si].subagent!.events ??= []), nested);
       // No start here: the carrier has nowhere to go; drop it.
-      return;
+      return false;
     }
     const i = saEvents.findIndex(
       (e) => e.kind === "subagent_progress" && e.subagent?.taskId === nid,
     );
     if (i >= 0) {
       saEvents[i] = innerEvent;
-      return;
+      return true;
     }
   }
   if (innerEvent.kind === "subagent_done" && innerEvent.subagent?.taskId) {
@@ -387,6 +394,7 @@ function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): void
     }
   }
   saEvents.push(innerEvent);
+  return true;
 }
 
 export class Workspace {
@@ -729,12 +737,10 @@ export class Workspace {
       );
 
       if (innerEvent && startIdx >= 0) {
-        // Codex streams its child transcript incrementally; Pi supplies an authoritative final transcript.
-        if (this.agents.get(msg.agentId ?? "")?.session.getState().config.backend === "codex") {
-          const saEvents = (msg.events[startIdx].subagent!.events ??= []);
-          applyInnerEvent(saEvents, innerEvent);
+        const saEvents = (msg.events[startIdx].subagent!.events ??= []);
+        if (applyInnerEvent(saEvents, innerEvent)) {
+          this.streamed(msg, event);
         }
-        this.streamed(msg, event);
         return;
       }
       if (innerEvent) {

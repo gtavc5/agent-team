@@ -20,17 +20,28 @@ import {
   type VerifiedPid,
 } from "./pi-rpc";
 import {
+  consumedJsonlOffset,
+  createIncrementalJsonlCursor,
+  createSubagentProjectionState,
   decodeSubagentNotifyWire,
   executeFallbackAsyncStop,
+  isSafeChildRunId,
   isTrackableSubagentMode,
   makeSyntheticSubagentTaskId,
   assistantExecution,
   observedStatusExecution,
+  projectAsyncEventRecord,
+  projectSessionV3Record,
   projectSubagentExecution,
+  projectTranscriptArtifactRecord,
+  readIncrementalJsonlRecords,
   reconstructSubagentChild,
   resolveCanonicalChildId,
   resolveStopTarget,
+  resolveWorkflowStepIndex,
+  type IncrementalJsonlCursor,
   type SubagentNotifyRun,
+  type SubagentProjectionState,
 } from "./pi-subagents";
 import { decodeExtensionUi } from "./pi-extension-ui";
 import { extractPiToolResultText, formatPiToolUse } from "./pi-tool-format";
@@ -38,6 +49,7 @@ import { ACP } from "./quota-schema";
 import { retireOnEof } from "./retire";
 import { formatReportMarker } from "./types";
 import type {
+  ActiveAsyncChildRecord,
   ActiveAsyncRunRecord,
   DispatchAttempt,
   BackgroundTask,
@@ -70,6 +82,7 @@ export interface PiSessionOptions {
   piArgs?: string[];
   interruptTimeoutMs?: number;
   reconcileIntervalMs?: number;
+  livePollIntervalMs?: number;
   statsTimeoutMs?: number;
   readyTimeoutMs?: number;
   anchorTimeoutMs?: number;
@@ -422,13 +435,46 @@ interface Turn {
   tools: Map<string, { name: string; args: Json; startedAt: number; emitted: boolean }>;
   subagents: Map<
     string,
-    { mode: ActiveAsyncRunRecord["mode"]; children: ActiveAsyncRunRecord["children"] }
+    {
+      mode: ActiveAsyncRunRecord["mode"];
+      asyncLaunch: boolean;
+      children: ActiveAsyncRunRecord["children"];
+    }
   >;
   replyUsage?: Json;
   finalText: string;
   error?: string;
   contextualInput?: number;
   compact?: boolean;
+}
+
+type ChildSourceFormat = "async_events" | "transcript" | "session_v3";
+
+interface LiveTailWatch {
+  cursor: IncrementalJsonlCursor;
+  format: ChildSourceFormat;
+  run?: ActiveAsyncRunRecord;
+  cursorKey?: string;
+  targetTaskId?: string;
+  fileWatcher?: fs.FSWatcher;
+  dirWatcher?: fs.FSWatcher;
+  watchedDir?: string;
+  active: boolean;
+  scheduled: boolean;
+  onRecords: (records: Json[]) => void;
+}
+
+interface ForegroundSubagentTracker {
+  toolCallId: string;
+  rowBindings: Map<string, ActiveAsyncChildRecord>;
+  childWatches: Map<string, LiveTailWatch>;
+}
+
+interface AsyncRunTracker {
+  run: ActiveAsyncRunRecord;
+  parentWatch: LiveTailWatch;
+  childWatches: Map<string, LiveTailWatch>;
+  childTaskIds: Map<string, string>;
 }
 
 function piEffortLevels(model: Json): string[] | undefined {
@@ -534,6 +580,19 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private readonly pendingDeployNotices = new Set<string>();
   private reconciliation?: Promise<void>;
   private reconcileTimer?: NodeJS.Timeout;
+  private readonly subagentProjectionStates = new Map<
+    string,
+    {
+      state: SubagentProjectionState;
+      emittedExecution?: { model?: string; effort?: string };
+      lastTool?: string;
+      hasLiveEvents?: boolean;
+    }
+  >();
+  private readonly foregroundTrackers = new Map<string, ForegroundSubagentTracker>();
+  private readonly asyncTrackers = new Map<string, AsyncRunTracker>();
+  private foregroundPollTimer?: NodeJS.Timeout;
+  private asyncPollTimer?: NodeJS.Timeout;
   private readonly detachedPids = new Map<number, VerifiedPid & { identity: string }>();
   private lastHelperCaptureAt = 0;
   private readonly dialogs = new Map<string, { request: UiDialogRequest; timer: NodeJS.Timeout }>();
@@ -580,8 +639,26 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     session.effort.desired = state.desiredEffort ?? state.config.effort;
     session.usage = { ...state.usage };
     session.activeAsyncRuns = structuredClone(state.activeAsyncRuns ?? []);
+    for (const run of session.activeAsyncRuns) {
+      for (const child of run.children) {
+        if (child.execution?.model || child.execution?.effort || child.hasLiveEvents) {
+          const entry = session.getOrCreateProjectionState(child.taskId);
+          if (child.execution?.model || child.execution?.effort) {
+            entry.emittedExecution = { ...child.execution };
+            entry.state.execution = { ...child.execution };
+          }
+          if (child.hasLiveEvents) entry.hasLiveEvents = true;
+        }
+      }
+    }
     session.scheduleReconciliation();
-    if (session.activeAsyncRuns.length) queueMicrotask(() => void session.reconcileAsyncRuns());
+    if (session.activeAsyncRuns.length) {
+      queueMicrotask(() => {
+        if (session.disposed) return;
+        for (const run of session.activeAsyncRuns) session.startAsyncRunTracker(run);
+        void session.reconcileAsyncRuns();
+      });
+    }
     return session;
   }
 
@@ -1557,6 +1634,9 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       case "tool_execution_start":
         this.startTool(turn, event);
         break;
+      case "tool_execution_update":
+        this.updateTool(turn, event);
+        break;
       case "tool_execution_end":
         this.endTool(turn, event);
         break;
@@ -2071,7 +2151,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         status: "running",
       };
     });
-    turn.subagents.set(id, { mode, children });
+    turn.subagents.set(id, { mode, asyncLaunch, children });
   }
 
   private emitToolUse(
@@ -2090,6 +2170,179 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       toolUseId: id,
       startedAt: tool.startedAt,
     });
+  }
+
+  private updateTool(turn: Turn, event: Json): void {
+    const id = text(event.toolCallId);
+    if (!id) return;
+    const call = turn.subagents.get(id);
+    if (!call) return;
+    const detail = object(object(event.partialResult).details);
+    let tracker = this.foregroundTrackers.get(id);
+    if (!tracker) {
+      tracker = { toolCallId: id, rowBindings: new Map(), childWatches: new Map() };
+      this.foregroundTrackers.set(id, tracker);
+    }
+
+    const workflowRows = list(object(detail.workflowChildren).children);
+    if (workflowRows.length) {
+      const boundChildren = new Set<ActiveAsyncChildRecord>(tracker.rowBindings.values());
+      for (let rowIndex = 0; rowIndex < workflowRows.length; rowIndex++) {
+        const row = workflowRows[rowIndex];
+        const rowKey =
+          text(row.childId) ?? text(row.workflowKey) ?? text(row.runId) ?? `row:${rowIndex}`;
+        let child = tracker.rowBindings.get(rowKey);
+        if (!child) {
+          const wantedCanonical = text(row.childId ?? row.workflowKey);
+          if (wantedCanonical) {
+            child = call.children.find(
+              (c) => !boundChildren.has(c) && c.canonicalChildId === wantedCanonical,
+            );
+          }
+          if (!child) {
+            const idx = resolveWorkflowStepIndex(row, call.children.length);
+            if (idx !== undefined && !boundChildren.has(call.children[idx])) {
+              child = call.children[idx];
+            }
+          }
+          if (!child) {
+            child = call.children.find((c) => !boundChildren.has(c) && !terminalStatus(c.status));
+          }
+          if (!child && call.mode === "workflow") {
+            const index = call.children.length;
+            const taskId = makeSyntheticSubagentTaskId(id, index);
+            const canonicalChildId = resolveCanonicalChildId(row, index);
+            const initialStatus = terminalStatus(row.state ?? row.status) ?? "running";
+            child = {
+              taskId,
+              stepIndex: index,
+              canonicalChildId,
+              status: initialStatus,
+            };
+            call.children.push(child);
+            this.event({
+              kind: "subagent_start",
+              content: "",
+              subagent: {
+                taskId,
+                description: text(row.agent) ?? canonicalChildId,
+                status: "running",
+                cancellable: call.asyncLaunch,
+              },
+            });
+          }
+          if (!child) continue;
+          if (wantedCanonical) child.canonicalChildId = wantedCanonical;
+          tracker.rowBindings.set(rowKey, child);
+          boundChildren.add(child);
+        }
+
+        const observed = observedStatusExecution(row);
+        const lastTool = text(object(row.activity).currentTool) ?? text(row.currentTool);
+        this.emitSubagentMetaProgress(child.taskId, call.asyncLaunch, observed, lastTool);
+
+        if (!terminalStatus(child.status) && !tracker.childWatches.has(child.taskId)) {
+          const childRunId = text(row.runId);
+          const root = this.asyncRunsRoot();
+          const eventsPath =
+            childRunId && isSafeChildRunId(childRunId) && root
+              ? path.join(root, childRunId, "events.jsonl")
+              : undefined;
+          const sessionFile = text(row.sessionFile ?? row.sessionPath);
+          if (eventsPath && (fs.existsSync(eventsPath) || !sessionFile)) {
+            this.attachForegroundWatch(
+              tracker,
+              child.taskId,
+              eventsPath,
+              "async_events",
+              call.asyncLaunch,
+            );
+          } else if (sessionFile) {
+            this.attachForegroundWatch(
+              tracker,
+              child.taskId,
+              sessionFile,
+              "session_v3",
+              call.asyncLaunch,
+            );
+          } else if (eventsPath) {
+            this.attachForegroundWatch(
+              tracker,
+              child.taskId,
+              eventsPath,
+              "async_events",
+              call.asyncLaunch,
+            );
+          }
+        }
+      }
+      this.pollForegroundTracker(tracker);
+      return;
+    }
+
+    const results = list(detail.results);
+    const progress = list(detail.progress);
+    const pickIndexed = (items: Json[], stepIndex: number): Json | undefined => {
+      if (items.some((item) => typeof item.index === "number")) {
+        const indices = items.map((item) => item.index);
+        if (
+          indices.every((index) => typeof index === "number") &&
+          new Set(indices).size === indices.length
+        ) {
+          return items.find((item) => item.index === stepIndex);
+        }
+      }
+      return items[stepIndex];
+    };
+    for (const child of call.children) {
+      const p = pickIndexed(progress, child.stepIndex);
+      const r = pickIndexed(results, child.stepIndex);
+      const observed = {
+        ...observedStatusExecution(p),
+        ...observedStatusExecution(r),
+      };
+      const lastTool = text(r?.currentTool ?? p?.currentTool);
+      this.emitSubagentMetaProgress(child.taskId, call.asyncLaunch, observed, lastTool);
+
+      if (!terminalStatus(child.status) && !tracker.childWatches.has(child.taskId)) {
+        const transcriptPath = text(r?.transcriptPath ?? p?.transcriptPath);
+        const childRunId = text(r?.runId ?? p?.runId ?? r?.asyncId ?? p?.asyncId);
+        const root = this.asyncRunsRoot();
+        const eventsPath =
+          childRunId && isSafeChildRunId(childRunId) && root
+            ? path.join(root, childRunId, "events.jsonl")
+            : undefined;
+        const sessionFile = text(
+          r?.sessionFile ?? r?.sessionPath ?? p?.sessionFile ?? p?.sessionPath,
+        );
+        if (transcriptPath) {
+          this.attachForegroundWatch(
+            tracker,
+            child.taskId,
+            transcriptPath,
+            "transcript",
+            call.asyncLaunch,
+          );
+        } else if (eventsPath) {
+          this.attachForegroundWatch(
+            tracker,
+            child.taskId,
+            eventsPath,
+            "async_events",
+            call.asyncLaunch,
+          );
+        } else if (sessionFile) {
+          this.attachForegroundWatch(
+            tracker,
+            child.taskId,
+            sessionFile,
+            "session_v3",
+            call.asyncLaunch,
+          );
+        }
+      }
+    }
+    this.pollForegroundTracker(tracker);
   }
 
   private endTool(turn: Turn, event: Json): void {
@@ -2118,6 +2371,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     const call = turn.subagents.get(id);
     if (!call) return;
     turn.subagents.delete(id);
+    this.stopForegroundTracker(id);
     const asyncDir = text(detail.asyncDir),
       runId = text(detail.asyncId ?? detail.runId);
     const mode = isTrackableSubagentMode(detail.mode) ? detail.mode : call.mode;
@@ -2143,7 +2397,12 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         const step = steps[child.stepIndex];
         const existing = child.stepIndex < call.children.length;
         const execution = observedStatusExecution(step);
-        if (execution.model) child.execution = execution;
+        if (execution.model) {
+          child.execution = execution;
+          const entry = this.getOrCreateProjectionState(child.taskId);
+          entry.state.execution = { ...execution };
+          entry.emittedExecution = { ...execution };
+        }
         if (existing && tool?.args.async === true && !execution.model && !execution.effort)
           continue;
         this.event({
@@ -2159,6 +2418,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         });
       }
       this.activeAsyncRuns.push(run);
+      this.startAsyncRunTracker(run);
       this.backgroundChanged();
       void this.captureDetached(this.rpc?.pid);
       return;
@@ -2188,25 +2448,37 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     startedAt?: number,
     execution = projectSubagentExecution(result),
   ): void {
+    const projectionEntry = this.subagentProjectionStates.get(taskId);
+    const trackedExecution = projectionEntry?.emittedExecution ?? projectionEntry?.state.execution;
+    const hadLiveEvents = projectionEntry?.hasLiveEvents ?? false;
+    this.subagentProjectionStates.delete(taskId);
     const summary = text(result?.summary ?? result?.output ?? result?.preview);
-    const child = result
-      ? reconstructSubagentChild(
-          {
-            sessionFile: text(result.sessionFile ?? result.sessionPath),
-            transcriptPath: text(result.transcriptPath),
-            outputTruncated: result.outputTruncated === true,
-            transcriptError: text(result.transcriptError),
-          },
-          this.bridgeOwnedToolNames,
-        )
-      : undefined;
-    const events = child?.events ?? [];
+    const hasChildRef = Boolean(
+      text(result?.sessionFile ?? result?.sessionPath) || text(result?.transcriptPath),
+    );
+    const child =
+      result && (hasChildRef || !hadLiveEvents)
+        ? reconstructSubagentChild(
+            {
+              sessionFile: text(result.sessionFile ?? result.sessionPath),
+              transcriptPath: text(result.transcriptPath),
+              outputTruncated: result.outputTruncated === true,
+              transcriptError: text(result.transcriptError),
+            },
+            this.bridgeOwnedToolNames,
+          )
+        : undefined;
+    // If live events were streamed (e.g. from events.jsonl) and no authoritative
+    // session/transcript file exists (or turn aborted), omit events/eventCount so
+    // Workspace and client preserve the live transcript instead of wiping it.
+    const preserveLive = !hasChildRef && hadLiveEvents;
+    const events = child?.events ?? (preserveLive ? undefined : []);
     let observed: ReturnType<typeof assistantExecution> = {};
     for (const message of list(result?.messages)) {
       if (message.role === "assistant") observed = { ...observed, ...assistantExecution(message) };
     }
-    const model = child?.model ?? observed.model ?? execution.model;
-    const effort = child?.effort ?? observed.effort ?? execution.effort;
+    const model = child?.model ?? observed.model ?? execution.model ?? trackedExecution?.model;
+    const effort = child?.effort ?? observed.effort ?? execution.effort ?? trackedExecution?.effort;
     const durationMs =
       num(result?.durationMs ?? object(result?.progressSummary).durationMs) ??
       (startedAt === undefined ? undefined : Date.now() - startedAt);
@@ -2218,8 +2490,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         description: "",
         status,
         summary,
-        events,
-        eventCount: events.length,
+        ...(events !== undefined ? { events, eventCount: events.length } : {}),
         durationMs,
         ...(model && { model }),
         ...(effort && { effort }),
@@ -2243,8 +2514,10 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         isError: true,
       });
     }
-    for (const call of turn.subagents.values())
+    for (const [id, call] of turn.subagents) {
+      this.stopForegroundTracker(id);
       for (const child of call.children) this.childDone(child.taskId, "stopped");
+    }
     turn.tools.clear();
     turn.subagents.clear();
   }
@@ -2279,24 +2552,11 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         ...observedStatusExecution(childStep),
       };
       if (!status) {
-        const previous = child.execution;
         if (
           observed.model &&
-          (previous?.model !== observed.model || previous?.effort !== observed.effort)
+          this.emitSubagentMetaProgress(child.taskId, true, observed, undefined, child)
         ) {
-          child.execution = observed;
           changed = true;
-          this.event({
-            kind: "subagent_progress",
-            content: "",
-            subagent: {
-              taskId: child.taskId,
-              description: "",
-              status: "running",
-              cancellable: true,
-              ...observed,
-            },
-          });
         }
         continue;
       }
@@ -2346,6 +2606,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         );
       });
       child.status = status;
+      this.closeAsyncChildWatchesForTask(run.runId, child.taskId);
       changed = true;
       this.childDone(child.taskId, status, merged, run.startedAt, {
         ...projectSubagentExecution(...completedSteps),
@@ -2354,6 +2615,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     }
     if (terminal || run.children.every((child) => terminalStatus(child.status))) {
       if (fromDisk && this.rpc) this.pendingDeployNotices.add(run.runId);
+      this.stopAsyncRunTracker(run.runId);
       this.activeAsyncRuns = this.activeAsyncRuns.filter((item) => item !== run);
       changed = true;
     }
@@ -2419,6 +2681,569 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       if (resolved !== `step:${child.stepIndex}`) child.canonicalChildId = resolved;
     }
     return diskSteps;
+  }
+
+  private asyncRunsRoot(): string | undefined {
+    const tempRoot =
+      this.home?.env.PI_SUBAGENTS_TEMP_ROOT ??
+      this.options.env?.PI_SUBAGENTS_TEMP_ROOT ??
+      process.env.PI_SUBAGENTS_TEMP_ROOT;
+    if (tempRoot) return path.join(tempRoot, "async-subagent-runs");
+    if (this.activeAsyncRuns.length) return path.dirname(this.activeAsyncRuns[0].asyncDir);
+    return undefined;
+  }
+
+  private getOrCreateProjectionState(taskId: string) {
+    let entry = this.subagentProjectionStates.get(taskId);
+    if (!entry) {
+      entry = { state: createSubagentProjectionState() };
+      this.subagentProjectionStates.set(taskId, entry);
+    }
+    return entry;
+  }
+
+  private emitSubagentInnerEvent(taskId: string, innerEvent: StreamEvent): void {
+    if (this.disposed) return;
+    this.event({
+      kind: "subagent_progress",
+      content: "",
+      subagent: {
+        taskId,
+        description: "",
+        status: "running",
+        _innerEvent: innerEvent,
+      },
+    });
+  }
+
+  private emitSubagentMetaProgress(
+    taskId: string,
+    cancellable: boolean,
+    execution: { model?: string; effort?: string },
+    lastTool?: string,
+    asyncChild?: ActiveAsyncChildRecord,
+  ): boolean {
+    if (this.disposed) return false;
+    const entry = this.getOrCreateProjectionState(taskId);
+    const prevExecution = entry.emittedExecution;
+    const nextModel =
+      execution.model ??
+      prevExecution?.model ??
+      entry.state.execution.model ??
+      asyncChild?.execution?.model;
+    const nextEffort =
+      execution.effort ??
+      prevExecution?.effort ??
+      entry.state.execution.effort ??
+      asyncChild?.execution?.effort;
+    const nextLastTool = lastTool ?? entry.lastTool;
+    const changed =
+      nextModel !== prevExecution?.model ||
+      nextEffort !== prevExecution?.effort ||
+      nextLastTool !== entry.lastTool;
+    if (!changed) {
+      if (asyncChild && nextModel && !asyncChild.execution) {
+        asyncChild.execution = {
+          ...(nextModel ? { model: nextModel } : {}),
+          ...(nextEffort ? { effort: nextEffort } : {}),
+        };
+      }
+      return false;
+    }
+    const nextExecution = {
+      ...(nextModel ? { model: nextModel } : {}),
+      ...(nextEffort ? { effort: nextEffort } : {}),
+    };
+    entry.emittedExecution = nextExecution;
+    entry.state.execution = { ...nextExecution };
+    if (asyncChild && nextModel) {
+      asyncChild.execution = { ...nextExecution };
+    }
+    entry.lastTool = nextLastTool;
+    this.event({
+      kind: "subagent_progress",
+      content: "",
+      subagent: {
+        taskId,
+        description: "",
+        status: "running",
+        cancellable,
+        ...(nextModel ? { model: nextModel } : {}),
+        ...(nextEffort ? { effort: nextEffort } : {}),
+        ...(nextLastTool ? { lastTool: nextLastTool } : {}),
+      },
+    });
+    return true;
+  }
+
+  private projectRecordToChild(
+    taskId: string,
+    cancellable: boolean,
+    record: Json,
+    format: ChildSourceFormat,
+    asyncChild?: ActiveAsyncChildRecord,
+  ): void {
+    const entry = this.getOrCreateProjectionState(taskId);
+    const batch =
+      format === "async_events"
+        ? projectAsyncEventRecord(record, entry.state, this.bridgeOwnedToolNames)
+        : format === "transcript"
+          ? projectTranscriptArtifactRecord(record, entry.state, this.bridgeOwnedToolNames)
+          : projectSessionV3Record(record, entry.state, this.bridgeOwnedToolNames);
+    if (batch.executionChanged) {
+      this.emitSubagentMetaProgress(
+        taskId,
+        cancellable,
+        entry.state.execution,
+        entry.lastTool,
+        asyncChild,
+      );
+    }
+    if (batch.events.length > 0) {
+      entry.hasLiveEvents = true;
+      if (asyncChild) asyncChild.hasLiveEvents = true;
+    }
+    for (const innerEvent of batch.events) {
+      if (innerEvent.kind === "tool_use" && innerEvent.toolName) {
+        this.emitSubagentMetaProgress(
+          taskId,
+          cancellable,
+          entry.state.execution,
+          innerEvent.toolName,
+          asyncChild,
+        );
+      }
+      this.emitSubagentInnerEvent(taskId, innerEvent);
+    }
+  }
+
+  private createLiveWatch(
+    filePath: string,
+    format: ChildSourceFormat,
+    onRecords: (records: Json[]) => void,
+    options?: {
+      initialOffset?: number;
+      run?: ActiveAsyncRunRecord;
+      cursorKey?: string;
+      targetTaskId?: string;
+    },
+  ): LiveTailWatch {
+    const watch: LiveTailWatch = {
+      cursor: createIncrementalJsonlCursor(filePath, options?.initialOffset ?? 0),
+      format,
+      run: options?.run,
+      cursorKey: options?.cursorKey,
+      targetTaskId: options?.targetTaskId,
+      active: true,
+      scheduled: false,
+      onRecords,
+    };
+    this.refreshLiveWatchFs(watch);
+    return watch;
+  }
+
+  private refreshLiveWatchFs(watch: LiveTailWatch): void {
+    if (!watch.active || this.disposed) return;
+    if (!watch.fileWatcher && fs.existsSync(watch.cursor.filePath)) {
+      watch.dirWatcher?.close();
+      watch.dirWatcher = undefined;
+      watch.watchedDir = undefined;
+      try {
+        const watcher = fs.watch(watch.cursor.filePath, { persistent: false }, () =>
+          this.scheduleWatchPoll(watch),
+        );
+        watcher.on("error", () => undefined);
+        watch.fileWatcher = watcher;
+      } catch {
+        /* Poll timer remains as fallback. */
+      }
+      return;
+    }
+    if (!watch.fileWatcher && !watch.dirWatcher) {
+      const parentDir = path.dirname(watch.cursor.filePath);
+      const grandParentDir = path.dirname(parentDir);
+      const watchDir = fs.existsSync(parentDir)
+        ? parentDir
+        : fs.existsSync(grandParentDir)
+          ? grandParentDir
+          : undefined;
+      if (watchDir) {
+        watch.watchedDir = watchDir;
+        try {
+          const watcher = fs.watch(watchDir, { persistent: false }, () =>
+            this.scheduleWatchPoll(watch),
+          );
+          watcher.on("error", () => undefined);
+          watch.dirWatcher = watcher;
+        } catch {
+          /* Poll timer remains as fallback. */
+        }
+      }
+    }
+  }
+
+  private scheduleWatchPoll(watch: LiveTailWatch): void {
+    if (!watch.active || this.disposed || watch.scheduled) return;
+    watch.scheduled = true;
+    queueMicrotask(() => {
+      watch.scheduled = false;
+      if (!watch.active || this.disposed) return;
+      this.pollLiveWatch(watch);
+    });
+  }
+
+  private pollLiveWatch(watch: LiveTailWatch, run = watch.run): void {
+    if (!watch.active || this.disposed) return;
+    if (!watch.fileWatcher) {
+      if (
+        watch.dirWatcher &&
+        watch.watchedDir !== path.dirname(watch.cursor.filePath) &&
+        fs.existsSync(path.dirname(watch.cursor.filePath))
+      ) {
+        watch.dirWatcher.close();
+        watch.dirWatcher = undefined;
+        watch.watchedDir = undefined;
+      }
+      this.refreshLiveWatchFs(watch);
+    }
+    const records = readIncrementalJsonlRecords(watch.cursor);
+    if (run && watch.cursorKey) {
+      run.tailCursors ??= {};
+      run.tailCursors[watch.cursorKey] = consumedJsonlOffset(watch.cursor);
+    }
+    if (records.length) watch.onRecords(records);
+  }
+
+  private closeLiveWatch(watch: LiveTailWatch): void {
+    watch.active = false;
+    watch.fileWatcher?.close();
+    watch.fileWatcher = undefined;
+    watch.dirWatcher?.close();
+    watch.dirWatcher = undefined;
+    watch.watchedDir = undefined;
+  }
+
+  private attachForegroundWatch(
+    tracker: ForegroundSubagentTracker,
+    taskId: string,
+    filePath: string,
+    format: ChildSourceFormat,
+    cancellable: boolean,
+  ): void {
+    if (this.disposed || tracker.childWatches.has(taskId)) return;
+    const watch = this.createLiveWatch(filePath, format, (records) => {
+      for (const record of records) {
+        this.projectRecordToChild(taskId, cancellable, record, format);
+      }
+    });
+    tracker.childWatches.set(taskId, watch);
+    this.ensureForegroundPollTimer();
+  }
+
+  private pollForegroundTracker(tracker: ForegroundSubagentTracker): void {
+    if (this.disposed) return;
+    for (const watch of tracker.childWatches.values()) {
+      this.pollLiveWatch(watch);
+    }
+  }
+
+  private ensureForegroundPollTimer(): void {
+    if (!this.foregroundTrackers.size || this.disposed) {
+      clearInterval(this.foregroundPollTimer);
+      this.foregroundPollTimer = undefined;
+      return;
+    }
+    if (!this.foregroundPollTimer) {
+      this.foregroundPollTimer = setInterval(() => {
+        for (const tracker of this.foregroundTrackers.values()) {
+          this.pollForegroundTracker(tracker);
+        }
+      }, this.options.livePollIntervalMs ?? 250);
+      this.foregroundPollTimer.unref();
+    }
+  }
+
+  private stopForegroundTracker(toolCallId: string): void {
+    const tracker = this.foregroundTrackers.get(toolCallId);
+    if (!tracker) return;
+    for (const watch of tracker.childWatches.values()) this.closeLiveWatch(watch);
+    tracker.childWatches.clear();
+    tracker.rowBindings.clear();
+    this.foregroundTrackers.delete(toolCallId);
+    if (!this.foregroundTrackers.size) {
+      clearInterval(this.foregroundPollTimer);
+      this.foregroundPollTimer = undefined;
+    }
+  }
+
+  private startAsyncRunTracker(run: ActiveAsyncRunRecord): void {
+    if (this.disposed || this.asyncTrackers.has(run.runId)) return;
+    const tracker: AsyncRunTracker = {
+      run,
+      parentWatch: this.createLiveWatch(
+        path.join(run.asyncDir, "events.jsonl"),
+        "async_events",
+        (records) => this.handleAsyncParentRecords(tracker, records),
+        {
+          initialOffset: run.tailCursors?.parent ?? 0,
+          run,
+          cursorKey: "parent",
+        },
+      ),
+      childWatches: new Map(),
+      childTaskIds: new Map(),
+    };
+    this.asyncTrackers.set(run.runId, tracker);
+    for (const child of run.children) {
+      if (child.execution?.model || child.execution?.effort) {
+        const entry = this.getOrCreateProjectionState(child.taskId);
+        entry.emittedExecution = { ...child.execution };
+        entry.state.execution = { ...child.execution };
+      }
+      if (child.childRunId && isSafeChildRunId(child.childRunId) && !terminalStatus(child.status)) {
+        this.attachAsyncWorkflowChildWatch(tracker, child, child.childRunId);
+      }
+    }
+    this.ensureAsyncPollTimer();
+    this.pollAsyncRunTracker(tracker);
+  }
+
+  private handleAsyncParentRecords(tracker: AsyncRunTracker, records: Json[]): void {
+    const { run } = tracker;
+    for (const record of records) {
+      if (record.type === "subagent.child-status") {
+        const canonicalId = text(record.childId ?? record.workflowKey);
+        const explicitIndex =
+          typeof record.stepIndex === "number" &&
+          Number.isInteger(record.stepIndex) &&
+          record.stepIndex >= 0
+            ? record.stepIndex
+            : undefined;
+        let hintedIndex = explicitIndex;
+        if (hintedIndex === undefined && canonicalId) {
+          const match = /^(?:task|step)-(\d+)$/.exec(canonicalId);
+          if (match) {
+            const parsed = Number(match[1]) - 1;
+            if (Number.isInteger(parsed) && parsed >= 0) hintedIndex = parsed;
+          }
+        }
+        let child = canonicalId
+          ? run.children.find((c) => c.canonicalChildId === canonicalId)
+          : undefined;
+        if (!child && hintedIndex !== undefined) {
+          child = run.children.find((c) => c.stepIndex === hintedIndex);
+        }
+        if (
+          !child &&
+          run.mode === "workflow" &&
+          canonicalId &&
+          (hintedIndex === undefined || hintedIndex === 0)
+        ) {
+          child = run.children.find((c) => c.canonicalChildId === "step:0");
+        }
+        if (!child && run.mode === "workflow") {
+          let index = hintedIndex;
+          if (index === undefined || run.children.some((c) => c.stepIndex === index)) {
+            index = 0;
+            while (run.children.some((c) => c.stepIndex === index)) index++;
+          }
+          const taskId = makeSyntheticSubagentTaskId(run.toolCallId, index);
+          const resolvedId = resolveCanonicalChildId(record, index);
+          const initialStatus =
+            record.state === "pending" || record.status === "pending" ? "pending" : "running";
+          child = {
+            taskId,
+            stepIndex: index,
+            canonicalChildId: resolvedId,
+            status: initialStatus,
+          };
+          run.children.push(child);
+          this.event({
+            kind: "subagent_start",
+            content: "",
+            subagent: {
+              taskId,
+              description: text(record.agent) ?? resolvedId,
+              status: "running",
+              cancellable: true,
+            },
+          });
+        }
+        if (!child) continue;
+        if (canonicalId && child.canonicalChildId.startsWith("step:")) {
+          child.canonicalChildId = canonicalId;
+        }
+        const observed = observedStatusExecution(record);
+        const lastTool = text(object(record.activity).currentTool) ?? text(record.currentTool);
+        this.emitSubagentMetaProgress(child.taskId, true, observed, lastTool, child);
+        const childRunId = text(record.childRunId ?? record.runId);
+        if (childRunId && isSafeChildRunId(childRunId) && !terminalStatus(child.status)) {
+          this.attachAsyncWorkflowChildWatch(tracker, child, childRunId);
+        }
+        continue;
+      }
+
+      if (typeof record.type === "string" && record.type.startsWith("subagent.")) continue;
+
+      const stepIndex = num(record.subagentStepIndex);
+      const child =
+        stepIndex !== undefined
+          ? (run.children.find((c) => c.stepIndex === stepIndex) ?? run.children[stepIndex])
+          : run.children.length === 1
+            ? run.children[0]
+            : undefined;
+      if (child && !terminalStatus(child.status)) {
+        this.projectRecordToChild(child.taskId, true, record, "async_events", child);
+      }
+    }
+  }
+
+  private attachAsyncWorkflowChildWatch(
+    tracker: AsyncRunTracker,
+    child: ActiveAsyncChildRecord,
+    childRunId: string,
+  ): void {
+    if (this.disposed || tracker.childWatches.has(childRunId)) return;
+    child.childRunId = childRunId;
+    tracker.childTaskIds.set(childRunId, child.taskId);
+    const cursorKey = `child:${childRunId}`;
+    const eventsPath = path.join(path.dirname(tracker.run.asyncDir), childRunId, "events.jsonl");
+    const watch = this.createLiveWatch(
+      eventsPath,
+      "async_events",
+      (records) => {
+        if (terminalStatus(child.status)) return;
+        for (const record of records) {
+          this.projectRecordToChild(child.taskId, true, record, "async_events", child);
+        }
+      },
+      {
+        initialOffset: tracker.run.tailCursors?.[cursorKey] ?? 0,
+        run: tracker.run,
+        cursorKey,
+        targetTaskId: child.taskId,
+      },
+    );
+    tracker.childWatches.set(childRunId, watch);
+    this.pollLiveWatch(watch, tracker.run);
+  }
+
+  private discoverWorkflowChildrenFromDisk(tracker: AsyncRunTracker): void {
+    const { run } = tracker;
+    const diskStatus = this.runStatus(run);
+    if (!diskStatus) return;
+    const diskSteps = this.syncRunChildrenFromDisk(run, diskStatus);
+    if (run.mode === "workflow") {
+      for (let index = 0; index < diskSteps.length; index++) {
+        const step = diskSteps[index];
+        const canonicalChildId = resolveCanonicalChildId(step, index);
+        const existing =
+          run.children.find((c) => c.canonicalChildId === canonicalChildId) ??
+          run.children.find((c) => c.stepIndex === index);
+        if (existing) continue;
+        const taskId = makeSyntheticSubagentTaskId(run.toolCallId, index);
+        const status = step.status === "pending" ? "pending" : "running";
+        const child: ActiveAsyncChildRecord = {
+          taskId,
+          stepIndex: index,
+          canonicalChildId,
+          status,
+        };
+        run.children.push(child);
+        this.event({
+          kind: "subagent_start",
+          content: "",
+          subagent: {
+            taskId,
+            description: text(step.agent) ?? canonicalChildId,
+            status: "running",
+            cancellable: true,
+          },
+        });
+      }
+    }
+    for (const child of run.children) {
+      if (terminalStatus(child.status)) continue;
+      const diskStep =
+        diskSteps.find(
+          (step, index) => resolveCanonicalChildId(step, index) === child.canonicalChildId,
+        ) ?? diskSteps[child.stepIndex];
+      if (!diskStep) continue;
+      const observed = observedStatusExecution(diskStep);
+      const lastTool = text(object(diskStep.activity).currentTool) ?? text(diskStep.currentTool);
+      this.emitSubagentMetaProgress(child.taskId, true, observed, lastTool, child);
+      if (run.mode === "workflow") {
+        const childRunId = text(diskStep.runId);
+        if (childRunId && isSafeChildRunId(childRunId)) {
+          this.attachAsyncWorkflowChildWatch(tracker, child, childRunId);
+        }
+      }
+    }
+  }
+
+  private pollAsyncRunTracker(tracker: AsyncRunTracker): void {
+    if (this.disposed) return;
+    this.pollLiveWatch(tracker.parentWatch, tracker.run);
+    this.discoverWorkflowChildrenFromDisk(tracker);
+    for (const watch of tracker.childWatches.values()) {
+      this.pollLiveWatch(watch, tracker.run);
+    }
+  }
+
+  private ensureAsyncPollTimer(): void {
+    if (!this.asyncTrackers.size || this.disposed) {
+      clearInterval(this.asyncPollTimer);
+      this.asyncPollTimer = undefined;
+      return;
+    }
+    if (!this.asyncPollTimer) {
+      this.asyncPollTimer = setInterval(() => {
+        for (const tracker of this.asyncTrackers.values()) {
+          this.pollAsyncRunTracker(tracker);
+        }
+      }, this.options.livePollIntervalMs ?? 250);
+      this.asyncPollTimer.unref();
+    }
+  }
+
+  private closeAsyncChildWatchesForTask(runId: string, taskId: string): void {
+    const tracker = this.asyncTrackers.get(runId);
+    if (!tracker) return;
+    for (const [childRunId, watch] of tracker.childWatches) {
+      if (watch.targetTaskId === taskId || tracker.childTaskIds.get(childRunId) === taskId) {
+        this.closeLiveWatch(watch);
+        tracker.childWatches.delete(childRunId);
+        tracker.childTaskIds.delete(childRunId);
+      }
+    }
+  }
+
+  private stopAsyncRunTracker(runId: string): void {
+    const tracker = this.asyncTrackers.get(runId);
+    if (!tracker) return;
+    this.closeLiveWatch(tracker.parentWatch);
+    for (const watch of tracker.childWatches.values()) this.closeLiveWatch(watch);
+    tracker.childWatches.clear();
+    tracker.childTaskIds.clear();
+    this.asyncTrackers.delete(runId);
+    if (!this.asyncTrackers.size) {
+      clearInterval(this.asyncPollTimer);
+      this.asyncPollTimer = undefined;
+    }
+  }
+
+  private stopAllLiveTrackers(): void {
+    for (const toolCallId of [...this.foregroundTrackers.keys()]) {
+      this.stopForegroundTracker(toolCallId);
+    }
+    for (const runId of [...this.asyncTrackers.keys()]) {
+      this.stopAsyncRunTracker(runId);
+    }
+    clearInterval(this.foregroundPollTimer);
+    this.foregroundPollTimer = undefined;
+    clearInterval(this.asyncPollTimer);
+    this.asyncPollTimer = undefined;
+    this.subagentProjectionStates.clear();
   }
   async reconcileAsyncRuns(): Promise<void> {
     if (this.disposed || !this.activeAsyncRuns.length) return;
@@ -2838,6 +3663,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     this.disposed = true;
     this.advanceGeneration();
     clearInterval(this.reconcileTimer);
+    this.stopAllLiveTrackers();
     if (this.activeTurn) {
       this.activeTurn.settled = true;
       this.finishSteer(this.activeTurn, "outcome_unknown");

@@ -90,11 +90,16 @@ export default function (pi) {
         let reply = "pi-e2e-ready";
         if (child) {
           const [, gate, marker] = child;
-          fs.appendFileSync(path.join(gates, "seen-" + gate), marker + "\\n");
-          if (gate === "Bunknown") pi.sendMessage({customType:"steer-test-notice",content:"background-notice-survived",display:true}, { triggerTurn:true });
-          const deadline = Date.now() + 45000;
-          while (!options?.signal?.aborted && !fs.existsSync(path.join(gates, gate)) && Date.now() < deadline) await pause(30);
-          reply = fs.existsSync(path.join(gates, gate)) ? marker : "gate-not-released";
+          const seenFile = path.join(gates, "seen-" + gate);
+          if (!count) fs.appendFileSync(seenFile, marker + "\\n");
+          if ((gate === "foregrounda" || gate === "reconcilea") && count === 0) {
+            step = call("read", { path: seenFile });
+          } else {
+            const deadline = Date.now() + 45000;
+            if (gate === "Bunknown") pi.sendMessage({customType:"steer-test-notice",content:"background-notice-survived",display:true}, { triggerTurn:true });
+            while (!options?.signal?.aborted && !fs.existsSync(path.join(gates, gate)) && Date.now() < deadline) await pause(30);
+            reply = fs.existsSync(path.join(gates, gate)) ? marker : "gate-not-released";
+          }
         } else if (messages.some((m) => text(m).includes("background-notice-survived")) && !fs.existsSync(path.join(gates,"notice-received"))) {
           fs.writeFileSync(path.join(gates,"notice-received"), "");
         } else if (prompt.includes("pi-e2e-lead-plan")) {
@@ -538,6 +543,21 @@ async function runDeterministicPiScenario() {
     try {
       const a = await child("subagent_start", offset);
       const b = await child("subagent_start", offset, a.taskId.replace(/0$/, "1"));
+      await seen(
+        "stream_event",
+        (f) =>
+          f.workspaceId === lead &&
+          f.event?.kind === "subagent_progress" &&
+          f.event.subagent?.taskId === a.taskId &&
+          f.event.subagent._innerEvent?.kind === "tool_use",
+        offset,
+      );
+      expect(await childEvents(a.taskId, offset)).toContain("seen-foregrounda");
+      expect(
+        frames
+          .slice(offset)
+          .some((f) => f.event?.kind === "subagent_done" && f.event.subagent?.taskId === a.taskId),
+      ).toBe(false);
       openGate("foregrounda");
       openGate("foregroundb");
       await done(lead, "pi-e2e-launch-returned:foreground");
@@ -575,6 +595,23 @@ async function runDeterministicPiScenario() {
         const statusFile = path.join(runs[0].asyncDir, "status.json");
         await vi.waitFor(() => expect(fs.existsSync(statusFile)).toBe(true));
         if (mode === "reconcile") {
+          await seen(
+            "stream_event",
+            (f) =>
+              f.workspaceId === lead &&
+              f.event?.kind === "subagent_progress" &&
+              f.event.subagent?.taskId === a.taskId &&
+              f.event.subagent._innerEvent?.kind === "tool_use",
+            offset,
+          );
+          expect(await childEvents(a.taskId, offset)).toContain("seen-reconcilea");
+          expect(
+            frames
+              .slice(offset)
+              .some(
+                (f) => f.event?.kind === "subagent_done" && f.event.subagent?.taskId === a.taskId,
+              ),
+          ).toBe(false);
           openGate(`${mode}a`);
           openGate(`${mode}b`);
           await vi.waitFor(() => expect(dropped).toBeGreaterThan(notifyBaseline), {

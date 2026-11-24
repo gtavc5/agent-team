@@ -468,6 +468,379 @@ export function reconstructSubagentChild(
   };
 }
 
+export interface IncrementalJsonlCursor {
+  filePath: string;
+  offset: number;
+  carry: Buffer;
+}
+
+export function createIncrementalJsonlCursor(
+  filePath: string,
+  initialOffset = 0,
+): IncrementalJsonlCursor {
+  return {
+    filePath,
+    offset: Number.isFinite(initialOffset) && initialOffset > 0 ? Math.floor(initialOffset) : 0,
+    carry: Buffer.alloc(0),
+  };
+}
+
+/** Byte offset up to the last newline-delimited record consumed from the cursor. */
+export function consumedJsonlOffset(cursor: IncrementalJsonlCursor): number {
+  return Math.max(0, cursor.offset - cursor.carry.length);
+}
+
+/** Read newly appended complete JSONL object records without failing on partial trailing lines. */
+export function readIncrementalJsonlRecords(
+  cursor: IncrementalJsonlCursor,
+): Record<string, unknown>[] {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(cursor.filePath);
+  } catch {
+    return [];
+  }
+  if (!stat.isFile()) return [];
+  if (stat.size < cursor.offset) {
+    cursor.offset = 0;
+    cursor.carry = Buffer.alloc(0);
+  }
+  const delta = stat.size - cursor.offset;
+  if (delta <= 0) return [];
+
+  let fd: number | undefined;
+  let bytesRead = 0;
+  const buf = Buffer.allocUnsafe(delta);
+  try {
+    fd = fs.openSync(cursor.filePath, "r");
+    while (bytesRead < delta) {
+      const n = fs.readSync(fd, buf, bytesRead, delta - bytesRead, cursor.offset + bytesRead);
+      if (n <= 0) break;
+      bytesRead += n;
+    }
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* ignore close errors */
+      }
+    }
+  }
+  if (bytesRead <= 0) return [];
+  cursor.offset += bytesRead;
+  const chunk = bytesRead < delta ? buf.subarray(0, bytesRead) : buf;
+  const combined = cursor.carry.length ? Buffer.concat([cursor.carry, chunk]) : chunk;
+  const lastNewline = combined.lastIndexOf(0x0a);
+  if (lastNewline < 0) {
+    cursor.carry = Buffer.from(combined);
+    return [];
+  }
+  const complete = combined.subarray(0, lastNewline);
+  cursor.carry = Buffer.from(combined.subarray(lastNewline + 1));
+
+  const records: Record<string, unknown>[] = [];
+  for (const line of complete.toString("utf8").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = objectValue(JSON.parse(line));
+      if (parsed) records.push(parsed);
+    } catch {
+      // Malformed line cannot yield an event; skip cleanly and continue.
+    }
+  }
+  return records;
+}
+
+export interface SubagentProjectionState {
+  seenToolUses: Set<string>;
+  seenToolResults: Set<string>;
+  execution: SubagentExecution;
+}
+
+export interface ProjectedRecordBatch {
+  events: StreamEvent[];
+  executionChanged: boolean;
+}
+
+export function createSubagentProjectionState(
+  initialExecution?: SubagentExecution,
+): SubagentProjectionState {
+  return {
+    seenToolUses: new Set<string>(),
+    seenToolResults: new Set<string>(),
+    execution: { ...initialExecution },
+  };
+}
+
+function mergeProjectionExecution(
+  state: SubagentProjectionState,
+  next: SubagentExecution,
+): boolean {
+  const merged: SubagentExecution = {
+    ...((next.model ?? state.execution.model)
+      ? { model: next.model ?? state.execution.model }
+      : {}),
+    ...((next.effort ?? state.execution.effort)
+      ? { effort: next.effort ?? state.execution.effort }
+      : {}),
+  };
+  const changed =
+    merged.model !== state.execution.model || merged.effort !== state.execution.effort;
+  state.execution = merged;
+  return changed;
+}
+
+function projectAssistantBlocksIncremental(
+  message: Record<string, unknown>,
+  state: SubagentProjectionState,
+  bridgeOwnedTools: ReadonlySet<string> | undefined,
+  includeToolCalls: boolean,
+): StreamEvent[] {
+  if (!includeToolCalls) return projectAssistantMessage(message, bridgeOwnedTools, false);
+  const content = message.content;
+  if (typeof content === "string") return content ? [{ kind: "text", content }] : [];
+  if (!Array.isArray(content)) return [];
+  const events: StreamEvent[] = [];
+  for (const rawBlock of content) {
+    const block = objectValue(rawBlock);
+    if (!block) continue;
+    if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking) {
+      events.push({ kind: "thinking", content: block.thinking });
+    } else if (block.type === "text" && typeof block.text === "string" && block.text) {
+      events.push({ kind: "text", content: block.text });
+    } else if (block.type === "toolCall" && typeof block.name === "string") {
+      const toolUseId = typeof block.id === "string" && block.id ? block.id : undefined;
+      if (toolUseId && state.seenToolUses.has(toolUseId)) continue;
+      if (toolUseId) state.seenToolUses.add(toolUseId);
+      const formatted = formatPiToolUse(block.name, objectValue(block.arguments), bridgeOwnedTools);
+      events.push({
+        kind: "tool_use",
+        ...formatted,
+        ...(toolUseId ? { toolUseId } : {}),
+      });
+    }
+  }
+  return events;
+}
+
+/** Project one line from an async runner `events.jsonl` incrementally without duplicates. */
+export function projectAsyncEventRecord(
+  record: Record<string, unknown>,
+  state: SubagentProjectionState,
+  bridgeOwnedTools?: ReadonlySet<string>,
+): ProjectedRecordBatch {
+  const type = stringValue(record.type);
+  if (type === "message_end") {
+    const message = objectValue(record.message);
+    if (!message) return { events: [], executionChanged: false };
+    const role = stringValue(message.role);
+    if (role === "assistant") {
+      const executionChanged = mergeProjectionExecution(state, assistantExecution(message));
+      const events = projectAssistantBlocksIncremental(message, state, bridgeOwnedTools, true);
+      return { events, executionChanged };
+    }
+    if (role === "toolResult" || role === "tool_result") {
+      const toolUseId = stringValue(message.toolCallId);
+      if (toolUseId && state.seenToolResults.has(toolUseId)) {
+        return { events: [], executionChanged: false };
+      }
+      if (toolUseId) state.seenToolResults.add(toolUseId);
+      return { events: [projectToolResult(message)], executionChanged: false };
+    }
+    return { events: [], executionChanged: false };
+  }
+  if (type === "tool_execution_start") {
+    const toolName = stringValue(record.toolName);
+    if (!toolName) return { events: [], executionChanged: false };
+    const toolUseId = stringValue(record.toolCallId);
+    if (toolUseId && state.seenToolUses.has(toolUseId)) {
+      return { events: [], executionChanged: false };
+    }
+    if (toolUseId) state.seenToolUses.add(toolUseId);
+    const formatted = formatPiToolUse(toolName, objectValue(record.args), bridgeOwnedTools);
+    return {
+      events: [
+        {
+          kind: "tool_use",
+          ...formatted,
+          ...(toolUseId ? { toolUseId } : {}),
+        },
+      ],
+      executionChanged: false,
+    };
+  }
+  if (type === "tool_execution_end") {
+    const toolUseId = stringValue(record.toolCallId);
+    if (toolUseId && state.seenToolResults.has(toolUseId)) {
+      return { events: [], executionChanged: false };
+    }
+    const resultObj = objectValue(record.result);
+    const rawContent = resultObj?.content ?? record.result;
+    if (rawContent === undefined && record.isError !== true) {
+      return { events: [], executionChanged: false };
+    }
+    if (toolUseId) state.seenToolResults.add(toolUseId);
+    const toolName = stringValue(record.toolName);
+    return {
+      events: [
+        {
+          kind: "tool_result",
+          content: extractPiToolResultText(rawContent),
+          ...(toolUseId ? { toolUseId } : {}),
+          ...(toolName ? { toolName } : {}),
+          ...(record.isError === true ? { isError: true } : {}),
+          ...(typeof record.durationMs === "number" ? { durationMs: record.durationMs } : {}),
+        },
+      ],
+      executionChanged: false,
+    };
+  }
+  return { events: [], executionChanged: false };
+}
+
+/** Project one line from a foreground `transcriptPath` JSONL incrementally. */
+export function projectTranscriptArtifactRecord(
+  record: Record<string, unknown>,
+  state: SubagentProjectionState,
+  bridgeOwnedTools?: ReadonlySet<string>,
+): ProjectedRecordBatch {
+  if (record.recordType === "truncated") {
+    return {
+      events: [
+        transcriptWarning(
+          stringValue(record.message) ??
+            "Child transcript was truncated; later records are missing.",
+        ),
+      ],
+      executionChanged: false,
+    };
+  }
+  if (record.recordType === "tool_start" && typeof record.toolName === "string") {
+    const toolUseId = stringValue(record.toolCallId);
+    if (toolUseId && state.seenToolUses.has(toolUseId)) {
+      return { events: [], executionChanged: false };
+    }
+    if (toolUseId) state.seenToolUses.add(toolUseId);
+    const formatted = formatPiToolUse(
+      record.toolName,
+      parseToolArguments(record),
+      bridgeOwnedTools,
+    );
+    return {
+      events: [
+        {
+          kind: "tool_use",
+          ...formatted,
+          ...(toolUseId ? { toolUseId } : {}),
+        },
+      ],
+      executionChanged: false,
+    };
+  }
+  if (record.recordType !== "message") return { events: [], executionChanged: false };
+  const message = objectValue(record.message);
+  if (!message) return { events: [], executionChanged: false };
+  const role = record.role ?? message.role;
+  if (role === "assistant") {
+    const executionChanged = mergeProjectionExecution(state, assistantExecution(message));
+    const events = projectAssistantBlocksIncremental(message, state, bridgeOwnedTools, false);
+    return { events, executionChanged };
+  }
+  if (role === "toolResult" || role === "tool_result") {
+    const events: StreamEvent[] = [];
+    const toolUseId = stringValue(message.toolCallId);
+    if (!(toolUseId && state.seenToolResults.has(toolUseId))) {
+      if (toolUseId) state.seenToolResults.add(toolUseId);
+      events.push(projectToolResult(message, record.text));
+    }
+    if (record.outputTruncated === true) {
+      events.push(
+        transcriptWarning("A child tool result was truncated; its output is incomplete."),
+      );
+    }
+    return { events, executionChanged: false };
+  }
+  return { events: [], executionChanged: false };
+}
+
+/** Project one entry from a native Pi Session v3 JSONL incrementally. */
+export function projectSessionV3Record(
+  record: Record<string, unknown>,
+  state: SubagentProjectionState,
+  bridgeOwnedTools?: ReadonlySet<string>,
+): ProjectedRecordBatch {
+  if (record.type === "model_change") {
+    const model = sessionModel(record.provider, record.modelId);
+    return {
+      events: [],
+      executionChanged: model ? mergeProjectionExecution(state, { model }) : false,
+    };
+  }
+  if (record.type === "thinking_level_change") {
+    const effort = stringValue(record.thinkingLevel)?.trim();
+    return {
+      events: [],
+      executionChanged: effort ? mergeProjectionExecution(state, { effort }) : false,
+    };
+  }
+  if (record.type !== "message") return { events: [], executionChanged: false };
+  const message = objectValue(record.message);
+  if (!message) return { events: [], executionChanged: false };
+  if (message.role === "assistant") {
+    const executionChanged = mergeProjectionExecution(state, assistantExecution(message));
+    const events = projectAssistantBlocksIncremental(message, state, bridgeOwnedTools, true);
+    return { events, executionChanged };
+  }
+  if (message.role === "toolResult" || message.role === "tool_result") {
+    const toolUseId = stringValue(message.toolCallId);
+    if (toolUseId && state.seenToolResults.has(toolUseId)) {
+      return { events: [], executionChanged: false };
+    }
+    if (toolUseId) state.seenToolResults.add(toolUseId);
+    return { events: [projectToolResult(message)], executionChanged: false };
+  }
+  return { events: [], executionChanged: false };
+}
+
+export function resolveWorkflowStepIndex(
+  row: Record<string, unknown>,
+  childCount: number,
+  fallbackIndex?: number,
+): number | undefined {
+  if (
+    typeof row.stepIndex === "number" &&
+    Number.isInteger(row.stepIndex) &&
+    row.stepIndex >= 0 &&
+    row.stepIndex < childCount
+  ) {
+    return row.stepIndex;
+  }
+  const key = stringValue(row.childId) ?? stringValue(row.workflowKey);
+  if (key) {
+    const m = /^(?:task|step)-(\d+)$/.exec(key);
+    if (m) {
+      const idx = Number(m[1]) - 1;
+      if (Number.isInteger(idx) && idx >= 0 && idx < childCount) return idx;
+    }
+  }
+  if (
+    fallbackIndex !== undefined &&
+    Number.isInteger(fallbackIndex) &&
+    fallbackIndex >= 0 &&
+    fallbackIndex < childCount
+  ) {
+    return fallbackIndex;
+  }
+  return undefined;
+}
+
+export function isSafeChildRunId(value: string): boolean {
+  return isSafeSingleSegment(value);
+}
+
 export type StopTarget =
   | { scope: "run"; run: ActiveAsyncRunRecord }
   | { scope: "child"; run: ActiveAsyncRunRecord; child: ActiveAsyncChildRecord };

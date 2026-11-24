@@ -242,7 +242,23 @@ function finishSubagent(events: StreamEvent[], done: StreamEvent, taskId: string
   if (start >= 0) {
     // A loaded transcript can hold metadata only on the progress event.
     const base = fallback ? mergeLifecycle(events[start], fallback) : events[start];
-    events[start] = mergeLifecycle(base, done);
+    const merged = mergeLifecycle(base, done);
+    // Live Pi subagent_done replaces the server transcript with an authoritative reconstruction
+    // and broadcasts eventCount without inline events. Clear any mid-run loaded slice so the UI
+    // reloads or adopts the authoritative copy even when counts match or shrink.
+    if (
+      !done.subagent?.events &&
+      done.subagent?.eventCount != null &&
+      base.subagent?.events !== undefined &&
+      base.subagent?.status === "running"
+    ) {
+      merged.subagent = {
+        ...merged.subagent!,
+        events: undefined,
+        eventCount: done.subagent.eventCount,
+      };
+    }
+    events[start] = merged;
   }
   events.push(
     start < 0 && fallback
@@ -253,6 +269,13 @@ function finishSubagent(events: StreamEvent[], done: StreamEvent, taskId: string
 
 function applyInnerEvent(sa: SubAgentInfo, innerEv: StreamEvent): void {
   const events = (sa.events ??= []);
+  if (
+    innerEv.kind === "tool_use" &&
+    innerEv.toolUseId &&
+    events.some((e) => e.kind === "tool_use" && e.toolUseId === innerEv.toolUseId)
+  ) {
+    return;
+  }
   const attached = attachToolResult(events, innerEv);
   if (attached) {
     events[attached.index] = attached.event;

@@ -196,9 +196,11 @@ export interface ActiveAsyncChildRecord {
   taskId: string;
   stepIndex: number;
   canonicalChildId: string;
+  childRunId?: string;
   status?: "pending" | "running" | "completed" | "failed" | "stopped";
   // Observed execution, retained across restore even if the runner artifacts disappear.
   execution?: Pick<SubAgentInfo, "model" | "effort">;
+  hasLiveEvents?: boolean;
 }
 
 export interface ActiveAsyncRunRecord {
@@ -209,6 +211,8 @@ export interface ActiveAsyncRunRecord {
   ownerMessageId: string;
   toolCallId: string;
   children: ActiveAsyncChildRecord[];
+  // Persisted JSONL byte offsets so restored sessions resume live tailing without replaying prior events.
+  tailCursors?: Record<string, number>;
 }
 
 export interface BoundedSessionProof {

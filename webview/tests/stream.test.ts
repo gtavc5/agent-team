@@ -157,6 +157,41 @@ describe("applyEventsToMessage", () => {
     },
   );
 
+  it("clears pre-completion live slice on expanded running card when subagent_done carries eventCount without inline events, while keeping Codex slices", () => {
+    const start = ev("subagent_start", {
+      subagent: {
+        taskId: "pi-live",
+        description: "Audit",
+        status: "running",
+        events: [ev("tool_use", { content: "`pwd`", toolUseId: "t1" })],
+      },
+    });
+    const afterSameCount = applyEventsToMessage(msg({ events: [start] }), [
+      ev("subagent_done", {
+        subagent: { taskId: "pi-live", description: "", status: "completed", eventCount: 1 },
+      }),
+    ]);
+    expect(afterSameCount.events![0].subagent!.events).toBeUndefined();
+    expect(afterSameCount.events![0].subagent!.eventCount).toBe(1);
+    expect(afterSameCount.events![0].subagent!.status).toBe("completed");
+
+    const codexStart = ev("subagent_start", {
+      subagent: {
+        taskId: "codex-live",
+        description: "Audit",
+        status: "running",
+        events: [ev("tool_use", { content: "`pwd`", toolUseId: "t1" })],
+      },
+    });
+    const afterCodex = applyEventsToMessage(msg({ events: [codexStart] }), [
+      ev("subagent_done", {
+        subagent: { taskId: "codex-live", description: "", status: "completed" },
+      }),
+    ]);
+    expect(afterCodex.events![0].subagent!.events).toHaveLength(1);
+    expect(afterCodex.events![0].subagent!.status).toBe("completed");
+  });
+
   it("appends text deltas and ignores thinking deltas", () => {
     const out = applyEventsToMessage(msg({ content: "He" }), [
       ev("text_delta", { content: "llo" }),
