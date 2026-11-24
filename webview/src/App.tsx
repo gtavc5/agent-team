@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
+import { recordTelemetry } from "./telemetry";
+import { PHONE } from "./viewport/facts";
 import {
   AUTO_RELOAD,
   useServer,
@@ -351,11 +353,17 @@ export function App() {
   const panelMax = maxFor !== null && maxFor === activeWsId;
   const [listWidth, setListWidth] = useSavedWidth("listPanelWidth");
   const [filesWidth, setFilesWidth] = useSavedWidth("filesPanelWidth");
-  const togglePanel = useCallback((id: PanelId) => {
-    setOpenPanel((cur) => (cur === id ? null : id));
-    setMaxFor(null);
-  }, []);
+  const togglePanel = useCallback(
+    (id: PanelId) => {
+      const closing = openPanel === id;
+      recordTelemetry(closing ? "panel.close" : id === "changes" ? "panel.diff" : `panel.${id}`);
+      setOpenPanel(closing ? null : id);
+      setMaxFor(null);
+    },
+    [openPanel],
+  );
   const closePanel = useCallback(() => {
+    recordTelemetry("panel.close");
     setOpenPanel(null);
     setMaxFor(null);
   }, []);
@@ -371,6 +379,7 @@ export function App() {
   >({});
   const fileSeq = useRef(0);
   const showFile = useCallback((wsId: string, ref: FileRef, session: string) => {
+    recordTelemetry("panel.files");
     const seq = ++fileSeq.current;
     setFileTargets((t) => ({ ...t, [session]: { wsId, ref, seq } }));
     setOpenPanel("files");
@@ -381,7 +390,10 @@ export function App() {
   }, [panelPinned]);
   // The project whose board page is open, whichever workspace is.
   const [boardProjectId, setBoardProjectId] = useState<string | null>(null);
-  const closeBoard = useCallback(() => setBoardProjectId(null), []);
+  const closeBoard = useCallback(() => {
+    recordTelemetry("panel.close");
+    setBoardProjectId(null);
+  }, []);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [sealingProjectId, setSealingProjectId] = useState<string | null>(null);
   const closeDeleteProject = useCallback(() => setDeletingProjectId(null), []);
@@ -536,7 +548,10 @@ export function App() {
             icon: "board" as const,
             page: true,
             active: boardProjectId === activeProject.id,
-            onClick: () => setBoardProjectId(activeProject.id),
+            onClick: () => {
+              recordTelemetry("panel.board");
+              setBoardProjectId(activeProject.id);
+            },
           },
         ]
       : []),
@@ -674,6 +689,7 @@ export function App() {
   );
 
   const onSelectWorkspace = useCallback((id: string) => {
+    recordTelemetry("workspace.switch");
     setActiveWsId(id);
     setSidebarOpen(false);
   }, []);
@@ -699,7 +715,10 @@ export function App() {
       onArchive: (id) => archiveWorkspace(id),
       onRestore: (id) => unarchiveWorkspace(id),
       onSetReporting: (id, reports) => setReporting(id, reports),
-      onAddAgent: (id) => setAddAgentFor(id),
+      onAddAgent: (id) => {
+        recordTelemetry("dialog.add_agent", "open");
+        setAddAgentFor(id);
+      },
       onClearContext: (id, agentId) => clearContext(id, agentId),
       onRemoveAgent: (id, agentId) => removeAgent(id, agentId),
       // Through the chat, so the switch shows where it happened.
@@ -731,14 +750,22 @@ export function App() {
     },
     [deleteWorkspace],
   );
-  const onCreateWorkspace = useCallback(() => {
-    setCreateInPath(undefined);
-    setShowCreate(true);
-  }, []);
-  const onCreateWorkspaceIn = useCallback((cwd: string) => {
+  const onCreateWorkspace = useCallback((cwd?: string) => {
+    recordTelemetry("dialog.add_session", "open");
     setCreateInPath(cwd);
     setShowCreate(true);
   }, []);
+  const onCreateProject = useCallback(() => {
+    recordTelemetry("dialog.add_project", "open");
+    setShowCreateProject(true);
+  }, []);
+  const onRefreshQuota = useCallback<typeof refreshQuota>(
+    (force, providers) => {
+      if (force) recordTelemetry("quota.refresh");
+      return refreshQuota(force, providers);
+    },
+    [refreshQuota],
+  );
   const onReplayDemo = useCallback(() => {
     const wsId = startReplayDemo();
     setActiveWsId(wsId);
@@ -1505,7 +1532,7 @@ export function App() {
             searchQuery={searchQuery}
             searchHits={searchHits}
             quota={quota}
-            onRefreshQuota={refreshQuota}
+            onRefreshQuota={onRefreshQuota}
             systemStatus={systemStatus}
             onSelect={onSelectWorkspace}
             onDelete={onDeleteWorkspace}
@@ -1513,9 +1540,9 @@ export function App() {
             onToggleGroup={toggleGroup}
             onSearchChange={setSearchQuery}
             onJump={jumpToMessage}
-            onCreate={onCreateWorkspace}
-            onCreateProject={() => setShowCreateProject(true)}
-            onCreateIn={onCreateWorkspaceIn}
+            onCreate={() => onCreateWorkspace()}
+            onCreateProject={onCreateProject}
+            onCreateIn={onCreateWorkspace}
             onReplayDemo={onReplayDemo}
             onPurgeArchived={onPurgeArchived}
             onArchiveProject={onArchiveProject}
@@ -2140,8 +2167,6 @@ function purgeBody(workspaces: Workspace[], projects: Project[], projectId: stri
 
 type PanelId = "agents" | "files" | "changes";
 const WORKSPACE_ROOT: FileRef = { path: "." };
-// Where side panels become full-screen sheets (styles.css).
-const PHONE = "(max-width: 768px), (max-height: 500px)";
 
 // The page is in front of the user: visible, focused, and touched in the
 // last few minutes (a desktop left on reads nothing for the phone).

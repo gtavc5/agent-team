@@ -38,6 +38,13 @@ max_age_days = 30
 # Sending a message to an archived workspace restores it. 0 disables.
 archive_after_days = 14
 
+# Off by default. When enabled, ordered UI interactions from browsers (including
+# mobile visitors) are stored only on your self-hosted YAAT server. Nothing is
+# sent to YAAT maintainers or third parties; v1 has no external upload or sharing.
+[telemetry]
+enabled = false
+retention_days = 30 # 1-365; pruned while enabled
+
 # Hosts — currently only "local" type is supported
 [hosts.local]
 label = "Local"

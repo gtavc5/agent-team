@@ -237,6 +237,32 @@ Pi home links `models.json`; start a new Pi process to pick up changes. Its
 If a package is unsuitable for headless Pi on your machine, list it in
 `[pi].exclude_packages`.
 
+### UI interaction telemetry (opt-in)
+
+```toml
+[telemetry]
+enabled = false
+retention_days = 30          # 1–365
+```
+
+Telemetry is off by default. When enabled, ordered UI interaction events from
+browsers visiting your panel (including mobile browsers) are stored only on your
+self-hosted YAAT server, in `telemetry.db` in its data directory. Nothing is sent
+to YAAT maintainers or third parties; v1 has no external upload or sharing feature.
+
+Events contain a timestamp, an ephemeral random token per page load, a narrow or
+wide layout flag, and a fixed action and outcome. They never contain chat text,
+prompts, search terms, file paths, or user, project, workspace or session IDs.
+Actions cover panel navigation, workspace selection, sidebar search focus and
+archive toggles, manual quota refresh, add dialogs, and explicit open/confirm/cancel
+for clearing context, removing an agent, or deleting a session.
+
+Inspect the local JSON at `/api/telemetry/summary?days=30` (uses the panel's
+existing login). It includes counts by layout, action and outcome, common
+consecutive transitions with gap buckets, and recent ordered chains. Turning
+telemetry off stops collection and closes the database, but does not erase
+existing files. Retention pruning runs while telemetry is enabled.
+
 ### Environment
 
 | Variable              | Default   | Meaning                           |

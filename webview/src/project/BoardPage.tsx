@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { recordTelemetry } from "../telemetry";
 import type {
   IssueModule,
   IssueModules,
@@ -247,6 +248,7 @@ export const BoardPage = memo(function BoardPage({
     returnScroll.current = null;
   }, [mode]);
   const choose = (m: typeof mode) => {
+    if (m !== mode) recordTelemetry(m === "objectives" ? "panel.board" : `panel.${m}`);
     setFileFrom(null);
     returnScroll.current = null;
     setMode(m);

@@ -25,6 +25,7 @@ import {
   isLoggedEvent,
 } from "../workspace/state";
 import { loadConfig, AppConfig } from "../config/config";
+import { TelemetryStore } from "../storage/telemetry";
 import { ModelSelectionError, type ModelDiscoveryIssue } from "../config/model-diagnostics";
 import {
   MODEL_OPTIONS,
@@ -98,6 +99,7 @@ export class Server {
   private workspaces = new Map<string, Workspace>();
   private uiClients = new Set<WebSocket>();
   private config: AppConfig;
+  private readonly telemetry: TelemetryStore;
   private baseDir: string;
   private statusTimer: ReturnType<typeof setInterval> | null = null;
   private branchTimer: ReturnType<typeof setInterval> | null = null;
@@ -181,6 +183,7 @@ export class Server {
     this.uploadsDir = path.join(baseDir, "uploads");
     if (!fs.existsSync(this.uploadsDir)) fs.mkdirSync(this.uploadsDir, { recursive: true });
     this.config = loadConfig(baseDir);
+    this.telemetry = new TelemetryStore(baseDir, this.config.telemetry);
     applyRuntimeEnvironment(this.config.server.proxy, this.config.pi?.acp?.binary);
     this.hostRegistry = this.initHosts();
     this.auth = new Auth(() => this.config.auth);
@@ -236,6 +239,7 @@ export class Server {
         return project && this.projects.paths(project)?.notesDir;
       },
       () => serviceReport(baseDir, this.config, this.modelDiscoverySnapshot()),
+      this.telemetry,
     );
     this.httpServer = http.createServer((req, res) => this.http.handle(req, res));
     this.wss = new WebSocketServer({
@@ -472,6 +476,7 @@ export class Server {
         commands,
         hosts: this.config.hosts,
         archiveAfterDays: this.config.workspace.archive_after_days,
+        telemetryEnabled: this.telemetry.enabled,
       },
       hosts: this.hostRegistry.getAllInfo(),
       projects: this.projects.list(),
@@ -1135,6 +1140,8 @@ export class Server {
     fs.watchFile(configPath, { interval: 2000 }, () => {
       const previousPresets = this.config.presets;
       const previousLanguage = this.config.user.language;
+      const previousTelemetry = this.config.telemetry;
+      if (this.closing) return;
       try {
         const next = loadConfig(this.baseDir);
         // Service-level environment is fixed for the lifetime of this process.
@@ -1174,6 +1181,14 @@ export class Server {
         }
       }
       this.broadcastUI({ type: "identities_update", user: this.config.user, presets });
+      const telemetry = this.config.telemetry;
+      if (
+        telemetry.enabled !== previousTelemetry.enabled ||
+        telemetry.retention_days !== previousTelemetry.retention_days
+      ) {
+        this.telemetry.configure(telemetry);
+        this.broadcastUI({ type: "telemetry_config", telemetryEnabled: this.telemetry.enabled });
+      }
       if (this.dispatchAllowed) void this.track(this.refreshPiCatalog());
       console.log("[config] reloaded config.toml");
     });
@@ -1951,6 +1966,7 @@ export class Server {
 
   private async closeOnce(): Promise<void> {
     this.closing = true;
+    this.telemetry.close();
     if (this.bootFence) fs.unwatchFile(this.bootFence);
     this.quota.stop();
     const retiring = this.deploy?.close();

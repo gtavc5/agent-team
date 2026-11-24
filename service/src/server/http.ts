@@ -11,6 +11,7 @@ import { NotRegularFile, readFileView, resolveFilePath } from "../repo/files";
 import { changes, fileDiff, NotARepository } from "../repo/diff";
 import { openInVSCode, VSCodeUnavailable } from "../repo/vscode";
 import { boardRef, findBySuffix, resolveProjectPath } from "../project/paths";
+import { telemetryBatchSchema, type TelemetryStore } from "../storage/telemetry";
 
 // Where a project's board paths lead: its repository and its notes.
 export interface ProjectPaths {
@@ -62,6 +63,7 @@ export class HttpHandler {
     // The notes of the project a workspace belongs to.
     private notesOf: (workspaceId: string) => string | undefined = () => undefined,
     private diagnostics?: () => RuntimeReport,
+    private telemetry?: TelemetryStore,
   ) {}
 
   handle(req: http.IncomingMessage, res: http.ServerResponse): void {
@@ -85,6 +87,19 @@ export class HttpHandler {
           res.end();
           return;
         }
+      }
+
+      if (req.method === "POST" && pathname === "/api/telemetry" && this.telemetry) {
+        receiveTelemetry(req, res, this.telemetry);
+        return;
+      }
+      if (req.method === "GET" && pathname === "/api/telemetry/summary" && this.telemetry) {
+        const raw = url.searchParams.get("days") ?? "30";
+        const days = Number(raw);
+        if (!/^\d{1,3}$/.test(raw) || days < 1 || days > 365) {
+          json(res, 400, { error: "days must be an integer from 1 to 365" });
+        } else json(res, 200, this.telemetry.summary(days));
+        return;
       }
 
       if (req.method === "GET" && pathname === "/api/diagnostics" && this.diagnostics) {
@@ -551,6 +566,77 @@ export class HttpHandler {
     this.gzipCache.set(file, { mtimeMs, data });
     return data;
   }
+}
+
+const TELEMETRY_BODY_MAX = 8 * 1024;
+
+function sameOriginTelemetry(req: http.IncomingMessage): boolean {
+  const { origin, host, "sec-fetch-site": site } = req.headers;
+  if (!origin || (site !== undefined && site !== "same-origin")) return false;
+  try {
+    const parsed = new URL(origin);
+    if (parsed.origin !== origin || !["http:", "https:"].includes(parsed.protocol)) return false;
+    // Browser-controlled Fetch Metadata also works behind a TLS-terminating
+    // proxy that rewrites Host. Without it, accept only the direct HTTP origin.
+    return site === "same-origin" || (!!host && origin === new URL(`http://${host}`).origin);
+  } catch {
+    return false;
+  }
+}
+
+function receiveTelemetry(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  store: TelemetryStore,
+): void {
+  const noContent = () => {
+    res.statusCode = 204;
+    res.end();
+  };
+  const reject = (status: number, error: string) => {
+    req.resume();
+    json(res, status, { error });
+  };
+  if (!store.enabled) {
+    req.resume();
+    return noContent();
+  }
+  if (!sameOriginTelemetry(req)) return reject(403, "Expected a same-origin request");
+  if (req.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json")
+    return reject(415, "Send JSON");
+  if (Number(req.headers["content-length"]) > TELEMETRY_BODY_MAX) return reject(413, "Too large");
+
+  let size = 0;
+  const chunks: Buffer[] = [];
+  req.on("data", (chunk: Buffer) => {
+    if (res.writableEnded) return;
+    size += chunk.length;
+    if (size > TELEMETRY_BODY_MAX) {
+      chunks.length = 0;
+      reject(413, "Too large");
+    } else chunks.push(chunk);
+  });
+  req.on("error", () => {
+    if (!res.writableEnded) res.destroy();
+  });
+  req.on("end", () => {
+    if (res.writableEnded) return;
+    if (!store.enabled) return noContent();
+    let body: unknown;
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      return json(res, 400, { error: "Invalid telemetry JSON" });
+    }
+    const batch = telemetryBatchSchema.safeParse(body);
+    if (!batch.success) return json(res, 400, { error: "Invalid telemetry batch" });
+    try {
+      store.append(batch.data);
+      noContent();
+    } catch {
+      json(res, 500, { error: "Could not store telemetry" });
+    }
+  });
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {

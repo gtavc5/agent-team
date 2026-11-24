@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from "react";
+import type { TelemetryConfirmation } from "../../../shared/telemetry";
+import { recordTelemetry } from "../telemetry";
 import { EffortSelect, effortOf } from "./EffortSelect";
 import type { AgentPreset, CodexAuthState, ModelOption, HostInfo } from "../state/useServer";
 import { isImageAvatar } from "./avatar";
@@ -15,6 +17,7 @@ export function ConfirmDialog({
   body,
   confirmLabel = "Confirm",
   danger = false,
+  telemetryAction,
   onConfirm,
   onClose,
 }: {
@@ -22,18 +25,29 @@ export function ConfirmDialog({
   body: string;
   confirmLabel?: string;
   danger?: boolean;
+  telemetryAction?: TelemetryConfirmation;
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  const opened = useRef<TelemetryConfirmation>(undefined);
+  useEffect(() => {
+    if (telemetryAction && opened.current !== telemetryAction)
+      recordTelemetry(telemetryAction, "open");
+    opened.current = telemetryAction;
+  }, [telemetryAction]);
+  const cancel = () => {
+    if (telemetryAction) recordTelemetry(telemetryAction, "cancel");
+    onClose();
+  };
   return (
-    <DialogFrame title={title} className="dialog-confirm" onClose={onClose}>
+    <DialogFrame title={title} className="dialog-confirm" onClose={cancel}>
       <p className="dialog-body">{body}</p>
       <div className="dialog-actions">
         <button
           data-dialog-focus={danger ? "" : undefined}
           type="button"
           className="btn-secondary"
-          onClick={onClose}
+          onClick={cancel}
         >
           Cancel
         </button>
@@ -42,6 +56,7 @@ export function ConfirmDialog({
           type="button"
           className={danger ? "btn-danger" : "btn-primary"}
           onClick={() => {
+            if (telemetryAction) recordTelemetry(telemetryAction, "confirm");
             onConfirm();
             onClose();
           }}

@@ -17,6 +17,11 @@ export interface ServerConfig {
   restart_command?: string[];
 }
 
+export interface TelemetryConfig {
+  enabled: boolean;
+  retention_days: number;
+}
+
 export interface WorkspaceConfig {
   // Workspaces idle for this long are archived automatically: their messages
   // leave memory, idle CLI processes are shut down and the sidebar folds them
@@ -62,6 +67,7 @@ export interface AppConfig {
   presets: AgentPreset[];
   server: ServerConfig;
   workspace: WorkspaceConfig;
+  telemetry: TelemetryConfig;
   auth: AuthConfig | null;
   hosts: Record<string, HostConfig>;
   projects: ProjectsConfig;
@@ -135,6 +141,20 @@ export function loadConfig(baseDir: string): AppConfig {
         : DEFAULT_ARCHIVE_AFTER_DAYS,
   };
 
+  const section = parsed.telemetry;
+  if (section !== undefined && (!section || typeof section !== "object" || Array.isArray(section)))
+    throw new RuntimeConfigError("[telemetry] must be a table");
+  const { enabled = false, retention_days = 30 } = (section ?? {}) as Record<string, unknown>;
+  if (typeof enabled !== "boolean")
+    throw new RuntimeConfigError("telemetry.enabled must be a boolean");
+  if (
+    typeof retention_days !== "number" ||
+    !Number.isInteger(retention_days) ||
+    retention_days < 1 ||
+    retention_days > 365
+  )
+    throw new RuntimeConfigError("telemetry.retention_days must be an integer from 1 to 365");
+
   const hosts: Record<string, HostConfig> = {};
   const rawHosts = parsed.hosts;
   if (rawHosts && typeof rawHosts === "object") {
@@ -205,6 +225,7 @@ export function loadConfig(baseDir: string): AppConfig {
   return {
     server,
     workspace,
+    telemetry: { enabled, retention_days },
     auth,
     hosts,
     projects,

@@ -1,3 +1,4 @@
+import { recordTelemetry } from "../telemetry";
 import type { QuotaState } from "../../../shared/quota";
 import { memo, useState, useEffect } from "react";
 import type { Workspace, Project, SystemStatus, SearchHit } from "../state/useServer";
@@ -175,12 +176,14 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
   const [renaming, setRenaming] = useState<string | null>(null);
   // Groups whose archived sessions are unfolded.
   const [openArchives, setOpenArchives] = useState<ReadonlySet<string>>(new Set());
-  const toggleArchive = (key: string) =>
+  const toggleArchive = (key: string) => {
+    recordTelemetry("sidebar.archive_toggle");
     setOpenArchives((prev) => {
       const next = new Set(prev);
       if (!next.delete(key)) next.add(key);
       return next;
     });
+  };
 
   const archivedItem = (ws: Workspace, folder: string | null) => (
     <div
@@ -466,6 +469,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
         <input
           type="text"
           value={p.searchQuery}
+          onFocus={() => recordTelemetry("sidebar.search")}
           onChange={(e) => p.onSearchChange(e.target.value)}
           placeholder="Search messages…"
           autoComplete="off"
@@ -506,7 +510,10 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             <div className="ws-group ws-shelf">
               <div
                 className="ws-group-header ws-archived-header"
-                onClick={() => setShelfOpen((v) => !v)}
+                onClick={() => {
+                  recordTelemetry("sidebar.archive_toggle");
+                  setShelfOpen((v) => !v);
+                }}
                 title="Projects filed away. Their leads and history are still there."
               >
                 <span className="events-toggle">{showShelf ? "▾" : "▸"}</span>
@@ -520,7 +527,10 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             <div className="ws-group ws-archived">
               <div
                 className="ws-group-header ws-archived-header"
-                onClick={() => setArchivedOpen((v) => !v)}
+                onClick={() => {
+                  recordTelemetry("sidebar.archive_toggle");
+                  setArchivedOpen((v) => !v);
+                }}
                 title="Idle workspaces. History stays on disk; sending a message restores one."
               >
                 <span className="events-toggle">{showArchived ? "▾" : "▸"}</span>
@@ -565,6 +575,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       {p.systemStatus && <SystemStatusPanel status={p.systemStatus} />}
       {deleting && (
         <ConfirmDialog
+          telemetryAction="confirm.delete_session"
           title={`Delete ${deleting.name}?`}
           body="This session and its message history will be deleted."
           confirmLabel="Delete session"

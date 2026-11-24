@@ -457,6 +457,9 @@ function AgentRow({
       </div>
       {!archived && !readOnly && confirmation && (
         <ConfirmDialog
+          telemetryAction={
+            confirmation === "clear" ? "confirm.clear_context" : "confirm.remove_agent"
+          }
           title={confirmation === "clear" ? `Clear ${a.name}'s context?` : `Remove ${a.name}?`}
           body={
             confirmation === "clear"

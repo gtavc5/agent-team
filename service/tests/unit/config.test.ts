@@ -35,6 +35,40 @@ afterAll(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+describe("telemetry config", () => {
+  it("defaults to disabled with 30 days of retention", () => {
+    expect(loadConfig(dir).telemetry).toEqual({ enabled: false, retention_days: 30 });
+  });
+
+  it.each([
+    ["[telemetry]\nenabled = true\nretention_days = 365", { enabled: true, retention_days: 365 }],
+    ["[telemetry]\nretention_days = 1", { enabled: false, retention_days: 1 }],
+  ])("reads %s", (toml, expected) => {
+    const base = writeConfig(toml);
+    try {
+      expect(loadConfig(base).telemetry).toEqual(expected);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['telemetry = "yes"', "must be a table"],
+    ['[telemetry]\nenabled = "yes"', "enabled must be a boolean"],
+    ...[0, 366, 1.5].map((n) => [
+      `[telemetry]\nretention_days = ${n}`,
+      "retention_days must be an integer",
+    ]),
+  ])("rejects %s", (toml, error) => {
+    const base = writeConfig(toml);
+    try {
+      expect(() => loadConfig(base)).toThrow(error);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("loadConfig", () => {
   it("ignores legacy account and cursor sections", () => {
     expect(loadConfig(dir)).not.toHaveProperty("accounts");

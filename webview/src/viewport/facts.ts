@@ -1,5 +1,8 @@
 import { isStandalone } from "./viewport";
 
+// Keep in sync with the phone layout media query in styles.css.
+export const PHONE = "(max-width: 768px), (max-height: 500px)";
+
 // What iOS reports for the window, the visual viewport, safe areas and
 // display mode: the first thing a layout snapshot from a phone needs.
 export interface ViewportFacts {

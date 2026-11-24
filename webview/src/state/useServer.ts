@@ -1,3 +1,4 @@
+import { configureTelemetry } from "../telemetry";
 import { emptyUi, receiveUi, withoutOwner, type LiveNotice } from "./extensionUi";
 import {
   sameAgent,
@@ -634,8 +635,10 @@ export function useServer() {
             models: ModelOption[];
             codexAuth?: CodexAuthState;
             commands?: CommandInfo[];
+            telemetryEnabled?: boolean;
             hosts: Record<string, HostConfig>;
           };
+          configureTelemetry(config.telemetryEnabled === true);
           setUser(config.user ?? DEFAULT_USER);
           setPresets(config.presets ?? []);
           setModels(config.models);
@@ -730,6 +733,9 @@ export function useServer() {
           break;
         }
 
+        case "telemetry_config":
+          configureTelemetry(msg.telemetryEnabled === true);
+          break;
         case "identities_update":
           setUser(msg.user as typeof DEFAULT_USER);
           setPresets(msg.presets as AgentPreset[]);
@@ -1198,6 +1204,7 @@ export function useServer() {
   );
 
   const connect = useCallback((): WebSocket => {
+    configureTelemetry(false);
     const ws = new WebSocket(resolveWsUrl());
     failPendingSends();
     wsRef.current = ws;
@@ -1209,6 +1216,7 @@ export function useServer() {
       // A socket we already gave up on (failed probe) must not schedule a
       // second reconnect on top of the replacement.
       if (wsRef.current !== ws) return;
+      configureTelemetry(false);
       failPendingSends();
       setConnected(false);
       setRecheckingCodexAuth(false);
@@ -1218,6 +1226,7 @@ export function useServer() {
     };
     ws.onerror = () => ws.close();
     ws.onmessage = (e) => {
+      if (wsRef.current !== ws) return;
       settleProbe();
       handleServerMessage(JSON.parse(e.data as string) as Record<string, unknown>);
     };
@@ -1295,6 +1304,7 @@ export function useServer() {
     }
     connect();
     return () => {
+      configureTelemetry(false);
       clearTimeout(reconnectRef.current);
       clearTimeout(probeRef.current);
       // Detached first, or its onclose would schedule a reconnect.
