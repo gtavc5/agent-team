@@ -18,6 +18,7 @@ import {
 } from "../src/state/useServer";
 import { CreateProjectDialog } from "../src/workspace/dialogs";
 import { UiDialogModal } from "../src/workspace/UiDialogModal";
+import { QuotaPanel } from "../src/sidebar/Sidebar";
 import { FakeSocket } from "./fakeSocket";
 
 const NOW = 1_800_000_000_000;
@@ -77,6 +78,75 @@ function initFrame(
   };
 }
 
+it("hydrates sidebar quota on init and reconnect, refreshes without a turn and labels stale bars", () => {
+  const app = render(<App />);
+  const sock = FakeSocket.instances.at(-1)!;
+  act(() => sock.open());
+  const row = {
+    provider: "antigravity-acp",
+    name: "Gemini",
+    availability: "available",
+    observedAt: Date.now() - 120000,
+    windows: [{ label: "weekly", usedPct: 34, resetsAt: Date.now() + 3600000 }],
+  };
+  const quota = {
+    refreshing: false,
+    rows: [
+      row,
+      {
+        provider: "native-codex",
+        name: "",
+        availability: "unavailable",
+        observedAt: 0,
+        windows: [],
+      },
+    ],
+  };
+  receive(sock, initFrame([], { quota }));
+  expect(app.getByRole("progressbar", { name: "weekly" }).getAttribute("aria-valuenow")).toBe("34");
+  expect(app.getByText(/stale · 2m ago/)).toBeTruthy();
+  expect(app.getByText(/Resets /)).toBeTruthy();
+  expect(app.getByText("unavailable")).toBeTruthy();
+  fireEvent.click(app.getByRole("button", { name: "Refresh" }));
+  expect(sock.frames()).toContainEqual({ type: "refresh_quota" });
+  receive(sock, { type: "quota_snapshot", quota: { ...quota, refreshing: true } });
+  expect((app.getByRole("button", { name: "Refreshing…" }) as HTMLButtonElement).disabled).toBe(
+    true,
+  );
+  receive(sock, initFrame([], { quota: { refreshing: false, rows: [] } }));
+  expect(app.queryByRole("progressbar", { name: "weekly" })).toBeNull();
+});
+
+it("ages quota without websocket traffic", () => {
+  vi.useFakeTimers();
+  try {
+    const now = Date.now();
+    const view = render(
+      <QuotaPanel
+        now={now}
+        connected={false}
+        quota={{
+          refreshing: false,
+          rows: [
+            {
+              provider: "acp",
+              name: "g",
+              availability: "available",
+              observedAt: now,
+              windows: [{ label: "5h", usedPct: 20 }],
+            },
+          ],
+        }}
+      />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(60_001);
+    });
+    expect(view.getByText(/stale · 1m ago/)).toBeTruthy();
+  } finally {
+    vi.useRealTimers();
+  }
+});
 let localStore: Map<string, string>;
 beforeEach(() => {
   FakeSocket.instances = [];

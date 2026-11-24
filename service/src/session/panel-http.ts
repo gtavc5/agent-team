@@ -1,6 +1,12 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
+import {
+  providerId,
+  piSnapshotSchema,
+  type QuotaSnapshot,
+  type PiQuotaReader,
+} from "./quota-schema";
 import { z } from "zod";
 import type { PanelToolset } from "../project/tools";
 import type { BoundedSessionProof } from "./types";
@@ -19,6 +25,7 @@ export interface PanelHttpAddress {
 export interface PanelSessionRegistration {
   sessionKey: string;
   getToolset: () => PanelToolset | null;
+  onQuota?: (snapshot: QuotaSnapshot) => void;
   restoreExpectation?: { expectedAnchorId: string | null };
   onAnswer?: (tool: string, args: unknown, text: string, isError: boolean) => void;
 }
@@ -33,6 +40,7 @@ export interface PanelToolDefinition {
 export interface PanelReadyReport {
   sessionProof: BoundedSessionProof;
   ownerToolNames: string[];
+  quotaProviders?: string[];
   requiredExtensionsRegistered: boolean;
   subagentsRpcReady: boolean;
   subagentsSessionId: string | null;
@@ -87,6 +95,7 @@ const readySchema = z.object({
     anchorExistsInFile: z.boolean(),
   }),
   ownerToolNames: z.array(z.string()),
+  quotaProviders: z.array(providerId).max(32).optional(),
   requiredExtensionsRegistered: z.boolean(),
   subagentsRpcReady: z.boolean(),
   subagentsSessionId: z.string().nullable(),
@@ -107,7 +116,7 @@ export class PanelHttpServer {
   private address?: PanelHttpAddress;
   private closing = false;
 
-  constructor() {
+  constructor(private readonly onQuotaReaderReady?: (providers: string[]) => void) {
     this.server.on("connection", (socket) => {
       this.sockets.add(socket);
       socket.on("close", () => this.sockets.delete(socket));
@@ -142,6 +151,41 @@ export class PanelHttpServer {
       pendingControls: new Map(),
     });
     return token;
+  }
+
+  quotaReader(): PiQuotaReader | undefined {
+    const sessions = [...this.sessions.values()]
+      .filter((s) => s.onQuota && s.ready && this.isControlConnected(s.sessionKey))
+      .sort(
+        (a, b) => (b.ready?.quotaProviders?.length ?? 0) - (a.ready?.quotaProviders?.length ?? 0),
+      );
+    if (!sessions.length) return;
+    const routes = new Map<string, string>();
+    for (const session of sessions) {
+      for (const provider of session.ready?.quotaProviders ?? []) {
+        if (!routes.has(provider)) routes.set(provider, session.sessionKey);
+      }
+    }
+    return {
+      configured: [...routes.keys()],
+      read: async (provider) => {
+        const key = routes.get(provider);
+        if (key === undefined) throw new Error("Quota provider is not configured");
+        const result = piSnapshotSchema.parse(
+          await this.controlRequest(key, "refresh_quota", { provider }, 50_000),
+        );
+        if (result.provider !== provider) throw new Error("Unexpected quota provider");
+        return result;
+      },
+    };
+  }
+
+  private notifyQuotaReaderReady(previous: PiQuotaReader | undefined): void {
+    if (!this.onQuotaReaderReady) return;
+    const current = this.quotaReader();
+    if (!current) return;
+    const added = current.configured.filter((id) => !previous?.configured.includes(id));
+    if (!previous || added.length) this.onQuotaReaderReady(added);
   }
 
   notifyToolsetChanged(key: string): void {
@@ -325,13 +369,13 @@ export class PanelHttpServer {
     res.end(body);
   }
 
-  private async body(req: http.IncomingMessage): Promise<unknown> {
+  private async body(req: http.IncomingMessage, limit = 1024 * 1024): Promise<unknown> {
     const chunks: Buffer[] = [];
     let length = 0;
     for await (const chunk of req as AsyncIterable<Uint8Array>) {
       const bytes = Buffer.from(chunk);
       length += bytes.length;
-      if (length > 1024 * 1024) throw new Error("Request body exceeds 1 MiB");
+      if (length > limit) throw new Error(`Request body exceeds ${limit} bytes`);
       chunks.push(bytes);
     }
     if (length === 0) return {};
@@ -341,9 +385,10 @@ export class PanelHttpServer {
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     try {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
-      const match = /^\/v1\/sessions\/([^/]+)\/(toolset|call|ready|control|control-reply)$/.exec(
-        url.pathname,
-      );
+      const match =
+        /^\/v1\/sessions\/([^/]+)\/(toolset|call|ready|control|control-reply|quota)$/.exec(
+          url.pathname,
+        );
       if (!match) {
         this.json(res, 404, { error: "Not found" });
         return;
@@ -359,7 +404,16 @@ export class PanelHttpServer {
         this.json(res, 401, { error: "Invalid bearer token" });
         return;
       }
-      if (req.method === "GET" && endpoint === "toolset") {
+      if (req.method === "POST" && endpoint === "quota") {
+        const result = piSnapshotSchema.safeParse(await this.body(req, 96 * 1024));
+        if (this.sessions.get(key) !== session || !session.onQuota)
+          this.json(res, 403, { error: "Quota route unavailable" });
+        else if (!result.success) this.json(res, 400, { error: "Invalid quota snapshot" });
+        else {
+          session.onQuota(result.data);
+          this.json(res, 200, { ok: true });
+        }
+      } else if (req.method === "GET" && endpoint === "toolset") {
         this.sendToolset(res, session);
       } else if (req.method === "POST" && endpoint === "call") {
         await this.callTool(req, res, session);
@@ -477,12 +531,14 @@ export class PanelHttpServer {
       this.json(res, 400, { error: z.prettifyError(parsed.error) });
       return;
     }
+    const previousReader = this.onQuotaReaderReady ? this.quotaReader() : undefined;
     session.ready = parsed.data;
     for (const waiter of session.readyWaiters.splice(0)) {
       clearTimeout(waiter.timer);
       waiter.resolve(parsed.data);
     }
     this.json(res, 200, { ok: true });
+    this.notifyQuotaReaderReady(previousReader);
   }
 
   private receiveControl(
@@ -490,6 +546,7 @@ export class PanelHttpServer {
     res: http.ServerResponse,
     session: SessionRoute,
   ): void {
+    const previousReader = this.onQuotaReaderReady ? this.quotaReader() : undefined;
     session.control?.end();
     res.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
@@ -513,6 +570,7 @@ export class PanelHttpServer {
         session.pendingControls.delete(id);
       }
     });
+    this.notifyQuotaReaderReady(previousReader);
   }
 
   private async receiveControlReply(

@@ -205,10 +205,7 @@ export class CodexSession extends EventEmitter {
   }
 
   private env(): NodeJS.ProcessEnv {
-    const env = { ...process.env, ...this.codexEnv() };
-    // codex reads an API key login from CODEX_API_KEY.
-    if (env.OPENAI_API_KEY && !env.CODEX_API_KEY) env.CODEX_API_KEY = env.OPENAI_API_KEY;
-    return env;
+    return codexProcessEnv(this.codexEnv());
   }
 
   private connect(): Promise<AppServerClient> {
@@ -973,13 +970,14 @@ export class CodexSession extends EventEmitter {
 
   // Updates are sparse: a missing window keeps the one seen last.
   private noteRateLimits(update: RateLimitSnapshot): void {
+    if (update.limitId && this.rateLimits?.limitId !== update.limitId) this.rateLimits = null;
     this.rateLimits = {
       limitId: update.limitId ?? this.rateLimits?.limitId ?? null,
       primary: update.primary ?? this.rateLimits?.primary ?? null,
       secondary: update.secondary ?? this.rateLimits?.secondary ?? null,
       planType: update.planType ?? this.rateLimits?.planType ?? null,
     };
-    this.emit("quota", this.rateLimits);
+    this.emit("quota", this.rateLimits, { ...update, limitId: this.rateLimits.limitId });
   }
 
   getContextUsage(): Promise<Record<string, unknown> | null> {
@@ -1021,6 +1019,12 @@ export class CodexSession extends EventEmitter {
     session.usage = { ...state.usage };
     return session;
   }
+}
+
+export function codexProcessEnv(overrides?: Record<string, string>): NodeJS.ProcessEnv {
+  const env = { ...process.env, ...overrides };
+  if (env.OPENAI_API_KEY && !env.CODEX_API_KEY) env.CODEX_API_KEY = env.OPENAI_API_KEY;
+  return env;
 }
 
 // A backend error codex passes on as the response body: its message.

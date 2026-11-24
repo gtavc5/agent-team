@@ -12,7 +12,9 @@ import { Server } from "../../src/server/server";
 import { ProjectManager } from "../../src/project/manager";
 import { closeHistory, historyOf, saveIndex, saveWorkspace } from "../../src/workspace/state";
 import type { PromptEnvelope, SessionConfig } from "../../src/session/types";
+import * as codex from "../../src/session/codex";
 import { LocalHost } from "../../src/session/host";
+import { QUOTA_TTL, type QuotaState } from "../../src/session/quota-schema";
 import { FakeSession } from "./fakes";
 
 interface FakeTool {
@@ -316,6 +318,215 @@ const readState = (base: string, id: string): WorkspaceState => {
 };
 
 describe("server restart with projects", () => {
+  it.each([
+    { order: "ready before control", overlap: false },
+    { order: "control before ready", overlap: false },
+    { order: "control before ready", overlap: true },
+    { order: "provider added after ready", overlap: false },
+    { order: "control reconnect after a failed read", overlap: false },
+    { order: "shutdown with a queued provider expansion", overlap: false },
+  ])(
+    "recovers quota with $order (cold refresh in flight: $overlap)",
+    async ({ order, overlap }) => {
+      const { base, root, web } = seed();
+      vi.spyOn(LocalHost.prototype, "createSession").mockRestore();
+      vi.stubEnv("OPENAI_API_KEY", "test-key");
+      vi.stubEnv("CODEX_API_KEY", undefined);
+      const limits = {
+        limitId: "codex",
+        planType: null,
+        primary: { usedPercent: 27, windowDurationMins: 300, resetsAt: null },
+        secondary: null,
+      };
+      let resolveNative!: (value: typeof limits) => void;
+      const native = new Promise<typeof limits>((resolve) => {
+        resolveNative = resolve;
+      });
+      const readLimits = vi.spyOn(codex, "readCodexRateLimits").mockReturnValue(native);
+      const controlAbort = new AbortController();
+      const { server, port, frames, send } = await start(base, web);
+      const snapshots = () => frames.filter((f) => f.type === "quota_snapshot");
+      const latestQuota = () => snapshots().at(-1)?.quota as QuotaState | undefined;
+      const provider = "antigravity-acp";
+      const piRow = (state: QuotaState | undefined) =>
+        state?.rows.find((r) => r.provider === provider);
+      let reconnect: WebSocket | undefined;
+      let closing: Promise<void> | undefined;
+      try {
+        send({ type: "refresh_quota" });
+        await until(() => !!readLimits.mock.calls.length && snapshots().length > 1, "cold refresh");
+        expect(readLimits.mock.calls[0]?.[0]?.CODEX_API_KEY).toBe("test-key");
+        if (!overlap) {
+          resolveNative(limits);
+          await until(() => latestQuota()?.refreshing === false, "cold refresh completion");
+        }
+        const cold = latestQuota();
+        expect(cold?.refreshing).toBe(overlap);
+        expect(piRow(cold)).toMatchObject({ availability: "unavailable", windows: [] });
+
+        const host = server["hostRegistry"].get("local") as LocalHost;
+        host.createSession("quota-pi", { cwd: root, backend: "pi" });
+        const panel = host["panelHttp"]!;
+        const { baseUrl } = await panel.listen();
+        const token = panel.registerSession({
+          sessionKey: "quota-pi",
+          getToolset: () => null,
+          onQuota: () => {},
+        });
+        const request = (endpoint: string, body?: unknown) =>
+          fetch(`${baseUrl}/v1/sessions/quota-pi/${endpoint}`, {
+            method: body === undefined ? "GET" : "POST",
+            headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+            body: body === undefined ? undefined : JSON.stringify(body),
+            signal: controlAbort.signal,
+          });
+        const ready = async (quotaProviders: string[]) => {
+          const response = await request("ready", {
+            quotaProviders,
+            sessionProof: {
+              sessionId: null,
+              sessionFile: null,
+              cwd: root,
+              headerCwd: null,
+              entryCount: 0,
+              leafId: null,
+              anchorOnActiveBranch: false,
+              anchorExistsInFile: false,
+            },
+            ownerToolNames: [],
+            requiredExtensionsRegistered: true,
+            subagentsRpcReady: false,
+            subagentsSessionId: null,
+          });
+          expect(await response.json()).toEqual({ ok: true });
+        };
+        if (order === "ready before control") await ready([provider]);
+        expect(panel.quotaReader()).toBeUndefined();
+        let control = await request("control");
+        expect(control.status).toBe(200);
+        if (order !== "ready before control") {
+          expect(panel.quotaReader()).toBeUndefined();
+          if (order === "provider added after ready") {
+            await ready([]);
+            await until(
+              () => piRow(latestQuota())?.reason === "not configured",
+              "empty provider set",
+            );
+            await until(
+              () => latestQuota()?.refreshing === false,
+              "empty reader refresh completion",
+            );
+          }
+          await ready([provider]);
+        }
+        if (overlap) {
+          expect(latestQuota()?.refreshing).toBe(true);
+          resolveNative(limits);
+        }
+        if (order === "control reconnect after a failed read") {
+          await until(() => latestQuota()?.refreshing === true, "Pi read in flight");
+          await control.body!.cancel();
+          await until(() => latestQuota()?.refreshing === false, "failed Pi read completion");
+          expect(piRow(latestQuota())?.reason).toBe("usage unavailable");
+          control = await request("control");
+          expect(control.status).toBe(200);
+        }
+        if (order === "shutdown with a queued provider expansion") {
+          await until(() => latestQuota()?.refreshing === true, "Pi read in flight");
+          await ready([provider, "kimi-coding"]);
+          vi.spyOn(Date, "now").mockReturnValue(Date.now() + QUOTA_TTL);
+          closing = server.close();
+          await closing;
+          await until(() => !server["quota"].state().refreshing, "quota refresh to drain");
+          expect(readLimits).toHaveBeenCalledTimes(1);
+          return;
+        }
+
+        const decoder = new TextDecoder();
+        const reader = (control.body as ReadableStream<Uint8Array>).getReader();
+        const messages: Array<{ type: string; provider: string; controlId: string }> = [];
+        const reply = (async () => {
+          let buffer = "";
+          while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) return;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            const events = buffer.split("\n\n");
+            buffer = events.pop()!;
+            for (const event of events) {
+              if (!event.startsWith("data: ")) continue;
+              const message = JSON.parse(event.slice(6)) as (typeof messages)[number];
+              messages.push(message);
+              const response = await request("control-reply", {
+                controlId: message.controlId,
+                result: {
+                  provider: message.provider,
+                  observedAt: Date.now(),
+                  availability: "available",
+                  groups: [{ name: "Pi plan", windows: [{ label: "weekly", usedPct: 42 }] }],
+                },
+              });
+              expect(await response.json()).toEqual({ ok: true });
+            }
+          }
+        })();
+        try {
+          await Promise.race([
+            until(
+              () =>
+                latestQuota()?.refreshing === false &&
+                piRow(latestQuota())?.availability === "available",
+              "automatic Pi quota recovery",
+            ),
+            reply,
+          ]);
+        } finally {
+          controlAbort.abort();
+          await reply.catch((error: unknown) => {
+            if (!(error instanceof Error) || error.name !== "AbortError") throw error;
+          });
+        }
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toMatchObject({ type: "refresh_quota", provider });
+        expect(piRow(cold)?.reason).toBe("waiting for Pi session");
+        const recovered = latestQuota();
+        expect(recovered?.rows).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              provider: "native-codex",
+              windows: [{ label: "5h", usedPct: 27 }],
+            }),
+            expect.objectContaining({
+              provider,
+              availability: "available",
+              windows: [{ label: "weekly", usedPct: 42 }],
+            }),
+            expect.objectContaining({
+              provider: "kimi-coding",
+              availability: "unavailable",
+              reason: "not configured",
+            }),
+          ]),
+        );
+        reconnect = new WebSocket(`ws://127.0.0.1:${port}/`);
+        const frame = await new Promise<Record<string, unknown>>((resolve, reject) => {
+          reconnect!.once("message", (raw: Buffer) =>
+            resolve(JSON.parse(raw.toString()) as Record<string, unknown>),
+          );
+          reconnect!.once("error", reject);
+        });
+        expect(frame).toMatchObject({ type: "init", quota: recovered });
+      } finally {
+        controlAbort.abort();
+        reconnect?.close();
+        resolveNative(limits);
+        vi.unstubAllEnvs();
+        await (closing ?? server.close());
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("sends identities on init and refreshes preset names in lead tools on config reload", async () => {
     const setPanelTools = vi.spyOn(TestSession.prototype, "setPanelTools");
     const startSessionDescription = () =>

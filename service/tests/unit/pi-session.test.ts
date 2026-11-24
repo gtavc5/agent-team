@@ -57,6 +57,7 @@ function harness(
     ready?: (ready: PanelReadyReport) => void;
     state?: (config: SessionConfig) => SessionState;
     disposition?: string;
+    delayedQuota?: boolean;
     enabledModels?: string[];
     models?: Array<{
       provider: string;
@@ -168,7 +169,9 @@ function harness(
             break;
           case "prompt":
             order.push("write");
-            respond(frame, { disposition }, disposition !== "rejected");
+            if (override.delayedQuota && frame.message === "/quota")
+              setTimeout(() => respond(frame, { disposition }), 31_000);
+            else respond(frame, { disposition }, disposition !== "rejected");
             break;
           case "get_session_stats":
             respond(frame, {
@@ -240,6 +243,20 @@ function confirmed(cfg: SessionConfig): SessionState {
 }
 
 describe("PiSession dispatch and stream state", () => {
+  it("allows a slow quota command to finish without retiring Pi", async () => {
+    const h = harness({ delayedQuota: true, disposition: "handled" });
+    await h.session.ensureStarted();
+    vi.useFakeTimers();
+    try {
+      const cmd = h.session.send("/quota");
+      await vi.advanceTimersByTimeAsync(31_001);
+      expect(await cmd).toEqual({ disposition: "handled" });
+      await h.session.send("/handled");
+      expect(h.factory).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it.each(["/compact", "/compact Keep\ndecisions"])(
     "runs %s as a standalone command and checkpoints the new leaf",
     async (command) => {

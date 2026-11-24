@@ -2627,6 +2627,49 @@ button.action-target:hover {
   border-top: 1px solid var(--border);
   padding: 8px 14px 10px;
 }
+.quota-panel {
+  max-height: 30vh;
+  overflow: auto;
+  font-size: var(--fs-meta);
+  overflow-wrap: anywhere;
+}
+.quota-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.quota-panel button {
+  font: inherit;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+.quota-panel button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.quota-group {
+  margin-top: 5px;
+}
+.quota-group small {
+  color: var(--text-muted);
+  margin-inline-start: 4px;
+}
+.quota-group > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.quota-group .status-label {
+  min-width: 2em;
+  max-width: 7em;
+}
+.quota-group .status-bar {
+  width: 36px;
+}
 .system-status-grid {
   /* One column for the labels, as wide as the widest: the bars line up. */
   display: grid;

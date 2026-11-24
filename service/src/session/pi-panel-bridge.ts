@@ -1,3 +1,4 @@
+import { CONFIGURED_EVENT, piSnapshotSchema, REFRESH_EVENT, SNAPSHOT_EVENT } from "./quota-schema";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -145,8 +146,7 @@ function schemaOptions(schema: RestrictedJsonSchema): JsonObject {
   return options;
 }
 
-// Kept inline deliberately: Pi loads this single file through jiti, including
-// when it is copied to dist without the service's other source modules.
+// Pi loads the bridge through jiti; it cannot import the service's panel-schema module from dist.
 function jsonSchemaToTypeBox(schema: RestrictedJsonSchema): TSchema {
   const options = schemaOptions(schema);
   if (schema.anyOf) return Type.Union(schema.anyOf.map(jsonSchemaToTypeBox), options);
@@ -334,6 +334,12 @@ export default function piPanelBridge(pi: PiExtensionApi): void {
     }
   }
 
+  const offQuota = pi.events.on(SNAPSHOT_EVENT, (raw) => {
+    const parsed = piSnapshotSchema.safeParse(raw);
+    if (parsed.success)
+      void requestJson("quota", { method: "POST", body: parsed.data }).catch(() => undefined);
+  });
+
   async function fetchToolset(): Promise<PanelToolset> {
     return (await requestJson("toolset", { timeoutMs: 5_000 })) as PanelToolset;
   }
@@ -488,10 +494,15 @@ export default function piPanelBridge(pi: PiExtensionApi): void {
         resolvedSessionId = null;
       }
     }
+    let quotaProviders: string[] = [];
+    pi.events.emit(CONFIGURED_EVENT, (ids: string[]) => {
+      quotaProviders = ids;
+    });
     await requestJson("ready", {
       method: "POST",
       body: {
         sessionProof: proof,
+        quotaProviders,
         ownerToolNames: [...activePanelToolNames],
         requiredExtensionsRegistered,
         subagentsRpcReady: resolvedSessionId !== null,
@@ -520,7 +531,19 @@ export default function piPanelBridge(pi: PiExtensionApi): void {
     const type = raw.type;
     try {
       if (type === "toolset_changed") return;
-      if (type === "session_checkpoint") {
+      if (type === "refresh_quota") {
+        pi.events.emit(REFRESH_EVENT, {
+          provider: raw.provider,
+          reply: (snapshot: unknown) => {
+            const parsed = piSnapshotSchema.safeParse(snapshot);
+            void replyControl(
+              raw.controlId,
+              parsed.data,
+              parsed.success ? undefined : "Invalid quota",
+            ).catch(() => undefined);
+          },
+        });
+      } else if (type === "session_checkpoint") {
         await replyControl(raw.controlId, checkpoint(ctx));
       } else if (type === "probe_dispatched_inputs") {
         await replyControl(
@@ -647,6 +670,7 @@ export default function piPanelBridge(pi: PiExtensionApi): void {
     controlAbort?.abort();
     requiredExtReg?.dispose();
     requiredExtReg = undefined;
+    offQuota();
     offReady();
     for (const off of rpcWaiters) off();
     rpcWaiters.clear();

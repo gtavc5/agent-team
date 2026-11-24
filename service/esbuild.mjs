@@ -6,10 +6,10 @@ const watch = process.argv.includes("--watch");
 
 function copyPiBridge() {
   fs.mkdirSync("../dist", { recursive: true });
-  fs.copyFileSync(
-    path.resolve("src/session/pi-panel-bridge.ts"),
-    path.resolve("../dist/pi-panel-bridge.ts"),
-  );
+  fs.cpSync("src/session/quota", "../dist/quota", { recursive: true });
+  for (const file of ["pi-panel-bridge.ts", "pi-quota.ts", "quota-schema.ts"]) {
+    fs.copyFileSync(path.resolve("src/session", file), path.resolve("../dist", file));
+  }
 }
 
 /** @type {import('esbuild').BuildOptions} */

@@ -48,6 +48,11 @@ import { ProjectManager, type ProjectHost } from "../project/manager";
 import { Auth } from "./auth";
 import { mergeLocalCommands } from "./commands";
 import { HttpHandler } from "./http";
+import { QuotaMonitor } from "./quota";
+import { CodexQuotaSource } from "./native-codex-quota";
+import { QuotaAdapterRegistry } from "../session/quota/registry";
+import { piAdapters } from "../session/quota/pi-adapters";
+import type { PiQuotaReader } from "../session/quota-schema";
 import { SystemMonitor } from "./system";
 
 function stripEventsInnerEvents(events: StreamEvent[]): StreamEvent[] {
@@ -96,6 +101,23 @@ export class Server {
   private alive = new WeakSet<WebSocket>();
   private auth: Auth;
   private http: HttpHandler;
+  private codexQuota = new CodexQuotaSource();
+  private quota = new QuotaMonitor(
+    (quota) => this.broadcastUI({ type: "quota_snapshot", quota }),
+    new QuotaAdapterRegistry<PiQuotaReader | undefined>(
+      [
+        this.codexQuota,
+        ...piAdapters().ids.map((id) => ({
+          id,
+          isConfigured: (reader: PiQuotaReader | undefined) => !!reader?.configured.includes(id),
+          unconfiguredReason: (reader: PiQuotaReader | undefined) =>
+            reader ? ("not configured" as const) : ("waiting for Pi session" as const),
+          fetchQuota: (reader: PiQuotaReader | undefined) => reader!.read(id),
+        })),
+      ],
+      55_000,
+    ),
+  );
   private system = new SystemMonitor();
   private git: GitScanner<Workspace>;
   private projects: ProjectManager;
@@ -177,7 +199,13 @@ export class Server {
   private initHosts(): HostRegistry {
     const registry = new HostRegistry();
     for (const [id, cfg] of Object.entries(this.config.hosts)) {
-      registry.register(new LocalHost(id, cfg.label));
+      registry.register(
+        new LocalHost(id, cfg.label, {
+          pi: (s) => this.quota.accept(s),
+          piReaderReady: (providers) => this.refreshQuota(providers),
+          codex: (limits) => this.quota.accept(this.codexQuota.snapshot(limits, Date.now(), true)),
+        }),
+      );
     }
     console.log(
       `Hosts: ${registry
@@ -186,6 +214,32 @@ export class Server {
         .join(", ")}`,
     );
     return registry;
+  }
+
+  private refreshQuota(newlyReadable?: readonly string[]): void {
+    if (!this.closing) void this.quota.refresh(() => this.piQuotaReader(), newlyReadable);
+  }
+
+  private piQuotaReader(): PiQuotaReader | undefined {
+    const readers = this.hostRegistry
+      .getAll()
+      .flatMap((host) => host.quotaReader?.() ?? [])
+      .sort((a, b) => b.configured.length - a.configured.length);
+    if (readers.length <= 1) return readers[0];
+    const routes = new Map<string, PiQuotaReader>();
+    for (const reader of readers) {
+      for (const provider of reader.configured) {
+        if (!routes.has(provider)) routes.set(provider, reader);
+      }
+    }
+    return {
+      configured: [...routes.keys()],
+      read: (provider) => {
+        const reader = routes.get(provider);
+        if (!reader) return Promise.reject(new Error("Quota provider is not configured"));
+        return reader.read(provider);
+      },
+    };
   }
 
   private getSystemStatus(): Record<string, unknown> {
@@ -260,6 +314,7 @@ export class Server {
     const commands = mergeLocalCommands([]);
     this.sendJson(ws, {
       type: "init",
+      quota: this.quota.state(),
       // Identifies the served bundle; a client that reconnects and sees a
       // different id reloads itself (home-screen apps never reload on their own).
       buildId: this.http.buildId(),
@@ -315,6 +370,9 @@ export class Server {
       return;
     }
     switch (msg.type) {
+      case "refresh_quota":
+        this.refreshQuota();
+        return;
       case "open_workspace":
       case "load_messages": {
         const workspace = this.workspaces.get(msg.workspaceId as string);
@@ -1569,6 +1627,7 @@ export class Server {
 
   async close(): Promise<void> {
     this.closing = true;
+    this.quota.cancelQueuedRefresh();
     if (!this.restored) await this.restoring.catch(() => undefined);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.projects.close();

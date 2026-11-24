@@ -90,6 +90,12 @@ new work. The panel provides the orchestration and UI, not a model of its own.
   history leaves memory (still on disk) and idle CLI processes shut down.
   Sending a message restores them.
 
+### Account quota
+
+The sidebar shows last-observed account limits separately from CPU and memory. Refresh reads native Codex limits and asks one connected Pi session for its registered providers. Antigravity ACP uses the provider’s `/usage` event; Pi OAuth logins for `openai-codex` and `kimi-coding` use their respective read-only account usage endpoints. None starts a model turn. Without a source, last-known bars retain their observation time. Pi providers without a verified quota reader report unsupported.
+
+Pi sessions load `/quota` automatically. To use the same command in standalone Pi, run `pi -e /path/to/yaat/service/src/session/pi-quota.ts` from an installed checkout. `/quota` checks all registered providers regardless of the current model. Enable `pi-antigravity-acp-provider` for ACP readings. OAuth quota comes from Pi’s credential resolver, not from the native Codex login. No account pooling or credential switching is performed.
+
 ## Requirements
 
 - Node.js 26+ (the history is stored with `node:sqlite`)

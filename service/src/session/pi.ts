@@ -61,6 +61,7 @@ export interface PiSessionOptions {
   reconcileIntervalMs?: number;
   statsTimeoutMs?: number;
   readyTimeoutMs?: number;
+  catalogOnly?: boolean;
   dialogFallbackTimeoutMs?: number;
 }
 
@@ -478,14 +479,13 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       fs.mkdirSync(dir, { recursive: true });
       sessionArgs = ["--session-dir", dir, "--session-id", this.sessionId];
     }
-    const bridge =
-      this.config.piBridgeExtensionPath ??
-      [
-        path.join(__dirname, "pi-panel-bridge.ts"),
-        path.resolve(__dirname, "../service/src/session/pi-panel-bridge.ts"),
-        path.resolve(__dirname, "../../service/src/session/pi-panel-bridge.ts"),
-      ].find((file) => fs.existsSync(file));
-    if (!bridge) throw new Error("Pi panel bridge extension not found");
+    const bundledBridge = [
+      path.join(__dirname, "pi-panel-bridge.ts"),
+      path.resolve(__dirname, "../service/src/session/pi-panel-bridge.ts"),
+      path.resolve(__dirname, "../../service/src/session/pi-panel-bridge.ts"),
+    ].find((file) => fs.existsSync(file));
+    if (!bundledBridge) throw new Error("Pi panel extensions not found");
+    const bridge = this.config.piBridgeExtensionPath ?? bundledBridge;
     const { agentDir, settings, providerEntry } = this.prepareAgentHome();
     let listening = listens.get(this.panelHttp);
     if (!listening) {
@@ -500,6 +500,11 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     const generation = this.processGeneration;
     const token = this.panelHttp.registerSession({
       sessionKey: this.sessionKey,
+      onQuota: this.options.catalogOnly
+        ? undefined
+        : (snapshot) => {
+            if (generation === this.processGeneration) this.emit("piQuota", snapshot);
+          },
       // The bridge must be able to fetch an empty toolset before ready, even on revocation.
       getToolset: () => this.panelTools ?? EMPTY_PANEL_TOOLSET,
       restoreExpectation: { expectedAnchorId: this.expectedLeafAnchorId },
@@ -537,6 +542,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           ...sessionArgs,
           "-e",
           bridge,
+          "-e",
+          path.join(path.dirname(bundledBridge), "pi-quota.ts"),
           ...(this.options.piArgs ?? this.config.piArgs ?? []),
         ],
         cwd: this.normalizedCwd,
@@ -728,7 +735,11 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         this.finish(turn, { kind: "result", content: "" });
         return { disposition: "handled" };
       }
-      const reply = await rpc.prompt(envelope.text, { images, onBeforeWrite });
+      const reply = await rpc.prompt(envelope.text, {
+        images,
+        onBeforeWrite,
+        ...(/^\/quota(?:\s|$)/.test(envelope.text.trimStart()) && { timeoutMs: 50_000 }),
+      });
       if (reply?.disposition === "handled") {
         if (!turn.started) this.finish(turn);
         else if (this.live(turn)) {

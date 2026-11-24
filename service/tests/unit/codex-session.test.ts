@@ -376,7 +376,11 @@ describe("codex app-server session", () => {
     const limits: unknown[] = [];
     session.on("rateLimit", (l: unknown) => limits.push(l));
     const quota: unknown[] = [];
-    session.on("quota", (q: unknown) => quota.push(q));
+    const sparse: unknown[] = [];
+    session.on("quota", (q: unknown, delta: unknown) => {
+      quota.push(q);
+      sparse.push(delta);
+    });
     await session.send("hi");
     server.startTurn();
     server.notify("error", {
@@ -416,6 +420,12 @@ describe("codex app-server session", () => {
       primary: { usedPercent: 40, windowDurationMins: 300, resetsAt: 100 },
       secondary: { usedPercent: 100, windowDurationMins: 10080, resetsAt: 900 },
       planType: "pro",
+    });
+    expect(sparse.at(-1)).toEqual({
+      limitId: "codex",
+      primary: null,
+      secondary: { usedPercent: 100, windowDurationMins: 10080, resetsAt: 900 },
+      planType: null,
     });
     expect(await session.getUsageInfo()).toEqual({
       rate_limits: {

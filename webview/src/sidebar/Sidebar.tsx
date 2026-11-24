@@ -1,4 +1,5 @@
-import { memo, useState } from "react";
+import type { QuotaState } from "../../../service/src/session/quota-schema";
+import { memo, useState, useEffect } from "react";
 import type { Workspace, Project, SystemStatus, SearchHit } from "../state/useServer";
 import {
   groupWorkspaces,
@@ -32,7 +33,14 @@ function StatusBar({ label, pct, extra }: { label: string; pct: number; extra?: 
     <div className="status-item">
       <span className="status-label">{label}</span>
       <span className="status-value">
-        <span className="status-bar">
+        <span
+          className="status-bar"
+          role="progressbar"
+          aria-label={label}
+          aria-valuenow={pct}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
           <span
             className="status-bar-fill"
             style={{ width: `${pct}%`, background: quotaBarColor(pct) }}
@@ -61,6 +69,72 @@ export function SystemStatusPanel({ status }: { status: SystemStatus }) {
   );
 }
 
+export function QuotaPanel({
+  quota,
+  now,
+  refresh,
+  connected,
+}: {
+  quota: QuotaState;
+  now: number;
+  refresh?: () => void;
+  connected: boolean;
+}) {
+  const [clock, setClock] = useState(now);
+  useEffect(() => {
+    const timer = setInterval(() => setClock(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+  const displayTime = Math.max(now, clock);
+  return (
+    <section className="quota-panel system-status-panel" aria-label="Account quota">
+      <header>
+        Account quota{" "}
+        <button disabled={!connected || quota.refreshing} onClick={refresh}>
+          {quota.refreshing ? "Refreshing…" : "Refresh"}
+        </button>
+      </header>
+      {quota.rows.map((row) => (
+        <div className="quota-group" key={`${row.provider}/${row.name}`}>
+          <strong>
+            {row.provider}
+            {row.name && ` · ${row.name}`}
+          </strong>
+          <small>
+            {row.availability !== "available" &&
+              [row.availability, row.reason].filter(Boolean).join(" · ")}
+            {row.observedAt > 0 && (
+              <>
+                {" "}
+                {row.windows.length > 0 &&
+                  (row.availability !== "available" || displayTime - row.observedAt >= 60_000) &&
+                  "stale · "}
+                {formatRelative(row.observedAt, displayTime)}
+              </>
+            )}
+          </small>
+          {row.windows.map((w) => (
+            <div key={w.label}>
+              <StatusBar label={w.label} pct={w.usedPct} />
+              {w.resetsAt && (
+                <small>
+                  Resets{" "}
+                  {new Date(w.resetsAt).toLocaleString([], {
+                    month: "short",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </small>
+              )}
+            </div>
+          ))}
+        </div>
+      ))}
+    </section>
+  );
+}
+
 export interface SidebarProps {
   workspaces: Workspace[];
   projects?: Project[];
@@ -71,6 +145,8 @@ export interface SidebarProps {
   searchQuery: string;
   searchHits: SearchHit[] | null;
   systemStatus: SystemStatus | null;
+  quota?: QuotaState | null;
+  onRefreshQuota?: () => void;
   now?: number;
   onSelect: (wsId: string) => void;
   onDelete: (wsId: string) => void;
@@ -507,6 +583,9 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             </div>
           )}
         </div>
+      )}
+      {p.quota && (
+        <QuotaPanel quota={p.quota} refresh={p.onRefreshQuota} now={now} connected={p.connected} />
       )}
       {p.systemStatus && <SystemStatusPanel status={p.systemStatus} />}
     </>

@@ -150,6 +150,8 @@ export function App() {
     respondUiDialog,
     hosts,
     systemStatus,
+    quota,
+    refreshQuota,
     createWorkspace,
     createProject,
     renameProject,
@@ -1406,6 +1408,8 @@ export function App() {
             finishedStatus={finishedStatus}
             searchQuery={searchQuery}
             searchHits={searchHits}
+            quota={quota}
+            onRefreshQuota={refreshQuota}
             systemStatus={systemStatus}
             onSelect={onSelectWorkspace}
             onDelete={onDeleteWorkspace}

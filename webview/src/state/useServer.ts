@@ -4,6 +4,7 @@ import {
   type ExtensionUiEvent,
   type ExtensionUiSnapshot,
 } from "../../../shared/extension-ui";
+import type { QuotaState } from "../../../service/src/session/quota-schema";
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   MOCK_WORKSPACES,
@@ -491,6 +492,7 @@ export function useServer() {
   const [pendingDialogs, setPendingDialogs] = useState<UiDialogRequest[]>([]);
   const [hosts, setHosts] = useState<HostInfo[]>([]);
   const [hostConfigs, setHostConfigs] = useState<Record<string, HostConfig>>({});
+  const [quota, setQuota] = useState<QuotaState | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [archiveAfterDays, setArchiveAfterDays] = useState<number>(0);
   const [lastError, setLastError] = useState<string | null>(null);
@@ -576,6 +578,7 @@ export function useServer() {
             return;
           }
           if (buildId) buildIdRef.current = buildId;
+          setQuota((msg.quota as QuotaState | undefined) ?? null);
           const incoming = msg.workspaces as Workspace[];
           setWorkspaces((prev) => {
             if (prev.length === 0) return incoming;
@@ -1092,6 +1095,10 @@ export function useServer() {
           setDirSuggestions({ prefix: msg.prefix as string, dirs: msg.dirs as string[] });
           break;
 
+        case "quota_snapshot":
+          setQuota(msg.quota as QuotaState);
+          break;
+
         case "system_status":
           setSystemStatus({
             osName: msg.osName as string,
@@ -1266,6 +1273,8 @@ export function useServer() {
     hosts,
     hostConfigs,
     systemStatus,
+    quota,
+    refreshQuota: useCallback(() => send({ type: "refresh_quota" }), [send]),
     archiveAfterDays,
     lastError,
     clearError: useCallback(() => setLastError(null), []),

@@ -1,3 +1,5 @@
+import type { PiQuotaReader, QuotaSnapshot } from "./quota-schema";
+import type { RateLimitSnapshot } from "./codex-rpc";
 import { EventEmitter } from "events";
 import type {
   BackgroundTask,
@@ -81,6 +83,7 @@ export interface Host {
   createSession(agentId: string, config: SessionConfig): HostSessionHandle;
   destroySession(agentId: string): Promise<void>;
   restoreSession(agentId: string, state: SessionState): HostSessionHandle;
+  quotaReader?(): PiQuotaReader | undefined;
   discoverPiModels?(config: SessionConfig): Promise<PiAvailableModel[]>;
   close?(): Promise<void>;
 }
@@ -94,7 +97,15 @@ export class LocalHost implements Host {
   private panelHttp?: PanelHttpServer;
   private closing?: Promise<void>;
 
-  constructor(id: string, label: string) {
+  constructor(
+    id: string,
+    label: string,
+    private readonly quota?: {
+      pi: (snapshot: QuotaSnapshot) => void;
+      piReaderReady: (providers: string[]) => void;
+      codex: (limits: RateLimitSnapshot) => void;
+    },
+  ) {
     this.id = id;
     this.label = label;
   }
@@ -103,21 +114,35 @@ export class LocalHost implements Host {
     return { id: this.id, label: this.label, type: this.type, connected: this.connected };
   }
 
+  quotaReader() {
+    return this.panelHttp?.quotaReader();
+  }
+
+  private getPanelHttp(): PanelHttpServer {
+    return (this.panelHttp ??= new PanelHttpServer(this.quota?.piReaderReady));
+  }
+
+  private track(agentId: string, session: HostSessionHandle) {
+    if (this.quota && session instanceof CodexSession)
+      session.on("quota", (_local: RateLimitSnapshot, update: RateLimitSnapshot) =>
+        this.quota!.codex(update),
+      );
+    if (this.quota && session instanceof PiSession) session.on("piQuota", this.quota.pi);
+    this.sessions.set(agentId, session);
+    return session;
+  }
+
   createSession(agentId: string, config: SessionConfig): HostSessionHandle {
     if (this.closing) throw new Error("LocalHost is closing");
     let session: HostSessionHandle;
     if (config.backend === "codex") {
       session = new CodexSession(config);
     } else if (config.backend === "pi") {
-      session = new PiSession(
-        { ...config, agentId },
-        { panelHttp: (this.panelHttp ??= new PanelHttpServer()) },
-      );
+      session = new PiSession({ ...config, agentId }, { panelHttp: this.getPanelHttp() });
     } else {
       throw new Error(`Backend "${config.backend ?? "unknown"}" cannot create new sessions`);
     }
-    this.sessions.set(agentId, session);
-    return session;
+    return this.track(agentId, session);
   }
 
   async destroySession(agentId: string): Promise<void> {
@@ -136,13 +161,12 @@ export class LocalHost implements Host {
     } else if (state.config.backend === "pi") {
       session = PiSession.fromState(
         { ...state, config: { ...state.config, agentId } },
-        { panelHttp: (this.panelHttp ??= new PanelHttpServer()) },
+        { panelHttp: this.getPanelHttp() },
       );
     } else {
       session = new ReadOnlyLegacySession(state);
     }
-    this.sessions.set(agentId, session);
-    return session;
+    return this.track(agentId, session);
   }
 
   async discoverPiModels(config: SessionConfig): Promise<PiAvailableModel[]> {
@@ -150,7 +174,7 @@ export class LocalHost implements Host {
     const agentId = `model-catalog-${Math.random().toString(36).slice(2)}`;
     const session = new PiSession(
       { ...config, agentId },
-      { panelHttp: (this.panelHttp ??= new PanelHttpServer()) },
+      { catalogOnly: true, panelHttp: this.getPanelHttp() },
     );
     this.sessions.set(agentId, session);
     try {

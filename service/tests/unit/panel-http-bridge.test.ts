@@ -12,6 +12,7 @@ import {
   type PanelToolset,
 } from "../../src/project/tools";
 import type { Project } from "../../src/project/store";
+import type { QuotaSnapshot } from "../../src/session/quota-schema";
 import { localPiBinary } from "../local-pi";
 import {
   discoverLocalPiPackages,
@@ -300,6 +301,7 @@ async function startRealPi(options: {
   expectedAnchorId?: string;
   getToolset?: () => PanelToolset | null;
   additionalExtension?: string;
+  onQuota?: (snapshot: QuotaSnapshot) => void;
   extraEnv?: Record<string, string>;
 }): Promise<RealPiFixture> {
   const { server, baseUrl } = await createPanelServer();
@@ -318,9 +320,13 @@ async function startRealPi(options: {
   const token = server.registerSession({
     sessionKey: key,
     getToolset: options.getToolset ?? (() => toolset),
+    onQuota: options.onQuota,
     restoreExpectation: { expectedAnchorId: options.expectedAnchorId ?? null },
   });
-  const home = prepareControlledPiAgentHome({ mode: "test-synthetic" });
+  const home = prepareControlledPiAgentHome({
+    mode: "test-synthetic",
+    ...(options.onQuota && { excludePackages: ["pi-antigravity-acp-provider"] }),
+  });
   temporaryDirectories.push(home.piAgentDir, home.geminiHome!, home.env.PI_SUBAGENTS_TEMP_ROOT);
   const cwd = options.sessionFile
     ? path.dirname(options.sessionFile)
@@ -337,6 +343,8 @@ async function startRealPi(options: {
       "rpc",
       "-e",
       bridge,
+      "-e",
+      path.join(path.dirname(bridge), "pi-quota.ts"),
       ...(options.additionalExtension ? ["-e", options.additionalExtension] : []),
       ...(options.sessionFile ? ["--session", options.sessionFile] : []),
     ],
@@ -443,6 +451,28 @@ describe.skipIf(!localPiBinary)("real Pi panel bridge gate", () => {
     },
     30_000,
   );
+
+  it("handles /quota without a turn and posts its snapshot through the real bridge", async () => {
+    const directory = temporaryDirectory("panel-pi-quota-");
+    const beforeTurn = path.join(directory, "before-turn.json");
+    const snapshots: QuotaSnapshot[] = [];
+    const fixture = await startRealPi({
+      additionalExtension: writeSyntheticProviderObserver(directory),
+      extraEnv: { YAAT_TEST_BEFORE_SNAPSHOT: beforeTurn },
+      onQuota: (s) => snapshots.push(s),
+    });
+    await fixture.client.setModel("panel-test", "synthetic");
+    await expect(fixture.client.prompt("/quota")).resolves.toMatchObject({
+      disposition: "handled",
+    });
+    await waitUntil(() => snapshots.some((s) => s.provider === "panel-test"));
+    expect(snapshots.find((s) => s.provider === "panel-test")).toMatchObject({
+      provider: "panel-test",
+      availability: "unsupported",
+      groups: [],
+    });
+    expect(fs.existsSync(beforeTurn)).toBe(false);
+  }, 30_000);
 
   it("updates real Pi tool descriptions, selected tools, and snippets on toolset changes", async () => {
     const directory = temporaryDirectory("panel-pi-dynamic-tools-");
@@ -559,6 +589,77 @@ describe.skipIf(!localPiBinary)("real Pi panel bridge gate", () => {
 });
 
 describe("PanelHttpServer", () => {
+  it("accepts only bounded quota snapshots on the authenticated route and targets one of two connected sessions", async () => {
+    const { server, baseUrl } = await createPanelServer();
+    const samples: unknown[] = [];
+    const calls: string[] = [];
+    const sample = {
+      provider: "antigravity-acp",
+      observedAt: Date.now(),
+      availability: "available",
+      groups: [{ name: "Gemini", windows: [{ label: "weekly", usedPct: 31 }] }],
+    };
+    const proof = {
+      sessionId: "id",
+      sessionFile: null,
+      cwd: "/tmp",
+      headerCwd: null,
+      entryCount: 0,
+      leafId: null,
+      anchorOnActiveBranch: true,
+      anchorExistsInFile: true,
+    };
+    const secondSample = { ...sample, provider: "kimi-coding" };
+    for (const [key, reply] of [
+      ["p1", sample],
+      ["p2", secondSample],
+    ] as const) {
+      const token = server.registerSession({
+        sessionKey: key,
+        getToolset: () => null,
+        onQuota: (s) => samples.push(s),
+      });
+      const post = (body: unknown, auth = token) =>
+        request(baseUrl, key, "quota", auth, { method: "POST", body });
+      expect((await post(sample, "wrong")).status).toBe(401);
+      for (const invalid of [
+        { ...sample, headers: "secret" },
+        { ...sample, provider: "native-codex" },
+        { ...sample, groups: Array(33).fill(sample.groups[0]) },
+        {
+          ...sample,
+          groups: [{ name: "g", windows: Array(17).fill(sample.groups[0].windows[0]) }],
+        },
+        { ...sample, groups: [{ name: "g".repeat(101), windows: sample.groups[0].windows }] },
+      ])
+        expect((await post(invalid)).status).toBe(400);
+      expect((await post(sample)).status).toBe(200);
+      await request(baseUrl, key, "ready", token, {
+        method: "POST",
+        body: {
+          sessionProof: proof,
+          ownerToolNames: [],
+          quotaProviders: [reply.provider],
+          requiredExtensionsRegistered: false,
+          subagentsRpcReady: false,
+          subagentsSessionId: null,
+        },
+      });
+      await openControl(baseUrl, key, token, (msg) => {
+        calls.push(key);
+        void request(baseUrl, key, "control-reply", token, {
+          method: "POST",
+          body: { controlId: msg.controlId, result: reply },
+        });
+      });
+    }
+    const reader = server.quotaReader();
+    expect(reader?.configured).toEqual([sample.provider, secondSample.provider]);
+    expect(await reader?.read(sample.provider)).toEqual(sample);
+    expect(await reader?.read(secondSample.provider)).toEqual(secondSample);
+    expect(calls).toEqual(["p1", "p2"]);
+    expect(samples).toEqual([sample, sample]);
+  });
   it("enforces bearer auth, live expansion/revocation, and control replies", async () => {
     const { server, baseUrl } = await createPanelServer();
     let toolset: PanelToolset | null = {
