@@ -5,13 +5,15 @@
 # Prefer launching via: scripts/yaat-service.sh deploy-deferred [delay-seconds]
 set -euo pipefail
 
-export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.pixi/envs/nodejs/bin:$HOME/.pixi/envs/default/bin:$HOME/.pixi/bin:$HOME/.local/bin:$HOME/.cargo/bin:/usr/bin:/bin${PATH:+:$PATH}"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$REPO_DIR/scripts/runtime-paths.sh"
+runtime_init_path
 
 DELAY="${1:-10}"
 sleep "$DELAY"
 
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR" || exit 1
+BASE_DIR="${AGENT_TEAM_BASE_DIR:-$HOME/.yaat}"
 
 LOG="${YAAT_DEPLOY_LOG:-$HOME/.cache/agent-team-deploy.log}"
 mkdir -p "$(dirname "$LOG")"
@@ -39,10 +41,16 @@ UNIT_DIR="${YAAT_UNIT_DIR:-$HOME/.config/systemd/user}"
 
 {
   printf '=== %s build %s\n' "$(date)" "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  runtime_load_pins "$BASE_DIR"
+  runtime_require_node
+  runtime_select_pi || true
   if [ -n "${YAAT_DEPLOY_SKIP_BUILD:-}" ] && [ "${YAAT_DEPLOY_SKIP_BUILD:-}" != "0" ]; then
-    printf '=== build skipped (YAAT_DEPLOY_SKIP_BUILD=%s)\n' "${YAAT_DEPLOY_SKIP_BUILD}"
+    runtime_use_paths
+    printf '=== build skipped (YAAT_DEPLOY_SKIP_BUILD=%s)\n' "$YAAT_DEPLOY_SKIP_BUILD"
   else
-    npm run build 2>&1 || exit 1
+    runtime_require_npm
+    runtime_use_paths
+    "$YAAT_NPM_BIN" run build || exit 1
     printf '=== build ok, restarting\n'
   fi
 

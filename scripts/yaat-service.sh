@@ -2,9 +2,9 @@
 # Unified macOS (launchd) and Linux (systemd --user) service manager for YAAT.
 set -euo pipefail
 
-export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.pixi/envs/nodejs/bin:$HOME/.pixi/envs/default/bin:$HOME/.pixi/bin:$HOME/.local/bin:$HOME/.cargo/bin:/usr/bin:/bin${PATH:+:$PATH}"
-
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$REPO_DIR/scripts/runtime-paths.sh"
+runtime_init_path
 OS_NAME="${YAAT_SERVICE_OS:-$(uname -s)}"
 UID_VAL="${YAAT_UID:-$(id -u)}"
 LAUNCHCTL_BIN="${YAAT_LAUNCHCTL_BIN:-launchctl}"
@@ -12,7 +12,6 @@ SYSTEMCTL_BIN="${YAAT_SYSTEMCTL_BIN:-systemctl}"
 SYSTEMD_RUN_BIN="${YAAT_SYSTEMD_RUN_BIN:-systemd-run}"
 
 BASE_DIR="${AGENT_TEAM_BASE_DIR:-$HOME/.yaat}"
-BASE_DIR_EXPLICIT=0
 PORT="${AGENT_TEAM_PORT:-9800}"
 HOST="${AGENT_TEAM_HOST:-0.0.0.0}"
 HOST_EXPLICIT=0
@@ -43,6 +42,7 @@ Usage: scripts/yaat-service.sh <command> [options]
 
 Commands:
   init-config               Create base dir and generate config.toml
+  install-deps              Run local npm install in this checkout (use instance pins if present)
   install                   Init config if needed, build, write & load OS service
   start                     Start the service
   stop                      Stop the service
@@ -186,7 +186,6 @@ while [ "$#" -gt 0 ]; do
     --base-dir)
       require_arg "$1" "$#"
       BASE_DIR="$2"
-      BASE_DIR_EXPLICIT=1
       shift 2
       ;;
     --port)
@@ -351,10 +350,13 @@ ERR_LOG="$BASE_DIR/logs/server.err.log"
 
 generate_hex() {
   local bytes="$1"
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex "$bytes"
+  local hex
+  if command -v openssl >/dev/null 2>&1 && hex=$(openssl rand -hex "$bytes"); then
+    printf '%s\n' "$hex"
   else
-    node -e "process.stdout.write(require('crypto').randomBytes($bytes).toString('hex'))"
+    if [ "$SUBCOMMAND" = init-config ]; then runtime_load_pins "$BASE_DIR" || return 1; fi
+    runtime_require_node || return 1
+    "$YAAT_NODE_BIN" -e "process.stdout.write(require('crypto').randomBytes($bytes).toString('hex'))"
   fi
 }
 
@@ -483,7 +485,6 @@ type = \"local\"
 }
 
 write_darwin_plist() {
-  local service_path="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.pixi/envs/nodejs/bin:$HOME/.pixi/envs/default/bin:$HOME/.pixi/bin:$HOME/.local/bin:$HOME/.cargo/bin:/usr/bin:/bin"
   local content
   content="$(cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -501,8 +502,6 @@ write_darwin_plist() {
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key>
-    <string>$(xml_escape "$service_path")</string>
     <key>AGENT_TEAM_HOST</key>
     <string>$(xml_escape "$HOST")</string>
     <key>AGENT_TEAM_PORT</key>
@@ -585,9 +584,8 @@ inspect_install_config() {
   fi
 
   if [ -d "$toml_module" ]; then
-    command -v node >/dev/null 2>&1 || die "node is required to inspect $cfg"
     local inspection
-    inspection="$(node - "$toml_module" "$cfg" "$@" 2>/dev/null <<'JS'
+    inspection="$("$YAAT_NODE_BIN" - "$toml_module" "$cfg" "$@" 2>/dev/null <<'JS'
 const [tomlModule, configPath, ...targets] = process.argv.slice(2);
 const config = require(tomlModule).parse(require('fs').readFileSync(configPath, 'utf8'));
 const auth = config.auth;
@@ -651,7 +649,27 @@ PY
   fi
 }
 
+cmd_install_deps() {
+  local runtime_install_cwd=""
+  runtime_load_pins "$BASE_DIR"
+  if [ -z "${YAAT_RUNTIME_PINS:-}" ]; then runtime_install_cwd="$REPO_DIR"; fi
+  runtime_require_node
+  runtime_require_npm
+  runtime_use_paths
+  (cd "$REPO_DIR" && run_cmd "$YAAT_NPM_BIN" install --global=false --location=project --prefix "$REPO_DIR")
+}
+
 cmd_install() {
+  # Install (including re-install) explicitly selects and saves the runtime for this instance.
+  local runtime_install_cwd="$REPO_DIR"
+  runtime_require_node
+  runtime_require_npm
+  runtime_require_pi
+  runtime_use_paths
+  if [ "$DRY_RUN" -eq 0 ]; then
+    PI_OFFLINE=1 "$YAAT_PI_BIN" --version >/dev/null 2>&1 || die "could not run Pi at $YAAT_PI_BIN"
+  fi
+
   if [ ! -f "$BASE_DIR/config.toml" ]; then
     cmd_init_config
   else
@@ -663,10 +681,16 @@ cmd_install() {
 
   if [ "$NO_BUILD" -eq 0 ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
-      printf '[dry-run] (cd %q && npm run build)\n' "$REPO_DIR"
+      printf '[dry-run] (cd %q && %q run build)\n' "$REPO_DIR" "$YAAT_NPM_BIN"
     else
-      (cd "$REPO_DIR" && npm run build)
+      (cd "$REPO_DIR" && "$YAAT_NPM_BIN" run build)
     fi
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[dry-run] pin runtime in %s/.yaat-runtime-paths:\n  node: %s\n  npm: %s\n  pi: %s\n' "$BASE_DIR" "$YAAT_NODE_BIN" "$YAAT_NPM_BIN" "$YAAT_PI_BIN"
+  else
+    runtime_write_pins "$BASE_DIR"
   fi
 
   if [ "$OS_NAME" = "Darwin" ]; then
@@ -821,7 +845,8 @@ probe_once() {
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$timeout" "$url" 2>/dev/null || true)"
     [ "$code" = "200" ]
   else
-    node -e "
+    runtime_load_pins "$BASE_DIR" && runtime_require_node || return 1
+    "$YAAT_NODE_BIN" -e "
       fetch('$url', { signal: AbortSignal.timeout(${timeout} * 1000) })
         .then((r) => process.exit(r.status === 200 ? 0 : 1))
         .catch(() => process.exit(1));
@@ -858,21 +883,22 @@ cmd_health() {
   return 1
 }
 
+prepare_deploy_runtime() {
+  runtime_load_pins "$BASE_DIR"
+  runtime_require_node
+  runtime_select_pi || true
+  if [ "$NO_BUILD" -eq 0 ] || [ "$VERIFY" -eq 1 ]; then runtime_require_npm; fi
+  runtime_use_paths
+}
+
 cmd_deploy() {
   local wait="${WAIT_SEC:-15}"
+  prepare_deploy_runtime
   if [ "$VERIFY" -eq 1 ]; then
-    if [ "$DRY_RUN" -eq 1 ]; then
-      printf '[dry-run] (cd %q && npm run check && npm test)\n' "$REPO_DIR"
-    else
-      (cd "$REPO_DIR" && npm run check && npm test)
-    fi
+    (cd "$REPO_DIR" && run_cmd "$YAAT_NPM_BIN" run check && run_cmd "$YAAT_NPM_BIN" test)
   fi
   if [ "$NO_BUILD" -eq 0 ]; then
-    if [ "$DRY_RUN" -eq 1 ]; then
-      printf '[dry-run] (cd %q && npm run build)\n' "$REPO_DIR"
-    else
-      (cd "$REPO_DIR" && npm run build)
-    fi
+    (cd "$REPO_DIR" && run_cmd "$YAAT_NPM_BIN" run build)
   fi
   cmd_restart
   cmd_health "$wait"
@@ -890,7 +916,7 @@ enqueue_linux_deploy() {
   # Transient services do not inherit the caller's environment like scopes do.
   for name in AGENT_TEAM_PORT AGENT_TEAM_BASE_DIR YAAT_SERVICE_LABEL YAAT_PLIST_DIR YAAT_UNIT_DIR \
     YAAT_DEPLOY_SKIP_BUILD YAAT_DEPLOY_LOG YAAT_DEPLOY_RESTART_CMD YAAT_SERVICE_OS YAAT_UID \
-    YAAT_SYSTEMCTL_BIN YAAT_LAUNCHCTL_BIN PATH; do
+    YAAT_SYSTEMCTL_BIN YAAT_LAUNCHCTL_BIN YAAT_NODE_BIN YAAT_NPM_BIN YAAT_PI_BIN PATH; do
     if printenv "$name" >/dev/null 2>&1; then
       args+=("--setenv=$name")
     fi
@@ -907,19 +933,17 @@ cmd_deploy_deferred() {
   is_uint "$delay" || die "delay must be a non-negative integer (got '$delay')"
   local script="$REPO_DIR/scripts/deploy-deferred.sh"
   [ -x "$script" ] || [ -f "$script" ] || die "missing $script"
+  prepare_deploy_runtime
 
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '[dry-run] detach %q %s\n' "$script" "$delay"
     return 0
   fi
 
-  export AGENT_TEAM_PORT="$PORT"
+  export AGENT_TEAM_PORT="$PORT" AGENT_TEAM_BASE_DIR="$BASE_DIR"
   export YAAT_SERVICE_LABEL="$LABEL"
   export YAAT_PLIST_DIR="$PLIST_DIR"
   export YAAT_UNIT_DIR="$UNIT_DIR"
-  if [ "$BASE_DIR_EXPLICIT" -eq 1 ]; then
-    export AGENT_TEAM_BASE_DIR="$BASE_DIR"
-  fi
   if [ "$NO_BUILD" -eq 1 ]; then
     export YAAT_DEPLOY_SKIP_BUILD=1
   fi
@@ -950,6 +974,9 @@ cmd_deploy_deferred() {
 case "$SUBCOMMAND" in
   init-config)
     cmd_init_config
+    ;;
+  install-deps)
+    cmd_install_deps
     ;;
   install)
     cmd_install

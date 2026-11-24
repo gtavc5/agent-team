@@ -2,42 +2,24 @@
 # Start the YAAT / Agent Team server with a service-safe PATH and pre-flight checks.
 set -euo pipefail
 
-export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.pixi/envs/nodejs/bin:$HOME/.pixi/envs/default/bin:$HOME/.pixi/bin:$HOME/.local/bin:$HOME/.cargo/bin:/usr/bin:/bin${PATH:+:$PATH}"
-
-# Optional proxy configuration:
-# export http_proxy=http://127.0.0.1:7890/
-# export https_proxy=http://127.0.0.1:7890/
-
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BASE_DIR="${AGENT_TEAM_BASE_DIR:-$REPO_DIR}"
-
-if ! command -v node >/dev/null 2>&1; then
-  printf 'error: node not found in PATH. Run scripts/setup-prereqs.sh to install Node.js >= 26.\n' >&2
-  exit 1
-fi
-
-NODE_VER="$(node -v 2>/dev/null || true)"
-NODE_MAJOR="${NODE_VER#v}"
-NODE_MAJOR="${NODE_MAJOR%%.*}"
-case "$NODE_MAJOR" in
-  ""|*[!0-9]*)
-    printf 'error: could not parse Node.js version (%s). Run scripts/setup-prereqs.sh.\n' "${NODE_VER:-unknown}" >&2
-    exit 1
-    ;;
-  *)
-    if [ "$NODE_MAJOR" -lt 26 ]; then
-      printf 'error: Node.js >= 26 is required (found %s). Run scripts/setup-prereqs.sh.\n' "$NODE_VER" >&2
-      exit 1
-    fi
-    ;;
-esac
+source "$REPO_DIR/scripts/runtime-paths.sh"
+runtime_init_path
+runtime_load_pins "$BASE_DIR"
+runtime_require_node
 
 if [ ! -f "$REPO_DIR/dist/server.js" ]; then
   printf 'error: %s/dist/server.js not found. Run "npm run build" in %s first.\n' "$REPO_DIR" "$REPO_DIR" >&2
   exit 1
 fi
 
-if [ ! -f "$BASE_DIR/config.toml" ]; then
+doctor=0
+for arg in "$@"; do
+  if [ "$arg" = --doctor ]; then doctor=1; break; fi
+done
+
+if [ "$doctor" -eq 0 ] && [ ! -f "$BASE_DIR/config.toml" ]; then
   if [ -z "${AGENT_TEAM_BASE_DIR:-}" ]; then
     printf 'error: %s/config.toml not found.\n' "$BASE_DIR" >&2
     printf '  If you ran "scripts/yaat-service.sh init-config", start with: AGENT_TEAM_BASE_DIR="$HOME/.yaat" scripts/start-server.sh\n' >&2
@@ -48,5 +30,8 @@ if [ ! -f "$BASE_DIR/config.toml" ]; then
   exit 1
 fi
 
+# Preserve missing Pi pins so the server can report degraded Pi without affecting Codex.
+runtime_select_pi || true
+runtime_use_paths
 cd "$REPO_DIR"
-exec node dist/server.js
+exec "$YAAT_NODE_BIN" dist/server.js "$@"

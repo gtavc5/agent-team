@@ -10,7 +10,7 @@ usage() {
     '  --install      Install supported missing prerequisites, then check again.' \
     '  --dry-run      Print install commands without executing them.' \
     '  --yes, -y      Skip the install confirmation.' \
-    '  --skip-python  Do not require or install Python and pip.' \
+    '  --skip-python  Skip optional Python and pip checks.' \
     '  --strict       Also require Pi extensions and non-empty auth.json.' \
     '  --help, -h     Show this help.'
 }
@@ -44,9 +44,8 @@ if [[ "$mode" != install ]] && (( dry_run || yes )); then
   exit 2
 fi
 
-if [[ ${YAAT_NO_DEFAULT_PATH:-0} != 1 ]]; then
-  export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.local/bin:$HOME/.pixi/envs/nodejs/bin:$HOME/.pixi/bin:$PATH"
-fi
+source "$(dirname "$0")/runtime-paths.sh"
+runtime_init_path
 setup_os=${YAAT_SETUP_OS:-$(uname -s)}
 setup_arch=${YAAT_SETUP_ARCH:-$(uname -m)}
 pi_agent_dir=${YAAT_PI_AGENT_DIR:-"$HOME/.pi/agent"}
@@ -57,13 +56,9 @@ case "$setup_os" in
   *) printf '[action] Unsupported platform: %s/%s (expected macOS or Linux).\n' "$setup_os" "$setup_arch" >&2; exit 1 ;;
 esac
 
-has() { command -v "$1" >/dev/null 2>&1; }
+runtime_load_pins "${AGENT_TEAM_BASE_DIR:-$HOME/.yaat}"
 
-node_supported() {
-  local version
-  version=$(node --version 2>/dev/null) || return 1
-  [[ $version =~ ^v?([0-9]+)\. ]] && (( 10#${BASH_REMATCH[1]} >= 26 ))
-}
+has() { command -v "$1" >/dev/null 2>&1; }
 
 has_pip() {
   has pip3 || PYTHONDONTWRITEBYTECODE=1 python3 -m pip --version >/dev/null 2>&1
@@ -72,8 +67,8 @@ has_pip() {
 # Read agent metadata without launching Pi or exposing credentials in output or parse errors.
 pi_metadata_ok() {
   local kind=$1 name=${2:-}
-  [[ -s "$pi_agent_dir/$kind.json" ]] && has node || return 1
-  NODE_OPTIONS= NODE_V8_COVERAGE= NODE_DISABLE_COMPILE_CACHE=1 node -e '
+  [[ -s "$pi_agent_dir/$kind.json" && -n ${YAAT_NODE_BIN:-} ]] || return 1
+  NODE_OPTIONS= NODE_V8_COVERAGE= NODE_DISABLE_COMPILE_CACHE=1 "$YAAT_NODE_BIN" -e '
     const fs = require("fs"), path = require("path"), os = require("os");
     const [dir, kind, name] = process.argv.slice(1);
     try {
@@ -101,52 +96,63 @@ extension_installed() {
   [[ -d "$pi_agent_dir/npm/node_modules/$1" ]] || pi_metadata_ok settings "$1"
 }
 
-check_command() {
-  local label=${2:-$1}
+check_required_command() {
   if has "$1"; then
-    printf '[ok] %s\n' "$label"
+    printf '[ok] %s\n' "$1"
   else
-    printf '[missing] %s\n' "$label"
+    printf '[missing] %s\n' "$1"
     required_missing=1
   fi
 }
 
-check_prereqs() {
-  local required_missing=0 pi_missing=0 pkg
-  printf '%s\n' 'Core runtime (required)'
-  if [[ "$setup_os" == Darwin ]]; then check_command brew; fi
-  check_command git
-  check_command curl
-  check_command openssl
-  if ! has node; then
-    printf '%s\n' '[missing] node (>=26 required for node:sqlite)'
-    required_missing=1
-  elif ! node_supported; then
-    printf '%s\n' '[outdated] node (>=26 required for node:sqlite)'
-    required_missing=1
+check_optional_command() {
+  if has "$1"; then
+    printf '[ok] %s (optional)\n' "$1"
   else
-    printf '%s\n' '[ok] node (>=26, node:sqlite)'
+    printf '[warn] %s not found (optional)\n' "$1"
   fi
-  check_command npm
-  check_command pi "pi ($pi_cli_package)"
+}
 
-  printf '\n%s\n' 'Python/Pip tooling'
+check_prereqs() {
+  local required_missing=0 pi_missing=0 pkg YAAT_NODE_BIN=${YAAT_NODE_BIN:-}
+  printf '%s\n' 'Core runtime (required)'
+  check_required_command git
+  check_required_command curl
+  if runtime_select_node; then
+    printf '[ok] node (>=26, node:sqlite): %s\n' "$YAAT_NODE_BIN"
+  else
+    printf '[missing] usable node (>=26 required for node:sqlite): %s\n' "${YAAT_NODE_BIN:-not found}"
+    YAAT_NODE_BIN=
+    required_missing=1
+  fi
+  if runtime_select_npm; then
+    printf '[ok] npm: %s\n' "$YAAT_NPM_BIN"
+  else
+    printf '[missing] npm: %s\n' "${YAAT_NPM_BIN:-not found}"
+    required_missing=1
+  fi
+  # Even --version can modify a managed Pi install; inspect the launcher without running it.
+  if runtime_select_pi; then
+    printf '[ok] pi (%s): %s\n' "$pi_cli_package" "$YAAT_PI_BIN"
+  else
+    printf '[missing] pi (%s): %s\n' "$pi_cli_package" "${YAAT_PI_BIN:-not found}"
+    required_missing=1
+  fi
+
+  printf '\n%s\n' 'Optional tooling'
+  if [[ "$setup_os" == Darwin ]]; then check_optional_command brew; fi
+  check_optional_command openssl
   if (( skip_python )); then
     printf '%s\n' '[ok] python3 and pip3 skipped (--skip-python)'
   else
-    check_command python3
+    check_optional_command python3
     if has_pip; then
-      printf '%s\n' '[ok] pip3 (or python3 -m pip)'
+      printf '%s\n' '[ok] pip3 (or python3 -m pip) (optional)'
     else
-      printf '%s\n' '[missing] pip3 (or python3 -m pip)'
-      required_missing=1
+      printf '%s\n' '[warn] pip3 (or python3 -m pip) not found (optional)'
     fi
   fi
-  if has uv; then
-    printf '%s\n' '[ok] uv (optional)'
-  else
-    printf '%s\n' '[warn] uv not found (optional)'
-  fi
+  check_optional_command uv
 
   printf '\n%s\n' 'Pi extensions & auth'
   for pkg in "${pi_extensions[@]}"; do
@@ -165,6 +171,9 @@ check_prereqs() {
   fi
 
   if (( required_missing || (strict && pi_missing) )); then
+    if (( required_missing )) && [[ -n ${YAAT_RUNTIME_PINS:-} ]]; then
+      printf '[action] If a pinned executable moved, re-run scripts/yaat-service.sh install to re-pin %s.\n' "$YAAT_RUNTIME_PINS"
+    fi
     printf '\n%s\n' 'Next: run scripts/setup-prereqs.sh --install or resolve the actions above, then recheck.'
     return 1
   fi
@@ -185,17 +194,21 @@ run() {
   fi
 }
 
+node_and_npm_available() { runtime_select_node && runtime_select_npm; }
+
 install_macos_deps() {
-  local brew_installer=https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh installer brew_prefix
+  local brew_installer=https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh installer brew_prefix need_node=0
+  if [[ -z ${YAAT_RUNTIME_PINS:-} ]] && ! node_and_npm_available; then need_node=1; fi
   if ! has curl; then
     printf '%s\n' '[action] Restore macOS curl (install Command Line Tools with xcode-select --install if missing).'
-    if ! has brew; then
+  fi
+  if ! (( need_node )) && has git; then return 0; fi
+  if ! has brew; then
+    if ! has curl; then
       printf '%s\n' '[action] Homebrew installation requires curl; restore curl before installing Homebrew.'
       macos_deps_blocked=1
       return 0
     fi
-  fi
-  if ! has brew; then
     if (( dry_run )); then
       printf '[dry-run] installer=$(curl -fsSL %s) && NONINTERACTIVE=1 /bin/bash -c "$installer"\n' "$brew_installer"
     else
@@ -214,52 +227,37 @@ install_macos_deps() {
     fi
   fi
 
-  if ! node_supported || ! has npm; then
-    if has brew && brew list --formula node >/dev/null 2>&1; then
+  if (( need_node )); then
+    if has brew && HOMEBREW_NO_AUTO_UPDATE=1 brew list --formula node >/dev/null 2>&1; then
       run brew upgrade node
     else
       run brew install node
     fi
   fi
   if ! has git; then run brew install git; fi
-  if ! has openssl; then
-    run brew install openssl
-    if ! (( dry_run )) && ! has openssl; then
-      export PATH="$(brew --prefix openssl)/bin:$PATH"
-    fi
-  fi
-  if ! (( skip_python )) && { ! has python3 || ! has_pip; }; then
-    run brew install python
-  fi
 }
 
 linux_system_hints() {
-  local manager python_pkg=python3 pip_pkg=python3-pip cmd
+  local manager cmd
   if has dnf; then
     manager='sudo dnf install'
   elif has pacman; then
     manager='sudo pacman -S --needed'
-    python_pkg=python pip_pkg=python-pip
   elif has zypper; then
     manager='sudo zypper install'
   elif has apk; then
     manager='sudo apk add'
-    pip_pkg=py3-pip
   else
     manager='sudo apt-get install' # Debian/Ubuntu example when no manager is detected.
   fi
 
   set --
-  for cmd in git curl openssl; do
+  for cmd in git curl; do
     if ! has "$cmd"; then set -- "$@" "$cmd"; fi
   done
-  if ! (( skip_python )); then
-    if ! has python3; then set -- "$@" "$python_pkg"; fi
-    if ! has_pip; then set -- "$@" "$pip_pkg"; fi
-  fi
   if (( $# )); then printf '[action] Install system packages with your distro package manager, e.g.: %s %s\n' "$manager" "$*"; fi
 
-  if ! node_supported || ! has npm; then
+  if [[ -z ${YAAT_RUNTIME_PINS:-} ]] && ! node_and_npm_available; then
     cmd=pixi
     if ! has pixi; then
       printf '%s\n' '[action] Install Pixi: curl -fsSL https://pixi.sh/install.sh | sh'
@@ -267,17 +265,19 @@ linux_system_hints() {
     fi
     printf '[action] Install Node.js >=26 and npm: %s global install --environment nodejs --expose node --expose npm "nodejs>=26"\n' "$cmd"
   fi
-  if ! (( skip_python )) && ! has uv; then
-    printf '%s\n' '[action] Optional uv: curl -fsSL https://astral.sh/uv/install.sh | sh'
-  fi
 }
 
 install_pi() {
   local pkg
-  if ! has pi; then run npm install -g "$pi_cli_package"; fi
+  runtime_use_paths
+  if ! runtime_select_pi; then
+    [[ -z ${YAAT_RUNTIME_PINS:-} ]] || return 0
+    run "${YAAT_NPM_BIN:-npm}" install -g "$pi_cli_package"
+    if ! (( dry_run )); then runtime_require_pi; fi
+  fi
   for pkg in "${pi_extensions[@]}"; do
     if ! extension_installed "$pkg"; then
-      PI_CODING_AGENT_DIR="$pi_agent_dir" run pi install "npm:$pkg"
+      PI_CODING_AGENT_DIR="$pi_agent_dir" run "${YAAT_PI_BIN:-pi}" install "npm:$pkg"
     fi
   done
 }
@@ -292,7 +292,7 @@ if [[ "$mode" == install ]]; then
   fi
   macos_deps_blocked=0
   if [[ "$setup_os" == Darwin ]]; then install_macos_deps; else linux_system_hints; fi
-  if { node_supported && has npm; } || { (( dry_run )) && [[ "$setup_os" == Darwin ]] && ! (( macos_deps_blocked )); }; then
+  if node_and_npm_available || { (( dry_run )) && [[ -z ${YAAT_RUNTIME_PINS:-} && "$setup_os" == Darwin ]] && ! (( macos_deps_blocked )); }; then
     install_pi
   fi
   if (( dry_run )); then
