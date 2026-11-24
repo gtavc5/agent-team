@@ -1,6 +1,6 @@
 // A branch's changes against its base, in a real repository: a clone of an
 // "origin" with a feature branch, committed and uncommitted work.
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execFileSync } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
@@ -8,9 +8,7 @@ import * as path from "path";
 import { changes, fileDiff, NotARepository } from "../../src/repo/diff";
 
 const dirs: string[] = [];
-afterEach(() => {
-  for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
-});
+let shared: ReturnType<typeof repo>;
 
 function repo() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-team-diff-"));
@@ -31,6 +29,7 @@ function repo() {
   fs.writeFileSync(path.join(origin, "d.txt"), lines(20, "keep"));
   git(origin, "add", ".");
   git(origin, "commit", "-q", "-m", "base");
+  git(origin, "branch", "release");
   const work = path.join(tmp, "work");
   git(tmp, "clone", "-q", origin, work);
   git(work, "checkout", "-q", "-b", "feature");
@@ -48,12 +47,19 @@ function repo() {
   return { tmp, origin, work, git };
 }
 
+beforeAll(() => {
+  shared = repo();
+});
+
+afterAll(() => {
+  for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+});
+
 describe("a branch's changes", () => {
   it("lists what changed since the base, committed or not, and what git does not know yet", async () => {
-    const { work } = repo();
-    const c = await changes(path.join(work));
+    const c = await changes(path.join(shared.work));
     expect(c).toMatchObject({
-      top: fs.realpathSync(work),
+      top: fs.realpathSync(shared.work),
       branch: "feature",
       base: "origin/main",
       truncated: false,
@@ -70,27 +76,25 @@ describe("a branch's changes", () => {
   });
 
   it("gives a file's diff from its first hunk; an untracked file as all new", async () => {
-    const { work } = repo();
-    const { against } = await changes(work);
-    const a = await fileDiff(work, { path: "a.txt" }, against);
+    const { against } = await changes(shared.work);
+    const a = await fileDiff(shared.work, { path: "a.txt" }, against);
     expect(a.diff.startsWith("@@ ")).toBe(true);
     expect(a.diff).toContain("-line 2\n+line two");
     expect(a.diff).toContain("+line four");
-    const f = await fileDiff(work, { path: "f.txt", untracked: true }, against);
+    const f = await fileDiff(shared.work, { path: "f.txt", untracked: true }, against);
     expect(f.diff).toContain("+one\n+two\n+three");
-    expect(await fileDiff(work, { path: "e.txt", oldPath: "d.txt" }, against)).toMatchObject({
-      diff: "",
-      binary: false,
-    });
-    expect(await fileDiff(work, { path: "g.bin" }, against)).toMatchObject({ binary: true });
+    expect(await fileDiff(shared.work, { path: "e.txt", oldPath: "d.txt" }, against)).toMatchObject(
+      {
+        diff: "",
+        binary: false,
+      },
+    );
+    expect(await fileDiff(shared.work, { path: "g.bin" }, against)).toMatchObject({ binary: true });
   });
 
   it("takes the pull request's base when it has one", async () => {
-    const { origin, work, git } = repo();
-    git(origin, "branch", "release");
-    git(work, "fetch", "-q", "origin");
-    expect((await changes(work, "release")).base).toBe("origin/release");
-    expect((await changes(work, "no-such-branch")).base).toBe("origin/main");
+    expect((await changes(shared.work, "release")).base).toBe("origin/release");
+    expect((await changes(shared.work, "no-such-branch")).base).toBe("origin/main");
   });
 
   it("with no base, shows what is not committed", async () => {
@@ -104,14 +108,13 @@ describe("a branch's changes", () => {
   });
 
   it("stays in the repository and says when there is none", async () => {
-    const { work } = repo();
-    const { against } = await changes(work);
+    const { against } = await changes(shared.work);
     for (const p of ["../origin/a.txt", "/etc/passwd", "-p"]) {
-      await expect(fileDiff(work, { path: p }, against)).rejects.toThrow(
+      await expect(fileDiff(shared.work, { path: p }, against)).rejects.toThrow(
         "Not a path in the repository",
       );
     }
-    await expect(fileDiff(work, { path: "a.txt" }, "HEAD; rm -rf /")).rejects.toThrow(
+    await expect(fileDiff(shared.work, { path: "a.txt" }, "HEAD; rm -rf /")).rejects.toThrow(
       "Not a commit",
     );
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "agent-team-nogit-"));

@@ -78,7 +78,7 @@ class FakeHost implements Host {
   }
 }
 
-const tick = () => new Promise((r) => setTimeout(r, 5));
+const tick = () => new Promise((r) => setTimeout(r, 0));
 
 function makeWorkspace(cb: Partial<WorkspaceCallbacks> = {}) {
   const host = new FakeHost();

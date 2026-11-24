@@ -1,13 +1,9 @@
 import { expect } from "vitest";
+import { captures } from "../pi-captures.ts";
 import { agentMessages, fixture } from "../fixture.ts";
 
 export default fixture({
-  description: "A blocking extension dialog still allows stdout frames before the user responds.",
-  steps: [
-    { op: "send", text: "Ask for confirmation." },
-    { op: "check", name: "dialogOpen" },
-    { op: "uiDialogResponse", requestId: "confirmation", confirmed: true },
-  ],
+  ...captures["extension-ui-dialog"],
   verify(r) {
     expect(r.pi!.dialogs).toEqual([
       { kind: "request", id: "confirmation" },
@@ -19,6 +15,9 @@ export default fixture({
       thinkingClosed: true,
       pendingDialogIds: ["confirmation"],
     });
-    expect(agentMessages(r)[0]).toMatchObject({ content: "Confirmed.", status: "done" });
+    expect(agentMessages(r)[0]).toMatchObject({
+      content: expect.stringMatching(/^x+$/) as unknown,
+      status: "done",
+    });
   },
 });

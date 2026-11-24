@@ -10,7 +10,7 @@ import {
   serialize,
   type Objective,
 } from "../../src/project/objectives";
-import { setupProjects as setup, tick, tmpDir as tmp } from "./projectHarness";
+import { setupProjects as setup, tmpDir as tmp } from "./projectHarness";
 
 const objective = (id: string, over: Partial<Objective> = {}): Objective => ({
   id,
@@ -464,23 +464,29 @@ describe("the lead's objective tools", () => {
   });
 
   it("broadcast the board when a file is edited by hand", async () => {
-    const { create, frames, manager, base } = setup();
-    const { project } = create("clice");
-    const dir = path.join(base, ".agent-team", "projects", project.id, "objectives", "core");
-    fs.mkdirSync(dir, { recursive: true });
-    manager.list();
-    for (let i = 0; i < 20; i++) await tick();
-    fs.writeFileSync(path.join(dir, "hand.toml"), 'title = "by hand"\ngoal = "g"\n');
-    const seen = () =>
-      frames.some(
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+    });
+    try {
+      const { create, frames, manager, base } = setup();
+      const { project } = create("clice");
+      const dir = path.join(base, ".agent-team", "projects", project.id, "objectives", "core");
+      fs.mkdirSync(dir, { recursive: true });
+      manager.list();
+      await vi.advanceTimersByTimeAsync(250);
+      fs.writeFileSync(path.join(dir, "hand.toml"), 'title = "by hand"\ngoal = "g"\n');
+      await vi.advanceTimersByTimeAsync(250);
+      const seen = frames.some(
         (f) =>
           f.type === "project_updated" &&
           (f.project as { objectives: Array<{ id: string }> }).objectives.some(
             (o) => o.id === "core/hand",
           ),
       );
-    for (let i = 0; i < 400 && !seen(); i++) await tick();
-    expect(seen()).toBe(true);
-    manager.close();
+      expect(seen).toBe(true);
+      manager.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

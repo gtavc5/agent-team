@@ -2,7 +2,6 @@
 // base, a file's diff with both line numbers, and lines that never wrap.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, waitFor } from "@testing-library/react";
-import css from "../src/styles.css?raw";
 import { FilesPanel } from "../src/panels/FilesPanel";
 import { ChangesList, changeTree, parseDiff } from "../src/panels/ChangesView";
 import { fileIconName } from "../src/panels/Icon";
@@ -258,37 +257,6 @@ describe("the Files panel's icons and changes", () => {
         { path: "docs/new.md", status: "untracked", added: 2, removed: 0 },
         { path: "old.png", status: "deleted", added: null, removed: null },
       ];
-    }
-  });
-
-  it("never wraps a line of code or of a diff: it scrolls sideways", async () => {
-    const sheet = document.createElement("style");
-    sheet.textContent = css;
-    document.head.appendChild(sheet);
-    try {
-      const { container, getByTitle } = panel();
-      await waitFor(() => expect(container.querySelector(".dir-view")).not.toBeNull());
-      fireEvent.click(getByTitle("Changes against the base branch"));
-      await waitFor(() => expect(container.querySelector(".change-entry")).not.toBeNull());
-      fireEvent.click(container.querySelector(".change-entry")!);
-      await waitFor(() => expect(container.querySelector(".diff-row")).not.toBeNull());
-      const row = [...container.querySelectorAll(".diff-row")].find((r) =>
-        r.textContent?.includes("a line far wider"),
-      )!;
-      expect(getComputedStyle(row).whiteSpace).toBe("pre");
-      expect(getComputedStyle(container.querySelector(".diff-view")!).overflow).toBe("auto");
-      expect(getComputedStyle(container.querySelector(".diff-gutter")!).position).toBe("sticky");
-      // The sign stays with the numbers when the code scrolls sideways.
-      expect(row.querySelector(".diff-gutter .diff-sign")!.textContent).toBe("+");
-      const inner = container.querySelector(".diff-inner") as HTMLElement;
-      expect(inner.style.getPropertyValue("--diff-digits")).toBe("2ch");
-      const code = document.createElement("pre");
-      code.className = "code-text";
-      document.body.appendChild(code);
-      expect(getComputedStyle(code).whiteSpace).toBe("pre");
-      code.remove();
-    } finally {
-      sheet.remove();
     }
   });
 

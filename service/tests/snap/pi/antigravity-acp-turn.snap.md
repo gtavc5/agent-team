@@ -1,8 +1,8 @@
 ## 1 system done
   text "🤖 **A** joined the team"
 ## 2 user done
-  text "Run the synthetic ACP turn."
-## 3 agent done ctx 7/1000
-  text "ACP sample complete."
-  thinking "Consider the example."
-  tool read "**Read** `example.txt`" → "Example text." 5ms
+  text "Read fixture.ts with the read tool and quote the value in it."
+## 3 agent done ctx 15444/1000000
+  text "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  thinking "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  tool read "**Read** `fixture.ts`" → "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" 3ms

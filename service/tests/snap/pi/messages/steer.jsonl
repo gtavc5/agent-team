@@ -1,0 +1,2 @@
+{"header":{"source":"pi-deterministic E2E / Pi RPC","model":"pi-e2e/scenario","recordedAt":"2026-11-24T00:21:41.971Z"}}
+{"frame":{"id":"request","type":"response","command":"steer","success":true,"data":{"disposition":"queued"}}}

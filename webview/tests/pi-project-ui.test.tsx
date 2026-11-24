@@ -4,7 +4,6 @@ import { App } from "../src/App";
 import { MessageItem, StepGroup } from "../src/chat/messages";
 import { BoardPage } from "../src/project/BoardPage";
 import { reachable } from "../src/project/NotesView";
-import { applyEventsToMessage } from "../src/state/stream";
 import {
   useServer,
   type AgentInfo,
@@ -576,42 +575,6 @@ describe("Project v2", () => {
 });
 
 describe("stream and message rendering", () => {
-  it("keeps the maximum event count when subagent_done folds onto its start", () => {
-    const message = (startCount: number): Message => ({
-      id: "m1",
-      kind: "agent",
-      agentId: "a1",
-      content: "",
-      timestamp: NOW,
-      status: "streaming",
-      events: [
-        {
-          kind: "subagent_start",
-          content: "",
-          subagent: { taskId: "task", description: "work", eventCount: startCount },
-        },
-      ],
-    });
-    for (const [startCount, doneCount, expected] of [
-      [12, 4, 12],
-      [3, 19, 19],
-    ]) {
-      const out = applyEventsToMessage(message(startCount), [
-        {
-          kind: "subagent_done",
-          content: "",
-          subagent: {
-            taskId: "task",
-            description: "",
-            status: "completed",
-            eventCount: doneCount,
-          },
-        },
-      ]);
-      expect(out.events![0].subagent!.eventCount).toBe(expected);
-    }
-  });
-
   it("shows dispatching and outcome_unknown as distinct delivery states", () => {
     const base: Message = {
       id: "m1",

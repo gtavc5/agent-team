@@ -9,6 +9,7 @@
 // a pause between them. Never loop this.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { capturePi } from "./capture-pi.ts";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -388,6 +389,10 @@ async function record(backend: Backend, name: string): Promise<void> {
 }
 
 const [backend, ...names] = process.argv.slice(2);
+if (backend === "pi") {
+  await capturePi(names, SNAP);
+  process.exit(0);
+}
 if (backend !== "codex" || names.length === 0) {
   console.error("usage: npm run capture -- codex <name...>");
   process.exit(2);

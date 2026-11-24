@@ -1,0 +1,213 @@
+// Run via npm run capture -- pi scenario. No provider login or network call.
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import { execFileSync } from "node:child_process";
+import { steerReceipt } from "../service/tests/snap/pi-capture-contract.ts";
+import { moreExcerpts } from "./pi-scenario-excerpts.mjs";
+import { sanitizer } from "./capture-pi.ts";
+
+const rows = (text) =>
+  text
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+export function extract(dir, snap) {
+  const files = new Map(
+    rows(fs.readFileSync(path.join(dir, "files.ndjson"), "utf8")).map(({ file, data }) => [
+      file,
+      data,
+    ]),
+  );
+  const sessions = fs
+    .readdirSync(dir)
+    .filter((n) => n.endsWith(".jsonl"))
+    .map((n) => rows(fs.readFileSync(path.join(dir, n), "utf8")));
+  moreExcerpts(sessions, snap);
+  const lead = sessions.find((rows) =>
+    rows.some((r) => r.sent?.message === "pi-e2e-launch:reconcile"),
+  );
+  if (!lead) throw new Error("No deterministic E2E RPC trace");
+  const startup = lead
+    .slice(
+      0,
+      lead.findIndex((r) => r.sent?.type === "prompt"),
+    )
+    .filter((r) => r.frame?.type === "response");
+  const cleanBoot = sanitizer();
+  fs.writeFileSync(
+    path.join(snap, "pi/messages/startup.jsonl"),
+    [
+      {
+        header: {
+          source: "pi-deterministic E2E / startup RPC",
+          model: "pi-e2e/scenario",
+          recordedAt: new Date(startup[0].at).toISOString(),
+        },
+      },
+      ...startup.map((r) => ({ frame: cleanBoot(r.frame) })),
+    ]
+      .map((r) => JSON.stringify(r))
+      .join("\n") + "\n",
+  );
+  const steer = lead.find(
+    (r) => r.frame?.command === "steer" && r.frame.data?.disposition === "queued",
+  );
+  if (!steer || steer.frame.success !== true) throw new Error("Missing real steer receipt");
+  fs.writeFileSync(
+    path.join(snap, "pi/messages/steer.jsonl"),
+    JSON.stringify({
+      header: {
+        source: "pi-deterministic E2E / Pi RPC",
+        model: "pi-e2e/scenario",
+        recordedAt: new Date(steer.at).toISOString(),
+      },
+    }) +
+      "\n" +
+      JSON.stringify({ frame: steerReceipt(steer.frame) }) +
+      "\n",
+  );
+  for (const [kind, prompt, description] of [
+    [
+      "foreground",
+      "pi-e2e-launch:foreground",
+      "Foreground child results reconstruct separate detail cards.",
+    ],
+    [
+      "async",
+      "pi-e2e-launch:reconcile",
+      "A native async notify backfills both original child cards on wake-up.",
+    ],
+  ]) {
+    const start = lead.findIndex((r) => r.sent?.message === prompt);
+    const end = lead.findIndex((r, i) => i > start && r.sent?.type === "prompt");
+    if (start < 0 || end < 0) throw new Error("Incomplete scenario");
+    const clip = lead.slice(start, end),
+      entries = [],
+      slots = new Map(),
+      clean = sanitizer(slots);
+    function children(steps) {
+      const artifacts = {};
+      for (const s of steps) {
+        const file = s.sessionFile;
+        const slot = `$child-${Object.keys(artifacts).length + 1}`;
+        const records = rows(files.get(file));
+        const leaf = records.findLast((r) => r.message?.role === "assistant");
+        if (records[0].version !== 3 || !leaf) throw new Error("Invalid child artifact");
+        slots.set(file, slot);
+        // Use the actual finalized child message; no invented child transcript.
+        artifacts[slot] = [
+          { type: "session", version: 3, id: "child" },
+          { type: "message", id: "leaf", parentId: null, message: clean(leaf.message) },
+        ];
+      }
+      return artifacts;
+    }
+    for (const { at, frame: f, sent } of clip) {
+      const t = at - clip[0].at,
+        add = (e) => entries.push({ t, ...e });
+      if (sent) {
+        if (sent.type === "prompt") {
+          add({ step: { op: "send", text: prompt, i: 0 } });
+          add({ sent: { type: "prompt", message: prompt } });
+        } else if (sent.type === "get_session_stats") add({ sent: { type: sent.type } });
+        continue;
+      }
+      // Select native frames, not a reconstruction of intermediate deltas.
+      if (f.type === "response" && !["prompt", "get_session_stats"].includes(f.command)) continue;
+      if (
+        f.type.startsWith("tool_execution_") &&
+        (f.toolName !== "subagent" || f.type === "tool_execution_update")
+      )
+        continue;
+      if (
+        f.type.startsWith("message_") &&
+        (f.message?.role === "toolResult" ||
+          (f.message?.role === "custom" && f.message.customType !== "subagent-notify"))
+      )
+        continue;
+      if (
+        ![
+          "response",
+          "agent_start",
+          "agent_settled",
+          "message_start",
+          "message_end",
+          "tool_execution_start",
+          "tool_execution_end",
+        ].includes(f.type)
+      )
+        continue;
+      if (f.type === "tool_execution_end") {
+        const d = f.result.details;
+        if (d.asyncDir) slots.set(d.asyncDir, "$async-dir");
+        else add({ artifacts: children(d.results) });
+      }
+      if (f.type === "message_start" && f.message?.customType === "subagent-notify") {
+        const run = f.message.details.runs[0];
+        const status = JSON.parse(files.get(path.join(run.asyncDir, "status.json")));
+        slots.set(status.sessionId, "$owner-session");
+        add({
+          artifacts: {
+            ...children(status.steps),
+            "$async-status": [
+              clean({ runId: status.runId, sessionId: status.sessionId, steps: status.steps }),
+            ],
+          },
+        });
+      }
+      const raw = { ...f };
+      if (f.type === "response") delete raw.id; // player binds the in-flight request ID
+      const frame = clean(raw);
+      add({ frame });
+      if (
+        kind === "async" &&
+        f.command === "get_session_stats" &&
+        !entries.some((e) => e.step?.i === 1)
+      )
+        add({ step: { op: "check", name: "waiting", i: 1 } });
+      if (f.type === "message_start" && f.message?.customType === "subagent-notify")
+        add({ step: { op: "check", name: "notified", i: 2 } });
+    }
+    const model = clip.find((r) => r.frame?.message?.role === "assistant").frame.message;
+    if (model.provider !== "pi-e2e" || model.model !== "scenario")
+      throw new Error("Not the offline E2E provider");
+    const fixture = "pi-subagents-" + kind;
+    const header = {
+      backend: "pi",
+      fixture,
+      description,
+      source: "pi-deterministic E2E / Pi RPC excerpt",
+      model: "pi-e2e/scenario",
+      recordedAt: new Date(clip.at(-1).at).toISOString(),
+    };
+    fs.writeFileSync(
+      path.join(snap, "pi", fixture + ".jsonl"),
+      [{ header }, ...entries].map((r) => JSON.stringify(r)).join("\n") + "\n",
+    );
+  }
+}
+export function captureScenario(snap) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-scenario-"));
+  try {
+    const root = path.resolve(snap, "../../..");
+    const tap = new URL("./pi-scenario-tap.mjs", import.meta.url);
+    execFileSync(
+      process.execPath,
+      [
+        path.join(root, "node_modules/vitest/vitest.mjs"),
+        "run",
+        "tests/e2e/pi-deterministic.test.ts",
+      ],
+      {
+        cwd: path.join(root, "service"),
+        env: { ...process.env, PI_CAPTURE_SCENARIO: dir, NODE_OPTIONS: `--import=${tap.href}` },
+        timeout: 210000,
+        stdio: "inherit",
+      },
+    );
+    extract(dir, snap);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}

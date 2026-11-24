@@ -132,10 +132,15 @@ describe("the history index in its worker thread", () => {
     const { threaded, save } = setup();
     save("w1", history);
     await threaded.search({ terms: ["zebra"], limit: 1 });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const post = vi.spyOn(Worker.prototype, "postMessage");
-    for (let i = 0; i < 5; i++) save("w1", [...history, msg(`n${i}`, `giraffe ${i}`, 10 + i)]);
-    expect(post).not.toHaveBeenCalled();
-    await new Promise((r) => setTimeout(r, 1200));
+    try {
+      for (let i = 0; i < 5; i++) save("w1", [...history, msg(`n${i}`, `giraffe ${i}`, 10 + i)]);
+      expect(post).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1000);
+    } finally {
+      vi.useRealTimers();
+    }
     expect(post.mock.calls.filter(([m]) => (m as { changed?: true }).changed)).toHaveLength(1);
     const found = await threaded.search({ terms: ["giraffe"], limit: 10 });
     expect(found.hits.map((h) => h.message)).toEqual(["n4"]);
@@ -155,21 +160,24 @@ describe("the history index in its worker thread", () => {
     save("w1", history);
     await threaded.search({ terms: ["zebra"], limit: 1 });
     const first = worker()!;
+    const entriesReplied = new Promise<void>((r) => first.once("message", () => r()));
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const started = Date.now();
-    const slow = threaded.sql(
-      "with recursive c(x) as (select 1 union all select x + 1 from c where x < 300000000) select count(*) as n from c",
-      [w1],
-      1,
-    );
-    const failed = expect(slow).rejects.toThrow("took longer than 20 s");
-    // Until its process is inside the query.
-    for (const t = Date.now(); Date.now() - t < 1000;) {
-      await new Promise((r) => setImmediate(r));
+    try {
+      const slow = threaded.sql(
+        "with recursive c(x) as (select 1 union all select x + 1 from c where x < 300000000) select count(*) as n from c",
+        [w1],
+        1,
+      );
+      const failed = expect(slow).rejects.toThrow("took longer than 20 s");
+      // Wait until entries() finishes and sql() spawns the process with its 20s kill timer.
+      await entriesReplied;
+      while (vi.getTimerCount() === 0) await new Promise((r) => setImmediate(r));
+      vi.advanceTimersByTime(20_000);
+      await failed;
+    } finally {
+      vi.useRealTimers();
     }
-    vi.advanceTimersByTime(20_000);
-    await failed;
-    vi.useRealTimers();
     // Killed, not left to finish (that takes minutes).
     expect(Date.now() - started).toBeLessThan(5000);
     expect((await threaded.sql("select 1 as n", [w1], 1)).rows).toEqual([{ n: 1 }]);

@@ -1,32 +1,23 @@
 import { expect } from "vitest";
+import { captures } from "../pi-captures.ts";
 import { agentMessages, fixture } from "../fixture.ts";
 
 export default fixture({
-  description: "Pi streams thinking and text, then settles with usage and context.",
-  steps: [
-    { op: "send", text: "Describe a sample." },
-    { op: "check", name: "stats" },
-  ],
+  ...captures["basic-turn"],
   verify(r) {
-    expect(r.events.filter((e) => e.kind === "thinking_delta").map((e) => e.content)).toEqual([
-      "Consider the example.",
-      "",
-    ]);
+    const thinking = r.events.filter((e) => e.kind === "thinking_delta");
+    expect(thinking[0]).toMatchObject({ content: "", startedAt: expect.any(Number) as unknown });
+    expect(thinking.at(-1)).toMatchObject({ content: "", durationMs: 2630 });
     expect(agentMessages(r)[0]).toMatchObject({
       status: "done",
-      content: "A synthetic reply.",
-      context: { tokens: 7, window: 1000 },
+      content: "xxxxx",
+      context: { tokens: 412, window: 272000 },
     });
-    expect(r.sessions[0].usage).toMatchObject({
-      input_tokens: 6,
-      output_tokens: 3,
-      cache_read_tokens: 1,
-      turns: 1,
-    });
+    expect(r.sessions[0].usage).toMatchObject({ input_tokens: 412, output_tokens: 37, turns: 1 });
     expect(r.pi!.checkpoints.stats.contextUsage).toMatchObject({
-      totalTokens: 7,
-      maxTokens: 1000,
-      model: "synthetic/pi-model",
+      totalTokens: 449,
+      maxTokens: 272000,
+      model: "openai-codex/gpt-6.2-astra",
     });
   },
 });

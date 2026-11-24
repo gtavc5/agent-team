@@ -6,7 +6,6 @@ import { MessageItem, chipLabelFor } from "../src/chat/messages";
 import { CreateWorkspaceDialog } from "../src/workspace/dialogs";
 import { useServer, type Message, type Project, type Workspace } from "../src/state/useServer";
 import { FakeSocket } from "./fakeSocket";
-import css from "../src/styles.css?raw";
 
 const NOW = 1_800_000_000_000;
 
@@ -166,53 +165,6 @@ describe("project groups", () => {
     expect(tag(worker)).toBeNull();
     expect(tag(working)).toBeNull();
     expect(tag(waiting, "w1")).toBeNull();
-  });
-
-  it("cut a long session name, not the time or the marks after it, and keep it whole in its title", () => {
-    const sheet = document.createElement("style");
-    sheet.textContent = css;
-    document.head.appendChild(sheet);
-    try {
-      const long =
-        "fix the wake-up time the CLI rounds up to the minute so the panel shows it early";
-      const { container } = render(
-        <Sidebar
-          {...sidebarProps()}
-          workspaces={[lead, { ...worker, name: long, awaitsUser: true }]}
-        />,
-      );
-      const row = container.querySelector(".task-name-text")!;
-      // A flex row cuts no text of its own: the name is a box that can.
-      expect([...row.childNodes].map((n) => n.nodeName)).toEqual(["SPAN", "SPAN"]);
-      const name = row.querySelector(".clip")!;
-      expect(name.textContent).toBe(long);
-      expect(name.getAttribute("title")).toBe(long);
-      const style = getComputedStyle(name);
-      expect([style.overflow, style.textOverflow, style.whiteSpace, style.minWidth]).toEqual([
-        "hidden",
-        "ellipsis",
-        "nowrap",
-        "0px",
-      ]);
-      expect(getComputedStyle(row.querySelector(".awaits-tag")!).flexShrink).toBe("0");
-      // The time and × lie over the name's end, shown on hover: nothing
-      // moves, and the × stays in the keyboard's reach.
-      const hover = container.querySelector(".task-item .task-hover")!;
-      expect([...hover.children].map((e) => e.className)).toEqual(["task-time", "task-delete"]);
-      const shown = getComputedStyle(hover);
-      expect([shown.position, shown.opacity, shown.pointerEvents]).toEqual([
-        "absolute",
-        "0",
-        "none",
-      ]);
-      expect(getComputedStyle(hover.querySelector(".task-delete")!).display).not.toBe("none");
-      // An archived row's overlay brings its own time over the inline one.
-      expect(css).toMatch(
-        /\.task-item-archived:hover \.task-name \.task-time \{\s*visibility: hidden;/,
-      );
-    } finally {
-      sheet.remove();
-    }
   });
 
   it("show the lead's unread count on the project's row", () => {
@@ -490,37 +442,6 @@ describe("archives in the sidebar", () => {
     expect(labels()).toEqual(["clice", "Archived projects", "clice2"]);
     fireEvent.click(getByTitle("Bring clice2 back among the projects"));
     expect(p.onRestoreProject).toHaveBeenCalledWith("p2");
-  });
-
-  it("style an archive's row and Restore like the sidebar's own, not bare text and buttons", () => {
-    const sheet = document.createElement("style");
-    sheet.textContent = css;
-    document.head.appendChild(sheet);
-    try {
-      const shelved = { ...project, id: "p2", name: "clice2", root: "/repo/clice2", archivedAt: 1 };
-      const lead2 = ws("lead2", {
-        cwd: "/repo/clice2",
-        projectLink: { projectId: "p2", role: "lead" },
-      });
-      const { container, getByTitle } = render(
-        <Sidebar
-          {...props({
-            workspaces: [...props().workspaces, lead2],
-            projects: [project, shelved],
-          })}
-        />,
-      );
-      const toggle = container.querySelector(".ws-archive-toggle")!;
-      expect(getComputedStyle(toggle).fontSize).toBe("var(--fs-meta)");
-      expect(getComputedStyle(toggle).display).toBe("flex");
-      fireEvent.click(container.querySelector(".ws-shelf .ws-archived-header")!);
-      const restore = getByTitle("Bring clice2 back among the projects");
-      expect(getComputedStyle(restore).borderRadius).toBe("8px");
-      // Shown on hover, like the header's other actions.
-      expect(getComputedStyle(restore).opacity).toBe("0");
-    } finally {
-      sheet.remove();
-    }
   });
 
   it("open an archived project's lead from its row, and list it nowhere else", () => {

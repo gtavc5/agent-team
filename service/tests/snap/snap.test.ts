@@ -57,6 +57,11 @@ for (const backend of ["codex", "pi"] as Backend[]) {
         expect(rec.header.description, "description in the recording header").toBe(
           fixture.description,
         );
+        if (backend === "pi") {
+          expect(rec.header.source).toMatch(/pi --mode rpc|pi-deterministic E2E/);
+          expect(rec.header.model).not.toMatch(/synthetic/);
+          expect(Number.isFinite(Date.parse(rec.header.recordedAt))).toBe(true);
+        }
         const result = await replay(backend, rec, fixture);
         if (backend === "pi") expect(fixture.verify).toBeTypeOf("function");
         fixture.verify?.(result);

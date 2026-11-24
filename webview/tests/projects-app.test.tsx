@@ -283,18 +283,6 @@ describe("the board page", () => {
     expect(document.querySelector(".board-page")).toBeNull();
     expect(title()).toMatch(/^modules/);
   });
-
-  it("hands the question to the lead with the objective named in the composer", () => {
-    boot([lead, worker], [withBoard], "w1");
-    fireEvent.click(document.querySelector('.side-rail [aria-label="Objectives of clice"]')!);
-    fireEvent.click(document.querySelector(".bp-card")!);
-    fireEvent.click(document.querySelector(".bp-ask")!);
-    frame();
-    expect(title()).toMatch(/^clice · lead/);
-    expect((document.querySelector("textarea") as HTMLTextAreaElement).value).toBe(
-      "About core/modules: ",
-    );
-  });
 });
 
 describe("the open workspace archived while in view", () => {

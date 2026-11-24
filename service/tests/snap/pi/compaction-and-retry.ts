@@ -15,7 +15,7 @@ export default fixture({
     const { retry, compacting, compacted, progress, settled } = r.pi!.checkpoints;
     for (const phase of [retry, compacting, compacted, progress])
       expect(phase).toMatchObject({ runState: "working", terminalCount: 0 });
-    expect(retry.retryBanner).toBe("Retrying (1/3 in 2s): Synthetic transient error.");
+    expect(retry.retryBanner).toBe("Retrying (1/2 in 0s): 503 fixture service unavailable");
     expect(compacted.retryBanner).toBe(retry.retryBanner);
     expect(progress.retryBanner).toBeNull();
     expect(settled).toMatchObject({
@@ -29,8 +29,8 @@ export default fixture({
       "",
     ]);
     expect(agentMessages(r)[0].events?.map((e) => [e.kind, e.content])).toEqual([
-      ["compact", "Compacting context (threshold)"],
-      ["compact", "Context compacted (threshold): 900 → ~320 tokens"],
+      ["compact", "Compacting context (overflow)"],
+      ["compact", "Context compacted (overflow): 5002 → ~2209 tokens"],
     ]);
   },
 });

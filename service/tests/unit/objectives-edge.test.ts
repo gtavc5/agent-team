@@ -1,11 +1,11 @@
 // Objective files under adversarial text, hand edits and racing writes.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as fs from "fs";
 import fsModule from "fs";
 import * as path from "path";
 import { syncBuiltinESMExports } from "module";
 import { parse, serialize, type Objective } from "../../src/project/objectives";
-import { setupProjects as setup, tick } from "./projectHarness";
+import { setupProjects as setup } from "./projectHarness";
 
 const base = (over: Partial<Objective> = {}): Objective => ({
   id: "a/b",
@@ -102,12 +102,28 @@ describe("hand edits", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it("an Emacs lock file (dangling .#x.toml symlink) does not break the board", async () => {
-    const { create, call, base: b, manager } = setup();
-    const { project, lead } = create("p");
-    await call(lead, "write_objective", { id: "a/x", title: "x", goal: "g" });
-    fs.symlinkSync("editor@host.example:456", path.join(objDir(b, project.id, "a"), ".#x.toml"));
-    expect(() => manager.list()).not.toThrow();
+  it("an Emacs lock file (dangling .#x.toml symlink) does not break the board or throw from the watcher", async () => {
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+    });
+    const errors: unknown[] = [];
+    const listeners = process.listeners("uncaughtException");
+    process.removeAllListeners("uncaughtException");
+    process.on("uncaughtException", (e) => errors.push(e));
+    try {
+      const { create, call, base: b, manager } = setup();
+      const { project, lead } = create("p");
+      await call(lead, "write_objective", { id: "a/x", title: "x", goal: "g" });
+      await vi.advanceTimersByTimeAsync(250);
+      fs.symlinkSync("editor@host.example:456", path.join(objDir(b, project.id, "a"), ".#x.toml"));
+      await vi.advanceTimersByTimeAsync(250);
+      expect(() => manager.list()).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+      process.removeAllListeners("uncaughtException");
+      for (const l of listeners) process.on("uncaughtException", l);
+    }
+    expect(errors.map(String)).toEqual([]);
   });
 
   it("an unknown key added by hand is reported instead of vanishing on the next write", async () => {
@@ -123,27 +139,35 @@ describe("hand edits", () => {
   });
 
   it("a hand edit reaches the board after the lead has written the file twice", async () => {
-    const { create, call, base: b, frames } = setup();
-    const { project, lead } = create("p");
-    // Tool calls come one at a time, with the event loop turning in between.
-    await call(lead, "write_objective", { id: "a/x", title: "x", goal: "g" });
-    for (let i = 0; i < 60; i++) await tick();
-    await call(lead, "add_items", { objective_id: "a/x", tasks: ["one"] });
-    for (let i = 0; i < 60; i++) await tick();
-    frames.length = 0;
-    for (let i = 0; i < 20; i++) await tick();
-    const file = path.join(objDir(b, project.id, "a"), "x.toml");
-    fs.writeFileSync(file, fs.readFileSync(file, "utf-8").replace('title = "x"', 'title = "HAND"'));
-    const seen = () =>
-      frames.some(
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+    });
+    try {
+      const { create, call, base: b, frames } = setup();
+      const { project, lead } = create("p");
+      // Tool calls come one at a time, with the watcher interval running in between.
+      await call(lead, "write_objective", { id: "a/x", title: "x", goal: "g" });
+      await vi.advanceTimersByTimeAsync(250);
+      await call(lead, "add_items", { objective_id: "a/x", tasks: ["one"] });
+      await vi.advanceTimersByTimeAsync(250);
+      frames.length = 0;
+      const file = path.join(objDir(b, project.id, "a"), "x.toml");
+      fs.writeFileSync(
+        file,
+        fs.readFileSync(file, "utf-8").replace('title = "x"', 'title = "HAND"'),
+      );
+      await vi.advanceTimersByTimeAsync(250);
+      const seen = frames.some(
         (f) =>
           f.type === "project_updated" &&
           (f.project as { objectives: Array<{ title?: string }> }).objectives.some(
             (o) => o.title === "HAND",
           ),
       );
-    for (let i = 0; i < 400 && !seen(); i++) await tick();
-    expect(seen()).toBe(true);
+      expect(seen).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

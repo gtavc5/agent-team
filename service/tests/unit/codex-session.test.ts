@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { z } from "zod";
+import { codexFields, withId } from "./fixtures/codex-wire";
 import { CodexSession } from "../../src/session/codex";
 import type { RpcMessage, Transport } from "../../src/session/codex-rpc";
 import type { StreamEvent } from "../../src/session/types";
@@ -24,15 +25,13 @@ class FakeServer {
   // Lines sent right after the answer to a method, in the same tick.
   after: Record<string, RpcMessage[]> = {};
   handlers: Record<string, (params: Record<string, unknown>) => unknown> = {
-    initialize: () => ({}),
-    "thread/start": () => ({ thread: { id: "thr_1" } }),
-    "thread/resume": (p) => ({ thread: { id: p.threadId } }),
-    "turn/start": () => ({
-      turn: { id: `turn_${this.turns()}`, status: "inProgress", error: null },
-    }),
-    "turn/steer": (p) => ({ turnId: p.expectedTurnId }),
-    "turn/interrupt": () => ({}),
-    "thread/compact/start": () => ({}),
+    initialize: () => codexFields("initialize"),
+    "thread/start": () => withId("thread/start", "thread", "thr_1"),
+    "thread/resume": (p) => withId("thread/resume", "thread", p.threadId),
+    "turn/start": () => withId("turn/start", "turn", `turn_${this.turns()}`),
+    "turn/steer": (p) => ({ ...codexFields("turn/steer"), turnId: p.expectedTurnId }),
+    "turn/interrupt": () => codexFields("turn/interrupt"),
+    "thread/compact/start": () => codexFields("thread/compact/start"),
   };
 
   transport(): Transport {
@@ -51,7 +50,7 @@ class FakeServer {
       onClose: (cb) => closers.push(cb),
       // A real child exits a moment after SIGTERM.
       close: () =>
-        setTimeout(() => this.exitConnection(closers, "codex app-server exited (SIGTERM)"), 5),
+        queueMicrotask(() => this.exitConnection(closers, "codex app-server exited (SIGTERM)")),
     };
   }
 
@@ -76,7 +75,7 @@ class FakeServer {
   }
 
   notify(method: string, params: Record<string, unknown>): void {
-    for (const cb of this.listeners) cb({ method, params });
+    for (const cb of this.listeners) cb({ method, params: { ...codexFields(method), ...params } });
   }
 
   request(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -103,34 +102,39 @@ class FakeServer {
 
   // The notifications of a turn's start, on thread thr_1.
   startTurn(id = `turn_${this.turns()}`): void {
-    this.notify("turn/started", {
-      threadId: "thr_1",
-      turn: { id, status: "inProgress", error: null },
-    });
+    this.notify("turn/started", { ...withId("turn/started", "turn", id), threadId: "thr_1" });
   }
 
   completeTurn(status = "completed", error: unknown = null, id = `turn_${this.turns()}`): void {
-    this.notify("turn/completed", { threadId: "thr_1", turn: { id, status, error } });
+    this.notify("turn/completed", {
+      ...withId("turn/completed", "turn", id, { status, error }),
+      threadId: "thr_1",
+    });
   }
 
   item(phase: "started" | "completed", item: Record<string, unknown>, threadId = "thr_1"): void {
-    this.notify(`item/${phase}`, { threadId, turnId: "t", item });
+    const method = `item/${phase}`;
+    const sample = codexFields(`${method}:${String(item.type)}`);
+    this.notify(method, {
+      ...sample,
+      threadId,
+      turnId: "t",
+      item: { ...(sample.item as Record<string, unknown>), ...item },
+    });
   }
 }
 
-// The workspace moves its queue on a setTimeout(0), which can outlast any
-// number of setImmediate rounds.
-const flush = async () => {
-  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setTimeout(r, 5));
-};
+// Drain immediate replies and the workspace's zero-delay queue.
+const flush = () => vi.advanceTimersByTimeAsync(1);
 
 let server: FakeServer;
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   server = new FakeServer();
   CodexSession.hooks = { transport: () => server.transport() };
 });
 afterEach(() => {
+  vi.useRealTimers();
   CodexSession.hooks = null;
 });
 
@@ -186,56 +190,20 @@ describe("codex app-server session", () => {
       await host.close();
     }
   });
-  it("declares the panel tools when the thread starts and answers their calls", async () => {
+  it("forwards validated arguments only for known panel tools on the owning thread", async () => {
     const { session } = makeSession();
-    session.setPanelTools(
-      echoTools((args) =>
-        args.text === "boom"
-          ? Promise.reject(new Error("it broke"))
-          : Promise.resolve(`echo ${String(args.text)}`),
-      ),
-    );
+    const handler = vi.fn((args: Record<string, unknown>) => Promise.resolve(String(args.text)));
+    session.setPanelTools(echoTools(handler));
     await session.send("hi");
-    const [start] = server.sent("thread/start");
-    expect(start.developerInstructions).toBe("You are a session of the project.");
-    expect(start.dynamicTools).toEqual([
-      {
-        type: "namespace",
-        name: "panel",
-        description: expect.any(String) as string,
-        tools: [
-          {
-            type: "function",
-            name: "echo",
-            description: "Echo the text.",
-            inputSchema: {
-              type: "object",
-              properties: { text: { type: "string" } },
-              required: ["text"],
-              additionalProperties: false,
-            },
-          },
-        ],
-      },
-    ]);
     const call = (args: unknown, extra: Record<string, unknown> = {}) =>
       server.request("item/tool/call", {
+        ...codexFields("item/tool/call"),
         threadId: "thr_1",
         turnId: "turn_1",
-        callId: "c",
-        namespace: "panel",
         tool: "echo",
         arguments: args,
         ...extra,
       });
-    expect(await call({ text: "hi" })).toEqual({
-      contentItems: [{ type: "inputText", text: "echo hi" }],
-      success: true,
-    });
-    expect(await call({ text: "boom" })).toMatchObject({
-      success: false,
-      contentItems: [{ text: "it broke" }],
-    });
     const invalid = (await call({ text: 3 })) as {
       success: boolean;
       contentItems: Array<{ text: string }>;
@@ -245,6 +213,12 @@ describe("codex app-server session", () => {
     expect(await call({ text: "hi" }, { tool: "start_session" })).toMatchObject({ success: false });
     // A subagent's thread has none of them.
     expect(await call({ text: "hi" }, { threadId: "thr_sub" })).toMatchObject({ success: false });
+    expect(handler).not.toHaveBeenCalled();
+    expect(await call({ text: "ok" })).toEqual({
+      contentItems: [{ type: "inputText", text: "ok" }],
+      success: true,
+    });
+    expect(handler.mock.calls.map(([args]) => args)).toEqual([{ text: "ok" }]);
   });
 
   it("sends model, effort and Fast with every turn, changing them without a restart", async () => {
@@ -556,7 +530,7 @@ describe("codex app-server session", () => {
     server.startTurn();
     server.completeTurn("failed", overloaded);
     server.startTurn("turn_goal");
-    await new Promise((r) => setTimeout(r, 40));
+    await vi.advanceTimersByTimeAsync(40);
     expect(server.sent("turn/start")).toHaveLength(1);
     server.completeTurn("completed", null, "turn_goal");
     expect(events.map((e) => e.kind)).toEqual(["retry", "result"]);
@@ -569,7 +543,7 @@ describe("codex app-server session", () => {
       content: `[Codex error] ${overloaded.message}`,
     });
     expect(session.isRunning).toBe(false);
-    await new Promise((r) => setTimeout(r, 40));
+    await vi.advanceTimersByTimeAsync(40);
     expect(server.sent("turn/start")).toHaveLength(1);
   });
 

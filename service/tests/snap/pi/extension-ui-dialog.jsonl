@@ -1,20 +1,29 @@
-{"header":{"backend":"pi","fixture":"extension-ui-dialog","description":"A blocking extension dialog still allows stdout frames before the user responds.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
-{"step":{"op":"send","text":"Ask for confirmation.","i":0},"t":0}
-{"sent":{"type":"prompt","message":"Ask for confirmation."},"t":5}
-{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
-{"frame":{"type":"agent_start"},"t":15}
-{"frame":{"type":"message_end","message":{"role":"user"}},"t":20}
-{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
-{"frame":{"type":"extension_ui_request","id":"confirmation","method":"confirm","title":"Continue?","message":"Synthetic confirmation."},"t":30}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Consider the example."}},"t":35}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"Consider the example."}},"t":40}
-{"step":{"op":"check","name":"dialogOpen","i":1},"t":45}
-{"step":{"op":"uiDialogResponse","requestId":"confirmation","confirmed":true,"i":2},"t":50}
-{"sent":{"type":"extension_ui_response","id":"confirmation","confirmed":true},"t":55}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Conf"}},"t":60}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"irmed."}},"t":65}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"Confirmed."}},"t":70}
-{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"thinking","thinking":"Consider the example."},{"type":"text","text":"Confirmed."}]}},"t":75}
-{"frame":{"type":"agent_settled"},"t":80}
-{"sent":{"type":"get_session_stats"},"t":85}
-{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":90}
+{"header":{"backend":"pi","fixture":"extension-ui-dialog","source":"pi --mode rpc","cli":"1.6.0","model":"openai-codex/gpt-6.2-astra","description":"A blocking extension dialog still allows stdout frames before the user responds.","recordedAt":"2026-11-24T00:09:07.966Z"}}
+{"t":0,"step":{"op":"send","text":"Calculate 313 times 291 minus 511 and reply with just the number.","i":0}}
+{"t":0,"sent":{"type":"prompt","message":"Calculate 313 times 291 minus 511 and reply with just the number."}}
+{"t":289,"frame":{"type":"extension_ui_request","id":"confirmation","method":"confirm","title":"sample","message":"sample"}}
+{"t":289,"frame":{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"t":289,"frame":{"type":"agent_start"}}
+{"t":289,"frame":{"type":"turn_start"}}
+{"t":289,"frame":{"type":"message_start","message":{"role":"sample","content":"","field2":{"field0":"sample","field1":"sample","field2":"sample","field3":"sample","cwd":"sample"},"timestamp":1795478942041}}}
+{"t":289,"frame":{"type":"message_end","message":{"role":"sample","content":"","field2":{"field0":"sample","field1":"sample","field2":"sample","field3":"sample","cwd":"sample"},"timestamp":1795478942041}}}
+{"t":289,"frame":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}],"timestamp":1795478942040}}}
+{"t":289,"frame":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}],"timestamp":1795478942040}}}
+{"t":1174,"frame":{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"sample","timestamp":1795478942053}}}
+{"t":2942,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"thinking_start","contentIndex":0}}}
+{"t":5993,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"xxxxxxxxxxxxxxxxxxxxxxxxxx"}}}
+{"t":5994,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"xx"}}}
+{"t":5994,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"xxxxxxxxxxxxxxxxxxxxxxxxxx"}}}
+{"t":5994,"step":{"op":"check","name":"dialogOpen","i":1}}
+{"t":5994,"step":{"op":"uiDialogResponse","requestId":"confirmation","confirmed":true,"i":2}}
+{"t":5994,"sent":{"type":"extension_ui_response","id":"confirmation","confirmed":true}}
+{"t":6013,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_start","contentIndex":1}}}
+{"t":6013,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"xxx"}}}
+{"t":6014,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"xx"}}}
+{"t":6206,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"xxxxx"}}}
+{"t":6211,"frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"xxxxxxxxxxxxxxxxxxxxxxxxxx","thinkingSignature":"sample"},{"type":"text","text":"xxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":412,"output":34,"cacheRead":0,"cacheWrite":0,"reasoning":26,"totalTokens":446,"cost":{"input":0.003296,"output":0.00136,"cacheRead":0,"cacheWrite":0,"total":0.004656,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795478942053,"responseId":"id-2","rawStopReason":"completed","durationMs":5908,"thinkingLevel":"high"}}}
+{"t":6211,"frame":{"type":"turn_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"xxxxxxxxxxxxxxxxxxxxxxxxxx","thinkingSignature":"sample"},{"type":"text","text":"xxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":412,"output":34,"cacheRead":0,"cacheWrite":0,"reasoning":26,"totalTokens":446,"cost":{"input":0.003296,"output":0.00136,"cacheRead":0,"cacheWrite":0,"total":0.004656,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795478942053,"responseId":"id-2","rawStopReason":"completed","durationMs":5908,"thinkingLevel":"high"},"toolResults":[]}}
+{"t":6211,"frame":{"type":"agent_end","messages":[{"role":"sample","content":"","field2":{"field0":"sample","field1":"sample","field2":"sample","field3":"sample","cwd":"sample"},"timestamp":1795478942041},{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}],"timestamp":1795478942040},{"role":"assistant","content":[{"type":"thinking","thinking":"xxxxxxxxxxxxxxxxxxxxxxxxxx","thinkingSignature":"sample"},{"type":"text","text":"xxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":412,"output":34,"cacheRead":0,"cacheWrite":0,"reasoning":26,"totalTokens":446,"cost":{"input":0.003296,"output":0.00136,"cacheRead":0,"cacheWrite":0,"total":0.004656,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795478942053,"responseId":"id-2","rawStopReason":"completed","durationMs":5908,"thinkingLevel":"high"}],"field2":false}}
+{"t":6213,"frame":{"type":"agent_settled","aborted":false}}
+{"t":6213,"sent":{"type":"get_session_stats"}}
+{"t":6214,"frame":{"type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sample","userMessages":1,"assistantMessages":1,"toolCalls":0,"toolResults":0,"totalMessages":3,"tokens":{"input":412,"output":34,"cacheRead":0,"cacheWrite":0,"total":446},"cost":0.004656,"contextUsage":{"tokens":446,"contextWindow":272000,"percent":0.16397058823529412}}}}

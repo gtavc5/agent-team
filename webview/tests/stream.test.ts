@@ -34,6 +34,25 @@ const carrier = (taskId: string, inner: StreamEvent): StreamEvent =>
   });
 
 describe("applyEventsToMessage", () => {
+  it.each([
+    [12, 4, 12],
+    [3, 19, 19],
+  ])(
+    "keeps the larger subagent transcript count (%i at start, %i at completion)",
+    (start, end, expected) => {
+      const info = { taskId: "task", description: "work" };
+      const message = msg({
+        events: [ev("subagent_start", { subagent: { ...info, eventCount: start } })],
+      });
+      const out = applyEventsToMessage(message, [
+        ev("subagent_done", {
+          subagent: { ...info, status: "completed", eventCount: end },
+        }),
+      ]);
+      expect(out.events![0].subagent!.eventCount).toBe(expected);
+    },
+  );
+
   it("appends text deltas and ignores thinking deltas", () => {
     const out = applyEventsToMessage(msg({ content: "He" }), [
       ev("text_delta", { content: "llo" }),

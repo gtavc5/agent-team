@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { piFrames } from "../snap/pi-wire";
 import {
   decodeChildTranscriptArtifact,
   decodePiSessionV3Tree,
@@ -16,6 +17,13 @@ import {
 } from "../../src/session/pi-subagents";
 import { extractPiToolResultText, formatPiToolUse } from "../../src/session/pi-tool-format";
 import type { ActiveAsyncRunRecord, StreamEvent } from "../../src/session/types";
+
+function restoredMessage(name: string) {
+  const file = path.join(__dirname, "../snap/pi/messages", `${name}.jsonl`);
+  const [, response] = fs.readFileSync(file, "utf8").trim().split("\n");
+  const entry = JSON.parse(response) as { frame: { data: { messages: unknown[] } } };
+  return entry.frame.data.messages[0];
+}
 
 const temporaryDirectories: string[] = [];
 
@@ -52,7 +60,7 @@ describe("subagent modes and canonical identities", () => {
     expect(resolveCanonicalChildId({ childId: "", workflowKey: "workflow", runId: "run" }, 1)).toBe(
       "workflow",
     );
-    expect(resolveCanonicalChildId({ childId: "", workflowKey: "", runId: "run" }, 2)).toBe("run");
+    expect(resolveCanonicalChildId({ childId: 19, workflowKey: "", runId: "run" }, 2)).toBe("run");
     expect(resolveCanonicalChildId({ childId: "", workflowKey: "", runId: "" }, 3)).toBe("step:3");
   });
 });
@@ -92,18 +100,34 @@ describe("Pi tool Markdown normalization", () => {
   });
 
   it.each([
-    [{}, ""],
-    [{ offset: 4 }, " · offset 4"],
-    [{ limit: 20 }, " · limit 20"],
-    [{ offset: 4, limit: 20 }, " · offset 4 · limit 20"],
-    [{ offset: 1, limit: 0 }, " · offset 1 · limit 0"],
-  ])("keeps Read arguments %j on one line", (options, suffix) => {
-    expect(formatPiToolUse("read", { path: "a.ts", ...options })).toEqual({
+    ["openai-read", ""], // Explicit nulls, not omitted keys.
+    ["gemini-read", " · offset 1 · limit 120"],
+    ["kimi-read", " · offset 500 · limit 165"],
+  ])("formats the actual %s call in one line", (name, suffix) => {
+    const {
+      content: [call],
+    } = restoredMessage(name) as {
+      content: { name: string; arguments: Record<string, unknown> }[];
+    };
+    expect(formatPiToolUse(call.name, call.arguments)).toEqual({
       toolName: "read",
       toolSource: "builtin",
-      content: `**Read** \`a.ts\`${suffix}`,
-      toolInput: { tool: "Read", file_path: "a.ts" },
+      content: `**Read** \`fixture.ts\`${suffix}`,
+      toolInput: { tool: "Read", file_path: "fixture.ts" },
     });
+  });
+
+  it("keeps one-sided and zero Read bounds", () => {
+    const {
+      content: [{ arguments: args }],
+    } = restoredMessage("openai-read") as { content: { arguments: Record<string, unknown> }[] };
+    for (const [bounds, suffix] of [
+      [{ offset: 4 }, " · offset 4"],
+      [{ limit: 0 }, " · limit 0"],
+    ] as const)
+      expect(formatPiToolUse("read", { ...args, ...bounds }).content).toBe(
+        `**Read** \`fixture.ts\`${suffix}`,
+      );
   });
 
   it("formats Write content and extra arguments without losing either", () => {
@@ -146,26 +170,23 @@ describe("Pi tool Markdown normalization", () => {
     expect(result.toolInput).toEqual({ tool: "Edit", file_path: "a.ts" });
   });
 
-  it.each([{}, { edits: [] }])(
-    "shows a path-only Edit for missing or empty replacements %j",
-    (options) => {
-      expect(formatPiToolUse("edit", { path: "a.ts", ...options })).toMatchObject({
-        content: "**Edit** `a.ts`",
-        toolInput: { tool: "Edit", file_path: "a.ts" },
+  it("distinguishes absent and malformed Edit replacements without dumping them", () => {
+    const { path } = piFrames("tools-bash-edit").find(
+      (f) => f.type === "tool_execution_start" && f.toolName === "edit",
+    )!.args as { path: string };
+    for (const [options, count] of [
+      [{}, 0],
+      [{ edits: [] }, 0],
+      [{ edits: [null, { oldText: "a" }, { newText: 1 }] }, 3],
+      [{ edits: "?" }, 1],
+      [{ old_string: "before" }, 1],
+      [{ old_string: null, new_string: null }, 1],
+    ] as const) {
+      expect(formatPiToolUse("edit", { path, ...options })).toMatchObject({
+        content: `**Edit** \`${path}\`${count ? ` · ${count} invalid replacement${count === 1 ? "" : "s"}` : ""}`,
+        toolInput: { tool: "Edit", file_path: path },
       });
-    },
-  );
-
-  it.each([
-    [{ edits: [null, { oldText: "a" }, { newText: 1 }] }, "3 invalid replacements"],
-    [{ edits: "?" }, "1 invalid replacement"],
-    [{ old_string: "before" }, "1 invalid replacement"],
-    [{ old_string: null, new_string: null }, "1 invalid replacement"],
-  ])("indicates malformed Edit arguments %j without dumping them", (options, label) => {
-    expect(formatPiToolUse("edit", { path: "a.ts", ...options })).toMatchObject({
-      content: `**Edit** \`a.ts\` · ${label}`,
-      toolInput: { tool: "Edit", file_path: "a.ts" },
-    });
+    }
   });
 
   it.each([
@@ -187,44 +208,35 @@ describe("Pi tool Markdown normalization", () => {
     expect(result.content).toBe("**Edit** `a.ts`\n```diff\n- a\n+ b\n\n- c\n+ d\n```");
   });
 
-  it("formats legacy top-level Edit keys as a diff and extracts legacy-compatible toolInput", () => {
-    const result = formatPiToolUse("edit", {
-      path: "a.ts",
-      oldText: "const a = 1;",
-      newText: "const a = 2;",
-      replaceAll: true,
-    });
-    expect(result.content.split("\n")[0]).toBe("**Edit** `a.ts`");
-    expect(result.content).toContain("- const a = 1;");
-    expect(result.content).toContain("+ const a = 2;");
-    expect(result.content).toContain('"replaceAll": true');
-    expect(result.toolInput).toEqual({
-      tool: "Edit",
-      file_path: "a.ts",
-      old_string: "const a = 1;",
-      new_string: "const a = 2;",
-    });
-
-    const legacy = formatPiToolUse("edit", {
-      file_path: "b.ts",
-      old_string: "old",
-      new_string: "new",
-    });
-    expect(legacy.toolInput).toEqual({
-      tool: "Edit",
-      file_path: "b.ts",
-      old_string: "old",
-      new_string: "new",
-    });
-  });
-
-  it("preserves legacy Edit calls with independently aliased replacement fields", () => {
-    expect(
-      formatPiToolUse("edit", { file_path: "a.ts", oldText: "before", new_string: "after" }),
-    ).toMatchObject({
-      content: "**Edit** `a.ts`\n```diff\n- before\n+ after\n```",
-      toolInput: { tool: "Edit", file_path: "a.ts", old_string: "before", new_string: "after" },
-    });
+  it("normalizes older Edit key aliases independently while preserving unknown options", () => {
+    const {
+      path,
+      edits: [pair],
+    } = piFrames("tools-bash-edit").find(
+      (f) => f.type === "tool_execution_start" && f.toolName === "edit",
+    )!.args as { path: string; edits: { oldText: string; newText: string }[] };
+    for (const [p, o, n] of [
+      ["path", "oldText", "newText"],
+      ["file_path", "old_string", "new_string"],
+      ["file_path", "oldText", "new_string"],
+    ]) {
+      const result = formatPiToolUse("edit", {
+        [p]: path,
+        [o]: pair.oldText,
+        [n]: pair.newText,
+        replaceAll: true,
+      });
+      expect(result.toolInput).toEqual({
+        tool: "Edit",
+        file_path: path,
+        old_string: pair.oldText,
+        new_string: pair.newText,
+      });
+      expect(result.content).toContain(
+        `**Edit** \`${path}\`\n\`\`\`diff\n- ${pair.oldText}\n+ ${pair.newText}\n\`\`\``,
+      );
+      expect(result.content).toContain('"replaceAll": true');
+    }
   });
 
   it.each([
@@ -347,6 +359,14 @@ describe("subagent-notify wire decoder", () => {
       summary: "done",
       usage: { input: 3, output: 4 },
     });
+  });
+
+  it("attributes siblings in the restored workflow notice by workflow key", () => {
+    const [run] = decodeSubagentNotifyWire(restoredMessage("subagent-notify"));
+    expect(run.children.map((c) => [c.canonicalChildId, c.stepIndex, c.status])).toEqual([
+      ["id-3", 0, "completed"],
+      ["id-5", 1, "completed"],
+    ]);
   });
 
   it("decodes batches independently and rejects every other wire message", () => {

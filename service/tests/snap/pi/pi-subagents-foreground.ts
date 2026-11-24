@@ -1,26 +1,17 @@
 import { expect } from "vitest";
-import { agentMessages, fixture } from "../fixture.ts";
+import { fixture } from "../fixture.ts";
 
 export default fixture({
-  description:
-    "A foreground subagent result reconstructs its card; an unrelated notify does not duplicate it.",
-  files: {
-    "child.jsonl":
-      '{"type":"session","version":3,"id":"child"}\n{"type":"message","id":"leaf","parentId":null,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"Child reasoning."},{"type":"text","text":"Child evidence."}]}}\n',
-  },
-  steps: [{ op: "send", text: "Delegate a foreground sample." }],
+  description: "Foreground child results reconstruct separate detail cards.",
+  steps: [{ op: "send", text: "pi-e2e-launch:foreground" }],
   verify(r) {
     expect(
-      agentMessages(r)[0].events!.find((e) => e.kind === "subagent_start")?.subagent,
-    ).toMatchObject({
-      taskId: "child:0",
-      status: "completed",
-      summary: "Child complete.",
-      events: [
-        { kind: "thinking", content: "Child reasoning." },
-        { kind: "text", content: "Child evidence." },
-      ],
-    });
-    expect(r.events.filter((e) => e.kind === "subagent_done")).toHaveLength(1);
+      r.events
+        .filter((e) => e.kind === "subagent_done")
+        .map((e) => [e.subagent?.taskId, e.subagent?.events]),
+    ).toEqual([
+      ["id-1:0", [{ kind: "text", content: "x".repeat(18) }]],
+      ["id-1:1", [{ kind: "text", content: "x".repeat(17) }]],
+    ]);
   },
 });

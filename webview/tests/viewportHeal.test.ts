@@ -1,12 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { vi } from "vitest";
-import {
-  ViewportTracker,
-  healViewport,
-  isAtBottom,
-  isTextInput,
-  settleScroller,
-} from "../src/viewport/viewportHeal";
+import { describe, it, expect, vi } from "vitest";
+import { ViewportTracker, isTextInput, settleScroller } from "../src/viewport/viewportHeal";
 
 describe("ViewportTracker", () => {
   it("remembers the tallest viewport seen and flags a lasting shrink", () => {
@@ -30,18 +23,6 @@ describe("ViewportTracker", () => {
   });
 });
 
-describe("healViewport", () => {
-  it("forces a re-layout of the shell and restores the scroll position", () => {
-    const shell = document.createElement("div");
-    const scroller = document.createElement("div");
-    Object.defineProperty(scroller, "scrollTop", { value: 120, writable: true });
-    healViewport(shell, scroller);
-    expect(shell.style.display).toBe("");
-    expect(scroller.scrollTop).toBe(120);
-    expect(() => healViewport(null, null)).not.toThrow();
-  });
-});
-
 describe("isTextInput", () => {
   it("recognises the fields that summon the software keyboard", () => {
     expect(isTextInput(document.createElement("textarea"))).toBe(true);
@@ -55,7 +36,8 @@ describe("isTextInput", () => {
   });
 });
 
-// jsdom has no layout; fake a scroller's metrics.
+// Emulate WebKit's stale compositor offset: Chromium clamps an offset past
+// the new maximum immediately, so its layout cannot reproduce this state.
 function fakeScroller(scrollTop: number, scrollHeight: number, clientHeight: number) {
   const el = document.createElement("div");
   let top = scrollTop;
@@ -82,22 +64,6 @@ describe("settleScroller", () => {
     expect(el.scrollTop).toBe(1378);
     frames.forEach((f) => f(0));
     expect(el.scrollTop).toBe(1379);
-    vi.unstubAllGlobals();
-  });
-
-  it("sticks to the end when asked, and leaves layout-less elements alone", () => {
-    const frames: FrameRequestCallback[] = [];
-    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => frames.push(cb));
-    const el = fakeScroller(100, 2000, 621);
-    settleScroller(el, true);
-    expect(el.scrollTop).toBe(1378);
-    frames.forEach((f) => f(0));
-    expect(el.scrollTop).toBe(1379);
-    expect(isAtBottom(el)).toBe(true);
-
-    const none = fakeScroller(50, 0, 0);
-    settleScroller(none, true);
-    expect(none.scrollTop).toBe(50);
     vi.unstubAllGlobals();
   });
 });

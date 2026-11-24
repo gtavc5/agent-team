@@ -1,40 +1,35 @@
 import { expect } from "vitest";
-import { agentMessages, fixture } from "../fixture.ts";
+import { fixture } from "../fixture.ts";
 
 export default fixture({
-  description: "An async Pi subagent waits, then a notify backfills its original card on wake-up.",
-  files: {
-    "child.jsonl":
-      '{"type":"session","version":3,"id":"child"}\n{"type":"message","id":"leaf","parentId":null,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"Child reasoning."},{"type":"text","text":"Child evidence."}]}}\n',
-  },
+  description: "A native async notify backfills both original child cards on wake-up.",
   steps: [
-    { op: "send", text: "Delegate an async sample." },
+    { op: "send", text: "pi-e2e-launch:reconcile" },
     { op: "check", name: "waiting" },
     { op: "check", name: "notified" },
   ],
   verify(r) {
-    expect(
-      agentMessages(r)[0].events!.find((e) => e.kind === "subagent_start")?.subagent,
-    ).toMatchObject({
-      taskId: "child:0",
-      status: "completed",
-      summary: "Child complete.",
-      events: [
-        { kind: "thinking", content: "Child reasoning." },
-        { kind: "text", content: "Child evidence." },
-      ],
-    });
-    expect(r.events.filter((e) => e.kind === "subagent_done")).toHaveLength(1);
     expect(r.pi!.checkpoints.waiting).toMatchObject({
       runState: "waiting",
-      backgroundTasks: [{ id: "child:0", cancellable: true }],
       terminalCount: 1,
+      backgroundTasks: [
+        { id: "id-1:0", cancellable: true },
+        { id: "id-1:1", cancellable: true },
+      ],
     });
     expect(r.pi!.checkpoints.notified).toMatchObject({
       runState: "working",
-      backgroundTasks: [],
       terminalCount: 1,
+      backgroundTasks: [],
     });
+    expect(
+      r.events
+        .filter((e) => e.kind === "subagent_done")
+        .map((e) => [e.subagent?.taskId, e.subagent?.status]),
+    ).toEqual([
+      ["id-1:0", "completed"],
+      ["id-1:1", "completed"],
+    ]);
     expect(r.events).toContainEqual(expect.objectContaining({ kind: "notice", level: "wakeup" }));
   },
 });

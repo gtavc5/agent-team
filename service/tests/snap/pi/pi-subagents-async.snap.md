@@ -1,15 +1,14 @@
 ## 1 system done
   text "🤖 **A** joined the team"
 ## 2 user done
-  text "Delegate an async sample."
-## 3 agent done ctx 7/1000
-  text "Async sample scheduled."
-  thinking "Consider the example."
-  tool subagent "**subagent** ```json { \"agent\": \"reviewer\", \"task\": \"Review the sample.\", \"async\": true } ```" → "Child scheduled." 5ms
-  card  completed 55ms "Review the sample."
-    thinking "Child reasoning."
-    text "Child evidence."
-    summary "Child complete."
-## 4 agent done ctx 7/1000
-  text "Async sample complete."
+  text "pi-e2e-launch:reconcile"
+## 3 agent done ctx 0/100000
+  text "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  tool subagent "**subagent** ```json { \"async\": true, \"tasks\": [ { \"agent\": \"sample\", \"task\": \"sample\", \"model\": \"sa…" → "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…" 46ms
+  card  completed 1355ms "sample"
+    text "xxxxxxxxxxxxxx"
+  card  completed 1355ms "sample"
+    text "xxxxxxxxxxxxx"
+## 4 agent done ctx 0/100000
+  text "xxxxxxxxxxxx"
   notice:wakeup "Pi carried on"

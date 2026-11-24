@@ -125,9 +125,12 @@ describe("Ask the lead", () => {
     expect(textarea().value).toBe("half-written question for the lead\nAbout core/modules: ");
   });
 
-  it("adds it to the lead's saved draft from another session and focuses the composer", () => {
+  it.each([
+    { draft: "", expected: "About core/modules: " },
+    { draft: "Half-written question", expected: "Half-written question\nAbout core/modules: " },
+  ])("opens the lead's composer from a worker with draft '$draft'", ({ draft, expected }) => {
     boot([lead, worker], [project()], "lead");
-    type("half-written question for the lead");
+    if (draft) type(draft);
     fireEvent.click(
       [...document.querySelectorAll(".task-item")].find((e) => e.textContent.includes("modules"))!,
     );
@@ -136,7 +139,7 @@ describe("Ask the lead", () => {
     openBoard();
     ask();
     expect(document.querySelector(".panel-title")!.textContent).toMatch(/^clice · lead/);
-    expect(textarea().value).toBe("half-written question for the lead\nAbout core/modules: ");
+    expect(textarea().value).toBe(expected);
     expect(document.activeElement).toBe(textarea());
   });
 

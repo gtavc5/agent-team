@@ -40,7 +40,7 @@ afterEach(() => {
 });
 
 const until = async (cond: () => boolean, what: string) => {
-  for (let i = 0; i < 300 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 1500 && !cond(); i++) await new Promise((r) => setTimeout(r, 2));
   if (!cond()) throw new Error(`timed out waiting for ${what}`);
 };
 
@@ -252,28 +252,20 @@ describe("a real server saving histories", () => {
     return { base, web };
   }
 
-  it("writes a turn a restart cut short at once, naming only it", async () => {
+  it("writes and indexes a turn a restart cut short at once, naming only it", async () => {
     const { base, web } = await restartedMidTurn();
     const save = vi.spyOn(HistoryDb.prototype, "save");
-    const { stop } = await start(base, web);
+    const { search, stop } = await start(base, web);
     try {
-      expect(rows(base, "ws-a").find((m) => m.id === "a1")!.content).toBe(
-        "half an answer about quokkas\n\n*\\[interrupted\\]*",
-      );
+      const saved = rows(base, "ws-a").find((m) => m.id === "a1")!;
+      expect(saved).toMatchObject({
+        status: "done",
+        content: "half an answer about quokkas\n\n*\\[interrupted\\]*",
+      });
       const calls = save.mock.calls.filter(([s]) => s === "ws-a");
       expect(calls).toHaveLength(1);
       expect(calls[0][2]).toBeInstanceOf(Set);
       expect([...(calls[0][2] as Set<string>)]).toEqual(["a1"]);
-    } finally {
-      stop();
-    }
-  });
-
-  it("finds a turn a restart cut short without waiting for another save", async () => {
-    const { base, web } = await restartedMidTurn();
-    const { search, stop } = await start(base, web);
-    try {
-      expect(rows(base, "ws-a").find((m) => m.id === "a1")!.status).toBe("done");
       expect(await search("quokkas")).toEqual(["ws-a/a1"]);
     } finally {
       stop();

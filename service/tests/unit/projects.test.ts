@@ -1786,7 +1786,7 @@ describe("worker tasks held back for spacing", () => {
     const [first] = w1.agents.keys();
     const b = w1.addAgent("B", "gpt-6-astra", "b", "c", { backend: "codex" });
     expect(w1.removeAgent(first)).toEqual([]);
-    await new Promise((r) => setTimeout(r, 5));
+    await tick();
     const heir = w1.agents.get(b.id)!.session as FakeSession;
     expect(heir.sent).toEqual(["[From the project lead]\n\nsecond"]);
   });
@@ -2692,6 +2692,21 @@ describe("a worker that goes idle without reporting", () => {
     }
   });
 
+  const emitRefusedFinish = (s: FakeSession, toolUseId: string) => {
+    s.emit("event", {
+      kind: "tool_use",
+      toolName: "mcp__panel__finish_task",
+      toolUseId,
+      content: "**finish_task**",
+    });
+    s.emit("event", {
+      kind: "tool_result",
+      toolUseId,
+      content: "The context is over the limit.",
+      isError: true,
+    });
+  };
+
   it("clears awaitsUser in a multi-agent worker once finish_task succeeds, and re-arms on later user turns or dialogs", async () => {
     useFakeTimers();
     try {
@@ -2775,18 +2790,7 @@ describe("a worker that goes idle without reporting", () => {
       // finish_task does not clear awaitsUser either.
       const primaryAfter = [...afterFollowUp.agents.values()][0].session as FakeSession;
       await afterFollowUp.sendMessage("report the follow-up too");
-      primaryAfter.emit("event", {
-        kind: "tool_use",
-        toolName: "mcp__panel__finish_task",
-        toolUseId: "ft-post-err",
-        content: "**finish_task**",
-      });
-      primaryAfter.emit("event", {
-        kind: "tool_result",
-        toolUseId: "ft-post-err",
-        content: "The context is over the limit.",
-        isError: true,
-      });
+      emitRefusedFinish(primaryAfter, "ft-post-err");
       primaryAfter.emit("event", { kind: "text_delta", content: "Context too long." });
       primaryAfter.isRunning = false;
       primaryAfter.emit("event", { kind: "result", content: "" });
@@ -2814,18 +2818,7 @@ describe("a worker that goes idle without reporting", () => {
 
       // Refused finish_task on a failed turn must not clear Allen's earlier turn.
       await w.sendMessage("go ahead");
-      session(w).emit("event", {
-        kind: "tool_use",
-        toolName: "mcp__panel__finish_task",
-        toolUseId: "ft-err",
-        content: "**finish_task**",
-      });
-      session(w).emit("event", {
-        kind: "tool_result",
-        toolUseId: "ft-err",
-        content: "The context is over the limit.",
-        isError: true,
-      });
+      emitRefusedFinish(session(w), "ft-err");
       session(w).isRunning = false;
       session(w).emit("event", { kind: "error", content: "API Error: 529 overloaded" });
       await settle();
@@ -2834,18 +2827,7 @@ describe("a worker that goes idle without reporting", () => {
       // Refused finish_task on a completed turn still keeps awaitsUser true,
       // both live and after restart.
       await w.sendMessage("try again");
-      session(w).emit("event", {
-        kind: "tool_use",
-        toolName: "mcp__panel__finish_task",
-        toolUseId: "ft-err-2",
-        content: "**finish_task**",
-      });
-      session(w).emit("event", {
-        kind: "tool_result",
-        toolUseId: "ft-err-2",
-        content: "The context is over the limit.",
-        isError: true,
-      });
+      emitRefusedFinish(session(w), "ft-err-2");
       say("Shall I shorten it?");
       endTurn(w);
       await settle();

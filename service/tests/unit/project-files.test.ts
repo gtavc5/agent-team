@@ -1,7 +1,7 @@
 // A project's board reads and opens files of its notes and repository only:
 // the path rules, api/file with a project, api/open, and VS Code's CLI found
 // and pointed at a live window.
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import * as fs from "fs";
 import * as http from "http";
 import * as net from "net";
@@ -326,8 +326,10 @@ describe("VS Code's CLI", () => {
       });
       expect(fs.readFileSync(log, "utf-8").trim()).toBe(live);
       const sleeper = Number(fs.readFileSync(pid, "utf-8"));
-      await new Promise((r) => setTimeout(r, 100));
-      expect(() => process.kill(sleeper, 0)).toThrow();
+      await vi.waitFor(() => expect(() => process.kill(sleeper, 0)).toThrow(), {
+        timeout: 1000,
+        interval: 10,
+      });
       await Promise.all(servers.map((srv) => new Promise<void>((r) => srv.close(() => r()))));
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

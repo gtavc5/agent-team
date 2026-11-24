@@ -134,7 +134,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<v
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("Condition did not become true before timeout");
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
 

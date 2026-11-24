@@ -1,11 +1,10 @@
 ## 1 system done
   text "🤖 **A** joined the team"
 ## 2 user done
-  text "Inspect and update a sample."
-## 3 agent done ctx 7/1000
-  text "Built-ins complete."
-  thinking "Consider the example."
-  tool bash "**Bash** timeout 4s ```bash printf example ```" → "Synthetic bash result." 5ms
-  tool edit "**Edit** `example.txt` ```diff - old + new - before + after ``` ```json { \"dryRun\": true } ```" → "Synthetic edit result." 5ms
-  tool read "**Read** `docs/example.txt`" → "Synthetic read result." 5ms
-  tool grep "**Grep** `example` in `example.txt` · ignore case" → "Synthetic grep result." 5ms
+  text "Use bash to run exactly pwd with timeout 4. Then read fixture.ts. Use edit to change sample to example in fixture.ts. Finally use grep for example in fixture.ts. Use each tool once and finish."
+## 3 agent done ctx 1531/272000
+  text "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  tool bash "**Bash** timeout 4s ```bash pwd ```" → "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" 21ms
+  tool read "**Read** `fixture.ts` · offset 1 · limit 100" → "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" 3ms
+  tool edit "**Edit** `fixture.ts` ```diff - redacted-before + redacted-after ```" → "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" 2ms
+  tool grep "**Grep** `example` in `fixture.ts`" → "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" 37ms

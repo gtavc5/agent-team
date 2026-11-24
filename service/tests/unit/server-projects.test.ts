@@ -124,6 +124,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   for (const [k, v] of Object.entries(savedEnv)) {
     if (v === undefined) delete process.env[k];
@@ -131,8 +132,14 @@ afterEach(() => {
   }
 });
 
+const realSetTimeout = globalThis.setTimeout;
+const realNow = Date.now;
+
 const until = async (cond: () => boolean, what: string) => {
-  for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+  const deadline = realNow() + 5000;
+  while (!cond() && realNow() < deadline) {
+    await new Promise<void>((r) => realSetTimeout(r, 2));
+  }
   if (!cond()) throw new Error(`timed out waiting for ${what}`);
 };
 
@@ -914,17 +921,17 @@ describe("server restart with projects", () => {
   });
 
   it("retries the turns a rate limit paused before the restart, one at a time", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     // Both wait for the same reset, still to come.
     const { base, web, root } = seed({ livePaused: 7000 });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { stop } = await start(base, web);
     try {
-      for (let i = 0; i < 1000 && launches.length === 0; i++) {
-        await new Promise((r) => setTimeout(r, 10));
-      }
+      await vi.advanceTimersByTimeAsync(7000);
+      expect(launches).toHaveLength(1);
       expect(launches[0].cwd).toBe(root);
-      // The other one waits for its own slot.
-      await new Promise((r) => setTimeout(r, 2500));
+      // The other one waits for its own slot (15s spacing).
+      await vi.advanceTimersByTimeAsync(2500);
       expect(launches).toHaveLength(1);
     } finally {
       stop();
@@ -932,14 +939,16 @@ describe("server restart with projects", () => {
     }
     expect(readState(base, "ws-live").agents[0].pausedUntil).toBeUndefined();
     fs.rmSync(base, { recursive: true, force: true });
-  }, 20_000);
+  });
 
   it("retries a turn whose limit has reset without waiting behind another's retry hours away", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const { base, web } = seed({ livePaused: 3600_000, orphanPaused: -1000 });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { stop } = await start(base, web);
     try {
-      await until(() => launches.length === 1, "the due retry");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(launches).toHaveLength(1);
     } finally {
       stop();
       log.mockRestore();
@@ -948,12 +957,14 @@ describe("server restart with projects", () => {
   });
 
   it("starts a queued message and a due retry one slot apart", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const { base, web } = seed({ liveQueued: true, orphanPaused: -1000 });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { stop } = await start(base, web);
     try {
-      await until(() => launches.length === 1, "the first start");
-      await new Promise((r) => setTimeout(r, 2500));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(launches).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(2500);
       expect(launches).toHaveLength(1);
     } finally {
       stop();
@@ -963,13 +974,18 @@ describe("server restart with projects", () => {
   });
 
   it("runs no retry for a worker archived while it waited for it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const { base, web } = seed({ livePaused: -1000 });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { send, stop } = await start(base, web);
+    const { frames, send, stop } = await start(base, web);
     try {
       send({ type: "archive_workspace", workspaceId: "ws-live" });
       send({ type: "archive_workspace", workspaceId: "ws-orphan" });
-      await new Promise((r) => setTimeout(r, 2000));
+      await until(
+        () => frames.filter((f) => f.type === "workspace_archived").length === 2,
+        "workers archived",
+      );
+      await vi.advanceTimersByTimeAsync(20_000);
       expect(launches).toEqual([]);
     } finally {
       stop();
@@ -1066,10 +1082,11 @@ describe("server restart with projects", () => {
     try {
       send({ type: "purge_archived" });
       await until(
-        () => frames.some((f) => f.type === "workspace_deleted" && f.workspaceId === "ws-w"),
+        () =>
+          frames.some((f) => f.type === "workspace_deleted" && f.workspaceId === "ws-w") &&
+          frames.some((f) => f.type === "project_updated"),
         "worker purge",
       );
-      await new Promise((r) => setTimeout(r, 50));
       expect(frames.filter((f) => f.type === "workspace_deleted")).toEqual([
         { type: "workspace_deleted", workspaceId: "ws-w" },
       ]);
@@ -1117,7 +1134,6 @@ describe("server restart with projects", () => {
 });
 
 describe("rate limits on the server", () => {
-  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const limit = (rateLimitType: string) => ({
     type: "rate_limit_event",
     rate_limit_info: { status: "rejected", rateLimitType },
@@ -1142,24 +1158,27 @@ describe("rate limits on the server", () => {
     frames
       .filter((f) => f.type === "new_message")
       .map((f) => (f.message as Message).content)
-      .filter((c) => c.includes("hit the 5-hour limit"));
+      .filter((c) => c.includes("hit the 5-hour limit") || c.includes("hit the weekly limit"));
 
   it("lets the retry the user's message started run after a weekly limit without account failover", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const { base, web } = seed();
     fs.writeFileSync(path.join(base, "config.toml"), '[accounts.other]\noauth_token = "t"\n');
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { send, stop } = await start(base, web);
+    const { frames, send, stop } = await start(base, web);
     try {
       send({ type: "send_message", workspaceId: "ws-live", content: "P" });
       await until(() => launches[0]?.prompts.length === 1, "the turn");
       launches[0].emit(limit("seven_day"));
       launches[0].emit(refused);
       launches[0].emit({ ...result("limit"), is_error: true });
-      await wait(100);
+      await until(() => paused(frames).length > 0, "the pause");
       send({ type: "send_message", workspaceId: "ws-live", content: "U" });
-      await wait(1500);
+      await until(() => launches[0].prompts.length === 2, "the retry");
+      await vi.advanceTimersByTimeAsync(1500);
       expect(launches.map((l) => l.prompts)).toEqual([["P", "P"]]);
       launches[0].emit(result("done"));
+      await vi.advanceTimersByTimeAsync(0);
       await until(() => launches[0].prompts.length === 3, "the user's message");
       expect(launches[0].prompts).toEqual(["P", "P", "U"]);
     } finally {
@@ -1170,11 +1189,12 @@ describe("rate limits on the server", () => {
   });
 
   it("waits a Codex weekly limit out to its reset without account failover", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const { base, web } = seed({ liveCodex: true });
     fs.writeFileSync(path.join(base, "config.toml"), '[accounts.other]\noauth_token = "t"\n');
     const resetsAt = Math.floor(Date.now() / 1000) + 3 * 86400;
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { send, stop } = await start(base, web);
+    const { frames, send, stop } = await start(base, web);
     try {
       send({ type: "send_message", workspaceId: "ws-live", content: "P" });
       await until(() => launches[0]?.prompts.length === 1, "the turn");
@@ -1183,9 +1203,10 @@ describe("rate limits on the server", () => {
         rate_limit_info: { rateLimitType: "seven_day", resetsAt },
       });
       launches[0].emit({ ...result("limit"), is_error: true });
-      await until(
-        () => (readState(base, "ws-live").agents[0].pausedUntil ?? 0) >= resetsAt * 1000 + 60_000,
-        "the pause",
+      await until(() => paused(frames).length > 0, "the pause");
+      await vi.advanceTimersByTimeAsync(500);
+      expect(readState(base, "ws-live").agents[0].pausedUntil).toBeGreaterThanOrEqual(
+        resetsAt * 1000 + 60_000,
       );
       expect(launches).toHaveLength(1);
     } finally {
@@ -1220,6 +1241,7 @@ describe("rate limits on the server", () => {
   });
 
   it("reports a wake-up the limit refuses while the retry waits, and keeps that retry", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const { base, web } = seed();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { frames, send, stop } = await start(base, web);
@@ -1241,7 +1263,7 @@ describe("rate limits on the server", () => {
       const slots = vi.spyOn(ProjectManager.prototype, "takeStartSlot");
       q.emit(refused);
       q.emit({ ...result("Usage limit reached (five-hour)"), is_error: true });
-      await wait(100);
+      await vi.advanceTimersByTimeAsync(0);
       expect(paused(frames)).toHaveLength(1);
       expect(slots).not.toHaveBeenCalled();
       slots.mockRestore();
@@ -1275,7 +1297,7 @@ describe("rate limits on the server", () => {
       const busy = "API Error: Server is temporarily limiting requests (not your usage limit)";
       launches[0].emit({ ...refused, message: { content: [{ type: "text", text: busy }] } });
       launches[0].emit({ ...result(busy), is_error: true });
-      await wait(100);
+      await until(() => frames.some((f) => f.type === "message_done"), "turn done");
       expect(paused(frames)).toEqual([]);
     } finally {
       stop();
@@ -1291,9 +1313,10 @@ describe("rate limits on the server", () => {
   });
 
   it("waits half an hour, not a minute, when a refusal names a reset already past", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const { base, web } = seed();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { send, stop } = await start(base, web);
+    const { frames, send, stop } = await start(base, web);
     const before = Date.now();
     try {
       send({ type: "send_message", workspaceId: "ws-live", content: "P" });
@@ -1309,7 +1332,7 @@ describe("rate limits on the server", () => {
       });
       launches[0].emit(refused);
       launches[0].emit({ ...result("limit"), is_error: true });
-      await wait(100);
+      await until(() => paused(frames).length > 0, "the pause");
     } finally {
       stop();
       log.mockRestore();
@@ -1320,15 +1343,15 @@ describe("rate limits on the server", () => {
   });
 
   it("saves the workspace once its retry has gone", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const { base, web } = seed({ livePaused: -1000 });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { stop } = await start(base, web);
     try {
-      await until(() => launches.length === 1, "the retry");
-      await until(
-        () => readState(base, "ws-live").agents[0].pausedUntil === undefined,
-        "the saved state",
-      );
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(launches).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(readState(base, "ws-live").agents[0].pausedUntil).toBeUndefined();
     } finally {
       stop();
       log.mockRestore();

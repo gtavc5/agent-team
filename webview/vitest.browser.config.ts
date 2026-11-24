@@ -4,6 +4,9 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],
+  optimizeDeps: {
+    include: ["hast-util-to-jsx-runtime"],
+  },
   test: {
     include: ["tests/browser/**/*.browser.test.{ts,tsx}"],
     browser: {

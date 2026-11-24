@@ -4,11 +4,6 @@ import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { Server } from "../../src/server/server";
-import {
-  isTrackableSubagentMode,
-  resolveCanonicalChildId,
-  SUBAGENT_MODES,
-} from "../../src/session/pi-subagents";
 import type { ActiveAsyncRunRecord, StreamEvent } from "../../src/session/types";
 import { HistoryIndex } from "../../src/workspace/history-index";
 import {
@@ -153,16 +148,6 @@ function scenario(base: string) {
 }
 
 describe("Pi subagent projection", () => {
-  it("selects only execution modes and the first nonempty canonical identity", () => {
-    expect([...SUBAGENT_MODES, "management"].filter(isTrackableSubagentMode)).toEqual([
-      "single",
-      "parallel",
-      "chain",
-      "workflow",
-    ]);
-    expect(resolveCanonicalChildId({ childId: 19, workflowKey: "", runId: "b" }, 1)).toBe("b");
-  });
-
   it("loads an archived owner's history on terminal reconciliation and indexes sibling attribution offline", async () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), "yaat-sibling-projection-"));
     const { workspaceId, agentId, finishWithoutNotify } = scenario(base);

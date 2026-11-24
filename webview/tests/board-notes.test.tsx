@@ -3,7 +3,7 @@
 // the panel is open in VS Code's own browser), and a note's own links
 // resolve against it.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, fireEvent, screen, within, waitFor } from "@testing-library/react";
+import { render, fireEvent, screen, within, waitFor, act } from "@testing-library/react";
 import { BoardPage } from "../src/project/BoardPage";
 import { InlineMd, MdBlock, ProsePathContext, prosePaths } from "../src/chat/markdown";
 import { FileOpenContext } from "../src/chat/fileRef";
@@ -487,8 +487,10 @@ describe("the notes view", () => {
     gates[1]();
     const shown = await preview();
     expect(shown.getAttribute("aria-label")).toBe("a.cpp");
-    gates[0]();
-    await new Promise((r) => setTimeout(r, 20));
+    await act(async () => {
+      gates[0]();
+      await Promise.resolve();
+    });
     expect((await preview()).getAttribute("aria-label")).toBe("a.cpp");
   });
 
@@ -547,8 +549,10 @@ describe("the notes view", () => {
     fireEvent.click(within(objective(container)).getByText("src/server/a.cpp:12"));
     await waitFor(() => expect(gates).toHaveLength(1));
     fireEvent.keyDown(document.body, { key: "Escape" });
-    gates[0]();
-    await new Promise((r) => setTimeout(r, 20));
+    await act(async () => {
+      gates[0]();
+      await Promise.resolve();
+    });
     expect(container.querySelector(".bn-preview")).toBeNull();
     expect(screen.getByRole("button", { name: "Objectives" }).getAttribute("aria-pressed")).toBe(
       "true",

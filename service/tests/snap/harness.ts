@@ -1,11 +1,12 @@
-// Snap fixtures: scripted Codex recordings and synthetic Pi tapes replayed
+// Snap fixtures: scripted Codex and Pi tapes replayed
 // through the real session, workspace and client aggregation.
 import { ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { PassThrough, Writable } from "node:stream";
-import { crc32, deflateSync } from "node:zlib";
+import { piReply } from "./pi-wire";
+import { seededPng } from "./pixel";
 import { fileURLToPath } from "node:url";
 import { expect, vi } from "vitest";
 import type { SessionConfig, StreamEvent } from "../../src/session/types";
@@ -305,6 +306,7 @@ class PiRpcPlayer {
   constructor(
     private readonly dir: string,
     private readonly model: string,
+    private readonly contextWindow: number,
   ) {}
 
   connect = (opts: PiRpcSpawnOptions): PiRpcClient => {
@@ -349,7 +351,7 @@ class PiRpcPlayer {
     this.stdout = stdout;
     this.streams.push(stdout);
     const [provider, id] = this.model.split("/");
-    const model = { provider, id, contextWindow: 1000 };
+    const model = { provider, id, contextWindow: this.contextWindow };
     const startup = [
       ["get_state", { model, sessionId, sessionFile, thinkingLevel: "low" }],
       ["get_available_models", { models: [model] }],
@@ -363,13 +365,8 @@ class PiRpcPlayer {
         const boot = startup[next];
         if (boot && boot[0] === command.type) {
           next++;
-          this.play({
-            type: "response",
-            id: command.id,
-            command: command.type,
-            success: true,
-            data: boot[1],
-          });
+          const reply = piReply(command.type);
+          this.play({ ...reply, id: command.id, data: { ...(reply.data as object), ...boot[1] } });
         } else {
           this.sent.push(command);
           this.written.push(command);
@@ -488,31 +485,11 @@ class PiRpcPlayer {
   }
 }
 
-function seededPng(seed: number): Buffer {
-  const chunk = (name: string, data: Buffer) => {
-    const typeAndData = Buffer.concat([Buffer.from(name), data]);
-    const length = Buffer.alloc(4);
-    length.writeUInt32BE(data.length);
-    const checksum = Buffer.alloc(4);
-    checksum.writeUInt32BE(crc32(typeAndData));
-    return Buffer.concat([length, typeAndData, checksum]);
-  };
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(1, 0);
-  header.writeUInt32BE(1, 4);
-  header[8] = 8;
-  header[9] = 2;
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    chunk("IHDR", header),
-    chunk("IDAT", deflateSync(Buffer.from([0, seed, seed * 3, seed * 7]))),
-    chunk("IEND", Buffer.alloc(0)),
-  ]);
-}
-
 // Resolve only explicit artifact slots. No host paths appear in the tape.
 function piArtifacts(value: unknown, dir: string): unknown {
-  if (value === "$child-session") return path.join(dir, "child.jsonl");
+  if (typeof value === "string" && /^\$child-\d+$/.test(value))
+    return path.join(dir, value.slice(1) + ".jsonl");
+  if (value === "$owner-session") return path.join(dir, "session.jsonl");
   if (value === "$async-dir") return path.join(dir, "async");
   if (Array.isArray(value)) return value.map((v) => piArtifacts(v, dir));
   if (value && typeof value === "object")
@@ -529,7 +506,23 @@ async function replayPi(
   if (vi.isFakeTimers()) vi.setSystemTime(base);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yaat-pi-snap-"));
   const panel = new PanelHttpServer();
-  const player = new PiRpcPlayer(dir, rec.header.model || DEFAULT_MODEL.pi);
+  const stats = rec.entries
+    .flatMap((entry) =>
+      "frame" in entry
+        ? [
+            entry.frame as {
+              command?: string;
+              data?: { contextUsage?: { contextWindow?: number } };
+            },
+          ]
+        : [],
+    )
+    .find((frame) => frame.command === "get_session_stats");
+  const player = new PiRpcPlayer(
+    dir,
+    rec.header.model || DEFAULT_MODEL.pi,
+    stats?.data?.contextUsage?.contextWindow ?? 1000,
+  );
   const sessions: PiSession[] = [];
   const events: StreamEvent[] = [];
   const states: string[] = [];
@@ -580,11 +573,6 @@ async function replayPi(
   let project: ReturnType<typeof makePiProject> | undefined;
   try {
     if (fixture.piProject) project = makePiProject(dir, registry, ws, session);
-    if (fixture.files?.["child.jsonl"]) {
-      const child = fixture.files["child.jsonl"];
-      if (typeof child !== "string") throw new Error("Pi child session must be synthetic JSONL");
-      fs.writeFileSync(path.join(dir, "child.jsonl"), child);
-    }
     const steps = rec.entries.flatMap((e) => ("step" in e ? [e.step] : []));
     expect(steps).toEqual(fixture.steps.map((step, i) => ({ ...step, i })));
     for (const entry of rec.entries) {
@@ -649,7 +637,21 @@ async function replayPi(
         }
       } else if ("sent" in entry) await player.expect(entry.sent as PiFrame);
       else if ("frame" in entry) player.play(piArtifacts(entry.frame, dir) as PiFrame);
-      else if ("close" in entry) player.crash();
+      else if ("artifacts" in entry) {
+        for (const [slot, records] of Object.entries(entry.artifacts)) {
+          if (!/^\$child-\d+$/.test(slot) && slot !== "$async-status")
+            throw new Error("Unknown artifact slot");
+          const file =
+            slot === "$async-status"
+              ? path.join(dir, "async", "status.json")
+              : (piArtifacts(slot, dir) as string);
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(
+            file,
+            records.map((rec) => JSON.stringify(piArtifacts(rec, dir))).join("\n") + "\n",
+          );
+        }
+      } else if ("close" in entry) player.crash();
       else throw new Error("Unsupported Pi tape entry");
       await flush();
     }
@@ -710,8 +712,8 @@ function makePiProject(dir: string, registry: HostRegistry, worker: Workspace, s
   const projectStore = new ProjectStore(dir);
   const board = new ObjectiveStore(projectStore.objectivesDir(project.id));
   board.write({
-    id: "demo/replay",
-    area: "demo",
+    id: "pi-e2e/suite",
+    area: "pi-e2e",
     title: "Seed objective",
     goal: "Exercise a project update.",
     status: "active",
@@ -727,14 +729,14 @@ function makePiProject(dir: string, registry: HostRegistry, worker: Workspace, s
     verify() {
       const store = new ProjectStore(dir);
       expect(store.get(project.id)).toMatchObject({ name: "Synthetic project", status: "active" });
-      expect(
-        fs.readFileSync(path.join(store.notesDir(project.id), "example.md"), "utf8"),
-      ).toContain("Synthetic note.");
+      expect(fs.readFileSync(path.join(store.notesDir(project.id), "design.md"), "utf8")).toContain(
+        "pi-e2e note body",
+      );
       expect(manager.list().find((p) => p.id === project.id)?.objectives).toEqual([
         expect.objectContaining({
-          id: "demo/replay",
-          title: "Replay",
-          context: "After finish",
+          id: "pi-e2e/suite",
+          title: "Pi E2E",
+          context: "reviewed by scenario",
           tasks: [{ id: "t1", text: "Replay a sample.", state: "review", session: worker.id }],
         }),
       ]);
@@ -745,16 +747,16 @@ function makePiProject(dir: string, registry: HostRegistry, worker: Workspace, s
         kind: "final",
         boardState: "applied",
         leadDelivery: { state: "enqueued" },
-        payload: { text: "Synthetic work done.", context: "After finish" },
+        payload: { text: "pi-e2e-worker-report", context: "reviewed by scenario" },
         frozenPlan: {
           taskTransitions: [
-            { objectiveId: "demo/replay", taskId: "t1", expectedSession: worker.id },
+            { objectiveId: "pi-e2e/suite", taskId: "t1", expectedSession: worker.id },
           ],
         },
       });
       expect(
-        fs.readFileSync(path.join(store.objectivesDir(project.id), "demo", "replay.toml"), "utf8"),
-      ).toContain("After finish");
+        fs.readFileSync(path.join(store.objectivesDir(project.id), "pi-e2e", "suite.toml"), "utf8"),
+      ).toContain("reviewed by scenario");
     },
     async close() {
       manager.close();

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import {
@@ -7,7 +7,7 @@ import {
   serializeModule,
   type IssueModule,
 } from "../../src/project/issues";
-import { setupProjects as setup, tick, tmpDir } from "./projectHarness";
+import { setupProjects as setup, tmpDir } from "./projectHarness";
 
 const MODULE: IssueModule = {
   id: "02-hosting",
@@ -198,12 +198,17 @@ describe("issue tools", () => {
     await call(lead, "write_issues", { issues: [{ id: "x#1", tags: ["t"], text: long }] });
     await call(lead, "write_issues", { issues: [{ id: "x#1", text: "Bad path" }] });
     // Its state or tags changing leave the text's date; the text changing renews it.
-    const first = issue().written!;
-    await new Promise((r) => setTimeout(r, 5));
-    await call(lead, "write_issues", { issues: [{ id: "x#1", state: "accepted" }] });
-    expect(issue().written).toBe(first);
-    await call(lead, "write_issues", { issues: [{ id: "x#1", text: "Bad path on Windows" }] });
-    expect(issue().written).toBeGreaterThan(first);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const first = issue().written!;
+      vi.setSystemTime(first + 10);
+      await call(lead, "write_issues", { issues: [{ id: "x#1", state: "accepted" }] });
+      expect(issue().written).toBe(first);
+      await call(lead, "write_issues", { issues: [{ id: "x#1", text: "Bad path on Windows" }] });
+      expect(issue().written).toBeGreaterThan(first);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("close fixed issues by deleting them, their text in the result", async () => {
@@ -306,25 +311,32 @@ describe("issue tools", () => {
   });
 
   it("send the clients a project's issues when the tools or a hand edit change them", async () => {
-    const { call, lead, frames, base, manager } = await withModule();
-    const pid = manager.list()[0].id;
-    frames.splice(0);
-    await call(lead, "write_issues", { issues: [{ id: "e#1", module: "paths", text: "t" }] });
-    const sent = frames.filter((f) => f.type === "project_issues");
-    expect(sent).toHaveLength(1);
-    expect(sent[0].projectId).toBe(pid);
-    expect(frames.some((f) => f.type === "project_updated")).toBe(false);
-    expect(Object.keys(manager.issueSets())).toEqual([pid]);
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+    });
+    try {
+      const { call, lead, frames, base, manager } = await withModule();
+      const pid = manager.list()[0].id;
+      frames.splice(0);
+      await call(lead, "write_issues", { issues: [{ id: "e#1", module: "paths", text: "t" }] });
+      const sent = frames.filter((f) => f.type === "project_issues");
+      expect(sent).toHaveLength(1);
+      expect(sent[0].projectId).toBe(pid);
+      expect(frames.some((f) => f.type === "project_updated")).toBe(false);
+      expect(Object.keys(manager.issueSets())).toEqual([pid]);
 
-    frames.splice(0);
-    const file = path.join(base, ".agent-team", "projects", pid, "issues", "paths.toml");
-    fs.writeFileSync(
-      file,
-      fs.readFileSync(file, "utf-8").replace('text = "t"', 'text = "by hand"'),
-    );
-    for (let i = 0; i < 100 && !frames.some((f) => f.type === "project_issues"); i++) await tick();
-    const edited = frames.find((f) => f.type === "project_issues") as { modules: IssueModule[] };
-    expect(edited.modules.find((m) => m.id === "paths")!.issues[0].text).toBe("by hand");
+      frames.splice(0);
+      const file = path.join(base, ".agent-team", "projects", pid, "issues", "paths.toml");
+      fs.writeFileSync(
+        file,
+        fs.readFileSync(file, "utf-8").replace('text = "t"', 'text = "by hand"'),
+      );
+      await vi.advanceTimersByTimeAsync(250);
+      const edited = frames.find((f) => f.type === "project_issues") as { modules: IssueModule[] };
+      expect(edited.modules.find((m) => m.id === "paths")!.issues[0].text).toBe("by hand");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -493,24 +505,31 @@ describe("issue edge cases from review", () => {
   });
 
   it("see hand edits after the issues dir is replaced whole", async () => {
-    const { manager, frames, dir } = await board();
-    manager.issueSets();
-    const fresh = `${dir}.new`;
-    fs.mkdirSync(fresh);
-    fs.writeFileSync(path.join(fresh, "c.toml"), 'title = "C"\n');
-    fs.rmSync(dir, { recursive: true });
-    fs.renameSync(fresh, dir);
-    for (let i = 0; i < 100 && !frames.some((f) => f.type === "project_issues"); i++) await tick();
-    frames.splice(0);
-    for (let i = 0; i < 60; i++) await tick();
-    fs.writeFileSync(path.join(dir, "d.toml"), 'title = "D"\n');
-    const seen = () =>
-      frames.some(
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+    });
+    try {
+      const { manager, frames, dir } = await board();
+      manager.issueSets();
+      const fresh = `${dir}.new`;
+      fs.mkdirSync(fresh);
+      fs.writeFileSync(path.join(fresh, "c.toml"), 'title = "C"\n');
+      fs.rmSync(dir, { recursive: true });
+      fs.renameSync(fresh, dir);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(frames.some((f) => f.type === "project_issues")).toBe(true);
+      frames.splice(0);
+      await vi.advanceTimersByTimeAsync(250);
+      fs.writeFileSync(path.join(dir, "d.toml"), 'title = "D"\n');
+      await vi.advanceTimersByTimeAsync(250);
+      const seen = frames.some(
         (f) =>
           f.type === "project_issues" && (f.modules as IssueModule[]).some((m) => m.id === "d"),
       );
-    for (let i = 0; i < 100 && !seen(); i++) await tick();
-    expect(seen()).toBe(true);
+      expect(seen).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("never fail a client's connect over an issues path that is a file", () => {
@@ -521,15 +540,21 @@ describe("issue edge cases from review", () => {
   });
 
   it("watch a new project's issues from the start", async () => {
-    const env = setup();
-    const { project } = env.create("x");
-    const dir = path.join(env.base, ".agent-team", "projects", project.id, "issues");
-    for (let i = 0; i < 60; i++) await tick();
-    fs.mkdirSync(dir);
-    fs.writeFileSync(path.join(dir, "c.toml"), 'title = "C"\n');
-    const seen = () => env.frames.some((f) => f.type === "project_issues");
-    for (let i = 0; i < 100 && !seen(); i++) await tick();
-    expect(seen()).toBe(true);
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+    });
+    try {
+      const env = setup();
+      const { project } = env.create("x");
+      const dir = path.join(env.base, ".agent-team", "projects", project.id, "issues");
+      await vi.advanceTimersByTimeAsync(250);
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, "c.toml"), 'title = "C"\n');
+      await vi.advanceTimersByTimeAsync(250);
+      expect(env.frames.some((f) => f.type === "project_issues")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("report a module dir inside issues/ instead of passing over it", () => {
@@ -542,11 +567,18 @@ describe("issue edge cases from review", () => {
   });
 
   it("do not echo the tools' own writes back from the watcher", async () => {
-    const { call, lead, frames } = await board();
-    for (let i = 0; i < 60; i++) await tick();
-    frames.splice(0);
-    await call(lead, "write_issues", { issues: [{ id: "n#1", module: "a", text: "t" }] });
-    for (let i = 0; i < 80; i++) await tick();
-    expect(frames.filter((f) => f.type === "project_issues")).toHaveLength(1);
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+    });
+    try {
+      const { call, lead, frames } = await board();
+      await vi.advanceTimersByTimeAsync(250);
+      frames.splice(0);
+      await call(lead, "write_issues", { issues: [{ id: "n#1", module: "a", text: "t" }] });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(frames.filter((f) => f.type === "project_issues")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

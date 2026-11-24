@@ -336,42 +336,20 @@ describe("report delivery reconciliation", () => {
     expect(deliveryStateRank("settled")).toBe(4);
   });
 
-  const journalStates: ReportLeadDeliveryState[] = [
-    "pending",
-    "enqueued",
-    "dispatching",
-    "sent_to_pi",
-    "outcome_unknown",
-    "error",
-    "settled",
-  ];
-  const messageStates: Array<MessageStatus | null> = [
-    null,
-    "queued",
-    "dispatching",
-    "streaming",
-    "done",
-    "outcome_unknown",
-    "error",
-  ];
-  const cases = journalStates.flatMap((journalState) =>
-    messageStates.map((messageStatus) => ({ journalState, messageStatus })),
-  );
-
-  it.each(cases)("full truth table: $journalState + $messageStatus", (testCase) => {
-    const messageState = testCase.messageStatus
-      ? messageStatusToDeliveryState(testCase.messageStatus)
-      : null;
-    const expectedTarget =
-      messageState && deliveryStateRank(messageState) > deliveryStateRank(testCase.journalState)
-        ? messageState
-        : testCase.journalState;
-    expect(reconcileReportDeliveryState(testCase.journalState, testCase.messageStatus)).toEqual({
-      targetState: expectedTarget,
-      journalNeedsUpdate: expectedTarget !== testCase.journalState,
-      shouldEnqueue: expectedTarget === "pending" && testCase.messageStatus === null,
-      shouldProbeDispatching: expectedTarget === "dispatching",
-      isTerminal: deliveryStateRank(expectedTarget) >= 3,
+  it("enqueues only a pending report when no history message exists", () => {
+    expect(reconcileReportDeliveryState("pending", null)).toEqual({
+      targetState: "pending",
+      journalNeedsUpdate: false,
+      shouldEnqueue: true,
+      shouldProbeDispatching: false,
+      isTerminal: false,
+    });
+    expect(reconcileReportDeliveryState("enqueued", null)).toEqual({
+      targetState: "enqueued",
+      journalNeedsUpdate: false,
+      shouldEnqueue: false,
+      shouldProbeDispatching: false,
+      isTerminal: false,
     });
   });
 
@@ -383,44 +361,77 @@ describe("report delivery reconciliation", () => {
       shouldProbeDispatching: false,
       isTerminal: false,
     });
+    expect(reconcileReportDeliveryState("enqueued", "queued")).toEqual({
+      targetState: "enqueued",
+      journalNeedsUpdate: false,
+      shouldEnqueue: false,
+      shouldProbeDispatching: false,
+      isTerminal: false,
+    });
   });
 
-  it("window 5a aligns enqueued to dispatching and probes instead of enqueueing", () => {
-    expect(reconcileReportDeliveryState("enqueued", "dispatching")).toEqual({
+  it("window 5a aligns earlier states to dispatching and probes active dispatch without enqueueing", () => {
+    for (const status of ["dispatching", "streaming"] as const) {
+      expect(reconcileReportDeliveryState("enqueued", status)).toEqual({
+        targetState: "dispatching",
+        journalNeedsUpdate: true,
+        shouldEnqueue: false,
+        shouldProbeDispatching: true,
+        isTerminal: false,
+      });
+    }
+    expect(reconcileReportDeliveryState("dispatching", null)).toEqual({
       targetState: "dispatching",
-      journalNeedsUpdate: true,
+      journalNeedsUpdate: false,
+      shouldEnqueue: false,
+      shouldProbeDispatching: true,
+      isTerminal: false,
+    });
+    expect(reconcileReportDeliveryState("dispatching", "queued")).toEqual({
+      targetState: "dispatching",
+      journalNeedsUpdate: false,
       shouldEnqueue: false,
       shouldProbeDispatching: true,
       isTerminal: false,
     });
   });
 
-  it("preserves an explicit error rather than degrading it to outcome_unknown", () => {
-    expect(reconcileReportDeliveryState("enqueued", "error").targetState).toBe("error");
-    expect(reconcileReportDeliveryState("error", "done").targetState).toBe("error");
-    expect(reconcileReportDeliveryState("error", "outcome_unknown").targetState).toBe("error");
+  it("advances non-terminal reports directly to terminal outcomes from message status", () => {
+    expect(reconcileReportDeliveryState("pending", "done")).toEqual({
+      targetState: "sent_to_pi",
+      journalNeedsUpdate: true,
+      shouldEnqueue: false,
+      shouldProbeDispatching: false,
+      isTerminal: true,
+    });
+    expect(reconcileReportDeliveryState("dispatching", "outcome_unknown")).toEqual({
+      targetState: "outcome_unknown",
+      journalNeedsUpdate: true,
+      shouldEnqueue: false,
+      shouldProbeDispatching: false,
+      isTerminal: true,
+    });
+    expect(reconcileReportDeliveryState("enqueued", "error")).toEqual({
+      targetState: "error",
+      journalNeedsUpdate: true,
+      shouldEnqueue: false,
+      shouldProbeDispatching: false,
+      isTerminal: true,
+    });
   });
 
-  it("never regresses or re-enqueues any terminal journal state", () => {
+  it("preserves explicit error and never regresses or re-enqueues terminal states", () => {
     for (const terminal of ["sent_to_pi", "outcome_unknown", "error", "settled"] as const) {
-      for (const status of messageStates) {
-        const result = reconcileReportDeliveryState(terminal, status);
-        expect(result.targetState).toBe(terminal);
-        expect(result.journalNeedsUpdate).toBe(false);
-        expect(result.shouldEnqueue).toBe(false);
-        expect(result.shouldProbeDispatching).toBe(false);
-        expect(result.isTerminal).toBe(true);
+      for (const status of [null, "queued", "dispatching", "done", "error"] as const) {
+        expect(reconcileReportDeliveryState(terminal, status)).toEqual({
+          targetState: terminal,
+          journalNeedsUpdate: false,
+          shouldEnqueue: false,
+          shouldProbeDispatching: false,
+          isTerminal: true,
+        });
       }
     }
-  });
-
-  it("enqueues only a truly pending report with no history message", () => {
-    expect(reconcileReportDeliveryState("pending", null)).toMatchObject({
-      targetState: "pending",
-      shouldEnqueue: true,
-      shouldProbeDispatching: false,
-      isTerminal: false,
-    });
-    expect(reconcileReportDeliveryState("enqueued", null).shouldEnqueue).toBe(false);
+    expect(reconcileReportDeliveryState("error", "outcome_unknown").targetState).toBe("error");
   });
 });

@@ -742,6 +742,53 @@ function appendLayoutTurn(frames: Frame[], now: number) {
   });
 }
 
+export interface DemoReplayStats {
+  runId: number;
+  done: boolean;
+  totalFrames: number;
+  dispatchedFrames: number;
+  durationMs: number;
+  framesPerSec: number;
+  p50CommitMs: number;
+  p95CommitMs: number;
+  maxCommitMs: number;
+  commitSamplesMs: number[];
+}
+
+declare global {
+  interface Window {
+    __yaatDemoReplay?: DemoReplayStats;
+  }
+}
+
+let activeReplayRun = 0;
+
+function replayPacing(): { mode: "raf" } | { mode: "delay"; speed: number } {
+  const search = typeof window !== "undefined" ? window.location?.search : "";
+  if (!search) return { mode: "delay", speed: 1 };
+  const params = new URLSearchParams(search);
+  if (params.get("demoPace") === "raf") return { mode: "raf" };
+  const rawSpeed = params.get("demoSpeed");
+  if (rawSpeed != null && rawSpeed.trim() !== "") {
+    const parsed = Number(rawSpeed);
+    if (Number.isFinite(parsed) && parsed >= 0) return { mode: "delay", speed: parsed };
+  }
+  return { mode: "delay", speed: 1 };
+}
+
+function nextFrameCommit(): Promise<void> {
+  if (typeof requestAnimationFrame === "function") {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function percentile(sorted: readonly number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return sorted[idx];
+}
+
 // Frame pacing: fast for deltas, slower for structural frames so the eye can
 // follow tool pairing and subagent state transitions.
 export function frameDelay(frame: Frame): number {
@@ -756,12 +803,61 @@ export function frameDelay(frame: Frame): number {
 export async function startDemoReplay(
   dispatch: (msg: Record<string, unknown>) => void,
 ): Promise<void> {
-  for (const frame of buildFrames()) {
+  const runId = ++activeReplayRun;
+  const frames = buildFrames();
+  const pacing = replayPacing();
+  const commitSamplesMs: number[] = [];
+  const startedAt = performance.now();
+  performance.mark?.("yaat:demo-replay:start");
+
+  const publish = (done: boolean) => {
+    const durationMs = Math.max(0.01, performance.now() - startedAt);
+    const sorted = [...commitSamplesMs].sort((a, b) => a - b);
+    const stats: DemoReplayStats = {
+      runId,
+      done,
+      totalFrames: frames.length,
+      dispatchedFrames: commitSamplesMs.length,
+      durationMs,
+      framesPerSec: (commitSamplesMs.length / durationMs) * 1000,
+      p50CommitMs: percentile(sorted, 50),
+      p95CommitMs: percentile(sorted, 95),
+      maxCommitMs: sorted[sorted.length - 1] ?? 0,
+      commitSamplesMs,
+    };
+    if (typeof window !== "undefined") window.__yaatDemoReplay = stats;
+  };
+
+  publish(false);
+  for (const frame of frames) {
+    if (runId !== activeReplayRun) return;
     const { delayAfterMs: _delay, ...wire } = frame;
+    const frameStart = performance.now();
     dispatch(wire);
-    const delay = frameDelay(frame);
-    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+    if (pacing.mode === "raf") {
+      await nextFrameCommit();
+      commitSamplesMs.push(performance.now() - frameStart);
+    } else {
+      const baseDelay = frameDelay(frame);
+      const delay = pacing.speed === 0 ? 0 : Math.round(baseDelay / pacing.speed);
+      if (delay > 0) {
+        commitSamplesMs.push(performance.now() - frameStart);
+        await new Promise((r) => setTimeout(r, delay));
+      } else {
+        await nextFrameCommit();
+        commitSamplesMs.push(performance.now() - frameStart);
+      }
+    }
+    if (runId !== activeReplayRun) return;
+    publish(false);
   }
+  performance.mark?.("yaat:demo-replay:end");
+  try {
+    performance.measure?.("yaat:demo-replay", "yaat:demo-replay:start", "yaat:demo-replay:end");
+  } catch {
+    // Marks may have been cleared externally.
+  }
+  publish(true);
   console.log("[replay-demo] finished");
 }
 

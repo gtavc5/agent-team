@@ -3,10 +3,19 @@ import { isIP } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { steerReceipt, validateTurn } from "./pi-capture-contract";
+import { piFrames } from "./pi-wire";
+import { sanitizer } from "../../../scripts/capture-pi";
 import { describe, expect, it } from "vitest";
 
 const PI_DIR = fileURLToPath(new URL("./pi/", import.meta.url));
-const allowedNames = new Set(["child.jsonl", "example.txt", "pixel.png", "fixture.ts"]);
+const allowedNames = new Set([
+  "child.jsonl",
+  "example.txt",
+  "pixel.png",
+  "fixture.ts",
+  "pi-captures.ts",
+]);
 
 function privateHost(host: string): boolean {
   const name = host.toLowerCase().replace(/\.$/, "");
@@ -85,8 +94,8 @@ function files(dir: string): string[] {
 
 describe("Pi golden fixture privacy sentinel", () => {
   it("audits every tape, snapshot and fixture source without printing sensitive matches", () => {
-    const paths = files(PI_DIR);
-    expect(paths).toHaveLength(36);
+    const paths = [...files(PI_DIR), join(PI_DIR, "../pi-captures.ts")];
+    expect(paths.filter((file) => file.endsWith(".snap.md"))).toHaveLength(12);
     for (const path of paths) {
       expect(path).toMatch(/\.(?:jsonl|snap\.md|ts)$/);
       expect(
@@ -94,6 +103,47 @@ describe("Pi golden fixture privacy sentinel", () => {
         path.slice(PI_DIR.length),
       ).toEqual([]);
     }
+  });
+
+  it("rejects unexpected steer receipt details without printing them", () => {
+    const [receipt] = piFrames("messages/steer");
+    expect(steerReceipt(receipt)).toEqual(receipt);
+    expect(() =>
+      steerReceipt({ ...receipt, data: { disposition: "queued", details: "private" } }),
+    ).toThrow("Unreviewed steer response");
+  });
+
+  it.each([
+    "basic-turn",
+    "antigravity-acp-turn",
+    "tools-bash-edit",
+    "interrupt-abort",
+    "extension-ui-dialog",
+    "image-prompt",
+    "single-queue-order",
+  ])("requires %s evidence before replacing its tape", (name) => {
+    const frames = piFrames(name);
+    validateTurn(name, frames);
+    expect(() =>
+      validateTurn(
+        name,
+        frames.filter((f) => !["agent_settled", "tool_execution_start"].includes(f.type)),
+      ),
+    ).toThrow();
+    if (name === "tools-bash-edit" || name === "antigravity-acp-turn")
+      expect(() =>
+        validateTurn(
+          name,
+          frames.filter((f) => f.type !== "tool_execution_start"),
+        ),
+      ).toThrow(/tool calls/);
+  });
+
+  it("does not publish numeric payloads under familiar field names in tool arguments", () => {
+    const args = { input: [65, 66, 67], usage: { input: 987654 }, limit: 12345 };
+    expect(sanitizer()({ type: "toolCall", name: "extension", arguments: args })).toMatchObject({
+      arguments: { input: [0, 0, 0], usage: { input: 0 }, limit: 0 },
+    });
   });
 
   it.each([

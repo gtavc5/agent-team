@@ -20,6 +20,8 @@ import type {
   StreamEvent,
 } from "../../src/session/types";
 
+import { piFrame, piFrames, piReply } from "../snap/pi-wire";
+
 type Frame = { id: string; type: string; [key: string]: unknown };
 const dirs: string[] = [];
 const cleanup: Array<() => Promise<void> | void> = [];
@@ -134,7 +136,7 @@ function harness(
     const event = (frame: object) => stdout.write(JSON.stringify(frame) + "\n");
     const respond = (frame: Frame, data?: unknown, success = true) =>
       event({
-        type: "response",
+        ...piReply(frame.type),
         command: frame.type,
         id: frame.id,
         success,
@@ -253,8 +255,8 @@ describe("Pi boundary steering", () => {
     await h.session.send("first");
     const client = h.clients[0];
     const boundary = (open = () => true) => h.register.mock.calls[0][0].onSteerBoundary!(open);
-    client.event({ type: "agent_start" });
-    client.event({ type: "message_end", message: { role: "user" } });
+    client.event(piFrame("agent_start"));
+    client.event(piFrame("message_end", { role: "user" }));
     const write = () =>
       vi.waitFor(() => {
         const frame = client.wire.find((item) => item.type === "steer");
@@ -280,7 +282,12 @@ describe("Pi boundary steering", () => {
     const h = await setup();
     const handoff = h.boundary();
     const frame = await h.write();
-    h.client.event({ type: "response", id: frame.id, command: "steer" });
+    // Drop the acknowledgement payload after the real write. Without proof of
+    // rejection this input must not be sent a second time.
+    const broken = piReply("steer");
+    delete broken.data;
+    delete broken.success;
+    h.client.event({ ...broken, id: frame.id });
     await handoff;
     expect(h.finish.mock.calls).toEqual([["outcome_unknown"]]);
   });
@@ -289,7 +296,7 @@ describe("Pi boundary steering", () => {
     const h = await setup();
     const handoff = h.boundary();
     const frame = await h.write();
-    h.client.respond(frame, { disposition: "queued" });
+    h.client.event({ ...piReply("steer"), id: frame.id });
     await handoff;
     let owner = "A";
     const replies: Record<string, string> = { A: "initial", B: "" };
@@ -299,16 +306,11 @@ describe("Pi boundary steering", () => {
     h.session.on("event", (event: StreamEvent) => {
       if (event.kind === "text_delta") replies[owner] += event.content;
     });
+    const user = piFrame("message_end", { role: "user" });
     for (const text of [frame.message, "another input"])
-      h.client.event({
-        type: "message_end",
-        message: { role: "user", content: [{ type: "text", text }] },
-      });
-    h.client.event({
-      type: "message_update",
-      assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "answer" },
-    });
-    expect(replies).toEqual({ A: "initial", B: "answer" });
+      h.client.event({ ...user, message: { ...user.message, content: [{ type: "text", text }] } });
+    h.client.event(piFrame("message_update", { update: "text_end" }));
+    expect(replies).toEqual({ A: "initial", B: "xxxxx" });
     expect(h.finish.mock.calls).toEqual([["read"]]);
   });
 
@@ -804,56 +806,17 @@ describe("PiSession dispatch and stream state", () => {
     expect(h.done).toHaveBeenCalledTimes(2);
   });
 
-  it("formats Pi retry metadata and clears the banner on recovery", async () => {
-    const h = harness();
-    await h.session.send("work");
-    const { event } = h.clients[0];
-    event({
-      type: "auto_retry_start",
-      attempt: 1,
-      maxAttempts: 3,
-      delayMs: 2000,
-      errorMessage: "529 overloaded",
-    });
-    event({ type: "auto_retry_end", success: true, attempt: 2 });
-    expect(h.events).toEqual([
-      { kind: "retry", content: "Retrying (1/3 in 2s): 529 overloaded" },
-      { kind: "retry", content: "" },
-    ]);
-    expect(h.done).not.toHaveBeenCalled();
-  });
-
   it("clears a finally failed retry and emits its final error once", async () => {
     const h = harness();
     await h.session.send("work");
     const { event } = h.clients[0];
-    event({
-      type: "auto_retry_start",
-      attempt: 3,
-      maxAttempts: 3,
-      delayMs: 4000,
-      errorMessage: "529 overloaded",
-    });
-    event({
-      type: "message_end",
-      message: {
-        role: "assistant",
-        content: [],
-        stopReason: "error",
-        errorMessage: "previous attempt",
-      },
-    });
-    event({
-      type: "auto_retry_end",
-      success: false,
-      attempt: 3,
-      finalError: "final failure",
-    });
-    event({ type: "agent_settled" });
-    expect(h.events).toEqual([
-      { kind: "retry", content: "Retrying (3/3 in 4s): 529 overloaded" },
+    for (const frame of piFrames("messages/retry-failed"))
+      if (frame.type !== "response") event(frame);
+    expect(h.events.filter((e) => e.kind === "retry" || e.kind === "error")).toEqual([
+      { kind: "retry", content: "Retrying (1/2 in 1s): 503 fixture service unavailable" },
+      { kind: "retry", content: "Retrying (2/2 in 2s): 503 fixture service unavailable" },
       { kind: "retry", content: "" },
-      { kind: "error", content: "final failure" },
+      { kind: "error", content: "503 final failure" },
     ]);
     expect(h.done).toHaveBeenCalledTimes(1);
   });
@@ -940,85 +903,62 @@ describe("PiSession dispatch and stream state", () => {
     ).toHaveLength(2);
   });
 
-  it("starts the thinking timer even without text deltas", async () => {
+  it("does not reopen a completed foreground card for an unrelated async notice", async () => {
+    const h = harness();
+    await h.session.send("work");
+    const { event } = h.clients[0];
+    for (const frame of piFrames("pi-subagents-foreground").filter((f) =>
+      ["agent_start", "tool_execution_start", "tool_execution_end"].includes(f.type),
+    ))
+      event(frame);
+    const cards = () =>
+      h.events.filter((e) => e.kind === "subagent_start" || e.kind === "subagent_done");
+    const before = cards();
+    expect(before.filter((e) => e.kind === "subagent_done")).toHaveLength(2);
+    event(
+      piFrames("pi-subagents-async").find(
+        (f) => f.type === "message_start" && f.message?.customType === "subagent-notify",
+      )!,
+    );
+    expect(cards()).toEqual(before);
+  });
+
+  it("times thinking even when no intermediate deltas arrive", async () => {
     const { session, clients, events } = harness();
     await session.send("stream");
     const { event } = clients[0];
-    event({ type: "agent_start" });
-    const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
-    event({
-      type: "message_update",
-      assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
-    });
-    expect(events).toEqual([{ kind: "thinking_delta", content: "", startedAt: 10_000 }]);
-
-    clock.mockReturnValue(17_000);
-    event({
-      type: "message_update",
-      assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "Considered." },
-    });
-    expect(events.slice(1)).toEqual([
-      { kind: "thinking_delta", content: "", durationMs: 7_000 },
-      { kind: "thinking", content: "Considered.", durationMs: 7_000 },
+    event(piFrame("agent_start"));
+    const clock = vi.spyOn(Date, "now").mockReturnValue(10000);
+    event(piFrame("message_update", { update: "thinking_start" }));
+    clock.mockReturnValue(17000);
+    event(piFrame("message_update", { update: "thinking_end" }));
+    expect(events.map((e) => [e.kind, e.startedAt, e.durationMs])).toEqual([
+      ["thinking_delta", 10000, undefined],
+      ["thinking_delta", undefined, 7000],
+      ["thinking", undefined, 7000],
     ]);
   });
 
-  it("closes thinking deltas before finalized thinking and retains authoritative text, tool formatting and usage columns", async () => {
+  it("recovers authoritative end-only output and replaces provisional usage with stats", async () => {
     const { session, clients, events } = harness();
     await session.send("stream");
     const { event } = clients[0];
     event({ type: "agent_start" });
-    for (const update of [
-      { type: "thinking_delta", contentIndex: 2, delta: "dr" },
-      { type: "thinking_end", contentIndex: 2, content: "draft" },
-      { type: "text_delta", contentIndex: 0, delta: "he" },
-    ]) {
-      event({ type: "message_update", assistantMessageEvent: update });
-    }
-    event({
-      type: "tool_execution_start",
-      toolCallId: "tool",
-      toolName: "write_note",
-      args: { slug: "example", body: "indexed" },
-    });
-    event({
-      type: "tool_execution_end",
-      toolCallId: "tool",
-      toolName: "write_note",
-      result: { content: [{ type: "text", text: "saved" }] },
-    });
-    event({
-      type: "tool_execution_end",
-      toolCallId: "no-start",
-      toolName: "read",
-      result: { content: [] },
-    });
-    event({
-      type: "message_end",
-      message: {
-        role: "assistant",
-        content: [{ type: "text", text: "hello" }],
-        usage: { input: 5, output: 2, cacheRead: 1, cost: { total: 0.2 } },
-      },
-    });
-    event({ type: "agent_settled" });
-    expect(events.slice(0, 3)).toEqual([
-      { kind: "thinking_delta", content: "dr", startedAt: expect.any(Number) as unknown },
-      { kind: "thinking_delta", content: "", durationMs: expect.any(Number) as unknown },
-      { kind: "thinking", content: "draft", durationMs: expect.any(Number) as unknown },
-    ]);
-    expect(events.find((entry) => entry.kind === "tool_use")).toMatchObject({
-      toolName: "mcp__panel__write_note",
-      toolSource: "panel",
-      content: expect.stringContaining('"body": "indexed"') as unknown,
-    });
-    expect(events.find((entry) => entry.toolUseId === "no-start")?.durationMs).toBeUndefined();
+    const orphan = piFrame("tool_execution_end");
+    event(orphan); // Drop start and all deltas, not the authoritative closing frames.
+    event(piFrame("message_end", { role: "assistant" }));
+    event(piFrame("agent_settled"));
+    const result = events.find(
+      (e) => e.kind === "tool_result" && e.toolUseId === orphan.toolCallId,
+    );
+    expect(result).toBeDefined();
+    expect(result?.durationMs).toBeUndefined();
     expect(events.at(-1)).toMatchObject({
       kind: "result",
-      content: "hello",
-      context: { tokens: 6, window: 100 },
+      content: "xxxxx",
+      context: { tokens: 412, window: 100 },
     });
-    expect(session.usage.input_tokens).toBe(5);
+    expect(session.usage.input_tokens).toBe(412);
     await vi.waitFor(() => expect(session.usage.input_tokens).toBe(99));
     expect(await session.getContextUsage()).toBeNull();
     expect(await session.getUsageInfo()).toMatchObject({ cost: 3, tokens: { output: 7 } });

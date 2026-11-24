@@ -1,16 +1,9 @@
 import { expect } from "vitest";
+import { captures } from "../pi-captures.ts";
 import { agentMessages, fixture } from "../fixture.ts";
 
 export default fixture({
-  description: "Without a steering boundary, Pi dispatches queued prompts FIFO after settlement.",
-  steps: [
-    { op: "send", text: "First prompt." },
-    { op: "send", text: "Second prompt." },
-    { op: "send", text: "Third prompt." },
-    { op: "check", name: "queued" },
-    { op: "check", name: "second" },
-    { op: "check", name: "third" },
-  ],
+  ...captures["single-queue-order"],
   verify(r) {
     const { queued, second, third } = r.pi!.checkpoints;
     expect(queued).toMatchObject({
@@ -30,10 +23,7 @@ export default fixture({
       prompts: ["First prompt.", "Second prompt.", "Third prompt."],
       terminalCount: 3,
     });
-    expect(agentMessages(r).map((m) => m.content)).toEqual([
-      "First reply.",
-      "Second reply.",
-      "Third reply.",
-    ]);
+    expect(agentMessages(r)).toHaveLength(3);
+    for (const m of agentMessages(r)) expect(m.content).toMatch(/^x+$/);
   },
 });

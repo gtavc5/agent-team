@@ -159,7 +159,7 @@ export const compact = (): Step => ({ op: "compact" });
 
 export const DEFAULT_MODEL: Record<Backend, string> = {
   codex: "gpt-6-luna",
-  pi: "synthetic/pi-model",
+  pi: "pi-e2e/scenario",
 };
 export const RECORD_CWD = "/tmp/sdk-capture";
 
@@ -169,12 +169,14 @@ export interface Header {
   description: string;
   model: string;
   cli?: string;
+  source?: string;
   recordedAt: string;
 }
 
 export type Entry = { t: number } & (
   | { step: Step & { i: number } }
   | { frame: unknown }
+  | { artifacts: Record<string, unknown[]> }
   // A JSON-RPC message the recorder sent to the backend.
   | { sent: unknown }
   | { error: string }

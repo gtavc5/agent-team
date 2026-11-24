@@ -26,7 +26,7 @@ afterEach(async () => {
   for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
 });
 
-export const tick = () => new Promise((r) => setTimeout(r, 5));
+export const tick = () => new Promise((r) => setTimeout(r, 0));
 
 export function setupProjects() {
   const base = tmpDir();

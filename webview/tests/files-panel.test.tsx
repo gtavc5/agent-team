@@ -309,9 +309,13 @@ describe("FilesPanel", () => {
     vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
     const { container, getByTitle } = open("x");
     await waitFor(() => expect(container.querySelector(".file-error")).not.toBeNull());
-    document.execCommand = vi.fn(() => false);
-    fireEvent.click(getByTitle("Copy path"));
-    await new Promise((r) => setTimeout(r, 20));
+    const copy = vi.fn(() => false);
+    document.execCommand = copy;
+    await act(async () => {
+      fireEvent.click(getByTitle("Copy path"));
+      await Promise.resolve();
+    });
+    expect(copy).toHaveBeenCalledWith("copy");
     expect(getByTitle("Copy path").textContent).toBe("Copy");
   });
 

@@ -1,22 +1,34 @@
-{"header":{"backend":"pi","fixture":"panel-tools-roundtrip","description":"Synthetic Pi tool anchors call real Panel HTTP and persist Notes, Board and Journal effects.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
-{"step":{"op":"send","text":"Record a project update.","i":0},"t":0}
-{"sent":{"type":"prompt","message":"Record a project update."},"t":5}
-{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
-{"frame":{"type":"agent_start"},"t":15}
-{"frame":{"type":"message_end","message":{"role":"user"}},"t":20}
-{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Consider the example."}},"t":30}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"Consider the example."}},"t":35}
-{"frame":{"type":"tool_execution_start","toolName":"write_note","toolCallId":"note","args":{"slug":"example","content":"Synthetic note.","expected_version":null}},"t":40}
-{"step":{"op":"panelCall","callId":"note","i":1},"t":45}
-{"frame":{"type":"tool_execution_start","toolName":"write_objective","toolCallId":"objective","args":{"id":"demo/replay","title":"Replay","goal":"Demonstrate the replay.","context":"Before finish"}},"t":50}
-{"step":{"op":"panelCall","callId":"objective","i":2},"t":55}
-{"frame":{"type":"tool_execution_start","toolName":"finish_task","toolCallId":"report","args":{"summary":"Synthetic work done.","context":"After finish","objective_id":"demo/replay"}},"t":60}
-{"step":{"op":"panelCall","callId":"report","i":3},"t":65}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Proj"}},"t":70}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"ect updated."}},"t":75}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"Project updated."}},"t":80}
-{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"thinking","thinking":"Consider the example."},{"type":"text","text":"Project updated."}]}},"t":85}
-{"frame":{"type":"agent_settled"},"t":90}
-{"sent":{"type":"get_session_stats"},"t":95}
-{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":100}
+{"header":{"backend":"pi","fixture":"panel-tools-roundtrip","description":"Recorded Panel calls persist Notes, Board and Journal effects through HTTP.","source":"three pi-deterministic E2E turn excerpts; real Panel HTTP handlers at tool anchors","model":"pi-e2e/scenario","recordedAt":"2026-11-24T00:21:47.803Z"}}
+{"t":0,"step":{"i":0,"op":"send","text":"pi-e2e-lead-plan"}}
+{"t":0,"sent":{"type":"prompt","message":"pi-e2e-lead-plan"}}
+{"t":4,"frame":{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"t":5,"frame":{"type":"agent_start"}}
+{"t":6,"frame":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxxxxx"}],"timestamp":1795479700159}}}
+{"t":6,"frame":{"type":"tool_execution_start","toolCallId":"objective","toolName":"write_objective","args":{"id":"pi-e2e/suite","title":"Pi E2E","goal":"run scenario"}}}
+{"t":6,"step":{"i":1,"op":"panelCall","callId":"objective"}}
+{"t":6,"frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxx"}],"api":"sample","provider":"pi-e2e","model":"scenario","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1795479700189,"durationMs":0,"thinkingLevel":"sample"}}}
+{"t":7,"frame":{"type":"agent_settled","aborted":false}}
+{"t":8,"sent":{"type":"get_session_stats"}}
+{"t":9,"frame":{"type":"response","command":"get_session_stats","success":true,"data":{"sessionFile":"sample","sessionId":"sample","userMessages":1,"assistantMessages":4,"toolCalls":3,"toolResults":3,"totalMessages":9,"tokens":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0},"cost":0,"contextUsage":{"tokens":7832,"contextWindow":100000,"percent":7.832}}}}
+{"t":412,"step":{"i":2,"op":"send","text":"[From the project lead]\n\npi-e2e-worker-notes"}}
+{"t":412,"sent":{"type":"prompt","message":"[From the project lead]\n\npi-e2e-worker-notes"}}
+{"t":417,"frame":{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"t":417,"frame":{"type":"agent_start"}}
+{"t":417,"frame":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}],"timestamp":1795479700600}}}
+{"t":417,"frame":{"type":"tool_execution_start","toolCallId":"note","toolName":"write_note","args":{"slug":"design","content":"pi-e2e note body","expected_version":null}}}
+{"t":417,"step":{"i":3,"op":"panelCall","callId":"note"}}
+{"t":417,"frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxx"}],"api":"sample","provider":"pi-e2e","model":"scenario","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1795479700628,"durationMs":0,"thinkingLevel":"sample"}}}
+{"t":417,"frame":{"type":"agent_settled","aborted":false}}
+{"t":418,"sent":{"type":"get_session_stats"}}
+{"t":420,"frame":{"type":"response","command":"get_session_stats","success":true,"data":{"sessionFile":"sample","sessionId":"sample","userMessages":1,"assistantMessages":5,"toolCalls":4,"toolResults":4,"totalMessages":11,"tokens":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0},"cost":0,"contextUsage":{"tokens":7090,"contextWindow":100000,"percent":7.090000000000001}}}}
+{"t":7558,"step":{"i":4,"op":"send","text":"pi-e2e-finish"}}
+{"t":7558,"sent":{"type":"prompt","message":"pi-e2e-finish"}}
+{"t":7561,"frame":{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"t":7562,"frame":{"type":"agent_start"}}
+{"t":7562,"frame":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxx"}],"timestamp":1795479707773}}}
+{"t":7562,"frame":{"type":"tool_execution_start","toolCallId":"report","toolName":"finish_task","args":{"summary":"pi-e2e-worker-report","context":"reviewed by scenario"}}}
+{"t":7562,"step":{"i":5,"op":"panelCall","callId":"report"}}
+{"t":7562,"frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxx"}],"api":"sample","provider":"pi-e2e","model":"scenario","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1795479707795,"durationMs":0,"thinkingLevel":"sample"}}}
+{"t":7562,"frame":{"type":"agent_settled","aborted":false}}
+{"t":7563,"sent":{"type":"get_session_stats"}}
+{"t":7565,"frame":{"type":"response","command":"get_session_stats","success":true,"data":{"sessionFile":"sample","sessionId":"sample","userMessages":2,"assistantMessages":7,"toolCalls":5,"toolResults":5,"totalMessages":15,"tokens":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0},"cost":0,"contextUsage":{"tokens":7126,"contextWindow":100000,"percent":7.126}}}}

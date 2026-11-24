@@ -47,7 +47,35 @@ export default fixture({
     const start = r.sent.find((s) => s.method === "thread/start");
     expect(start?.params).toMatchObject({
       developerInstructions: "Panel tools of a recorded fixture.",
-      dynamicTools: [{ type: "namespace", name: "panel" }],
+      dynamicTools: [
+        {
+          type: "namespace",
+          name: "panel",
+          tools: [
+            {
+              type: "function",
+              name: "lookup_code",
+              description: "Look up the secret code registered for a name.",
+              inputSchema: {
+                type: "object",
+                properties: { name: { type: "string" } },
+                required: ["name"],
+                additionalProperties: false,
+              },
+            },
+            {
+              type: "function",
+              name: "finish_task",
+              inputSchema: {
+                type: "object",
+                properties: { summary: { type: "string" } },
+                required: ["summary"],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ],
     });
     const calls = direct.events!.filter((e) => e.kind === "tool_use");
     expect(calls.map((e) => e.toolName)).toEqual([

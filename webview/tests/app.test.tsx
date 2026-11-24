@@ -1,45 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
 import { render, act, fireEvent } from "@testing-library/react";
 import { App } from "../src/App";
-import css from "../src/styles.css?raw";
 import { AUTO_RELOAD, type AgentInfo, type Message } from "../src/state/useServer";
 
-// The server end of the socket: the test opens it, feeds frames and reads
-// what the app sent.
-class FakeSocket {
-  static instances: FakeSocket[] = [];
-  static CONNECTING = 0;
-  static OPEN = 1;
-  static CLOSING = 2;
-  static CLOSED = 3;
-  readyState = FakeSocket.CONNECTING;
-  sent: string[] = [];
-  onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: ((e: { data: string }) => void) | null = null;
-  constructor(public url: string) {
-    FakeSocket.instances.push(this);
+import { FakeSocket } from "./fakeSocket";
+
+class ReactSocket extends FakeSocket {
+  override receive(frame: unknown) {
+    act(() => super.receive(frame));
   }
-  open() {
-    this.readyState = FakeSocket.OPEN;
-    this.onopen?.();
-  }
-  receive(frame: unknown) {
-    act(() => this.onmessage?.({ data: JSON.stringify(frame) }));
-  }
-  send(data: string) {
-    this.sent.push(data);
-  }
-  close() {
-    this.readyState = FakeSocket.CLOSED;
-  }
-  drop() {
-    this.readyState = FakeSocket.CLOSED;
-    act(() => this.onclose?.());
-  }
-  frames(): Array<Record<string, unknown>> {
-    return this.sent.map((s) => JSON.parse(s) as Record<string, unknown>);
+  override drop() {
+    act(() => super.drop());
   }
 }
 
@@ -117,7 +88,6 @@ const delta = (content: string) => ({
   event: { kind: "text_delta", content },
 });
 
-const scroller = () => document.querySelector(".messages") as HTMLElement;
 const composer = () => document.querySelector("textarea")!;
 const selectWorkspace = (name: string) =>
   fireEvent.click(
@@ -133,23 +103,12 @@ function setVisibility(state: "visible" | "hidden") {
   });
 }
 
-// jsdom has no layout: give the scroller fixed geometry.
-function fakeGeometry(el: HTMLElement, geo: { top: number; height: number; client: number }) {
-  Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => geo.height });
-  Object.defineProperty(el, "clientHeight", { configurable: true, get: () => geo.client });
-  Object.defineProperty(el, "scrollTop", {
-    configurable: true,
-    get: () => geo.top,
-    set: (v: number) => (geo.top = v),
-  });
-}
-
 let scrollIntoView: MockInstance<(arg?: boolean | ScrollIntoViewOptions) => void>;
 beforeEach(() => {
   vi.useFakeTimers();
   Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
   FakeSocket.instances = [];
-  vi.stubGlobal("WebSocket", FakeSocket);
+  vi.stubGlobal("WebSocket", ReactSocket);
   scrollIntoView = vi.fn<(arg?: boolean | ScrollIntoViewOptions) => void>();
   Element.prototype.scrollIntoView = scrollIntoView as unknown as Element["scrollIntoView"];
 });
@@ -265,118 +224,24 @@ describe("composer", () => {
     expect(composer().value).toBe("hello, and one more thing");
   });
 
-  it("clears the draft once the message is sent", async () => {
+  it("sends and clears a draft on deliberate Enter, not on IME confirmation", async () => {
     const sock = boot([settled(1)]);
-    fireEvent.change(composer(), { target: { value: "go" } });
-    fireEvent.keyDown(composer(), { key: "Enter" });
-    await act(async () => {});
-    expect(composer().value).toBe("");
-    expect(sock.frames().filter((f) => f.type === "send_message")).toMatchObject([
-      { content: "go" },
-    ]);
-  });
-});
-
-describe("scrolling", () => {
-  it("follows a growing reply while the reader is at the bottom", () => {
-    const sock = boot([settled(1), live]);
-    const geo = { top: 1000, height: 1500, client: 500 };
-    fakeGeometry(scroller(), geo);
-    fireEvent.scroll(scroller());
-    for (let i = 0; i < 3; i++) {
-      geo.height += 100;
-      sock.receive(delta(`line ${i}\n\n`));
-      frame();
-      expect(geo.top).toBe(geo.height);
-    }
-  });
-
-  it("lets a reader drag back up a little while a reply streams", () => {
-    const sock = boot([live]);
-    const geo = { top: 1000, height: 1500, client: 500 };
-    fakeGeometry(scroller(), geo);
-    fireEvent.scroll(scroller());
-    // One touch-move step up: far less than "scrolled up".
-    geo.top = 960;
-    fireEvent.scroll(scroller());
-    geo.height += 20;
-    sock.receive(delta("more "));
-    frame();
-    expect(geo.top).toBe(960);
-    // Back at the bottom, it follows again.
-    geo.top = geo.height - geo.client;
-    fireEvent.scroll(scroller());
-    geo.height += 20;
-    sock.receive(delta("again "));
-    frame();
-    expect(geo.top).toBe(geo.height);
-  });
-
-  it("does not pull an opened step box away when its details arrive", () => {
-    const last: Message = { ...settled(1), detail: "summary" };
-    const sock = boot([last]);
-    const geo = { top: 1000, height: 1500, client: 500 };
-    fakeGeometry(scroller(), geo);
-    fireEvent.scroll(scroller());
-    fireEvent.click(document.querySelector(".step-header")!);
-    expect(sock.frames()).toContainEqual(
-      expect.objectContaining({ type: "load_message_details", messageId: "s1" }),
-    );
-    // The full body makes the opened box taller.
-    geo.height += 800;
-    sock.receive({
-      type: "message_details",
-      workspaceId: "w1",
-      messageId: "s1",
-      events: [
-        {
-          kind: "tool_use",
-          content: "**Bash**\n```bash\n" + "echo x\n".repeat(40) + "```",
-          toolUseId: "t1",
-          contentOffset: 0,
-        },
-      ],
-    });
-    frame();
-    expect(geo.top).toBe(1000);
-  });
-
-  it("leaves a reader who scrolled up where they are", () => {
-    const sock = boot([settled(1), live]);
-    const geo = { top: 200, height: 3000, client: 500 };
-    fakeGeometry(scroller(), geo);
-    fireEvent.scroll(scroller());
-    scrollIntoView.mockClear();
-    sock.receive(delta("more"));
-    frame();
-    expect(geo.top).toBe(200);
-    expect(scrollIntoView).not.toHaveBeenCalled();
-  });
-
-  it("keeps the reader's place and the draft's caret across a reconnect", () => {
-    const sock = boot([settled(1)]);
-    const geo = { top: 200, height: 3000, client: 500 };
-    fakeGeometry(scroller(), geo);
-    fireEvent.scroll(scroller());
-    fireEvent.change(composer(), { target: { value: "half a thought" } });
-    composer().setSelectionRange(4, 4);
-    scrollIntoView.mockClear();
-
-    sock.drop();
+    const input = composer();
+    const sends = () => sock.frames().filter((f) => f.type === "send_message");
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "继续" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("继续");
+    expect(sends()).toEqual([]);
     act(() => {
-      vi.advanceTimersByTime(2_000);
+      vi.advanceTimersByTime(100);
     });
-    const next = FakeSocket.instances.at(-1)!;
-    openSocket(next, [AGENT]);
-    frame();
-
-    expect(scrollIntoView).not.toHaveBeenCalled();
-    expect(composer().value).toBe("half a thought");
-    expect(composer().selectionStart).toBe(4);
-    // The newest page is still resynced on the new socket.
-    expect(next.frames()).toContainEqual(
-      expect.objectContaining({ type: "load_messages", workspaceId: "w1" }),
-    );
+    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => {});
+    expect(input.value).toBe("");
+    expect(sends()).toMatchObject([{ content: "继续" }]);
   });
 });
 
@@ -481,25 +346,6 @@ describe("agent avatars", () => {
     const who = document.querySelector(".quote-bar-agent")!;
     expect(who.textContent).not.toContain("avatars/");
     expect(who.querySelector("img")!.getAttribute("src")).toBe("avatars/Alice.jpg");
-  });
-});
-
-describe("the sidebar drawer", () => {
-  it("takes the second tap of a double tap on a session as it closes", () => {
-    boot([settled(1)], { others: ["w2"] });
-    fireEvent.click(document.querySelector(".mobile-menu-btn")!);
-    selectWorkspace("w2");
-    expect(document.querySelector(".sidebar-open")).toBeNull();
-    const shield = document.querySelector(".sidebar-overlay.closing")!;
-    expect(shield).not.toBeNull();
-    // Above the drawer sliding away, not only the page.
-    expect(css).toMatch(/\.sidebar-overlay\.closing \{[^}]*z-index: 101;/);
-    fireEvent.click(shield);
-    expect(document.querySelector(".sidebar-open")).toBeNull();
-    act(() => {
-      vi.advanceTimersByTime(400);
-    });
-    expect(document.querySelector(".sidebar-overlay")).toBeNull();
   });
 });
 

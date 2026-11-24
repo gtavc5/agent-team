@@ -1,45 +1,74 @@
-{"header":{"backend":"pi","fixture":"single-queue-order","description":"Without a steering boundary, Pi dispatches queued prompts FIFO after settlement.","model":"synthetic/pi-model","recordedAt":"2026-01-01T00:00:00.000Z"}}
-{"step":{"op":"send","text":"First prompt.","i":0},"t":0}
-{"sent":{"type":"prompt","message":"First prompt."},"t":5}
-{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":10}
-{"frame":{"type":"agent_start"},"t":15}
-{"frame":{"type":"message_end","message":{"role":"user"}},"t":170}
-{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":25}
-{"step":{"op":"send","text":"Second prompt.","i":1},"t":30}
-{"step":{"op":"send","text":"Third prompt.","i":2},"t":35}
-{"frame":{"type":"agent_end"},"t":40}
-{"step":{"op":"check","name":"queued","i":3},"t":45}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Firs"}},"t":50}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"t reply."}},"t":55}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"First reply."}},"t":60}
-{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"text","text":"First reply."}]}},"t":65}
-{"frame":{"type":"agent_settled"},"t":70}
-{"sent":{"type":"get_session_stats"},"t":75}
-{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":80}
-{"sent":{"type":"prompt","message":"Second prompt."},"t":85}
-{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":90}
-{"frame":{"type":"agent_start"},"t":95}
-{"frame":{"type":"message_end","message":{"role":"user"}},"t":170}
-{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":105}
-{"frame":{"type":"agent_end"},"t":110}
-{"step":{"op":"check","name":"second","i":4},"t":115}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Seco"}},"t":120}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"nd reply."}},"t":125}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Second reply."}},"t":130}
-{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"text","text":"Second reply."}]}},"t":135}
-{"frame":{"type":"agent_settled"},"t":140}
-{"sent":{"type":"get_session_stats"},"t":145}
-{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":150}
-{"sent":{"type":"prompt","message":"Third prompt."},"t":155}
-{"frame":{"type":"response","command":"prompt","data":{"disposition":"started"}},"t":160}
-{"frame":{"type":"agent_start"},"t":165}
-{"frame":{"type":"message_end","message":{"role":"user"}},"t":170}
-{"frame":{"type":"message_start","message":{"role":"assistant"}},"t":175}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Thir"}},"t":180}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"d reply."}},"t":185}
-{"frame":{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Third reply."}},"t":190}
-{"frame":{"type":"message_end","message":{"role":"assistant","usage":{"input":6,"output":3,"cacheRead":1},"content":[{"type":"text","text":"Third reply."}]}},"t":195}
-{"frame":{"type":"agent_settled"},"t":200}
-{"sent":{"type":"get_session_stats"},"t":205}
-{"frame":{"type":"response","command":"get_session_stats","data":{"tokens":{"input":6,"output":3,"cacheRead":1},"cost":0.001,"contextUsage":{"tokens":7,"contextWindow":1000}}},"t":210}
-{"step":{"op":"check","name":"third","i":5},"t":215}
+{"header":{"backend":"pi","fixture":"single-queue-order","source":"pi --mode rpc","cli":"1.6.0","model":"openai-codex/gpt-6.2-astra","description":"Without a steering boundary, Pi dispatches queued prompts FIFO after settlement.","recordedAt":"2026-11-24T00:14:42.609Z"}}
+{"t":0,"step":{"op":"send","text":"First prompt.","i":0}}
+{"t":0,"sent":{"type":"prompt","message":"First prompt."}}
+{"t":231,"frame":{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"t":231,"frame":{"type":"agent_start"}}
+{"t":231,"frame":{"type":"turn_start"}}
+{"t":231,"frame":{"type":"message_start","message":{"role":"sample","content":"","field2":{"field0":"sample","field1":"sample","field2":"sample","field3":"sample","cwd":"sample"},"timestamp":1795479217198}}}
+{"t":231,"frame":{"type":"message_end","message":{"role":"sample","content":"","field2":{"field0":"sample","field1":"sample","field2":"sample","field3":"sample","cwd":"sample"},"timestamp":1795479217198}}}
+{"t":231,"frame":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxx"}],"timestamp":1795479217197}}}
+{"t":231,"frame":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxx"}],"timestamp":1795479217197}}}
+{"t":231,"step":{"op":"send","text":"Second prompt.","i":1}}
+{"t":231,"step":{"op":"send","text":"Third prompt.","i":2}}
+{"t":231,"step":{"op":"check","name":"queued","i":3}}
+{"t":1328,"frame":{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"sample","timestamp":1795479217207}}}
+{"t":2157,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_start","contentIndex":0}}}
+{"t":2158,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxx"}}}
+{"t":2159,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxxxx"}}}
+{"t":2159,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxx"}}}
+{"t":2160,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxxx"}}}
+{"t":2160,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxx"}}}
+{"t":2217,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxxxx"}}}
+{"t":2323,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"x"}}}
+{"t":2323,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxxxxxx"}}}
+{"t":2428,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"x"}}}
+{"t":2428,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxx"}}}
+{"t":2428,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxx"}}}
+{"t":2429,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"x"}}}
+{"t":2506,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}}
+{"t":2511,"frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":399,"output":16,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":415,"cost":{"input":0.003192,"output":0.00064,"cacheRead":0,"cacheWrite":0,"total":0.003832,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795479217207,"responseId":"id-1","rawStopReason":"completed","durationMs":2271,"thinkingLevel":"high"}}}
+{"t":2511,"frame":{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":399,"output":16,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":415,"cost":{"input":0.003192,"output":0.00064,"cacheRead":0,"cacheWrite":0,"total":0.003832,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795479217207,"responseId":"id-1","rawStopReason":"completed","durationMs":2271,"thinkingLevel":"high"},"toolResults":[]}}
+{"t":2512,"frame":{"type":"agent_end","messages":[{"role":"sample","content":"","field2":{"field0":"sample","field1":"sample","field2":"sample","field3":"sample","cwd":"sample"},"timestamp":1795479217198},{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxx"}],"timestamp":1795479217197},{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":399,"output":16,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":415,"cost":{"input":0.003192,"output":0.00064,"cacheRead":0,"cacheWrite":0,"total":0.003832,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795479217207,"responseId":"id-1","rawStopReason":"completed","durationMs":2271,"thinkingLevel":"high"}],"field2":false}}
+{"t":2514,"frame":{"type":"agent_settled","aborted":false}}
+{"t":2514,"sent":{"type":"get_session_stats"}}
+{"t":2515,"frame":{"type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sample","userMessages":1,"assistantMessages":1,"toolCalls":0,"toolResults":0,"totalMessages":3,"tokens":{"input":399,"output":16,"cacheRead":0,"cacheWrite":0,"total":415},"cost":0.003832,"contextUsage":{"tokens":415,"contextWindow":272000,"percent":0.1525735294117647}}}}
+{"t":32517,"sent":{"type":"prompt","message":"Second prompt."}}
+{"t":32521,"frame":{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"t":32521,"frame":{"type":"agent_start"}}
+{"t":32521,"frame":{"type":"turn_start"}}
+{"t":32521,"frame":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxxx"}],"timestamp":1795479249487}}}
+{"t":32521,"frame":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxxx"}],"timestamp":1795479249487}}}
+{"t":32521,"step":{"op":"check","name":"second","i":4}}
+{"t":32829,"frame":{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"sample","timestamp":1795479249490}}}
+{"t":33667,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_start","contentIndex":0}}}
+{"t":33668,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxxxx"}}}
+{"t":33668,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxxxxx"}}}
+{"t":33668,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxxxxxxx"}}}
+{"t":33669,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"x"}}}
+{"t":33737,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"xxxxxxxxxxxxxxxxxxxxxxx"}}}
+{"t":33743,"frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":424,"output":8,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":432,"cost":{"input":0.003392,"output":0.00032,"cacheRead":0,"cacheWrite":0,"total":0.003712,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795479249490,"responseId":"id-2","rawStopReason":"completed","durationMs":1220,"thinkingLevel":"high"}}}
+{"t":33743,"frame":{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":424,"output":8,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":432,"cost":{"input":0.003392,"output":0.00032,"cacheRead":0,"cacheWrite":0,"total":0.003712,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795479249490,"responseId":"id-2","rawStopReason":"completed","durationMs":1220,"thinkingLevel":"high"},"toolResults":[]}}
+{"t":33743,"frame":{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxxx"}],"timestamp":1795479249487},{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":424,"output":8,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":432,"cost":{"input":0.003392,"output":0.00032,"cacheRead":0,"cacheWrite":0,"total":0.003712,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795479249490,"responseId":"id-2","rawStopReason":"completed","durationMs":1220,"thinkingLevel":"high"}],"field2":false}}
+{"t":33743,"frame":{"type":"agent_settled","aborted":false}}
+{"t":33743,"sent":{"type":"get_session_stats"}}
+{"t":33744,"frame":{"type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sample","userMessages":2,"assistantMessages":2,"toolCalls":0,"toolResults":0,"totalMessages":5,"tokens":{"input":823,"output":24,"cacheRead":0,"cacheWrite":0,"total":847},"cost":0.007544,"contextUsage":{"tokens":432,"contextWindow":272000,"percent":0.1588235294117647}}}}
+{"t":63747,"sent":{"type":"prompt","message":"Third prompt."}}
+{"t":63750,"frame":{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}}
+{"t":63750,"frame":{"type":"agent_start"}}
+{"t":63750,"frame":{"type":"turn_start"}}
+{"t":63750,"frame":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxx"}],"timestamp":1795479280717}}}
+{"t":63750,"frame":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxx"}],"timestamp":1795479280717}}}
+{"t":64077,"frame":{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"sample","timestamp":1795479280720}}}
+{"t":65112,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_start","contentIndex":0}}}
+{"t":65113,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxxx"}}}
+{"t":65113,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxxxxx"}}}
+{"t":65113,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"xxxxxxxxx"}}}
+{"t":65114,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"x"}}}
+{"t":65639,"frame":{"type":"message_update","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"xxxxxxxxxxxxxxxxxxxxxx"}}}
+{"t":65640,"frame":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":441,"output":8,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":449,"cost":{"input":0.003528,"output":0.00032,"cacheRead":0,"cacheWrite":0,"total":0.003848,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795479280720,"responseId":"id-3","rawStopReason":"completed","durationMs":1888,"thinkingLevel":"high"}}}
+{"t":65640,"frame":{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":441,"output":8,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":449,"cost":{"input":0.003528,"output":0.00032,"cacheRead":0,"cacheWrite":0,"total":0.003848,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795479280720,"responseId":"id-3","rawStopReason":"completed","durationMs":1888,"thinkingLevel":"high"},"toolResults":[]}}
+{"t":65641,"frame":{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"xxxxxxxxxxxxx"}],"timestamp":1795479280717},{"role":"assistant","content":[{"type":"text","text":"xxxxxxxxxxxxxxxxxxxxxx","textSignature":"sample"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6.2-astra","providerThinkingLevel":"high","usage":{"input":441,"output":8,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":449,"cost":{"input":0.003528,"output":0.00032,"cacheRead":0,"cacheWrite":0,"total":0.003848,"totalFromProvider":false}},"stopReason":"stop","timestamp":1795479280720,"responseId":"id-3","rawStopReason":"completed","durationMs":1888,"thinkingLevel":"high"}],"field2":false}}
+{"t":65641,"frame":{"type":"agent_settled","aborted":false}}
+{"t":65641,"sent":{"type":"get_session_stats"}}
+{"t":65641,"frame":{"type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sample","userMessages":3,"assistantMessages":3,"toolCalls":0,"toolResults":0,"totalMessages":7,"tokens":{"input":1264,"output":32,"cacheRead":0,"cacheWrite":0,"total":1296},"cost":0.011392,"contextUsage":{"tokens":449,"contextWindow":272000,"percent":0.1650735294117647}}}}
+{"t":65641,"step":{"op":"check","name":"third","i":5}}

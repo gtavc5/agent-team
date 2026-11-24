@@ -301,9 +301,8 @@ describe("server websocket", () => {
         s.on("close", () => resolve());
       });
     });
-    await new Promise((r) => setTimeout(r, 200));
-    expect(child.exitCode).toBeNull();
     expect((await request("/", { headers: { Cookie: cookie } })).status).toBe(200);
+    expect(child.exitCode).toBeNull();
   });
 
   it("pages back through history without skipping same-millisecond messages", async () => {

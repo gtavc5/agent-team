@@ -1,4 +1,4 @@
-// Replays recorded Codex and synthetic Pi fixtures through the real session and workspace,
+// Replays Codex and Pi fixtures through the real session and workspace,
 // captures broadcast frames, and folds them with the client's own functions.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { StreamEvent } from "../../src/session/types";
@@ -139,6 +139,7 @@ const norm = (m: unknown) =>
 const FIXTURES: Array<[Backend, string]> = [
   ["codex", "tools"],
   ["pi", "basic-turn"],
+  ["pi", "antigravity-acp-turn"],
   ["pi", "tools-bash-edit"],
   ["pi", "pi-subagents-foreground"],
   ["pi", "pi-subagents-async"],
@@ -161,7 +162,11 @@ describe("broadcast parity", () => {
         const deltas = frames.filter(
           (f) => f.type === "stream_event" && (f.event as StreamEvent).kind === "thinking_delta",
         );
-        expect(deltas.length).toBeGreaterThan(0);
+        const hasThinking =
+          !name.startsWith("pi-subagents-") &&
+          !["tools-bash-edit", "panel-tools-roundtrip"].includes(name); // Tool-only turn, no reasoning block on wire.
+        if (hasThinking) expect(deltas.length).toBeGreaterThan(0);
+        else expect(deltas).toHaveLength(0);
         for (const m of messages) {
           expect(m.events?.some((e) => e.kind === "thinking_delta") ?? false).toBe(false);
         }
@@ -181,7 +186,7 @@ describe("broadcast parity", () => {
           ).toEqual(norm(stripEventsInnerEvents(sm.events ?? [])));
         });
         for (const span of spans) expect(span.closedAt, span.messageId).not.toBeNull();
-        if (backend === "pi") {
+        if (backend === "pi" && hasThinking) {
           expect(
             deltas.some((f) => {
               const event = f.event as StreamEvent;
@@ -197,32 +202,37 @@ describe("broadcast parity", () => {
           const done = frames.filter(
             (f) => f.type === "stream_event" && (f.event as StreamEvent).kind === "subagent_done",
           );
-          expect(done).toHaveLength(1);
-          expect((done[0].event as StreamEvent).subagent).toMatchObject({ eventCount: 2 });
-          expect((done[0].event as StreamEvent).subagent?.events).toBeUndefined();
-          const index = messages.findIndex((m) => m.id === done[0].messageId);
-          const taskId = (done[0].event as StreamEvent).subagent!.taskId;
-          const serverEvents = messages[index].events!;
-          // Same payload selection as load_subagent_events, then the client's
-          // detail update followed by a later summary refresh.
-          const detail = serverEvents.find((e) => e.subagent?.taskId === taskId)!.subagent!.events!;
-          const clientEvents = msgs[index].events!;
-          expect(clientEvents.find((e) => e.subagent?.taskId === taskId)?.subagent).toMatchObject({
-            eventCount: detail.length,
-          });
-          const hydrated = clientEvents.map((e) =>
-            e.subagent?.taskId === taskId
-              ? { ...e, subagent: { ...e.subagent, events: detail, eventCount: detail.length } }
-              : e,
-          );
-          const refreshed = mergeDetailEvents(hydrated, stripEventsInnerEvents(serverEvents));
-          expect(refreshed.find((e) => e.kind === "subagent_start")?.subagent?.events).toEqual(
-            detail,
-          );
-          expect(detail).toEqual([
-            { kind: "thinking", content: "Child reasoning." },
-            { kind: "text", content: "Child evidence." },
-          ]);
+          expect(done).toHaveLength(2);
+          for (const frame of done) {
+            const subagent = (frame.event as StreamEvent).subagent!;
+            expect(subagent.eventCount).toBe(1);
+            expect(subagent.events).toBeUndefined();
+            const index = messages.findIndex((m) => m.id === frame.messageId);
+            const taskId = subagent.taskId;
+            const serverEvents = messages[index].events!;
+            // Same payload selection as load_subagent_events, then the client's
+            // detail update followed by a later summary refresh.
+            const detail = serverEvents.find((e) => e.subagent?.taskId === taskId)!.subagent!
+              .events!;
+            const clientEvents = msgs[index].events!;
+            expect(clientEvents.find((e) => e.subagent?.taskId === taskId)?.subagent).toMatchObject(
+              {
+                eventCount: detail.length,
+              },
+            );
+            const hydrated = clientEvents.map((e) =>
+              e.subagent?.taskId === taskId
+                ? { ...e, subagent: { ...e.subagent, events: detail, eventCount: detail.length } }
+                : e,
+            );
+            const refreshed = mergeDetailEvents(hydrated, stripEventsInnerEvents(serverEvents));
+            expect(refreshed.find((e) => e.subagent?.taskId === taskId)?.subagent?.events).toEqual(
+              detail,
+            );
+            expect(detail).toEqual([
+              { kind: "text", content: expect.stringMatching(/^x+$/) as unknown },
+            ]);
+          }
         }
         // Summary pages keep the stats.
         const summary = summarizeMessages(messages);

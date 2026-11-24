@@ -72,19 +72,6 @@ describe("SubAgentItem", () => {
 });
 
 describe("StepGroup", () => {
-  it("renders subagents as sibling blocks, not inside the step box", () => {
-    const events: StreamEvent[] = [
-      { kind: "tool_use", content: "Bash ls", toolUseId: "t1" },
-      sa({ status: "running" }),
-    ];
-    const { container } = render(<StepGroup group={{ step: 0, events }} />);
-
-    const item = container.querySelector(".subagent-item")!;
-    expect(item).toBeTruthy();
-    expect(item.closest(".step-group")).toBeNull();
-    expect(container.querySelector(".step-group")).toBeTruthy();
-  });
-
   it("omits the step box entirely when a segment only contains a subagent", () => {
     const { container } = render(<StepGroup group={{ step: 0, events: [sa()] }} />);
     expect(container.querySelector(".step-group")).toBeNull();
@@ -126,19 +113,6 @@ describe("MessageItem", () => {
     expect(d.getByText("Ada")).toBeTruthy();
     expect(d.getByText("⭐")).toBeTruthy();
     expect(d.queryByRole("img")).toBeNull();
-  });
-
-  it("renders subagents outside the collapsed events box", () => {
-    const events: StreamEvent[] = [
-      { kind: "thinking", content: "hmm" },
-      sa({ status: "completed" }),
-    ];
-    const { container } = render(<MessageItem msg={msg({ events })} agents={agents} />);
-
-    const item = container.querySelector(".subagent-item")!;
-    expect(item).toBeTruthy();
-    expect(item.closest(".step-group")).toBeNull();
-    expect(container.querySelector(".step-group")).toBeTruthy();
   });
 
   it("interleaves text segments and event groups by contentOffset", () => {

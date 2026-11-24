@@ -252,11 +252,13 @@ describe("Pi workspace lifecycle regressions", () => {
         },
       );
       req.on("error", reject);
+      panel["server"].once("request", (incoming) => {
+        incoming.once("data", () => {
+          panel.unregisterSession("s1");
+          req.end('ng","params":{}}');
+        });
+      });
       req.write('{"name":"pi');
-      setTimeout(() => {
-        panel.unregisterSession("s1");
-        req.end('ng","params":{}}');
-      }, 25);
     });
     expect(status).toBe(403);
     expect(handler).not.toHaveBeenCalled();
@@ -366,7 +368,8 @@ describe("Pi workspace lifecycle regressions", () => {
     const token = panel.registerSession({ sessionKey: "s-sse", getToolset: () => null });
 
     const probePromise = panel.probeDispatchedReport("s-sse", null, "rep-1", 2_000);
-    await new Promise((r) => setTimeout(r, 30));
+    // The probe registers its waiter synchronously, before fetch opens the stream.
+    expect(panel.isControlConnected("s-sse")).toBe(false);
     const ctrl = new AbortController();
     cleanups.push(() => ctrl.abort());
     const sse = await fetch(`${baseUrl}/v1/sessions/s-sse/control`, {

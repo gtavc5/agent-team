@@ -5,11 +5,11 @@ export default fixture({
   description:
     "A Pi crash closes open work and does not re-send an unaccepted prompt; the saved session resumes.",
   steps: [
-    { op: "send", text: "Establish a saved session." },
-    { op: "send", text: "Start uncertain work." },
+    { op: "send", text: "pi-e2e-git-ready" },
+    { op: "send", text: "pi-e2e-launch:foreground" },
     { op: "check", name: "beforeCrash" },
     { op: "check", name: "afterCrash" },
-    { op: "send", text: "Continue explicitly." },
+    { op: "send", text: "check retained notices" },
     { op: "check", name: "restored" },
   ],
   verify(r) {
@@ -26,9 +26,9 @@ export default fixture({
     });
     expect(restored.generation).toBe(beforeCrash.generation! + 1);
     expect(restored.prompts).toEqual([
-      "Establish a saved session.",
-      "Start uncertain work.",
-      "Continue explicitly.",
+      "pi-e2e-git-ready",
+      "pi-e2e-launch:foreground",
+      "check retained notices",
     ]);
     expect(r.pi!.connections).toEqual([{ restored: false }, { restored: true }]);
     const [, crashed, recovered] = agentMessages(r);
@@ -39,6 +39,9 @@ export default fixture({
     expect(crashed.events!.find((e) => e.kind === "subagent_start")?.subagent?.status).toBe(
       "stopped",
     );
-    expect(recovered).toMatchObject({ status: "done", content: "Restored turn." });
+    expect(recovered).toMatchObject({
+      status: "done",
+      content: expect.stringMatching(/^x+$/) as unknown,
+    });
   },
 });

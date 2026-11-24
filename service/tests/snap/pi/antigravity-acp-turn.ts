@@ -1,22 +1,18 @@
 import { expect } from "vitest";
 import { agentMessages, fixture } from "../fixture.ts";
+import { captures } from "../pi-captures.ts";
 
 export default fixture({
-  description: "A synthetic Antigravity ACP model projects reasoning, tool use and context.",
-  model: "antigravity-acp/synthetic-model",
-  steps: [
-    { op: "send", text: "Run the synthetic ACP turn." },
-    { op: "check", name: "stats" },
-  ],
+  ...captures["antigravity-acp-turn"],
   verify(r) {
     expect(r.pi!.checkpoints.stats.contextUsage).toMatchObject({
-      model: "antigravity-acp/synthetic-model",
-      totalTokens: 7,
-      maxTokens: 1000,
+      model: "antigravity-acp/gemini-4-neon",
+      totalTokens: 15444,
+      maxTokens: 1000000,
     });
     expect(agentMessages(r)[0].events).toEqual([
       expect.objectContaining({ kind: "thinking" }),
-      expect.objectContaining({ kind: "tool_use", toolName: "read", toolResult: "Example text." }),
+      expect.objectContaining({ kind: "tool_use", toolName: "read", toolResult: "x".repeat(31) }),
     ]);
   },
 });

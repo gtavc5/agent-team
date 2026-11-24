@@ -2,7 +2,6 @@
 // pushed off the row, no invisible tap targets over the text.
 import { describe, it, expect, vi } from "vitest";
 import { act, fireEvent, render } from "@testing-library/react";
-import css from "../src/styles.css?raw";
 import { EventItem, MessageItem, SubAgentItem } from "../src/chat/messages";
 import type { AgentInfo, Message, StreamEvent, SubAgentInfo } from "../src/state/useServer";
 
@@ -13,17 +12,6 @@ const agent: AgentInfo = {
   avatar: "A",
   color: "#888",
   isDefault: true,
-};
-
-const withSheet = (fn: () => void) => {
-  const sheet = document.createElement("style");
-  sheet.textContent = css;
-  document.head.appendChild(sheet);
-  try {
-    fn();
-  } finally {
-    sheet.remove();
-  }
 };
 
 describe("the transcript", () => {
@@ -180,158 +168,5 @@ describe("the transcript", () => {
     expect(resumed.querySelector(".subagent-usage")!.textContent).toBe("14k tokens · 3 tools");
     expect(time(agentCard({ usage }))).toBe("43.6s");
     expect(time(agentCard({ usage, status: "running" }))).toBeNull();
-  });
-
-  it("keeps the quote button in the header row, off the text", () => {
-    const msg: Message = {
-      id: "m1",
-      kind: "agent",
-      agentId: "a1",
-      content: "Done: the tests pass.",
-      timestamp: 0,
-      status: "done",
-    };
-    const { container } = render(<MessageItem msg={msg} agents={[agent]} onQuote={vi.fn()} />);
-    expect(container.querySelector(".message-header .btn-quote")).not.toBeNull();
-    expect(container.querySelector(".message-content .btn-quote")).toBeNull();
-    withSheet(() => {
-      const quote = getComputedStyle(container.querySelector(".btn-quote")!);
-      expect(quote.position).not.toBe("absolute");
-      expect(quote.marginLeft).toBe("auto");
-    });
-  });
-
-  it("cuts a long sender's name on one line instead of wrapping it", () => {
-    const msg: Message = {
-      id: "m2",
-      kind: "user",
-      agentId: null,
-      content: "carry on",
-      timestamp: 0,
-      status: "done",
-      from: {
-        workspaceId: "w1",
-        name: "fix the wake-up time the CLI rounds up to the minute",
-        role: "worker",
-      },
-    };
-    const { container } = render(<MessageItem msg={msg} agents={[agent]} />);
-    withSheet(() => {
-      const name = getComputedStyle(container.querySelector(".from-author")!);
-      expect([name.whiteSpace, name.textOverflow, name.overflow]).toEqual([
-        "nowrap",
-        "ellipsis",
-        "hidden",
-      ]);
-    });
-    // A button centres its text: the name starts where the header does.
-    expect(css).toMatch(/\.from-author \{[^}]*text-align: left;/);
-  });
-});
-
-describe("the transcript's rules", () => {
-  interface Rule {
-    selectors: string[];
-    body: string;
-    media: string | null;
-  }
-  const rules = (text: string, media: string | null = null): Rule[] => {
-    const out: Rule[] = [];
-    const src = text.replace(/\/\*[\s\S]*?\*\//g, "");
-    let i = 0;
-    while (i < src.length) {
-      const open = src.indexOf("{", i);
-      if (open < 0) break;
-      const head = src.slice(i, open).trim();
-      let depth = 1;
-      let j = open + 1;
-      while (depth > 0) {
-        if (src[j] === "{") depth++;
-        else if (src[j] === "}") depth--;
-        j++;
-      }
-      const body = src.slice(open + 1, j - 1);
-      if (head.startsWith("@media")) out.push(...rules(body, head));
-      else out.push({ selectors: head.split(",").map((s) => s.trim()), body, media });
-      i = j;
-    }
-    return out;
-  };
-  const all = rules(css);
-  const rule = (sel: string, media: string | null = null) =>
-    all.find((r) => r.selectors.includes(sel) && r.media === media)!;
-
-  it("let a long tool name or subagent type give way to the buttons beside it", () => {
-    expect(rule(".event-chip").body).toMatch(/flex-shrink:\s*1/);
-    // A phone wraps a row's time and buttons rather than push them off it.
-    const phone = "@media (max-width: 768px), (max-height: 500px)";
-    expect(rule(".event-row", phone).body).toMatch(/flex-wrap:\s*wrap/);
-    // A path or pattern is a block of its own, whole, on every screen.
-    expect(rule(".event-summary-line").body).toMatch(/overflow-wrap:\s*anywhere/);
-    expect(rule(".event-summary-line").body).not.toMatch(/display:\s*none/);
-    expect(rule(".subagent-label").body).toMatch(/text-overflow:\s*ellipsis/);
-    expect(rule(".subagent-label").body).not.toMatch(/flex-shrink:\s*0/);
-    // Shrinking goes by each item's natural width: a long description sized
-    // that way cut a short type to "s…" before it gave way itself.
-    expect(rule(".subagent-desc").body).toMatch(/flex:\s*1 1 0;/);
-  });
-
-  it("float a code block's Copy over its corner, taking no room from the code", () => {
-    const copy = rule(".code-block .copy-btn");
-    expect(copy.body).toMatch(/float:\s*right/);
-    // Positioned and stacked, so it is drawn above the code it overlaps.
-    expect(copy.body).toMatch(/position:\s*sticky/);
-    expect(copy.body).toMatch(/z-index:\s*1/);
-    // No width or height left for the code to wrap around.
-    expect(copy.body).toMatch(/margin:\s*6px 6px -100% -100%/);
-    // On touch it stays faintly visible and grows to a finger's size; nothing
-    // moves it off the code.
-    const touch = all.filter((r) => r.selectors.some((s) => s.includes(".copy-btn")) && r.media);
-    expect(touch.map((r) => r.body.replace(/\s+/g, " ").trim())).toEqual([
-      "opacity: 1; font-size: 12.5px; padding: 4px 11px;",
-    ]);
-  });
-
-  it("give a tool's path block the same Copy, the path wrapping around it", () => {
-    const copy = rule(".event-summary-line .copy-btn");
-    expect(copy).toBe(rule(".code-block .copy-btn"));
-    expect(copy.body).toMatch(/user-select:\s*none/);
-    // Its own margins after the shared ones: the first line makes room.
-    const own = all.filter(
-      (r) => r.selectors.length === 1 && r.selectors[0] === ".event-summary-line .copy-btn",
-    );
-    expect(own.map((r) => r.body.replace(/\s+/g, " ").trim())).toEqual([
-      "position: static; margin: -4px -6px 0 8px;",
-    ]);
-    expect(rule(".event-summary-line:hover .copy-btn").body).toMatch(/opacity:\s*1/);
-    const touch = all.find(
-      (r) => r.selectors.includes(".event-summary-line .copy-btn") && r.media,
-    )!;
-    expect(touch.body).toMatch(/opacity:\s*1;/);
-  });
-
-  it("keep images their own shape, and a queued message's ✕ a target bigger than its glyph", () => {
-    expect(rule(".msg-images").body).toMatch(/align-items:\s*flex-start/);
-    expect(rule(".queued-cancel").body).toMatch(/padding:\s*6px/);
-  });
-
-  it("give a command's description a line of its own on phones", () => {
-    const phone = "@media (max-width: 768px), (max-height: 500px)";
-    expect(rule(".command-item", phone).body).toMatch(/flex-wrap:\s*wrap/);
-    expect(rule(".command-desc", phone).body).toMatch(/flex-basis:\s*100%/);
-  });
-
-  it("give a phone's branch line room for the branch: the PR goes by its number", () => {
-    const phone = "@media (max-width: 768px), (max-height: 500px)";
-    expect(rule(".pr-title", phone).body).toMatch(/display:\s*none/);
-    expect(rule(".pr-state", phone).body).toMatch(/display:\s*none/);
-    expect(rule(".pr-card", phone).body).toMatch(/flex-shrink:\s*0/);
-    expect(rule(".pr-open .pr-number", phone).body).toMatch(/var\(--success\)/);
-    expect(rule(".ws-info-branch", phone).body).toMatch(/min-width:\s*6em/);
-  });
-
-  it("colour a failed subagent's summary and an error's label as errors", () => {
-    expect(rule(".subagent-failed .subagent-summary").body).toMatch(/var\(--error\)/);
-    expect(rule(".banner-error .banner-label").body).toMatch(/var\(--error\)/);
   });
 });

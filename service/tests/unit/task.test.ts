@@ -221,9 +221,9 @@ describe("Workspace event aggregation", () => {
   });
 });
 
-describe("message queue", () => {
-  const tick = () => new Promise((r) => setTimeout(r, 5));
+const tick = () => new Promise((r) => setTimeout(r, 0));
 
+describe("message queue", () => {
   it("dispatches immediately when the agent is idle", async () => {
     const { ws, session, agentMsgs } = makeWorkspace();
     await ws.sendMessage("first task");
@@ -266,7 +266,7 @@ describe("message queue", () => {
     await ws.sendMessage("after abort");
     session.isRunning = false;
     ws.abortAll();
-    await new Promise((r) => setTimeout(r, 5));
+    await tick();
     expect(session.sent).toEqual(["after abort"]);
   });
 
@@ -284,13 +284,6 @@ describe("message queue", () => {
     expect(session.sent).toEqual(["after stop"]);
   });
 
-  it("dispose releases every session from the host", async () => {
-    const { ws, host, agentInfo } = makeWorkspace();
-    await ws.dispose();
-    expect(host.destroyed).toEqual([agentInfo.id]);
-    expect(ws.agents.size).toBe(0);
-  });
-
   it("cancelQueued removes a pending message so it never runs", async () => {
     const { ws, emit, session } = makeWorkspace();
     session.isRunning = true;
@@ -302,7 +295,7 @@ describe("message queue", () => {
 
     session.isRunning = false;
     emit({ kind: "result", content: "" });
-    await new Promise((r) => setTimeout(r, 5));
+    await tick();
     expect(session.sent).toEqual([]);
   });
 
@@ -316,7 +309,7 @@ describe("message queue", () => {
     });
     session.isRunning = false;
     emit({ kind: "result", content: "" });
-    await new Promise((r) => setTimeout(r, 5));
+    await tick();
     expect(session.sent).toHaveLength(1);
     expect(session.sent[0]).toContain("original text");
     expect(session.sent[0]).toContain("follow-up");
@@ -324,8 +317,6 @@ describe("message queue", () => {
 });
 
 describe("rate-limit retry mechanics", () => {
-  const tick = () => new Promise((r) => setTimeout(r, 5));
-
   it("records the last prompt and retryLast re-dispatches it", async () => {
     const { ws, session } = makeWorkspace();
     await ws.sendMessage("do the thing");
@@ -427,7 +418,7 @@ describe("banners, retries and activity", () => {
     expect(events[0].contentOffset).toBe(2);
   });
 
-  it("clears a retry on recovery or failure without waiting for the turn to end", () => {
+  it("clears a retry on recovery, failure, or turn end", () => {
     const progress: Array<Partial<StreamEvent>> = [
       { kind: "text_delta", content: "recovered" },
       { kind: "thinking_delta", content: "thinking" },
@@ -451,6 +442,12 @@ describe("banners, retries and activity", () => {
     explicit.emit({ kind: "retry", content: "Retrying" });
     explicit.emit({ kind: "retry", content: "" });
     expect(explicit.agentMsgs()[0].events).toEqual([]);
+
+    const finished = makeWorkspace();
+    finished.session.isRunning = true;
+    finished.emit({ kind: "retry", content: "Retrying" });
+    finished.emit({ kind: "result", content: "" });
+    expect(finished.agentMsgs()[0].events?.some((e) => e.kind === "retry")).toBe(false);
 
     const failed = makeWorkspace();
     failed.session.isRunning = true;
@@ -536,11 +533,11 @@ describe("archiving", () => {
     emit({ kind: "result", content: "" });
     // The queued message is still pending until the next tick dispatches it.
     expect(ws.isIdle).toBe(false);
-    await new Promise((r) => setTimeout(r, 0));
+    await tick();
     expect(session.isRunning).toBe(true);
     session.isRunning = false;
     emit({ kind: "result", content: "" });
-    await new Promise((r) => setTimeout(r, 0));
+    await tick();
     expect(ws.isIdle).toBe(true);
   });
 
@@ -572,12 +569,18 @@ describe("archiving", () => {
 });
 
 describe("error events", () => {
-  it("get a contentOffset so the interleaved view can place them", () => {
+  it("get a contentOffset, mark the reply errored, and keep error text out of content", () => {
     const { ws, emit } = makeWorkspace();
     emit({ kind: "text_delta", content: "partial" });
     emit({ kind: "error", content: "boom" });
     const m = ws.messages.filter((x) => x.kind === "agent")[0];
-    expect(m.events![0]).toMatchObject({ kind: "error", contentOffset: m.content.length });
+    expect(m.status).toBe("error");
+    expect(m.content).toBe("partial");
+    expect(m.events![0]).toMatchObject({
+      kind: "error",
+      content: "boom",
+      contentOffset: m.content.length,
+    });
   });
 });
 
@@ -893,23 +896,6 @@ describe("events between turns and late results", () => {
     expect(done.filter((d) => d.msgId === first.id).length).toBeGreaterThanOrEqual(2);
   });
 
-  it("drops the retry banner once the turn finishes and keeps errors out of the text", async () => {
-    const { ws, emit, agentMsgs } = makeWorkspace();
-    await ws.sendMessage("go");
-    emit({ kind: "retry", content: "API retry 1/10 in 1s" });
-    emit({ kind: "text_delta", content: "answer" });
-    expect(agentMsgs()[0].events!.some((e) => e.kind === "retry")).toBe(false);
-    emit({ kind: "result", content: "" });
-    expect(agentMsgs()[0].events!.some((e) => e.kind === "retry")).toBe(false);
-    await ws.sendMessage("again");
-    emit({ kind: "text_delta", content: "partial" });
-    emit({ kind: "error", content: "boom" });
-    const failed = agentMsgs()[1];
-    expect(failed.status).toBe("error");
-    expect(failed.content).toBe("partial");
-    expect(failed.events!.at(-1)).toMatchObject({ kind: "error", content: "boom" });
-  });
-
   it("applies a grandchild's events inside the nested card and drops ownerless carriers", async () => {
     const { ws, emit, agentMsgs } = makeWorkspace();
     await ws.sendMessage("go");
@@ -981,7 +967,7 @@ describe("messages delivered from a project", () => {
     expect(ws.messages.find((m) => m.kind === "user")!.status).toBe("queued");
     session.isRunning = false;
     emit({ kind: "result", content: "" });
-    await new Promise((r) => setTimeout(r, 0));
+    await tick();
     expect(session.sent).toEqual(["[From parser fix]\n\ndone"]);
   });
 

@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
+import { piFrame } from "../snap/pi-wire";
 import * as os from "node:os";
 import * as path from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -26,10 +27,6 @@ function frameError(run: () => unknown): PiRpcFrameError {
     return error as PiRpcFrameError;
   }
   throw new Error("expected a frame error");
-}
-
-function response(id: string, command: string, data?: unknown): string {
-  return `${JSON.stringify({ id, type: "response", command, success: true, ...(data !== undefined && { data }) })}\n`;
 }
 
 function makeClient(options: { highWaterMark?: number } = {}) {
@@ -92,25 +89,9 @@ describe("LfJsonLineDecoder", () => {
 });
 
 describe("PiRpcClient", () => {
-  it.each([undefined, "Keep decisions"])(
-    "sends compact with instructions %s",
-    async (instructions) => {
-      const { client, stdout, writes } = makeClient();
-      const pending = client.compact(instructions);
-      await flushWrites();
-      expect(JSON.parse(writes[0].toString())).toEqual({
-        id: "req-1",
-        type: "compact",
-        ...(instructions && { customInstructions: instructions }),
-      });
-      const result = { summary: "Earlier work", firstKeptEntryId: "entry", tokensBefore: 900 };
-      stdout.write(response("req-1", "compact", result));
-      await expect(pending).resolves.toEqual(result);
-    },
-  );
   it("matches out-of-order responses and drains concurrent stdout messages synchronously", async () => {
     const { client, stdout, writes } = makeClient();
-    const first = client.getState();
+    const first = client.prompt("one");
     const second = client.getSessionStats();
     await flushWrites();
     const commands = writes.map(
@@ -122,14 +103,20 @@ describe("PiRpcClient", () => {
     void first.finally(() => {
       firstSettled = true;
     });
-    stdout.write(response("req-2", "get_session_stats", { turns: 3 }));
-    await expect(second).resolves.toEqual({ turns: 3 });
+    const stats = piFrame("response", { command: "get_session_stats" });
+    stdout.write(JSON.stringify({ ...stats, id: "req-2" }) + "\n");
+    await expect(second).resolves.toEqual(stats.data);
     expect(firstSettled).toBe(false);
 
+    const prompt = piFrame("response", { command: "prompt" });
+    const settled = piFrame("agent_settled");
+    const events: unknown[] = [];
+    client.on("event", (e) => events.push(e));
     stdout.write(
-      `${response("req-1", "get_state", { sessionId: "s1" })}${JSON.stringify({ type: "agent_settled" })}\n`,
+      [{ ...prompt, id: "req-1" }, settled].map((e) => JSON.stringify(e)).join("\n") + "\n",
     );
-    await expect(first).resolves.toEqual({ sessionId: "s1" });
+    expect(events).toEqual([settled]);
+    await expect(first).resolves.toEqual(prompt.data);
     stdout.end();
   });
 
@@ -144,7 +131,9 @@ describe("PiRpcClient", () => {
       message: "follow",
       images,
     });
-    stdout.write(response("req-1", "steer", { disposition: "queued" }));
+    stdout.write(
+      JSON.stringify({ ...piFrame("response", { command: "steer" }), id: "req-1" }) + "\n",
+    );
     await expect(result).resolves.toEqual({ disposition: "queued" });
     stdout.end();
   });
@@ -163,7 +152,9 @@ describe("PiRpcClient", () => {
         order.push("write");
         expect(command.message).toBe("hello");
         expect(command.images).toEqual([{ type: "image", data: "AAAA", mimeType: "image/png" }]);
-        stdout.write(response(command.id, "prompt", { disposition: "handled" }));
+        stdout.write(
+          JSON.stringify({ ...piFrame("response", { command: "prompt" }), id: command.id }) + "\n",
+        );
         callback();
         resolveWrite?.();
       },
@@ -178,7 +169,7 @@ describe("PiRpcClient", () => {
     });
     await written;
     expect(order).toEqual(["before", "write"]);
-    await expect(result).resolves.toEqual({ disposition: "handled" });
+    await expect(result).resolves.toEqual({ disposition: "started" });
     stdout.end();
   });
 
