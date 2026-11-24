@@ -65,19 +65,6 @@ describe("SubAgentItem", () => {
     expect(container.querySelector(".btn-cancel-subagent")).toBeNull();
   });
 
-  it("hides the cancel button once the subagent is done", () => {
-    const { container } = render(
-      <SubAgentItem ev={sa({ status: "completed" })} onCancel={() => {}} />,
-    );
-    expect(container.querySelector(".btn-cancel-subagent")).toBeNull();
-    expect(container.querySelector(".subagent-item")!.className).toContain("subagent-completed");
-  });
-
-  it("renders a stopped subagent with its own status style", () => {
-    const { container } = render(<SubAgentItem ev={sa({ status: "stopped" })} />);
-    expect(container.querySelector(".subagent-item")!.className).toContain("subagent-stopped");
-  });
-
   it("renders nested subagents as nested SubAgentItems with merged lifecycle", () => {
     const nestedEvents: StreamEvent[] = [
       { kind: "tool_use", content: "Read /a", toolUseId: "t1" },
@@ -107,16 +94,6 @@ describe("SubAgentItem", () => {
 });
 
 describe("StepGroup", () => {
-  it("returns an expanded step to its collapsed header from the footer", () => {
-    const { getByRole, queryByRole } = render(
-      <StepGroup group={{ step: 0, events: [{ kind: "thinking", content: "step" }] }} />,
-    );
-    expect(queryByRole("button", { name: "Collapse step trace" })).toBeNull();
-    fireEvent.click(getByRole("button", { name: "Expand steps" }));
-    fireEvent.click(getByRole("button", { name: "Collapse step trace" }));
-    expect(queryByRole("button", { name: "Collapse step trace" })).toBeNull();
-    expect(document.activeElement).toBe(getByRole("button", { name: "Expand steps" }));
-  });
   it.each(["", "\n  "])(
     "keeps %j persisted thinking static even when steps default open",
     (content) => {

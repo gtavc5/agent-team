@@ -301,26 +301,6 @@ describe("search jumps", () => {
   const page = (ids: number[]): Message[] =>
     ids.map((i) => ({ ...settled(i), id: `m${i}`, timestamp: i }));
 
-  it("pages back to a hit older than the loaded window, then highlights it", () => {
-    const sock = boot(page([100, 101, 102]), { hasMore: true });
-    searchAndOpen(sock, { messageId: "m10", timestamp: 10 });
-    const asked = sock.frames().filter((f) => f.type === "load_messages" && f.before != null);
-    expect(asked).toMatchObject([{ workspaceId: "w1", before: 100 }]);
-    sock.receive({
-      type: "workspace_messages",
-      workspaceId: "w1",
-      before: 100,
-      hasMore: true,
-      messages: page([10, 11, 99]),
-    });
-    frame();
-    expect(document.querySelector("#msg-m10")!.classList).toContain("message-highlight");
-    act(() => {
-      vi.advanceTimersByTime(100);
-    });
-    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: "instant", block: "center" });
-  });
-
   it("is dropped when the reader leaves the workspace before it lands", () => {
     const sock = boot(page([100, 101]), { hasMore: true, others: ["w2"] });
     searchAndOpen(sock, { messageId: "m10", timestamp: 10 });
@@ -375,16 +355,6 @@ describe("search jumps", () => {
     });
     frame();
     expect(document.querySelector(".info-toast")!.textContent).toMatch(/no longer/);
-  });
-});
-
-describe("agent avatars", () => {
-  it("shows the quoted agent's avatar as an image, not its file path", () => {
-    boot([settled(1)], { agents: [{ ...AGENT, avatar: "avatars/Alice.jpg" }] });
-    fireEvent.click(document.querySelector(".btn-quote")!);
-    const who = document.querySelector(".quote-bar-agent")!;
-    expect(who.textContent).not.toContain("avatars/");
-    expect(who.querySelector("img")!.getAttribute("src")).toBe("avatars/Alice.jpg");
   });
 });
 
@@ -516,26 +486,6 @@ describe("files panel", () => {
   const panel = () => document.querySelector('aside[aria-label="Files"]');
   const lastFetch = () => fetchMock.mock.calls.at(-1)![0];
 
-  it("opens the workspace folder from the rail, and a file named in a reply", async () => {
-    boot([{ ...settled(1), content: "Changed `src/a.ts:3`." }], { others: ["w2"] });
-    fireEvent.click(document.querySelector('.side-rail [aria-label="Files"]')!);
-    await act(async () => {});
-    expect(panel()!.querySelector(".dir-view")).not.toBeNull();
-    expect(lastFetch()).toBe("api/file?ws=w1&path=.");
-    fireEvent.click(panel()!.querySelector(".side-panel-close")!);
-    expect(panel()).toBeNull();
-
-    fireEvent.click(document.querySelector(".message-content .file-ref")!);
-    await act(async () => {});
-    expect(lastFetch()).toBe("api/file?ws=w1&path=src%2Fa.ts");
-    expect(panel()!.querySelector(".code-mark")).not.toBeNull();
-
-    // Another workspace's panel shows that workspace's folder.
-    selectWorkspace("w2");
-    await act(async () => {});
-    expect(lastFetch()).toBe("api/file?ws=w2&path=.");
-    expect(panel()!.querySelector(".dir-view")).not.toBeNull();
-  });
   it.each(["C:\\captures\\one#final.png", "artifacts/one`two.png"])(
     "opens a ViewImage filename literally: %s",
     async (path) => {

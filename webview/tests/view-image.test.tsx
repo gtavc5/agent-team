@@ -14,25 +14,22 @@ const image = (path = "/tmp/one.png", over: Partial<StreamEvent> = {}): StreamEv
 });
 
 describe("ViewImage paths", () => {
-  it.each([
-    "/tmp/one.png",
-    "artifacts/one image.png",
-    "artifacts/one`two.png",
-    "C:\\captures\\one image.png",
-    "C:\\captures\\one#final.png",
-  ])("opens the displayed path through FileOpenContext: %s", (path) => {
-    const open = vi.fn();
-    const { getByRole, queryByRole } = render(
-      <FileOpenContext.Provider value={open}>
-        <EventItem ev={image(path, { toolResult: "" })} />
-      </FileOpenContext.Provider>,
-    );
-    const ref = getByRole("button", { name: path });
-    expect(ref.tagName).toBe("CODE");
-    fireEvent.click(ref);
-    expect(open).toHaveBeenCalledExactlyOnceWith(path, { literalPath: true });
-    expect(queryByRole("button", { name: /open file/i })).toBeNull();
-  });
+  it.each(["/tmp/one.png", "C:\\captures\\one image.png"])(
+    "opens the displayed path through FileOpenContext: %s",
+    (path) => {
+      const open = vi.fn();
+      const { getByRole, queryByRole } = render(
+        <FileOpenContext.Provider value={open}>
+          <EventItem ev={image(path, { toolResult: "" })} />
+        </FileOpenContext.Provider>,
+      );
+      const ref = getByRole("button", { name: path });
+      expect(ref.tagName).toBe("CODE");
+      fireEvent.click(ref);
+      expect(open).toHaveBeenCalledExactlyOnceWith(path, { literalPath: true });
+      expect(queryByRole("button", { name: /open file/i })).toBeNull();
+    },
+  );
 
   it("retries loading a truncated summary, then opens the full path once", async () => {
     const path = `artifacts/${"nested/".repeat(30)}one.png`;

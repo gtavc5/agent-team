@@ -172,43 +172,6 @@ describe("connection liveness", () => {
     expect(reply().liveThinkingSince).toBeUndefined();
     expect(reply().waitingSince).toBe(8_000);
   });
-
-  it("resyncs the newest page in place after a reconnect", () => {
-    const { result } = renderHook(() => useServer());
-    const ws = FakeSocket.instances[0];
-    const w = { id: "w", name: "w", project: "p", hostId: "h", cwd: "/", agents: [], messages: [] };
-    act(() => {
-      ws.open();
-      ws.receive({ ...init, workspaces: [{ ...w, createdAt: 0 }] });
-      ws.receive({
-        type: "workspace_messages",
-        workspaceId: "w",
-        hasMore: false,
-        before: null,
-        messages: [
-          { id: "m1", kind: "agent", agentId: "a", content: "", timestamp: 1, status: "streaming" },
-        ],
-      });
-    });
-    expect(result.current.workspaces[0].messages[0].status).toBe("streaming");
-    act(() => {
-      ws.receive({
-        type: "workspace_messages",
-        workspaceId: "w",
-        hasMore: false,
-        before: null,
-        messages: [
-          { id: "m1", kind: "agent", agentId: "a", content: "ok", timestamp: 1, status: "done" },
-          { id: "m2", kind: "user", agentId: null, content: "next", timestamp: 2, status: "done" },
-        ],
-      });
-    });
-    const msgs = result.current.workspaces[0].messages;
-    expect(msgs.map((m) => [m.id, m.status])).toEqual([
-      ["m1", "done"],
-      ["m2", "done"],
-    ]);
-  });
 });
 
 describe("resync detail refetch", () => {

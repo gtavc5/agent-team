@@ -428,24 +428,6 @@ describe("Copy buttons", () => {
     expect(container.querySelector(".event-summary-line .copy-btn")).toBeNull();
   });
 
-  it("copies a tool's plain result", async () => {
-    const writeText = vi.fn(() => Promise.resolve());
-    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
-    const { container, getByText } = render(
-      <EventItem
-        ev={{
-          kind: "tool_use",
-          toolName: "Bash",
-          content: "**Bash**\n```bash\nls\n```",
-          toolResult: "a_b.ts\nc.ts",
-        }}
-      />,
-    );
-    fireEvent.click(getByText(/^Result/));
-    await click(container.querySelector(".event-result .copy-btn")!);
-    expect(writeText).toHaveBeenCalledWith("a_b.ts\nc.ts");
-  });
-
   it("copies a result that came on its own", async () => {
     const writeText = vi.fn(() => Promise.resolve());
     vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });

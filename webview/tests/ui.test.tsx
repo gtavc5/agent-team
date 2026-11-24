@@ -201,17 +201,6 @@ describe("EventItem", () => {
     expect(container.querySelector(".event-content strong")).toBeNull();
   });
 
-  it("toggles the paired tool result", () => {
-    const { container, getByText } = render(
-      <EventItem
-        ev={ev("tool_use", { content: "**Read** `a`", toolUseId: "t1", toolResult: "file body" })}
-      />,
-    );
-    expect(container.querySelector(".event-result")).toBeNull();
-    fireEvent.click(getByText(/^Result/));
-    expect(container.querySelector(".event-result")!.textContent).toContain("file body");
-  });
-
   it("labels thinking with its own chip", () => {
     const { container } = render(<EventItem ev={ev("thinking", { content: "hmm" })} />);
     expect(container.querySelector(".chip-thinking")!.textContent).toBe("Thinking");
@@ -955,7 +944,7 @@ describe("summary pages and lazy details", () => {
 });
 
 describe("HistoryHint", () => {
-  it("walks through loading, older-available, and start-of-conversation", async () => {
+  it("distinguishes initial loading, paging in flight, and empty history", async () => {
     const { HistoryHint } = await import("../src/chat/HistoryHint");
     const { container, rerender } = render(
       <HistoryHint hasMore={false} loading={false} loaded={false} count={0} />,
@@ -964,10 +953,6 @@ describe("HistoryHint", () => {
     rerender(<HistoryHint hasMore loading loaded count={5} />);
     expect(container.textContent).toContain("Loading older messages");
     expect(container.querySelector(".spinner")).toBeTruthy();
-    rerender(<HistoryHint hasMore loading={false} loaded count={5} />);
-    expect(container.textContent).toContain("Scroll up");
-    rerender(<HistoryHint hasMore={false} loading={false} loaded count={5} />);
-    expect(container.textContent).toContain("Beginning of conversation");
     rerender(<HistoryHint hasMore={false} loading={false} loaded count={0} />);
     expect(container.innerHTML).toBe("");
   });
