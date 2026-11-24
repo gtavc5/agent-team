@@ -1,6 +1,13 @@
 import { Fragment, memo, useState } from "react";
-import type { AgentInfo, ModelOption, Project, Workspace } from "../state/useServer";
+import type {
+  AgentInfo,
+  CodexAuthState,
+  ModelOption,
+  Project,
+  Workspace,
+} from "../state/useServer";
 import { AgentAvatar } from "../workspace/avatar";
+import { CODEX_SETUP_VALUE } from "../workspace/dialogs";
 import { EffortSelect, effortOf, selectableLevels } from "../workspace/EffortSelect";
 import { agentState, stateLabel } from "../workspace/agents";
 import { formatRelative, formatTokens, shortModel } from "../format";
@@ -44,6 +51,8 @@ export const AgentsPanel = memo(function AgentsPanel({
   activeWsId,
   connected,
   models,
+  codexAuth,
+  onOpenCodexSetup,
   actions,
   overview = false,
 }: {
@@ -52,6 +61,8 @@ export const AgentsPanel = memo(function AgentsPanel({
   activeWsId: string | null;
   connected: boolean;
   models: ModelOption[];
+  codexAuth?: CodexAuthState | null;
+  onOpenCodexSetup?: () => void;
   actions: AgentsPanelActions;
   overview?: boolean;
 }) {
@@ -67,6 +78,8 @@ export const AgentsPanel = memo(function AgentsPanel({
       active={w.id === activeWsId}
       connected={connected}
       models={models}
+      codexAuth={codexAuth}
+      onOpenCodexSetup={onOpenCodexSetup}
       actions={actions}
       defaultOpen={!overview}
     />
@@ -90,6 +103,8 @@ function SessionCard({
   active,
   connected,
   models,
+  codexAuth,
+  onOpenCodexSetup,
   actions,
   defaultOpen,
 }: {
@@ -98,6 +113,8 @@ function SessionCard({
   active: boolean;
   connected: boolean;
   models: ModelOption[];
+  codexAuth?: CodexAuthState | null;
+  onOpenCodexSetup?: () => void;
   actions: AgentsPanelActions;
   defaultOpen: boolean;
 }) {
@@ -203,6 +220,8 @@ function SessionCard({
                   archived={state === "archived"}
                   readOnly={readOnly}
                   models={models}
+                  codexAuth={codexAuth}
+                  onOpenCodexSetup={onOpenCodexSetup}
                   onClear={() => actions.onClearContext(w.id, a.id)}
                   onRemove={() => actions.onRemoveAgent(w.id, a.id)}
                   onModel={(model) => actions.onSetModel(w.id, a.id, model)}
@@ -285,6 +304,8 @@ function AgentRow({
   archived,
   readOnly = false,
   models,
+  codexAuth,
+  onOpenCodexSetup,
   onClear,
   onRemove,
   onModel,
@@ -295,6 +316,8 @@ function AgentRow({
   archived: boolean;
   readOnly?: boolean;
   models: ModelOption[];
+  codexAuth?: CodexAuthState | null;
+  onOpenCodexSetup?: () => void;
   onClear: () => void;
   onRemove: () => void;
   onModel: (model: string) => void;
@@ -304,8 +327,21 @@ function AgentRow({
   const ctx = a.context;
   const pct = ctx && ctx.window ? Math.min(100, Math.round((ctx.tokens / ctx.window) * 100)) : null;
   const bg = a.backgroundTasks ?? [];
-  const modelOptions = modelLabels(switchable(a, models));
-  const hasModelSelect = !archived && !readOnly && connected && modelOptions.length >= 2;
+  const codexLocked = codexAuth != null && !codexAuth.authenticated;
+  const { backend, allowOtherBackend, ids } = switchable(a, models, codexLocked);
+  const modelOptions = modelLabels(ids);
+  const showCodexSetup =
+    !archived &&
+    !readOnly &&
+    connected &&
+    !!codexAuth?.cliAvailable &&
+    !codexAuth.authenticated &&
+    (allowOtherBackend || backend === "codex");
+  const hasModelSelect =
+    !archived &&
+    !readOnly &&
+    connected &&
+    (modelOptions.length >= 2 || (showCodexSetup && modelOptions.length >= 1));
   const effortLevels =
     !archived && !readOnly && connected && selectableLevels(a.effortLevels) ? a.effortLevels : null;
   const hasControls = hasModelSelect || !!effortLevels;
@@ -325,13 +361,24 @@ function AgentRow({
                 aria-label={`${a.name}'s model`}
                 title="Switch model; the conversation carries over"
                 value={a.model}
-                onChange={(e) => onModel(e.target.value)}
+                onChange={(e) => {
+                  if (e.target.value === CODEX_SETUP_VALUE) {
+                    onOpenCodexSetup?.();
+                    return;
+                  }
+                  onModel(e.target.value);
+                }}
               >
                 {modelOptions.map(({ id, label }) => (
                   <option key={id} value={id}>
                     {label}
                   </option>
                 ))}
+                {showCodexSetup && (
+                  <option value={CODEX_SETUP_VALUE} className="codex-unauth-option">
+                    Codex (not signed in)
+                  </option>
+                )}
               </select>
             ) : hasControls ? (
               <span className="ap-meta-model">{shortAgentModel(a.model)}</span>
@@ -463,12 +510,21 @@ function modelLabels(ids: string[]): Array<{ id: string; label: string }> {
 }
 
 // A conversation stays on its backend. The current model is always selectable.
-function switchable(a: AgentInfo, models: ModelOption[]): string[] {
+function switchable(
+  a: AgentInfo,
+  models: ModelOption[],
+  codexLocked = false,
+): { backend: "pi" | "codex"; allowOtherBackend: boolean; ids: string[] } {
   const backend =
     models.find((m) => m.id === a.model)?.backend ?? (a.model.startsWith("gpt-") ? "codex" : "pi");
-  const allowOtherBackend = a.canSwitchBackend && !a.busy && agentState(a) === "idle";
-  const ids = models.filter((m) => allowOtherBackend || m.backend === backend).map((m) => m.id);
-  return ids.includes(a.model) ? ids : [a.model, ...ids];
+  const allowOtherBackend = !!(a.canSwitchBackend && !a.busy && agentState(a) === "idle");
+  const usable = codexLocked ? models.filter((m) => m.backend !== "codex") : models;
+  const ids = usable.filter((m) => allowOtherBackend || m.backend === backend).map((m) => m.id);
+  return {
+    backend,
+    allowOtherBackend,
+    ids: ids.includes(a.model) ? ids : [a.model, ...ids],
+  };
 }
 
 // The last two folders of a path: enough to tell worktrees apart.

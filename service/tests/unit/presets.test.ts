@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   MODEL_OPTIONS,
+  availableModelOptions,
   backendForModel,
   codexContextWindow,
   codexFastTier,
@@ -16,6 +17,35 @@ describe("codex model presets", () => {
   it("exposes codex models only when its CLI is available", () => {
     expect(MODEL_OPTIONS.length > 0).toBe(isCodexCliAvailable());
     expect(MODEL_OPTIONS.every((m) => m.backend === "codex")).toBe(true);
+  });
+
+  it("filters unauthenticated native codex models while keeping Pi openai-codex/* models intact", () => {
+    const piModels = [
+      {
+        id: "openai-codex/gpt-5.4",
+        provider: "openai-codex",
+        modelId: "gpt-5.4",
+        name: "GPT-5.4 (Pi)",
+        effortLevels: ["low", "high"],
+      },
+      {
+        id: "anthropic/claude-opus-5-5",
+        provider: "anthropic",
+        modelId: "claude-opus-5-5",
+        name: "Opus 5.5",
+      },
+    ];
+
+    const gated = availableModelOptions(piModels, { codexAuthenticated: false });
+    expect(gated.some((m) => m.backend === "codex")).toBe(false);
+    expect(gated.map((m) => [m.id, m.backend])).toEqual([
+      ["anthropic/claude-opus-5-5", "pi"],
+      ["openai-codex/gpt-5.4", "pi"],
+    ]);
+
+    const unlocked = availableModelOptions(piModels, { codexAuthenticated: true });
+    expect(unlocked.filter((m) => m.backend === "codex")).toEqual(MODEL_OPTIONS);
+    expect(unlocked.some((m) => m.id === "openai-codex/gpt-5.4" && m.backend === "pi")).toBe(true);
   });
 
   it("maps the 1M suffix to a context window override and a plain CLI model id", () => {

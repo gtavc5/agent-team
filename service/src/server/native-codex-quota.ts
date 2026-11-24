@@ -35,8 +35,9 @@ import { codexProcessEnv, readCodexRateLimits } from "../session/codex";
 import type { QuotaProviderAdapter } from "../session/quota/registry";
 export class CodexQuotaSource implements QuotaProviderAdapter<unknown> {
   readonly id = NATIVE_CODEX;
+  constructor(private readonly configured: () => boolean = () => true) {}
   isConfigured() {
-    return true;
+    return this.configured();
   }
   async fetchQuota() {
     const at = Date.now();

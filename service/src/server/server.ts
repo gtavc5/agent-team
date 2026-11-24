@@ -31,6 +31,7 @@ import {
   availableModelOptions,
   backendForModel,
   effortLevelsForModel,
+  isCodexCliAvailable,
   type ModelOption,
 } from "../config/presets";
 import {
@@ -40,6 +41,7 @@ import {
   type SessionConfig,
 } from "../session/types";
 import { HostRegistry, LocalHost } from "../session/host";
+import { codexProcessEnv, probeCodexAuth, type CodexAuthState } from "../session/codex";
 import { completeDirs, resolveWorkspacePath } from "../repo/dirs";
 import { GitScanner } from "../repo/scanner";
 import { HistoryService, sidebarHits, type SearchHit } from "../workspace/history-service";
@@ -52,7 +54,7 @@ import { QuotaMonitor } from "./quota";
 import { CodexQuotaSource } from "./native-codex-quota";
 import { QuotaAdapterRegistry } from "../session/quota/registry";
 import { piAdapters } from "../session/quota/pi-adapters";
-import type { PiQuotaReader } from "../session/quota-schema";
+import { NATIVE_CODEX, unavailable, type PiQuotaReader } from "../session/quota-schema";
 import { SystemMonitor } from "./system";
 
 function stripEventsInnerEvents(events: StreamEvent[]): StreamEvent[] {
@@ -84,7 +86,9 @@ export class Server {
   private readonly commandsByAgent = new Map<string, Map<string, CommandInfo[]>>();
   private catalogModels: PiAvailableModel[] = [];
   private catalogRevision = 0;
-  private models: ModelOption[] = availableModelOptions([]);
+  private codexAuth: CodexAuthState = initialCodexAuthState();
+  private recheckingCodexAuth: Promise<CodexAuthState> | null = null;
+  private models: ModelOption[] = availableModelOptions([], { codexAuthenticated: false });
   private staleLeadToolWorkspaces = new Set<string>();
   private readonly restoring: Promise<void>;
   private closing = false;
@@ -102,7 +106,7 @@ export class Server {
   private alive = new WeakSet<WebSocket>();
   private auth: Auth;
   private http: HttpHandler;
-  private codexQuota = new CodexQuotaSource();
+  private codexQuota = new CodexQuotaSource(() => this.codexAuth.authenticated);
   private quota = new QuotaMonitor(
     (quota) => this.broadcastUI({ type: "quota_snapshot", quota }),
     new QuotaAdapterRegistry<PiQuotaReader | undefined>(
@@ -179,22 +183,20 @@ export class Server {
     this.archiveTimer = setInterval(() => this.sweepArchives(), 3600_000);
 
     const host = process.env.AGENT_TEAM_HOST || "0.0.0.0";
-    this.listening = this.restoring
-      .then(() => this.refreshPiCatalog())
-      .then(
-        () =>
-          new Promise<number>((resolve) => {
-            if (this.closing) {
-              resolve(port);
-              return;
-            }
-            this.httpServer.listen(port, host, () => {
-              const bound = (this.httpServer.address() as AddressInfo).port;
-              console.log(`Agent Team server listening on http://${host}:${bound}`);
-              resolve(bound);
-            });
-          }),
-      );
+    this.listening = this.restoring.then(
+      () =>
+        new Promise<number>((resolve) => {
+          if (this.closing) {
+            resolve(port);
+            return;
+          }
+          this.httpServer.listen(port, host, () => {
+            const bound = (this.httpServer.address() as AddressInfo).port;
+            console.log(`Agent Team server listening on http://${host}:${bound}`);
+            resolve(bound);
+          });
+        }),
+    );
   }
 
   private initHosts(): HostRegistry {
@@ -321,6 +323,7 @@ export class Server {
       buildId: this.http.buildId(),
       workspaces: [...this.workspaces.values()].map((w) => this.listInfo(w)),
       models: this.models,
+      codexAuth: this.codexAuth,
       commands,
       commandsByAgent,
       extensionUi: [...this.workspaces.values()].flatMap((w) => w.getExtensionUi()),
@@ -329,6 +332,7 @@ export class Server {
         presets: this.config.presets,
         user: this.config.user,
         models: this.models,
+        codexAuth: this.codexAuth,
         commands,
         hosts: this.config.hosts,
         archiveAfterDays: this.config.workspace.archive_after_days,
@@ -373,6 +377,9 @@ export class Server {
     switch (msg.type) {
       case "refresh_quota":
         this.refreshQuota();
+        return;
+      case "recheck_codex_auth":
+        void this.recheckCodexAuth(true);
         return;
       case "open_workspace":
       case "load_messages": {
@@ -1160,6 +1167,8 @@ export class Server {
       if (this.ensureLoaded(workspace)) workspace.settlePlainDispatchingOnRestore();
       if (workspace.isArchived) workspace.unloadMessages();
     }
+    await Promise.all([this.refreshPiCatalog(), this.recheckCodexAuth(false)]);
+    if (this.closing) return;
     try {
       this.projects.adoptAll();
     } catch (e) {
@@ -1491,15 +1500,58 @@ export class Server {
     this.refreshLeadTools(workspace);
   }
 
+  private notifyCodexRecheck = false;
+
+  private recheckCodexAuth(notify = true): Promise<CodexAuthState> {
+    if (notify) this.notifyCodexRecheck = true;
+    if (!this.recheckingCodexAuth) {
+      const pending = this.probeCodexAuthState().finally(() => {
+        if (this.recheckingCodexAuth === pending) this.recheckingCodexAuth = null;
+      });
+      this.recheckingCodexAuth = pending;
+    }
+    return this.recheckingCodexAuth;
+  }
+
+  private async probeCodexAuthState(): Promise<CodexAuthState> {
+    const wasAuthenticated = this.codexAuth.authenticated;
+    const prev = this.codexAuth;
+    const next = await probeCodexAuth(codexProcessEnv());
+    const notify = this.notifyCodexRecheck;
+    this.notifyCodexRecheck = false;
+    if (this.closing) return this.codexAuth;
+    this.codexAuth = next;
+    if (!next.authenticated) {
+      const at = wasAuthenticated ? Date.now() : 0;
+      this.quota.accept({ ...unavailable(NATIVE_CODEX, at), reason: "not configured" });
+    } else if (notify) {
+      this.refreshQuota([NATIVE_CODEX]);
+    }
+    this.refreshModels();
+    const changed =
+      prev.cliAvailable !== next.cliAvailable ||
+      prev.authenticated !== next.authenticated ||
+      prev.status !== next.status ||
+      prev.accountType !== next.accountType ||
+      prev.error !== next.error;
+    if (notify || changed) {
+      this.broadcastUI({ type: "codex_auth_update", codexAuth: this.codexAuth });
+    }
+    return this.codexAuth;
+  }
+
   private refreshModels(): void {
-    const models = availableModelOptions([
-      ...this.catalogModels,
-      ...[...this.workspaces.values()].flatMap((w) =>
-        w.projectLink && this.projects.get(w.projectLink.projectId)?.status === "sealed"
-          ? []
-          : [...w.agents.values()].flatMap((entry) => entry.session.getAvailableModels?.() ?? []),
-      ),
-    ]);
+    const models = availableModelOptions(
+      [
+        ...this.catalogModels,
+        ...[...this.workspaces.values()].flatMap((w) =>
+          w.projectLink && this.projects.get(w.projectLink.projectId)?.status === "sealed"
+            ? []
+            : [...w.agents.values()].flatMap((entry) => entry.session.getAvailableModels?.() ?? []),
+        ),
+      ],
+      { codexAuthenticated: this.codexAuth.authenticated },
+    );
     if (JSON.stringify(models) === JSON.stringify(this.models)) return;
     const previous = this.models;
     this.models = models;
@@ -1700,6 +1752,17 @@ export class Server {
       if (result.status === "rejected")
         console.error("[close] host shutdown failed", result.reason);
   }
+}
+
+function initialCodexAuthState(): CodexAuthState {
+  const cliAvailable = isCodexCliAvailable();
+  return {
+    cliAvailable,
+    authenticated: false,
+    status: cliAvailable ? "unauthenticated" : "unavailable",
+    accountType: null,
+    checkedAt: 0,
+  };
 }
 
 function genId(prefix: string): string {

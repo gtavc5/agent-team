@@ -1,7 +1,11 @@
-import { useState, useRef, useEffect, type RefObject } from "react";
+import { useState, useRef, useEffect, useMemo, type RefObject } from "react";
 import { EffortSelect, effortOf } from "./EffortSelect";
-import type { AgentPreset, ModelOption, HostInfo } from "../state/useServer";
+import type { AgentPreset, CodexAuthState, ModelOption, HostInfo } from "../state/useServer";
 import { isImageAvatar } from "./avatar";
+import { copyText } from "../chat/clipboard";
+
+export const CODEX_SETUP_VALUE = "__codex_setup__";
+export const CODEX_LOGIN_COMMAND = "npx codex login";
 
 // Small modal confirmation used for destructive actions (purging archived
 // workspaces). Enter confirms, Escape cancels.
@@ -52,10 +56,15 @@ export function ConfirmDialog({
 // closures on every render (each stream frame); re-running the effect would
 // pull focus back. Capture phase, and marked handled: what is behind the
 // dialog (the board, a side panel) must not take the same Escape as its own.
-function useDialogKeys(focus: RefObject<HTMLElement | null>, onClose: () => void): void {
+function useDialogKeys(
+  focus: RefObject<HTMLElement | null>,
+  onClose: () => void,
+  active = true,
+): void {
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   useEffect(() => {
+    if (!active) return;
     focus.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -64,7 +73,7 @@ function useDialogKeys(focus: RefObject<HTMLElement | null>, onClose: () => void
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [focus]);
+  }, [focus, active]);
 }
 
 const BACKEND_GROUPS: Array<[ModelOption["backend"], string]> = [
@@ -72,42 +81,78 @@ const BACKEND_GROUPS: Array<[ModelOption["backend"], string]> = [
   ["codex", "Codex"],
 ];
 
+function defaultAddSelection(
+  selectableModels: ModelOption[],
+  preset: AgentPreset | undefined,
+  fallback: string,
+) {
+  const available = selectableModels.find((m) => m.id === preset?.model);
+  const model = available?.id ?? fallback;
+  const effort =
+    (!preset?.model || available) &&
+    preset?.effort &&
+    effortOf(selectableModels, model).levels.includes(preset.effort)
+      ? preset.effort
+      : "";
+  return { model, effort };
+}
+
 export function AddAgentDialog({
   presets,
   models,
+  codexAuth,
+  onOpenCodexSetup,
+  suspended = false,
   onClose,
   onAdd,
 }: {
   presets: AgentPreset[];
   models: ModelOption[];
+  codexAuth?: CodexAuthState | null;
+  onOpenCodexSetup?: () => void;
+  suspended?: boolean;
   onClose: () => void;
   onAdd: (name: string, model: string, avatar: string, color: string, effort?: string) => void;
 }) {
+  const codexLocked = codexAuth != null && !codexAuth.authenticated;
+  const showCodexHint = !!codexAuth && codexAuth.cliAvailable && !codexAuth.authenticated;
+  const selectableModels = useMemo(
+    () => (codexLocked ? models.filter((m) => m.backend !== "codex") : models),
+    [codexLocked, models],
+  );
+
   const [selectedPreset, setSelectedPreset] = useState(0);
-  const defaults = (preset: AgentPreset | undefined, fallback: string) => {
-    const available = models.find((m) => m.id === preset?.model);
-    const model = available?.id ?? fallback;
-    const effort =
-      (!preset?.model || available) &&
-      preset?.effort &&
-      effortOf(models, model).levels.includes(preset.effort)
-        ? preset.effort
-        : "";
-    return { model, effort };
-  };
-  const initial = defaults(presets[0], models[0]?.id ?? "");
+  const initial = defaultAddSelection(selectableModels, presets[0], selectableModels[0]?.id ?? "");
   const [model, setModel] = useState(initial.model);
   const [effort, setEffort] = useState(initial.effort);
+
+  // When models refresh live (e.g. after signing in to Codex and clicking
+  // Re-check), pick a valid model if nothing usable was selected yet.
+  useEffect(() => {
+    if (model && selectableModels.some((m) => m.id === model)) return;
+    const next = defaultAddSelection(
+      selectableModels,
+      presets[selectedPreset],
+      selectableModels[0]?.id ?? "",
+    );
+    setModel(next.model);
+    setEffort(next.effort);
+  }, [selectableModels, model, presets, selectedPreset]);
+
   const chooseModel = (next: string) => {
+    if (next === CODEX_SETUP_VALUE) {
+      onOpenCodexSetup?.();
+      return;
+    }
     setModel(next);
-    if (!effortOf(models, next).levels.includes(effort)) setEffort("");
+    if (!effortOf(selectableModels, next).levels.includes(effort)) setEffort("");
   };
   const [customName, setCustomName] = useState("");
 
   const preset = presets[selectedPreset];
   const finalName = customName || preset?.name || "Agent";
   const nameRef = useRef<HTMLInputElement>(null);
-  useDialogKeys(nameRef, onClose);
+  useDialogKeys(nameRef, onClose, !suspended);
 
   return (
     <div className="dialog-overlay" onClick={onClose}>
@@ -122,7 +167,7 @@ export function AddAgentDialog({
               onClick={() => {
                 setSelectedPreset(i);
                 if (p.model || p.effort) {
-                  const next = defaults(p, model);
+                  const next = defaultAddSelection(selectableModels, p, model);
                   setModel(next.model);
                   setEffort(next.effort);
                 }
@@ -163,13 +208,20 @@ export function AddAgentDialog({
           />
         </label>
 
-        <label className="dialog-field">
-          <span>Model</span>
-          <select value={model} onChange={(e) => chooseModel(e.target.value)}>
+        <div className="dialog-field">
+          <label className="dialog-field-label" htmlFor="add-agent-model">
+            Model
+          </label>
+          <select id="add-agent-model" value={model} onChange={(e) => chooseModel(e.target.value)}>
+            {selectableModels.length === 0 && (
+              <option value="" disabled>
+                No models available
+              </option>
+            )}
             {BACKEND_GROUPS.map(([backend, label]) => {
-              const group = models.filter((m) => m.backend === backend);
-              return (
-                group.length > 0 && (
+              const group = selectableModels.filter((m) => m.backend === backend);
+              if (group.length > 0) {
+                return (
                   <optgroup key={backend} label={label}>
                     {group.map((m) => (
                       <option key={m.id} value={m.id}>
@@ -177,17 +229,32 @@ export function AddAgentDialog({
                       </option>
                     ))}
                   </optgroup>
-                )
-              );
+                );
+              }
+              if (backend === "codex" && showCodexHint) {
+                return (
+                  <optgroup key={backend} label={label}>
+                    <option value={CODEX_SETUP_VALUE} className="codex-unauth-option">
+                      Codex (not signed in)
+                    </option>
+                  </optgroup>
+                );
+              }
+              return null;
             })}
           </select>
-        </label>
+          {showCodexHint && onOpenCodexSetup && (
+            <button type="button" className="codex-auth-hint" onClick={onOpenCodexSetup}>
+              Sign in to Codex…
+            </button>
+          )}
+        </div>
 
-        {effortOf(models, model).levels.length > 0 && (
+        {effortOf(selectableModels, model).levels.length > 0 && (
           <label className="dialog-field">
             <span>Effort</span>
             <EffortSelect
-              {...effortOf(models, model)}
+              {...effortOf(selectableModels, model)}
               value={effort}
               onChange={setEffort}
               label="Reasoning effort"
@@ -203,7 +270,9 @@ export function AddAgentDialog({
           <button
             type="button"
             className="btn-primary"
+            disabled={!model}
             onClick={() => {
+              if (!model) return;
               onAdd(
                 finalName,
                 model,
@@ -215,6 +284,118 @@ export function AddAgentDialog({
             }}
           >
             Add
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function CodexSetupDialog({
+  codexAuth,
+  rechecking,
+  onRecheck,
+  onClose,
+}: {
+  codexAuth: CodexAuthState | null;
+  rechecking: boolean;
+  onRecheck: () => void;
+  onClose: () => void;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [checkRequested, setCheckRequested] = useState(false);
+  const recheckRef = useRef<HTMLButtonElement>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const sawRecheckingRef = useRef(false);
+
+  useDialogKeys(recheckRef, onClose);
+
+  useEffect(() => {
+    return () => clearTimeout(copyTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (rechecking) {
+      sawRecheckingRef.current = true;
+      return;
+    }
+    if (sawRecheckingRef.current && codexAuth?.authenticated) {
+      sawRecheckingRef.current = false;
+      onClose();
+    }
+  }, [rechecking, codexAuth?.authenticated, onClose]);
+
+  const handleCopy = async () => {
+    const ok = await copyText(CODEX_LOGIN_COMMAND);
+    setCopyState(ok ? "copied" : "failed");
+    clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopyState("idle"), 2000);
+  };
+
+  const handleRecheck = () => {
+    setCheckRequested(true);
+    onRecheck();
+  };
+
+  const statusNote = (() => {
+    if (rechecking) return null;
+    if (codexAuth?.authenticated) return "Codex is signed in.";
+    if (!checkRequested) return null;
+    if (codexAuth?.status === "error" && codexAuth.error) {
+      return `Check failed: ${codexAuth.error}`;
+    }
+    if (codexAuth?.status === "unavailable") {
+      return "Codex CLI binary is unavailable on the server.";
+    }
+    return "Still not signed in. Finish running the command above, then click Re-check.";
+  })();
+
+  return (
+    <div className="dialog-overlay dialog-codex-setup-overlay" onClick={onClose}>
+      <div
+        className="dialog dialog-codex-setup"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="codex-setup-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div id="codex-setup-title" className="dialog-title">
+          Sign in to Codex
+        </div>
+        <p className="dialog-body">
+          Run this command in your terminal to sign in with your Codex account, then re-check to
+          unlock Codex models and quota:
+        </p>
+        <div className="codex-cmd-box">
+          <code className="codex-cmd-code">{CODEX_LOGIN_COMMAND}</code>
+          <button
+            type="button"
+            className="btn-secondary codex-copy-btn"
+            onClick={() => void handleCopy()}
+          >
+            {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy"}
+          </button>
+        </div>
+        {statusNote && (
+          <p
+            className={`codex-auth-status${codexAuth?.authenticated ? " authenticated" : ""}`}
+            role="status"
+          >
+            {statusNote}
+          </p>
+        )}
+        <div className="dialog-actions">
+          <button type="button" className="btn-secondary" onClick={onClose}>
+            Close
+          </button>
+          <button
+            ref={recheckRef}
+            type="button"
+            className="btn-primary"
+            disabled={rechecking}
+            onClick={handleRecheck}
+          >
+            {rechecking ? "Checking…" : "Re-check"}
           </button>
         </div>
       </div>

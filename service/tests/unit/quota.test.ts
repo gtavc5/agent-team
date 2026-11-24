@@ -298,3 +298,44 @@ it("limits refresh to one in flight and one read per TTL independently of passiv
   expect(acp).toHaveBeenCalledTimes(2);
   expect(q.state().rows.find((r) => r.provider === ACP)?.availability).toBe("available");
 });
+
+it("gates CodexQuotaSource.isConfigured() on Codex auth state and recovers immediately once enabled", async () => {
+  let authed = false;
+  const source = new CodexQuotaSource(() => authed);
+  const fetchSpy = vi.spyOn(source, "fetchQuota").mockResolvedValue(
+    codexQuota(
+      {
+        primary: { usedPercent: 18, windowDurationMins: 300, resetsAt: null },
+        secondary: null,
+        limitId: "codex",
+        planType: null,
+      },
+      Date.now(),
+    ),
+  );
+  const registry = new QuotaAdapterRegistry<undefined>([source]);
+  const mon = new Monitor(() => {}, registry);
+
+  expect(source.isConfigured()).toBe(false);
+  await mon.refresh(() => undefined);
+  expect(fetchSpy).not.toHaveBeenCalled();
+  expect(mon.state().rows).toEqual([
+    expect.objectContaining({
+      provider: NATIVE_CODEX,
+      availability: "unavailable",
+      reason: "not configured",
+    }),
+  ]);
+
+  authed = true;
+  expect(source.isConfigured()).toBe(true);
+  await mon.refresh(() => undefined, [NATIVE_CODEX]);
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
+  expect(mon.state().rows).toEqual([
+    expect.objectContaining({
+      provider: NATIVE_CODEX,
+      availability: "available",
+      windows: [{ label: "5h", usedPct: 18 }],
+    }),
+  ]);
+});

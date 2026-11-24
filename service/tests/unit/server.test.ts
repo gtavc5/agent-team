@@ -95,6 +95,11 @@ beforeAll(async () => {
   const home = path.join(base, "home");
   const web = path.join(base, "web");
   fs.mkdirSync(home);
+  fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, ".codex", "auth.json"),
+    JSON.stringify({ OPENAI_API_KEY: "sk-test" }),
+  );
   fs.mkdirSync(path.join(web, "icons"), { recursive: true });
   fs.writeFileSync(path.join(web, "index.html"), "<html>app</html>");
   fs.writeFileSync(path.join(web, "secret.jsonl"), "private transcript");

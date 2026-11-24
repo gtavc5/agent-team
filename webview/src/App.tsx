@@ -26,6 +26,7 @@ import { formatRelative, shortModel } from "./format";
 import { MessageItem, MessageBoundary, originLabel, SessionLinkContext } from "./chat/messages";
 import {
   AddAgentDialog,
+  CodexSetupDialog,
   CreateProjectDialog,
   CreateWorkspaceDialog,
   ConfirmDialog,
@@ -59,6 +60,7 @@ export { GitBar } from "./workspace/GitBar";
 export { EventItem, SubAgentItem, StepGroup, MessageItem, BannerItem } from "./chat/messages";
 export {
   AddAgentDialog,
+  CodexSetupDialog,
   CreateProjectDialog,
   CreateWorkspaceDialog,
   ConfirmDialog,
@@ -142,6 +144,9 @@ export function App() {
     user,
     presets,
     models,
+    codexAuth,
+    recheckingCodexAuth,
+    recheckCodexAuth,
     commands,
     extensionUi,
     dismissNotice,
@@ -325,6 +330,9 @@ export function App() {
   const [createInPath, setCreateInPath] = useState<string | undefined>(undefined);
   // The workspace the Add Agent dialog is open for.
   const [addAgentFor, setAddAgentFor] = useState<string | null>(null);
+  const [showCodexSetup, setShowCodexSetup] = useState(false);
+  const openCodexSetup = useCallback(() => setShowCodexSetup(true), []);
+  const closeCodexSetup = useCallback(() => setShowCodexSetup(false), []);
   // The side panel open beside the chat: pinned (the chat makes room),
   // floating over it, or maximised over the chat area until it closes.
   // Pinning persists, and so does a width once dragged; code needs more
@@ -1827,6 +1835,8 @@ export function App() {
               activeWsId={activeWsId}
               connected={connected}
               models={models}
+              codexAuth={codexAuth}
+              onOpenCodexSetup={openCodexSetup}
               actions={agentActions}
               overview={overview}
             />
@@ -1986,10 +1996,22 @@ export function App() {
           <AddAgentDialog
             presets={presets}
             models={models}
+            codexAuth={codexAuth}
+            onOpenCodexSetup={openCodexSetup}
+            suspended={showCodexSetup}
             onClose={() => setAddAgentFor(null)}
             onAdd={(name, model, avatar, color, effort) =>
               addAgent(addAgentFor, name, model, avatar, color, effort)
             }
+          />
+        )}
+
+        {showCodexSetup && (
+          <CodexSetupDialog
+            codexAuth={codexAuth}
+            rechecking={recheckingCodexAuth}
+            onRecheck={recheckCodexAuth}
+            onClose={closeCodexSetup}
           />
         )}
       </div>

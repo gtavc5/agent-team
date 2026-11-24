@@ -17,11 +17,13 @@ import {
 import {
   AppServerClient,
   RpcRequestError,
+  codexBinary,
   spawnAppServer,
   type CodexThread,
   type CodexTurn,
   type DynamicToolCallParams,
   type DynamicToolCallResponse,
+  type GetAccountResponse,
   type RateLimitSnapshot,
   type RateLimitWindow,
   type ThreadItem,
@@ -1093,5 +1095,88 @@ export async function readCodexRateLimits(
     return null;
   } finally {
     (client as AppServerClient | null)?.close();
+  }
+}
+
+export type CodexAuthStatus = "authenticated" | "unauthenticated" | "unavailable" | "error";
+
+export interface CodexAuthState {
+  cliAvailable: boolean;
+  authenticated: boolean;
+  status: CodexAuthStatus;
+  accountType?: string | null;
+  error?: string;
+  checkedAt: number;
+}
+
+// Probe Codex CLI authentication without starting a thread or spending quota.
+export async function probeCodexAuth(
+  env: NodeJS.ProcessEnv = process.env,
+  opts?: {
+    timeoutMs?: number;
+    transport?: () => Transport;
+    codexBinary?: () => string;
+  },
+): Promise<CodexAuthState> {
+  if (opts?.codexBinary || !opts?.transport) {
+    try {
+      (opts?.codexBinary ?? codexBinary)();
+    } catch (e) {
+      return {
+        cliAvailable: false,
+        authenticated: false,
+        status: "unavailable",
+        accountType: null,
+        error: e instanceof Error ? e.message : String(e),
+        checkedAt: Date.now(),
+      };
+    }
+  }
+
+  let transport: Transport | null = null;
+  let client: AppServerClient | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutMs = opts?.timeoutMs ?? 5_000;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("Codex account probe timed out")), timeoutMs);
+    timer.unref?.();
+  });
+
+  const read = async (): Promise<CodexAuthState> => {
+    transport = opts?.transport ? opts.transport() : spawnAppServer({ cwd: os.tmpdir(), env });
+    client = new AppServerClient(transport, {
+      notification: () => {},
+      request: () => Promise.reject(new Error("not answered")),
+      close: () => {},
+    });
+    await client.initialize();
+    const res = await client.request<GetAccountResponse>("account/read", { refreshToken: false });
+    const authenticated = res?.account != null || res?.requiresOpenaiAuth === false;
+    return {
+      cliAvailable: true,
+      authenticated,
+      status: authenticated ? "authenticated" : "unauthenticated",
+      accountType: res?.account?.type ?? null,
+      checkedAt: Date.now(),
+    };
+  };
+
+  try {
+    const attempt = read();
+    attempt.catch(() => {});
+    return await Promise.race([attempt, timeout]);
+  } catch (e) {
+    return {
+      cliAvailable: true,
+      authenticated: false,
+      status: "error",
+      accountType: null,
+      error: e instanceof Error ? e.message : String(e),
+      checkedAt: Date.now(),
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (client) (client as AppServerClient).close();
+    else (transport as Transport | null)?.close();
   }
 }

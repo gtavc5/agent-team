@@ -111,6 +111,13 @@ beforeEach(() => {
   for (const k of ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"]) delete process.env[k];
   launches = [];
   sessionsByAgent = new Map();
+  vi.spyOn(codex, "probeCodexAuth").mockResolvedValue({
+    cliAvailable: true,
+    authenticated: true,
+    status: "authenticated",
+    accountType: "apiKey",
+    checkedAt: Date.now(),
+  });
   vi.spyOn(LocalHost.prototype, "createSession").mockImplementation((id, config) => {
     const s = new TestSession(config);
     sessionsByAgent.set(id, s);
@@ -1406,5 +1413,146 @@ describe("rate limits on the server", () => {
       log.mockRestore();
     }
     fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  it("gates unauthenticated Codex models and quota on startup, keeps Pi openai-codex/*, and unlocks live via recheck_codex_auth", async () => {
+    const { base, web } = seed();
+    fs.writeFileSync(path.join(base, "config.toml"), "[pi]\n");
+    const piCatalog = vi.spyOn(LocalHost.prototype, "discoverPiModels").mockResolvedValue([
+      {
+        id: "openai-codex/gpt-5.4",
+        provider: "openai-codex",
+        modelId: "gpt-5.4",
+        name: "GPT-5.4 (Pi)",
+        effortLevels: ["low", "high"],
+      },
+    ]);
+    let authenticated = false;
+    const probeSpy = vi.spyOn(codex, "probeCodexAuth").mockImplementation(() =>
+      Promise.resolve({
+        cliAvailable: true,
+        authenticated,
+        status: authenticated ? "authenticated" : "unauthenticated",
+        accountType: authenticated ? "chatgpt" : null,
+        checkedAt: Date.now(),
+      }),
+    );
+    const readLimitsSpy = vi.spyOn(codex, "readCodexRateLimits").mockResolvedValue({
+      limitId: "codex",
+      planType: "plus",
+      primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: null },
+      secondary: null,
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { frames, send, stop } = await start(base, web);
+    try {
+      const init = frames.find((f) => f.type === "init")!;
+      expect(init.codexAuth).toMatchObject({ cliAvailable: true, authenticated: false });
+      const initModels = init.models as Array<{ id: string; backend: string }>;
+      expect(initModels.some((m) => m.backend === "codex")).toBe(false);
+      expect(initModels).toContainEqual(
+        expect.objectContaining({ id: "openai-codex/gpt-5.4", backend: "pi" }),
+      );
+      expect((init.quota as QuotaState).rows).toContainEqual(
+        expect.objectContaining({
+          provider: "native-codex",
+          availability: "unavailable",
+          reason: "not configured",
+        }),
+      );
+
+      // Refreshing quota while unauthenticated does not invoke readCodexRateLimits.
+      send({ type: "refresh_quota" });
+      await until(
+        () =>
+          frames.some(
+            (f) => f.type === "quota_snapshot" && (f.quota as QuotaState).refreshing === false,
+          ),
+        "unauthenticated quota refresh",
+      );
+      expect(readLimitsSpy).not.toHaveBeenCalled();
+
+      // Sign in and request an on-demand re-check without restarting the server.
+      authenticated = true;
+      send({ type: "recheck_codex_auth" });
+      await until(
+        () =>
+          frames.some(
+            (f) =>
+              f.type === "codex_auth_update" &&
+              (f.codexAuth as { authenticated?: boolean }).authenticated === true,
+          ) &&
+          frames.some(
+            (f) =>
+              f.type === "models_update" &&
+              (f.models as Array<{ backend: string }>).some((m) => m.backend === "codex"),
+          ) &&
+          frames.some(
+            (f) =>
+              f.type === "quota_snapshot" &&
+              (f.quota as QuotaState).rows.some(
+                (r) => r.provider === "native-codex" && r.availability === "available",
+              ),
+          ),
+        "live codex unlock after re-check",
+      );
+
+      expect(probeSpy).toHaveBeenCalledTimes(2);
+      expect(readLimitsSpy).toHaveBeenCalledTimes(1);
+      const latestModels = frames.filter((f) => f.type === "models_update").at(-1)
+        ?.models as Array<{ id: string; backend: string }>;
+      expect(latestModels).toContainEqual(
+        expect.objectContaining({ id: "gpt-6-astra", backend: "codex" }),
+      );
+      expect(latestModels).toContainEqual(
+        expect.objectContaining({ id: "openai-codex/gpt-5.4", backend: "pi" }),
+      );
+
+      // Signing back out re-gates native Codex models & quota without touching Pi openai-codex/*.
+      authenticated = false;
+      const beforeSignoutCount = frames.length;
+      send({ type: "recheck_codex_auth" });
+      await until(
+        () =>
+          frames
+            .slice(beforeSignoutCount)
+            .some(
+              (f) =>
+                f.type === "codex_auth_update" &&
+                (f.codexAuth as { authenticated?: boolean }).authenticated === false,
+            ) &&
+          frames
+            .slice(beforeSignoutCount)
+            .some(
+              (f) =>
+                f.type === "models_update" &&
+                !(f.models as Array<{ backend: string }>).some((m) => m.backend === "codex"),
+            ) &&
+          frames
+            .slice(beforeSignoutCount)
+            .some(
+              (f) =>
+                f.type === "quota_snapshot" &&
+                (f.quota as QuotaState).rows.some(
+                  (r) =>
+                    r.provider === "native-codex" &&
+                    r.availability === "unavailable" &&
+                    r.reason === "not configured" &&
+                    r.observedAt > 0,
+                ),
+            ),
+        "live codex lock after sign-out re-check",
+      );
+      const afterSignoutModels = frames.filter((f) => f.type === "models_update").at(-1)
+        ?.models as Array<{ id: string; backend: string }>;
+      expect(afterSignoutModels).toContainEqual(
+        expect.objectContaining({ id: "openai-codex/gpt-5.4", backend: "pi" }),
+      );
+    } finally {
+      piCatalog.mockRestore();
+      stop();
+      log.mockRestore();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
   });
 });

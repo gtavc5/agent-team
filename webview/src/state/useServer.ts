@@ -400,6 +400,17 @@ export interface ModelOption {
   defaultEffort?: string;
 }
 
+export type CodexAuthStatus = "authenticated" | "unauthenticated" | "unavailable" | "error";
+
+export interface CodexAuthState {
+  cliAvailable: boolean;
+  authenticated: boolean;
+  status: CodexAuthStatus;
+  accountType?: string | null;
+  error?: string;
+  checkedAt: number;
+}
+
 export interface CommandInfo {
   name: string;
   description: string;
@@ -469,6 +480,8 @@ export function useServer() {
   const [user, setUser] = useState(DEFAULT_USER);
   const [presets, setPresets] = useState<AgentPreset[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
+  const [codexAuth, setCodexAuth] = useState<CodexAuthState | null>(null);
+  const [recheckingCodexAuth, setRecheckingCodexAuth] = useState(false);
   const [globalCommands, setGlobalCommands] = useState<CommandInfo[]>([]);
   const [commandsByAgent, setCommandsByAgent] = useState<CommandsByAgent>({});
   const [commandTarget, setCommandTarget] = useState<{
@@ -605,12 +618,15 @@ export function useServer() {
             presets?: AgentPreset[];
             user?: typeof DEFAULT_USER;
             models: ModelOption[];
+            codexAuth?: CodexAuthState;
             commands?: CommandInfo[];
             hosts: Record<string, HostConfig>;
           };
           setUser(config.user ?? DEFAULT_USER);
           setPresets(config.presets ?? []);
           setModels(config.models);
+          setCodexAuth((msg.codexAuth as CodexAuthState | undefined) ?? config.codexAuth ?? null);
+          setRecheckingCodexAuth(false);
           const cfgExtra = config as unknown as { archiveAfterDays?: number };
           setArchiveAfterDays(cfgExtra.archiveAfterDays ?? 0);
           setGlobalCommands((msg.commands as CommandInfo[] | undefined) ?? config.commands ?? []);
@@ -707,6 +723,11 @@ export function useServer() {
 
         case "models_update":
           setModels(msg.models as ModelOption[]);
+          break;
+
+        case "codex_auth_update":
+          setCodexAuth((msg.codexAuth as CodexAuthState | undefined) ?? null);
+          setRecheckingCodexAuth(false);
           break;
 
         case "extension_ui": {
@@ -1146,6 +1167,7 @@ export function useServer() {
       // second reconnect on top of the replacement.
       if (wsRef.current !== ws) return;
       setConnected(false);
+      setRecheckingCodexAuth(false);
       wsRef.current = null;
       settleProbe();
       reconnectRef.current = setTimeout(connect, RECONNECT_DELAY_MS);
@@ -1209,6 +1231,13 @@ export function useServer() {
       setProjects(MOCK_PROJECTS);
       setPresets(MOCK_PRESETS);
       setModels(MOCK_MODELS);
+      setCodexAuth({
+        cliAvailable: true,
+        authenticated: true,
+        status: "authenticated",
+        accountType: "chatgpt",
+        checkedAt: Date.now(),
+      });
       setSystemStatus(MOCK_SYSTEM_STATUS);
       setConnected(true);
       return;
@@ -1255,6 +1284,11 @@ export function useServer() {
     return true;
   }, []);
 
+  const recheckCodexAuth = useCallback(() => {
+    if (!send({ type: "recheck_codex_auth" })) return;
+    setRecheckingCodexAuth(true);
+  }, [send]);
+
   const commands = commandTarget
     ? (commandsByAgent[commandTarget.workspaceId]?.[commandTarget.agentId] ?? globalCommands)
     : globalCommands;
@@ -1267,6 +1301,9 @@ export function useServer() {
     user,
     presets,
     models,
+    codexAuth,
+    recheckingCodexAuth,
+    recheckCodexAuth,
     commands,
     commandsByAgent,
     globalCommands,

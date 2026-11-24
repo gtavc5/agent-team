@@ -129,7 +129,10 @@ export function isCodexCliAvailable(): boolean {
 }
 
 export const MODEL_OPTIONS: ModelOption[] = isCodexCliAvailable() ? [...CODEX_MODELS] : [];
-export function availableModelOptions(piModels: Iterable<PiAvailableModel>): ModelOption[] {
+export function availableModelOptions(
+  piModels: Iterable<PiAvailableModel>,
+  opts?: { codexAuthenticated?: boolean },
+): ModelOption[] {
   const pi = new Map<string, ModelOption>();
   for (const model of piModels)
     pi.set(model.id, {
@@ -139,7 +142,8 @@ export function availableModelOptions(piModels: Iterable<PiAvailableModel>): Mod
       contextWindow: model.contextWindow,
       effortLevels: model.effortLevels ?? pi.get(model.id)?.effortLevels,
     });
-  return [...MODEL_OPTIONS, ...[...pi.values()].sort((a, b) => a.id.localeCompare(b.id))];
+  const codex = (opts?.codexAuthenticated ?? true) ? MODEL_OPTIONS : [];
+  return [...codex, ...[...pi.values()].sort((a, b) => a.id.localeCompare(b.id))];
 }
 
 export const LEGACY_MODELS: ModelOption[] = [];

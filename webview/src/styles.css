@@ -2647,7 +2647,8 @@ button.action-target:hover {
   gap: 4px;
   margin-bottom: 12px;
 }
-.dialog-field span {
+.dialog-field span,
+.dialog-field-label {
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -2671,6 +2672,65 @@ button.action-target:hover {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 18px;
+}
+.dialog-overlay.dialog-codex-setup-overlay {
+  z-index: 110;
+}
+.dialog-codex-setup {
+  max-width: min(440px, calc(100vw - 24px));
+}
+.codex-unauth-option {
+  font-style: italic;
+  color: var(--text-muted);
+}
+.codex-auth-hint {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font-family: inherit;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.codex-auth-hint:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.codex-cmd-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.codex-cmd-code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  color: var(--text-primary);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.codex-copy-btn {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.codex-auth-status {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+.codex-auth-status.authenticated {
+  color: var(--accent);
 }
 .preset-grid {
   display: grid;

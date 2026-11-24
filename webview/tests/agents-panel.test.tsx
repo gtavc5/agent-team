@@ -9,7 +9,15 @@ import {
   stateSummary,
 } from "../src/panels/scope";
 import { App } from "../src/App";
-import type { AgentInfo, ModelOption, Objective, Project, Workspace } from "../src/state/useServer";
+import { CODEX_SETUP_VALUE } from "../src/workspace/dialogs";
+import type {
+  AgentInfo,
+  CodexAuthState,
+  ModelOption,
+  Objective,
+  Project,
+  Workspace,
+} from "../src/state/useServer";
 import { FakeSocket } from "./fakeSocket";
 
 const NOW = Date.now();
@@ -366,7 +374,12 @@ describe("the agents panel in the app", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   const opus = { id: "claude-opus-5-5", label: "Opus", backend: "pi" };
-  const boot = (active = "lead", workspaces = [lead, w1, w2], models: object[] = [opus]) => {
+  const boot = (
+    active = "lead",
+    workspaces = [lead, w1, w2],
+    models: object[] = [opus],
+    codexAuth?: CodexAuthState,
+  ) => {
     localStorage.setItem("activeWsId", active);
     render(<App />);
     const sock = FakeSocket.instances.at(-1)!;
@@ -380,6 +393,7 @@ describe("the agents panel in the app", () => {
           models,
           commands: [],
           hosts: {},
+          ...(codexAuth ? { codexAuth } : {}),
         },
         hosts: [],
         projects: [project],
@@ -664,6 +678,59 @@ describe("the agents panel in the app", () => {
       workspaceId: "lead",
       model: "claude-opus-5-5",
     });
+  });
+
+  it("gates unauthenticated Codex models, preserves Pi openai-codex models, and unlocks live on recheck", () => {
+    const piCodex = { id: "openai-codex/gpt-5.4", label: "GPT-5.4", backend: "pi" };
+    const nativeCodex = { id: "gpt-6-astra", label: "GPT-6 Astra", backend: "codex" };
+    const sock = boot("lead", [lead, w1, w2], [opus, piCodex, nativeCodex], {
+      cliAvailable: true,
+      authenticated: false,
+      status: "unauthenticated",
+      accountType: null,
+      checkedAt: 1,
+    });
+    fireEvent.click(document.querySelector(".agents-chip")!);
+    fireEvent.click(document.querySelector('[aria-label="clice · lead"] .ap-toggle')!);
+    const leadCard = within(document.querySelector('[aria-label="clice · lead"]') as HTMLElement);
+    fireEvent.click(leadCard.getByText("+ Agent"));
+
+    const select = document.querySelector<HTMLSelectElement>("#add-agent-model")!;
+    const optionValues = [...select.options].map((o) => o.value);
+    expect(optionValues).toContain("claude-opus-5-5");
+    expect(optionValues).toContain("openai-codex/gpt-5.4");
+    expect(optionValues).not.toContain("gpt-6-astra");
+    expect(optionValues).toContain(CODEX_SETUP_VALUE);
+
+    fireEvent.click(document.querySelector(".codex-auth-hint")!);
+    expect(document.querySelector(".dialog-codex-setup")).not.toBeNull();
+
+    fireEvent.click(within(document.querySelector(".dialog-codex-setup")!).getByText("Re-check"));
+    expect(sock.frames().some((f) => f.type === "recheck_codex_auth")).toBe(true);
+
+    act(() => {
+      sock.receive({
+        type: "codex_auth_update",
+        codexAuth: {
+          cliAvailable: true,
+          authenticated: true,
+          status: "authenticated",
+          accountType: "chatgpt",
+          checkedAt: 2,
+        },
+      });
+      sock.receive({
+        type: "models_update",
+        models: [opus, piCodex, nativeCodex],
+      });
+    });
+
+    expect(document.querySelector(".dialog-codex-setup")).toBeNull();
+    const updatedValues = [
+      ...document.querySelectorAll<HTMLOptionElement>("#add-agent-model option"),
+    ].map((o) => o.value);
+    expect(updatedValues).toContain("gpt-6-astra");
+    expect(updatedValues).not.toContain(CODEX_SETUP_VALUE);
   });
 });
 
@@ -967,5 +1034,98 @@ describe("switching an agent's model and effort", () => {
 
     const modelOnly = render1(agent("a", { model: "cursor/composer-2.5", effort: "high" }));
     expect(modelOnly.container.querySelector(".ap-meta-effort")!.textContent).toBe(" · high");
+  });
+
+  it("excludes unauthenticated native Codex models, preserves Pi openai-codex/*, and opens setup on selection", () => {
+    const onSetModel = vi.fn();
+    const onOpenCodexSetup = vi.fn();
+    const mixedModels: ModelOption[] = [
+      { id: "claude-opus-5-5", label: "Opus 5.5", backend: "pi" },
+      { id: "openai-codex/gpt-5.4", label: "GPT-5.4", backend: "pi" },
+      { id: "gpt-6-astra", label: "GPT-6 Astra", backend: "codex" },
+      { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", backend: "codex" },
+    ];
+    const unauth: CodexAuthState = {
+      cliAvailable: true,
+      authenticated: false,
+      status: "unauthenticated",
+      accountType: null,
+      checkedAt: 1,
+    };
+    const baseActions: AgentsPanelActions = {
+      onOpen: vi.fn(),
+      onStop: vi.fn(),
+      onArchive: vi.fn(),
+      onRestore: vi.fn(),
+      onSetReporting: vi.fn(),
+      onAddAgent: vi.fn(),
+      onClearContext: vi.fn(),
+      onRemoveAgent: vi.fn(),
+      onSetModel,
+      onSetEffort: vi.fn(),
+      onStopTask: vi.fn(),
+      onCancelWake: vi.fn(),
+      onStopAll: vi.fn(),
+    };
+
+    // Empty session with backend switching enabled hides native codex models, keeps Pi openai-codex/*,
+    // shows italic Codex (not signed in) entry, and invokes onOpenCodexSetup instead of onSetModel.
+    const empty = render(
+      <AgentsPanel
+        sessions={[
+          ws("s", {
+            agents: [agent("a", { model: "claude-opus-5-5", canSwitchBackend: true })],
+          }),
+        ]}
+        project={undefined}
+        activeWsId="s"
+        connected
+        models={mixedModels}
+        codexAuth={unauth}
+        onOpenCodexSetup={onOpenCodexSetup}
+        actions={baseActions}
+      />,
+    );
+    const select = empty.container.querySelector(".ap-model:not(.ap-effort)") as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).toEqual([
+      "claude-opus-5-5",
+      "openai-codex/gpt-5.4",
+      CODEX_SETUP_VALUE,
+    ]);
+    expect(select.options[2].textContent).toBe("Codex (not signed in)");
+    fireEvent.change(select, { target: { value: CODEX_SETUP_VALUE } });
+    expect(onOpenCodexSetup).toHaveBeenCalledTimes(1);
+    expect(onSetModel).not.toHaveBeenCalled();
+    empty.unmount();
+
+    // Even when only 1 Pi model exists, an empty session with unauthenticated Codex still exposes the setup entry.
+    const singlePi = render(
+      <AgentsPanel
+        sessions={[
+          ws("s2", {
+            agents: [agent("b", { model: "openai-codex/gpt-5.4", canSwitchBackend: true })],
+          }),
+        ]}
+        project={undefined}
+        activeWsId="s2"
+        connected
+        models={[
+          { id: "openai-codex/gpt-5.4", label: "GPT-5.4", backend: "pi" },
+          { id: "gpt-6-astra", label: "GPT-6 Astra", backend: "codex" },
+        ]}
+        codexAuth={unauth}
+        onOpenCodexSetup={onOpenCodexSetup}
+        actions={baseActions}
+      />,
+    );
+    const singleSelect = singlePi.container.querySelector(
+      ".ap-model:not(.ap-effort)",
+    ) as HTMLSelectElement;
+    expect(singleSelect).not.toBeNull();
+    expect([...singleSelect.options].map((o) => o.value)).toEqual([
+      "openai-codex/gpt-5.4",
+      CODEX_SETUP_VALUE,
+    ]);
+    singlePi.unmount();
   });
 });

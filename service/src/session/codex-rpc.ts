@@ -240,6 +240,16 @@ export interface RateLimitSnapshot {
   planType: string | null;
 }
 
+export type CodexAccount =
+  | { type: "apiKey" }
+  | { type: "chatgpt"; email: string | null; planType: string }
+  | { type: "amazonBedrock"; usesCodexManagedCredentials: boolean };
+
+export interface GetAccountResponse {
+  account: CodexAccount | null;
+  requiresOpenaiAuth: boolean;
+}
+
 export interface TokenUsageBreakdown {
   totalTokens: number;
   inputTokens: number;

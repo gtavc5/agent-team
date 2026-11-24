@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import WebSocket, { type RawData } from "ws";
 import { localPiBinary } from "../local-pi";
 import { Server } from "../../src/server/server";
+import * as codex from "../../src/session/codex";
 import { LocalHost } from "../../src/session/host";
 import type { PiAvailableModel, UiDialogRequest, UiDialogResponse } from "../../src/session/types";
 import { FakeSession } from "./fakes";
@@ -348,6 +349,13 @@ export default (pi) => {
           : config,
       );
     });
+    const auth = vi.spyOn(codex, "probeCodexAuth").mockResolvedValue({
+      cliAvailable: true,
+      authenticated: true,
+      status: "authenticated",
+      accountType: "apiKey",
+      checkedAt: Date.now(),
+    });
     const server = new Server(0, base, base);
     const sockets: WebSocket[] = [];
     try {
@@ -410,6 +418,7 @@ export default (pi) => {
       for (const socket of sockets) socket.terminate();
       await server.close();
       create.mockRestore();
+      auth.mockRestore();
       fs.rmSync(base, { recursive: true, force: true });
     }
   }
