@@ -15,7 +15,12 @@ import type { PiAvailableModel, PromptEnvelope, SessionConfig } from "../../src/
 import * as codex from "../../src/session/codex";
 import * as acpReadiness from "../../src/session/acp-readiness";
 import { LocalHost } from "../../src/session/host";
-import { ACP, QUOTA_TTL, type QuotaState } from "../../src/session/quota-schema";
+import {
+  ACP,
+  NATIVE_CODEX,
+  QUOTA_AUTO_REFRESH_INTERVAL,
+  type QuotaState,
+} from "../../src/session/quota-schema";
 import { FakeSession } from "./fakes";
 
 interface FakeTool {
@@ -448,20 +453,20 @@ describe("server restart with projects", () => {
       const initQuota = frames.find((f) => f.type === "init")?.quota as QuotaState;
       expect(initQuota.acpPrepareStep).toBe(acpReadiness.ACP_PREPARE_STEP);
       expect(acpRow(initQuota)?.reason).toBe("waiting for ACP setup");
-      send({ type: "refresh_quota" });
+      send({ type: "refresh_quota", force: true });
       await until(() => latestQuota()?.refreshing === false, "manual quota refresh");
       expect(acpRow(latestQuota())?.reason).toBe("waiting for ACP setup");
       await vi.advanceTimersByTimeAsync(3000);
-      expect(read.mock.calls).toEqual([["kimi-coding"]]);
+      expect(read.mock.calls.map(([provider]) => [provider])).toEqual([["kimi-coding"]]);
 
       // The other providers are now past TTL, but a runtime transition must only read ACP.
-      vi.setSystemTime(Date.now() + QUOTA_TTL);
+      vi.setSystemTime(Date.now() + QUOTA_AUTO_REFRESH_INTERVAL);
       fs.writeFileSync(runtime, "", { mode: 0o755 });
       await vi.advanceTimersByTimeAsync(3000);
       await until(() => acpRow(latestQuota())?.availability === "available", "ACP install refresh");
       const sample = acpRow(latestQuota());
       await vi.advanceTimersByTimeAsync(3000);
-      expect(read.mock.calls).toEqual([["kimi-coding"], [ACP]]);
+      expect(read.mock.calls.map(([provider]) => [provider])).toEqual([["kimi-coding"], [ACP]]);
       expect(native).toHaveBeenCalledTimes(1);
       expect(launches).toEqual([]);
 
@@ -476,9 +481,48 @@ describe("server restart with projects", () => {
       expect(read).toHaveBeenCalledTimes(2);
 
       configured.splice(configured.indexOf(ACP), 1);
-      send({ type: "refresh_quota" });
+      send({ type: "refresh_quota", force: true });
       await until(() => acpRow(latestQuota())?.reason === "not configured", "ACP not configured");
       expect(read.mock.calls.filter(([provider]) => provider === ACP)).toHaveLength(1);
+    } finally {
+      stop();
+      await server.close();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes forced manual and non-forced provider-scoped WS refreshes", async () => {
+    const { base, web } = seed();
+    const { server, send, stop } = await start(base, web);
+    const refresh = vi.spyOn(server["quota"], "refresh").mockResolvedValue();
+    try {
+      send({ type: "refresh_quota", force: true });
+      send({ type: "refresh_quota", force: false, providers: ["kimi-coding"] });
+      await until(() => refresh.mock.calls.length === 2, "both WS refresh requests");
+      expect(refresh.mock.calls.map(([, options]) => options)).toEqual([
+        { force: true, providers: undefined },
+        { force: false, providers: ["kimi-coding"] },
+      ]);
+    } finally {
+      stop();
+      await server.close();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes only the completed turn's provider while a UI client is connected", async () => {
+    const { base, web } = seed();
+    const { server, send, stop } = await start(base, web);
+    const refresh = vi.spyOn(server["quota"], "refresh").mockResolvedValue();
+    try {
+      send({ type: "send_message", workspaceId: "ws-live", content: "use quota" });
+      await until(() => launches[0]?.prompts.length === 1, "turn start");
+      launches[0].emit({ kind: "result", content: "" });
+      await until(() => refresh.mock.calls.length === 1, "turn-end quota refresh");
+      expect(refresh).toHaveBeenCalledWith(expect.any(Function), {
+        force: false,
+        providers: [NATIVE_CODEX],
+      });
     } finally {
       stop();
       await server.close();
@@ -533,7 +577,7 @@ describe("server restart with projects", () => {
       let reconnect: WebSocket | undefined;
       let closing: Promise<void> | undefined;
       try {
-        send({ type: "refresh_quota" });
+        send({ type: "refresh_quota", force: true });
         await until(() => !!readLimits.mock.calls.length && snapshots().length > 1, "cold refresh");
         expect(readLimits.mock.calls[0]?.[0]?.CODEX_API_KEY).toBe("test-key");
         if (!overlap) {
@@ -614,7 +658,7 @@ describe("server restart with projects", () => {
         if (order === "shutdown with a queued provider expansion") {
           await until(() => latestQuota()?.refreshing === true, "Pi read in flight");
           await ready([provider, "kimi-coding"]);
-          vi.spyOn(Date, "now").mockReturnValue(Date.now() + QUOTA_TTL);
+          vi.spyOn(Date, "now").mockReturnValue(Date.now() + QUOTA_AUTO_REFRESH_INTERVAL);
           closing = server.close();
           await closing;
           await until(() => !server["quota"].state().refreshing, "quota refresh to drain");
@@ -624,7 +668,12 @@ describe("server restart with projects", () => {
 
         const decoder = new TextDecoder();
         const reader = (control.body as ReadableStream<Uint8Array>).getReader();
-        const messages: Array<{ type: string; provider: string; controlId: string }> = [];
+        const messages: Array<{
+          type: string;
+          provider: string;
+          controlId: string;
+          force: boolean;
+        }> = [];
         const reply = (async () => {
           let buffer = "";
           while (true) {
@@ -667,7 +716,7 @@ describe("server restart with projects", () => {
           });
         }
         expect(messages).toHaveLength(1);
-        expect(messages[0]).toMatchObject({ type: "refresh_quota", provider });
+        expect(messages[0]).toMatchObject({ type: "refresh_quota", provider, force: overlap });
         expect(piRow(cold)?.reason).toBe("waiting for Pi session");
         const recovered = latestQuota();
         expect(recovered?.rows).toEqual(
@@ -1514,7 +1563,7 @@ describe("rate limits on the server", () => {
       expect(init.codexAuth).toMatchObject({ authenticated: true, accountType: "apiKey" });
       expect(init.models).toContainEqual(expect.objectContaining({ backend: "codex" }));
       expect(isNeutral(init.quota as QuotaState)).toBe(true);
-      send({ type: "refresh_quota" });
+      send({ type: "refresh_quota", force: true });
       await until(
         () =>
           frames.some((f) => f.type === "quota_snapshot" && !(f.quota as QuotaState).refreshing),
@@ -1522,7 +1571,7 @@ describe("rate limits on the server", () => {
       );
       send({ type: "recheck_codex_auth" });
       await until(() => frames.some((f) => f.type === "codex_auth_update"), "API-key recheck");
-      await vi.advanceTimersByTimeAsync(4 * QUOTA_TTL);
+      await vi.advanceTimersByTimeAsync(4 * QUOTA_AUTO_REFRESH_INTERVAL);
       expect(readLimits).not.toHaveBeenCalled();
       expect(isNeutral(server["quota"].state())).toBe(true);
     } finally {
@@ -1579,7 +1628,7 @@ describe("rate limits on the server", () => {
       );
 
       // Refreshing quota while unauthenticated does not invoke readCodexRateLimits.
-      send({ type: "refresh_quota" });
+      send({ type: "refresh_quota", force: true });
       await until(
         () =>
           frames.some(

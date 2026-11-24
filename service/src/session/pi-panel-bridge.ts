@@ -543,6 +543,7 @@ export default function piPanelBridge(pi: PiExtensionApi): void {
       if (type === "refresh_quota") {
         pi.events.emit(REFRESH_EVENT, {
           provider: raw.provider,
+          force: raw.force === true,
           reply: (snapshot: unknown) => {
             const parsed = piSnapshotSchema.safeParse(snapshot);
             void replyControl(

@@ -2,12 +2,17 @@ import { z } from "zod";
 
 export const ACP = "antigravity-acp";
 export const NATIVE_CODEX = "native-codex";
-export const QUOTA_TTL = 60_000;
+export const QUOTA_AUTO_REFRESH_INTERVAL = 60_000;
+export const QUOTA_MANUAL_REFRESH_THROTTLE = 5_000;
+export const QUOTA_STALE_AFTER = 15 * 60_000;
 export const SNAPSHOT_EVENT = "quota:snapshot:v1";
 export const CONFIGURED_EVENT = "quota:configured:v1";
+export interface QuotaReadOptions {
+  force?: boolean;
+}
 export interface PiQuotaReader {
   configured: string[];
-  read: (provider: string) => Promise<QuotaSnapshot>;
+  read: (provider: string, options?: QuotaReadOptions) => Promise<QuotaSnapshot>;
 }
 export const REFRESH_EVENT = "quota:refresh:v1";
 export const providerId = z

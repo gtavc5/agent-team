@@ -1,4 +1,9 @@
-import type { QuotaRow, QuotaState, QuotaWindow } from "../../../service/src/session/quota-schema";
+import {
+  QUOTA_STALE_AFTER,
+  type QuotaRow,
+  type QuotaState,
+  type QuotaWindow,
+} from "../../../service/src/session/quota-schema";
 import { memo, useState, useEffect, useId } from "react";
 import type { Workspace, Project, SystemStatus, SearchHit } from "../state/useServer";
 import {
@@ -186,7 +191,7 @@ export function QuotaPanel({
 }: {
   quota: QuotaState;
   now: number;
-  refresh?: () => void;
+  refresh?: (force?: boolean, providers?: readonly string[]) => void;
   connected: boolean;
 }) {
   const panelId = useId();
@@ -198,12 +203,15 @@ export function QuotaPanel({
   }, []);
   const displayTime = Math.max(now, clock);
   const labels = quotaRowLabels(quota.rows);
-  const toggleRow = (key: string) =>
+  const toggleRow = (key: string, provider: string) => {
+    const opening = !expanded.has(key);
     setExpanded((prev) => {
       const next = new Set(prev);
       if (!next.delete(key)) next.add(key);
       return next;
     });
+    if (opening && connected) refresh?.(false, [provider]);
+  };
 
   return (
     <section className="quota-panel system-status-panel" aria-label="Quota used">
@@ -213,7 +221,7 @@ export function QuotaPanel({
           type="button"
           className={`quota-refresh${quota.refreshing ? " refreshing" : ""}`}
           disabled={!connected || quota.refreshing}
-          onClick={refresh}
+          onClick={() => refresh?.(true)}
           aria-label={quota.refreshing ? "Refreshing…" : "Refresh"}
           title={quota.refreshing ? "Refreshing…" : "Refresh quota"}
         >
@@ -231,8 +239,10 @@ export function QuotaPanel({
             const isError = isUnavailable && !waitingHint;
             const needsSetup = row.reason === "waiting for ACP setup";
             const isStale =
+              row.availability === "available" &&
               row.windows.length > 0 &&
-              (isUnavailable || (row.observedAt > 0 && displayTime - row.observedAt >= 60_000));
+              row.observedAt > 0 &&
+              displayTime - row.observedAt >= QUOTA_STALE_AFTER;
             const summaryWindows = selectSummaryWindows(row.windows);
             const statusText = needsSetup
               ? "Waiting for explicit ACP setup"
@@ -250,7 +260,7 @@ export function QuotaPanel({
                   className="quota-row-toggle"
                   aria-expanded={open}
                   aria-controls={detailsId}
-                  onClick={() => toggleRow(key)}
+                  onClick={() => toggleRow(key, row.provider)}
                   title={isUnavailable ? `${rowLabel} — ${statusText}` : rowLabel}
                 >
                   <span className="quota-caret" aria-hidden="true">
@@ -345,7 +355,7 @@ export interface SidebarProps {
   searchHits: SearchHit[] | null;
   systemStatus: SystemStatus | null;
   quota?: QuotaState | null;
-  onRefreshQuota?: () => void;
+  onRefreshQuota?: (force?: boolean, providers?: readonly string[]) => void;
   now?: number;
   onSelect: (wsId: string) => void;
   onDelete: (wsId: string) => void;

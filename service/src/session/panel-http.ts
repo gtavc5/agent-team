@@ -169,11 +169,16 @@ export class PanelHttpServer {
     }
     return {
       configured: [...routes.keys()],
-      read: async (provider) => {
+      read: async (provider, options) => {
         const key = routes.get(provider);
         if (key === undefined) throw new Error("Quota provider is not configured");
         const result = piSnapshotSchema.parse(
-          await this.controlRequest(key, "refresh_quota", { provider }, 50_000),
+          await this.controlRequest(
+            key,
+            "refresh_quota",
+            { provider, force: options?.force === true },
+            50_000,
+          ),
         );
         if (result.provider !== provider) throw new Error("Unexpected quota provider");
         return result;

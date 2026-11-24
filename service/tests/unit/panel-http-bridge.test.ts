@@ -593,6 +593,7 @@ describe("PanelHttpServer", () => {
     const { server, baseUrl } = await createPanelServer();
     const samples: unknown[] = [];
     const calls: string[] = [];
+    const controls: Record<string, unknown>[] = [];
     const sample = {
       provider: "antigravity-acp",
       observedAt: Date.now(),
@@ -647,6 +648,7 @@ describe("PanelHttpServer", () => {
       });
       await openControl(baseUrl, key, token, (msg) => {
         calls.push(key);
+        controls.push(msg);
         void request(baseUrl, key, "control-reply", token, {
           method: "POST",
           body: { controlId: msg.controlId, result: reply },
@@ -657,7 +659,17 @@ describe("PanelHttpServer", () => {
     expect(reader?.configured).toEqual([sample.provider, secondSample.provider]);
     expect(await reader?.read(sample.provider)).toEqual(sample);
     expect(await reader?.read(secondSample.provider)).toEqual(secondSample);
-    expect(calls).toEqual(["p1", "p2"]);
+    expect(controls).toMatchObject([
+      { type: "refresh_quota", provider: sample.provider, force: false },
+      { type: "refresh_quota", provider: secondSample.provider, force: false },
+    ]);
+    expect(await reader?.read(sample.provider, { force: true })).toEqual(sample);
+    expect(controls.at(-1)).toMatchObject({
+      type: "refresh_quota",
+      provider: sample.provider,
+      force: true,
+    });
+    expect(calls).toEqual(["p1", "p2", "p1"]);
     expect(samples).toEqual([sample, sample]);
   });
   it("enforces bearer auth, live expansion/revocation, and control replies", async () => {

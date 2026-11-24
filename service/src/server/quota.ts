@@ -1,5 +1,6 @@
 import {
-  QUOTA_TTL,
+  QUOTA_AUTO_REFRESH_INTERVAL,
+  QUOTA_MANUAL_REFRESH_THROTTLE,
   unavailable,
   type QuotaRow,
   type QuotaState,
@@ -9,11 +10,16 @@ import type { QuotaAdapterRegistry } from "../session/quota/registry";
 
 const MAX_QUOTA_RETRIES = 2;
 export interface QuotaRefreshOptions {
+  force?: boolean;
   providers?: readonly string[];
   newlyReadable?: readonly string[];
 }
-interface QuotaRefresh<C> extends QuotaRefreshOptions {
+interface QuotaRefresh<C> {
   context: () => C;
+  forceAll: boolean;
+  forcedProviders: readonly string[];
+  providers?: readonly string[];
+  newlyReadable?: readonly string[];
 }
 
 export class QuotaMonitor<C> {
@@ -31,6 +37,7 @@ export class QuotaMonitor<C> {
     { count: number; timer?: ReturnType<typeof setTimeout> }
   >();
   private readonly shutdown = new AbortController();
+  private running = false;
   private refreshing = false;
   private queuedRefresh?: QuotaRefresh<C>;
 
@@ -170,7 +177,7 @@ export class QuotaMonitor<C> {
       () => {
         void this.refresh(context, { providers: [id] });
       },
-      QUOTA_TTL * 2 ** count,
+      QUOTA_AUTO_REFRESH_INTERVAL * 2 ** count,
     );
     timer.unref();
     this.retries.set(id, { count: count + 1, timer });
@@ -178,10 +185,18 @@ export class QuotaMonitor<C> {
 
   async refresh(context: () => C, options?: QuotaRefreshOptions) {
     if (this.shutdown.signal.aborted) return;
-    if (this.refreshing) {
+    if (this.running) {
       const queued = this.queuedRefresh;
       this.queuedRefresh = {
         context,
+        // Keep manual force scoped even when an automatic hint expands the read.
+        forceAll: Boolean(queued?.forceAll || (options?.force && options.providers === undefined)),
+        forcedProviders: [
+          ...new Set([
+            ...(queued?.forcedProviders ?? []),
+            ...(options?.force ? (options.providers ?? []) : []),
+          ]),
+        ],
         // A full refresh subsumes any queued provider-specific refreshes.
         providers:
           options?.providers && (!queued || queued.providers)
@@ -193,22 +208,36 @@ export class QuotaMonitor<C> {
       };
       return;
     }
-    this.refreshing = true;
-    this.changed(this.state());
+    this.running = true;
     try {
-      let next: QuotaRefresh<C> | undefined = { context, ...options };
+      let next: QuotaRefresh<C> | undefined = {
+        context,
+        forceAll: options?.force === true && options.providers === undefined,
+        forcedProviders: options?.force ? (options.providers ?? []) : [],
+        providers: options?.providers,
+        newlyReadable: options?.newlyReadable,
+      };
       while (next && !this.shutdown.signal.aborted) {
         this.queuedRefresh = undefined;
-        await this.readProviders(next);
+        await this.readProviders(next, () => {
+          if (this.refreshing) return;
+          this.refreshing = true;
+          this.changed(this.state());
+        });
         next = this.queuedRefresh;
       }
     } finally {
+      this.running = false;
+      const announced = this.refreshing;
       this.refreshing = false;
-      if (!this.shutdown.signal.aborted) this.changed(this.state());
+      if (announced && !this.shutdown.signal.aborted) this.changed(this.state());
     }
   }
 
-  private async readProviders({ context, providers, newlyReadable }: QuotaRefresh<C>) {
+  private async readProviders(
+    { context, forceAll, forcedProviders, providers, newlyReadable }: QuotaRefresh<C>,
+    onAttempt: () => void,
+  ) {
     const ctx = context();
     const now = Date.now();
     const run = async (id: string) => {
@@ -217,19 +246,30 @@ export class QuotaMonitor<C> {
         this.accept(this.registry.unconfigured(id, ctx, now));
         return;
       }
+      const force = forceAll || forcedProviders.includes(id);
       // A newly readable provider can recover without waiting for the previous cooldown.
       const justReady = newlyReadable?.includes(id);
       if (justReady) this.clearRetry(id);
-      else if (now - (this.lastAttempt.get(id) ?? -Infinity) < QUOTA_TTL) return;
+      else {
+        const throttle = force ? QUOTA_MANUAL_REFRESH_THROTTLE : QUOTA_AUTO_REFRESH_INTERVAL;
+        if (now - (this.lastAttempt.get(id) ?? -Infinity) < throttle) return;
+      }
       const rows = [...(this.providers.get(id)?.rows.values() ?? [])];
-      if (rows.every((r) => r.availability === "available" && now - r.observedAt < QUOTA_TTL))
+      if (
+        !force &&
+        rows.length > 0 &&
+        rows.every(
+          (r) => r.availability === "available" && now - r.observedAt < QUOTA_AUTO_REFRESH_INTERVAL,
+        )
+      )
         return;
       if (rows.some((r) => r.reason === "waiting for ACP setup")) {
         this.accept({ ...unavailable(id, now), reason: "checking usage" });
       }
+      onAttempt();
       this.lastAttempt.set(id, now);
       this.clearRetry(id, false);
-      const result = await this.registry.read(id, ctx, this.shutdown.signal);
+      const result = await this.registry.read(id, ctx, this.shutdown.signal, { force });
       if (this.shutdown.signal.aborted) return;
       this.accept(result, now);
       if (

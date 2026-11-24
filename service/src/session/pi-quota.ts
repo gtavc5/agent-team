@@ -31,8 +31,13 @@ export default function piQuota(pi: ExtensionApi) {
   pi.on("session_start", (_e, ctx) => {
     current = ctx;
   });
-  async function publish(id: string, ctx: CommandContext) {
-    const s = await registry.read(id, { events: pi.events, modelRegistry: ctx.modelRegistry });
+  async function publish(id: string, ctx: CommandContext, force = false) {
+    const s = await registry.read(
+      id,
+      { events: pi.events, modelRegistry: ctx.modelRegistry },
+      undefined,
+      { force },
+    );
     pi.events.emit(SNAPSHOT_EVENT, s);
     return s;
   }
@@ -45,7 +50,11 @@ export default function piQuota(pi: ExtensionApi) {
       );
   });
   pi.events.on(REFRESH_EVENT, (raw) => {
-    const request = raw as { provider?: string; reply?: (s: QuotaSnapshot) => void } | null;
+    const request = raw as {
+      provider?: string;
+      force?: boolean;
+      reply?: (s: QuotaSnapshot) => void;
+    } | null;
     if (
       !current ||
       !request?.provider ||
@@ -54,7 +63,7 @@ export default function piQuota(pi: ExtensionApi) {
       typeof request.reply !== "function"
     )
       return;
-    return publish(request.provider, current).then(request.reply);
+    return publish(request.provider, current, request.force === true).then(request.reply);
   });
   pi.registerCommand("quota", {
     description: "Show account quota across configured providers",

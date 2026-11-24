@@ -2,8 +2,8 @@ import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import type {} from "@vitest/browser-playwright";
-import type { QuotaState } from "../../../service/src/session/quota-schema";
-import { Sidebar, type SidebarProps } from "../../src/sidebar/Sidebar";
+import { QUOTA_STALE_AFTER, type QuotaState } from "../../../service/src/session/quota-schema";
+import { QuotaPanel, Sidebar, type SidebarProps } from "../../src/sidebar/Sidebar";
 import type { Workspace } from "../../src/state/useServer";
 import "../../src/styles.css";
 
@@ -121,7 +121,7 @@ afterEach(() => {
   cleanup();
 });
 
-it("renders compact quota rows on desktop with threshold colors, error/stale badges, and click/keyboard inline expansion", async () => {
+it("renders compact quota rows on desktop with threshold colors, error badges, and click/keyboard inline expansion", async () => {
   await page.viewport(1280, 800);
   const onRefresh = vi.fn();
   const view = renderSidebar(sampleQuota, onRefresh);
@@ -161,16 +161,17 @@ it("renders compact quota rows on desktop with threshold colors, error/stale bad
   expect(dangerColor).not.toBe(normalColor);
   expect(dangerColor).not.toBe(warnColor);
 
-  // Stale and error indicators are visible at a glance before expansion.
-  expect(toggles[2].querySelector(".quota-badge-stale")?.textContent).toBe("stale");
+  // A transient error is independent of the healthy-row stale indicator.
+  expect(toggles[2].querySelector(".quota-badge-stale")).toBeNull();
   expect(toggles[3].querySelector(".quota-badge-error")?.textContent).toBe("!");
-  expect(toggles[3].querySelector(".quota-badge-stale")?.textContent).toBe("stale");
+  expect(toggles[3].querySelector(".quota-badge-stale")).toBeNull();
   expect(toggles[4].querySelector(".quota-badge-error")).toBeNull();
   expect(toggles[4].querySelector(".quota-summary")?.textContent).toBe("not configured");
 
   // Click expands Kimi inline directly underneath its row and shows all 3 windows.
   fireEvent.click(toggles[1]);
   expect(toggles[1].getAttribute("aria-expanded")).toBe("true");
+  expect(onRefresh).toHaveBeenLastCalledWith(false, ["kimi-coding"]);
   const kimiDetails = document.getElementById(toggles[1].getAttribute("aria-controls")!)!;
   expect(kimiDetails).toBeTruthy();
   expect(kimiDetails.getBoundingClientRect().top).toBeGreaterThanOrEqual(
@@ -199,7 +200,11 @@ it("renders compact quota rows on desktop with threshold colors, error/stale bad
 
   // Refresh button works from the compact header.
   fireEvent.click(panel.querySelector<HTMLButtonElement>(".quota-refresh")!);
-  expect(onRefresh).toHaveBeenCalledTimes(1);
+  expect(onRefresh.mock.calls).toEqual([
+    [false, ["kimi-coding"]],
+    [false, ["openai-codex"]],
+    [true],
+  ]);
 });
 
 it("gives explicit setup instructions and distinguishes warming from a transient quota error", () => {
@@ -235,6 +240,46 @@ it("gives explicit setup instructions and distinguishes warming from a transient
   expect(details.textContent).toContain("Not yet observed");
 });
 
+it("marks only healthy rows stale at QUOTA_STALE_AFTER and keeps failed cached rows fresh-age aware", () => {
+  const observedAt = NOW - 14 * 60_000;
+  const quota: QuotaState = {
+    refreshing: false,
+    rows: [
+      {
+        provider: "acp",
+        name: "healthy",
+        availability: "available",
+        observedAt,
+        windows: [{ label: "5h", usedPct: 20 }],
+      },
+      {
+        provider: "acp",
+        name: "failed",
+        availability: "unavailable",
+        reason: "usage unavailable",
+        observedAt,
+        windows: [{ label: "5h", usedPct: 70 }],
+      },
+    ],
+  };
+  const view = render(<QuotaPanel quota={quota} now={NOW} connected={false} />);
+  const healthy = view.getByRole("button", { name: /acp · healthy/ });
+  const failed = view.getByRole("button", { name: /acp · failed/ });
+  expect(healthy.textContent).not.toContain("stale");
+  expect(failed.querySelector(".quota-badge-error")?.textContent).toBe("!");
+  expect(failed.textContent).not.toContain("stale");
+
+  fireEvent.click(failed);
+  expect(view.getByText(/Updated 14m ago/)).toBeTruthy();
+  view.rerender(
+    <QuotaPanel quota={quota} now={NOW + (QUOTA_STALE_AFTER - 14 * 60_000)} connected={false} />,
+  );
+  expect(healthy.textContent).toContain("stale");
+  expect(failed.textContent).not.toContain("stale");
+  expect(failed.textContent).toContain("70%");
+  expect(view.getByText(/Updated 15m ago/)).toBeTruthy();
+});
+
 it("maintains >= 32px touch targets and zero horizontal overflow inside the 280px mobile drawer", async () => {
   await page.viewport(390, 760);
   const view = renderSidebar(sampleQuota, vi.fn(), true);
@@ -268,7 +313,10 @@ it("maintains >= 32px touch targets and zero horizontal overflow inside the 280p
   for (const d of details) {
     expect(d.getBoundingClientRect().right).toBeLessThanOrEqual(sidebarRect.right + 0.5);
   }
-  expect(details[0].textContent).toContain("stale · Updated 3m ago");
+  expect(details[0].textContent).toContain("Updated 3m ago");
+  expect(details[0].textContent).not.toContain("stale");
   expect(details[1].textContent).toContain("unavailable · usage unavailable");
+  expect(details[1].textContent).toContain("Updated 5m ago");
+  expect(details[1].textContent).not.toContain("stale");
   expect(panel.scrollWidth).toBeLessThanOrEqual(panel.clientWidth);
 });

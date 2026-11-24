@@ -310,6 +310,7 @@ describe("project frames", () => {
     result.current.renameProject("p1", "clice 2");
     result.current.deleteProject("p1");
     expect(ws.frames()).toEqual([
+      { type: "refresh_quota", force: false },
       { type: "rename_project", projectId: "p1", name: "clice 2" },
       { type: "delete_project", projectId: "p1" },
     ]);

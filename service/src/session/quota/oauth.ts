@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { QUOTA_TTL, type QuotaSnapshot } from "../quota-schema";
+import {
+  QUOTA_AUTO_REFRESH_INTERVAL,
+  type QuotaReadOptions,
+  type QuotaSnapshot,
+} from "../quota-schema";
 import type { QuotaProviderAdapter } from "./registry";
 import type { PiQuotaContext } from "./pi-context";
 
@@ -21,7 +25,7 @@ export function oauthAdapter(
         modelRegistry.isUsingOAuth(model)
       );
     },
-    async fetchQuota(ctx, signal) {
+    async fetchQuota(ctx, signal, options?: QuotaReadOptions) {
       const startedAt = Date.now();
       const resolved = await ctx.modelRegistry.getProviderAuth(id);
       signal.throwIfAborted();
@@ -32,7 +36,12 @@ export function oauthAdapter(
         (typeof bearer === "string" && bearer.startsWith("Bearer ") ? bearer.slice(7) : undefined);
       if (!token) throw new Error("No Pi OAuth credential");
       const identity = createHash("sha256").update(token).digest("hex");
-      if (cached?.identity === identity && Date.now() < cached.until) return cached.sample;
+      if (
+        cached?.identity === identity &&
+        Date.now() < cached.until &&
+        (!options?.force || cached.until === Infinity)
+      )
+        return cached.sample;
       const read = async () => {
         const response = await fetch(url, {
           headers: {
@@ -53,7 +62,7 @@ export function oauthAdapter(
       cached = entry;
       try {
         const result = await entry.sample;
-        entry.until = result.observedAt + QUOTA_TTL;
+        entry.until = result.observedAt + QUOTA_AUTO_REFRESH_INTERVAL;
         return result;
       } catch (error) {
         if (cached === entry) cached = undefined;

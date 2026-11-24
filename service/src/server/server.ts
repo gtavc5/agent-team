@@ -57,7 +57,14 @@ import { inspectAcpRuntime, ACP_PREPARE_STEP } from "../session/acp-readiness";
 import { CodexQuotaSource } from "./native-codex-quota";
 import { QuotaAdapterRegistry } from "../session/quota/registry";
 import { piAdapters } from "../session/quota/pi-adapters";
-import { ACP, NATIVE_CODEX, unavailable, type PiQuotaReader } from "../session/quota-schema";
+import {
+  ACP,
+  NATIVE_CODEX,
+  providerId,
+  unavailable,
+  type PiQuotaReader,
+  type QuotaReadOptions,
+} from "../session/quota-schema";
 import { SystemMonitor } from "./system";
 import { serviceReport } from "../config/diagnostics";
 import { applyRuntimeEnvironment } from "../config/runtime";
@@ -136,10 +143,14 @@ export class Server {
               : reader
                 ? ("not configured" as const)
                 : ("waiting for Pi session" as const),
-          fetchQuota: ({ reader }: QuotaReadContext) =>
+          fetchQuota: (
+            { reader }: QuotaReadContext,
+            _signal: AbortSignal,
+            options?: QuotaReadOptions,
+          ) =>
             id === ACP && !inspectAcpRuntime().ready
               ? Promise.resolve({ ...unavailable(id), reason: "waiting for ACP setup" as const })
-              : reader!.read(id),
+              : reader!.read(id, options),
         })),
       ],
       55_000,
@@ -272,6 +283,15 @@ export class Server {
       );
   }
 
+  private quotaProviderForModel(model: string): string | undefined {
+    if (backendForModel(model) === "codex") return NATIVE_CODEX;
+    const parsed = providerId.safeParse(model.split("/", 1)[0]);
+    if (!parsed.success) return;
+    return this.quota.state().rows.some((row) => row.provider === parsed.data)
+      ? parsed.data
+      : undefined;
+  }
+
   private piQuotaReader(): PiQuotaReader | undefined {
     const readers = this.hostRegistry
       .getAll()
@@ -286,10 +306,10 @@ export class Server {
     }
     return {
       configured: [...routes.keys()],
-      read: (provider) => {
+      read: (provider, options) => {
         const reader = routes.get(provider);
         if (!reader) return Promise.reject(new Error("Quota provider is not configured"));
-        return reader.read(provider);
+        return reader.read(provider, options);
       },
     };
   }
@@ -391,6 +411,7 @@ export class Server {
       issues: this.projects.issueSets(),
     });
     this.sendJson(ws, this.getSystemStatus());
+    this.refreshQuota({ force: false });
   }
 
   private isProjectSealed(w: Workspace): boolean {
@@ -424,9 +445,26 @@ export class Server {
       return;
     }
     switch (msg.type) {
-      case "refresh_quota":
-        this.refreshQuota();
+      case "refresh_quota": {
+        let providers: string[] | undefined;
+        if (msg.providers !== undefined) {
+          if (!Array.isArray(msg.providers) || msg.providers.length > 32) {
+            this.sendJson(ws, { type: "error", message: "Invalid quota providers" });
+            return;
+          }
+          providers = [];
+          for (const value of msg.providers) {
+            const parsed = providerId.safeParse(value);
+            if (!parsed.success) {
+              this.sendJson(ws, { type: "error", message: "Invalid quota providers" });
+              return;
+            }
+            if (!providers.includes(parsed.data)) providers.push(parsed.data);
+          }
+        }
+        this.refreshQuota({ force: msg.force === true, providers });
         return;
+      }
       case "recheck_codex_auth":
         void this.recheckCodexAuth(true);
         return;
@@ -1716,6 +1754,10 @@ export class Server {
         if (ws) this.git.requestPrRefresh(ws.cwd);
         if (ws) this.projects.workerIdle(ws);
         if (ws) this.flushPendingLeadTools(ws);
+        const agent = ws?.agents.get(agentId);
+        const provider = agent && this.quotaProviderForModel(agent.info.model);
+        if (provider && this.uiClients.size > 0)
+          this.refreshQuota({ force: false, providers: [provider] });
       },
       onAgentState: (wsId, agentId, state) => {
         this.broadcastUI({ type: "agent_state", workspaceId: wsId, agentId, state });

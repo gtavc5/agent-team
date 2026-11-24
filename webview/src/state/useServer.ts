@@ -1157,11 +1157,30 @@ export function useServer() {
     if (detailRefetchRef.current.size > 0) flushDetailRefetches();
   }, [workspaces, flushDetailRefetches]);
 
+  const send = useCallback((data: unknown): boolean => {
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
+    wsRef.current.send(JSON.stringify(data));
+    return true;
+  }, []);
+
+  const refreshQuota = useCallback(
+    (force = true, providers?: readonly string[]) =>
+      send({
+        type: "refresh_quota",
+        force,
+        ...(providers ? { providers: [...providers] } : {}),
+      }),
+    [send],
+  );
+
   const connect = useCallback((): WebSocket => {
     const ws = new WebSocket(resolveWsUrl());
     wsRef.current = ws;
 
-    ws.onopen = () => setConnected(true);
+    ws.onopen = () => {
+      setConnected(true);
+      refreshQuota(false);
+    };
     ws.onclose = () => {
       // A socket we already gave up on (failed probe) must not schedule a
       // second reconnect on top of the replacement.
@@ -1178,7 +1197,7 @@ export function useServer() {
       handleServerMessage(JSON.parse(e.data as string) as Record<string, unknown>);
     };
     return ws;
-  }, [handleServerMessage, settleProbe]);
+  }, [handleServerMessage, refreshQuota, settleProbe]);
 
   // Gives `ws` PROBE_TIMEOUT_MS to show it is alive: any frame, or for an
   // attempt still connecting, opening. Otherwise it is replaced by a new
@@ -1263,26 +1282,25 @@ export function useServer() {
   useEffect(() => {
     if (useMock || useReplay) return;
     const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      refreshQuota(false);
+      probe();
+    };
+    const heartbeat = () => {
       if (document.visibilityState === "visible") probe();
     };
     document.addEventListener("visibilitychange", onVisible);
     // Back/forward cache restores and network changes bypass visibilitychange.
     window.addEventListener("pageshow", onVisible);
     window.addEventListener("online", onVisible);
-    const timer = setInterval(onVisible, HEARTBEAT_MS);
+    const timer = setInterval(heartbeat, HEARTBEAT_MS);
     return () => {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("pageshow", onVisible);
       window.removeEventListener("online", onVisible);
       clearInterval(timer);
     };
-  }, [probe, useMock, useReplay]);
-
-  const send = useCallback((data: unknown): boolean => {
-    if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
-    wsRef.current.send(JSON.stringify(data));
-    return true;
-  }, []);
+  }, [probe, refreshQuota, useMock, useReplay]);
 
   const recheckCodexAuth = useCallback(() => {
     if (!send({ type: "recheck_codex_auth" })) return;
@@ -1317,7 +1335,7 @@ export function useServer() {
     hostConfigs,
     systemStatus,
     quota,
-    refreshQuota: useCallback(() => send({ type: "refresh_quota" }), [send]),
+    refreshQuota,
     archiveAfterDays,
     lastError,
     clearError: useCallback(() => setLastError(null), []),

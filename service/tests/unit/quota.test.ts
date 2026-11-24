@@ -8,11 +8,13 @@ import piQuota from "../../src/session/pi-quota";
 import {
   ACP,
   NATIVE_CODEX,
-  QUOTA_TTL,
+  QUOTA_AUTO_REFRESH_INTERVAL,
+  QUOTA_MANUAL_REFRESH_THROTTLE,
   SNAPSHOT_EVENT,
   REFRESH_EVENT,
   unavailable,
   type QuotaSnapshot,
+  type QuotaState,
 } from "../../src/session/quota-schema";
 import { QuotaMonitor as Monitor } from "../../src/server/quota";
 import { codexQuota, CodexQuotaSource } from "../../src/server/native-codex-quota";
@@ -22,9 +24,9 @@ import { QuotaAdapterRegistry } from "../../src/session/quota/registry";
 import type { PiQuotaContext } from "../../src/session/quota/pi-context";
 type Reader = () => Promise<QuotaSnapshot>;
 class TestQuotaMonitor extends Monitor<(Reader | undefined)[]> {
-  constructor() {
+  constructor(changed: (state: QuotaState) => void = () => {}) {
     super(
-      () => {},
+      changed,
       new QuotaAdapterRegistry(
         [NATIVE_CODEX, ACP].map((id, i) => ({
           id,
@@ -207,7 +209,7 @@ it("reports unsupported providers without probing; errors, missing listeners and
       },
     },
   ]) {
-    await vi.advanceTimersByTimeAsync(QUOTA_TTL);
+    await vi.advanceTimersByTimeAsync(QUOTA_AUTO_REFRESH_INTERVAL);
     f.events.once("antigravity-acp:quota:request", ({ reply }: { reply: (raw: unknown) => void }) =>
       reply(raw),
     );
@@ -315,7 +317,7 @@ it("merges sparse native windows received from independent sessions", () => {
 it("refreshes a stale group even with a fresh sibling", async () => {
   const q = monitor(),
     now = Date.now();
-  q.accept(group(now - 2 * QUOTA_TTL, "old", 5));
+  q.accept(group(now - 2 * QUOTA_AUTO_REFRESH_INTERVAL, "old", 5));
   q.accept(group(now, "new", 90));
   const acp = vi.fn(() => Promise.resolve(group(Date.now(), "old", 55)));
   await q.refresh(() => Promise.resolve(unavailable(NATIVE_CODEX)), acp);
@@ -331,7 +333,18 @@ it("returns the async refresh chain to the event bus for reload error handling",
   expect(result).toBeInstanceOf(Promise);
   await result;
 });
-it("limits refresh to one in flight and one read per TTL independently of passive native events", async () => {
+it("propagates a forced panel refresh to the Pi adapter registry", async () => {
+  const f = fixture();
+  const read = vi.spyOn(QuotaAdapterRegistry.prototype, "read");
+  f.events.once("antigravity-acp:quota:request", ({ reply }: { reply: (v: unknown) => void }) =>
+    reply({ ok: false }),
+  );
+  const refresh = f.events.listeners(REFRESH_EVENT)[0] as (req: unknown) => Promise<void>;
+  await refresh({ provider: ACP, force: true, reply: () => {} });
+  expect(read).toHaveBeenCalledWith(ACP, expect.anything(), undefined, { force: true });
+});
+
+it("limits refresh to one in flight and one read per auto-refresh interval independently of passive native events", async () => {
   vi.useFakeTimers();
   const q = monitor();
   const codex = vi.fn(() => Promise.resolve(unavailable(NATIVE_CODEX)));
@@ -340,10 +353,82 @@ it("limits refresh to one in flight and one read per TTL independently of passiv
   await q.refresh(codex, acp);
   expect(acp).toHaveBeenCalledTimes(1);
   expect(codex).toHaveBeenCalledTimes(1);
-  await vi.advanceTimersByTimeAsync(QUOTA_TTL);
+  await vi.advanceTimersByTimeAsync(QUOTA_AUTO_REFRESH_INTERVAL);
   await q.refresh(codex, acp);
   expect(acp).toHaveBeenCalledTimes(2);
   expect(q.state().rows.find((r) => r.provider === ACP)?.availability).toBe("available");
+});
+
+it("separates the automatic interval from the manual force throttle without no-op broadcasts", async () => {
+  vi.useFakeTimers();
+  const changed = vi.fn();
+  const q = new TestQuotaMonitor(changed);
+  const acp = vi.fn(() => Promise.resolve(group(Date.now(), "A", 41)));
+  const readers = () => [undefined, acp];
+  await q.refresh(readers);
+  expect(acp).toHaveBeenCalledTimes(1);
+
+  changed.mockClear();
+  await q.refresh(readers);
+  await q.refresh(readers, { force: true, providers: [ACP] });
+  expect(acp).toHaveBeenCalledTimes(1);
+  expect(changed).not.toHaveBeenCalledWith(expect.objectContaining({ refreshing: true }));
+
+  await vi.advanceTimersByTimeAsync(QUOTA_MANUAL_REFRESH_THROTTLE);
+  await q.refresh(readers, { force: true, providers: [ACP] });
+  expect(acp).toHaveBeenCalledTimes(2);
+
+  changed.mockClear();
+  await q.refresh(readers, { providers: [ACP] });
+  expect(acp).toHaveBeenCalledTimes(2);
+  expect(changed).not.toHaveBeenCalledWith(expect.objectContaining({ refreshing: true }));
+
+  await vi.advanceTimersByTimeAsync(QUOTA_AUTO_REFRESH_INTERVAL);
+  await q.refresh(readers, { providers: [ACP] });
+  expect(acp).toHaveBeenCalledTimes(3);
+});
+
+it("keeps a forced provider refresh queued behind an in-flight read", async () => {
+  vi.useFakeTimers();
+  const q = new TestQuotaMonitor();
+  let finish!: (sample: QuotaSnapshot) => void;
+  const acp = vi
+    .fn<Reader>()
+    .mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)))
+    .mockResolvedValueOnce(group(Date.now(), "A", 22));
+  const readers = () => [undefined, acp];
+  const active = q.refresh(readers, { providers: [ACP] });
+  await q.refresh(readers, { force: true, providers: [ACP] });
+  await vi.advanceTimersByTimeAsync(QUOTA_MANUAL_REFRESH_THROTTLE);
+  finish(group(Date.now(), "A", 11));
+  await active;
+  expect(acp).toHaveBeenCalledTimes(2);
+});
+
+it("does not upgrade unrelated queued providers to a forced refresh", async () => {
+  vi.useFakeTimers();
+  const q = new TestQuotaMonitor();
+  let finishAcp!: (sample: QuotaSnapshot) => void;
+  const acp = vi
+    .fn<Reader>()
+    .mockImplementationOnce(() => new Promise((resolve) => (finishAcp = resolve)))
+    .mockResolvedValue(group(Date.now(), "A", 22));
+  const native = vi.fn(() =>
+    Promise.resolve({ ...group(Date.now(), "Native", 7), provider: NATIVE_CODEX }),
+  );
+  const readers = () => [native, acp];
+  await q.refresh(readers, { providers: [NATIVE_CODEX] });
+  await vi.advanceTimersByTimeAsync(10_000);
+
+  const active = q.refresh(readers, { providers: [ACP] });
+  await q.refresh(readers, { force: true, providers: [ACP] });
+  await q.refresh(readers);
+  await vi.advanceTimersByTimeAsync(QUOTA_MANUAL_REFRESH_THROTTLE);
+  finishAcp(group(Date.now(), "A", 11));
+  await active;
+
+  expect(acp).toHaveBeenCalledTimes(2);
+  expect(native).toHaveBeenCalledTimes(1);
 });
 
 it.each([false, true])(
@@ -372,7 +457,7 @@ it.each([false, true])(
 it("retries only the transient provider after TTL with bounded backoff, preserving its last sample", async () => {
   vi.useFakeTimers();
   const q = new TestQuotaMonitor();
-  const old = Date.now() - QUOTA_TTL;
+  const old = Date.now() - QUOTA_AUTO_REFRESH_INTERVAL;
   q.accept(group(old, "ACP plan", 42));
   const codex = vi.fn(() =>
     Promise.resolve({ ...group(Date.now(), "Codex plan", 7), provider: NATIVE_CODEX }),
@@ -385,13 +470,13 @@ it("retries only the transient provider after TTL with bounded backoff, preservi
     reason: "usage unavailable",
     windows: [{ label: "5h", usedPct: 42 }],
   });
-  await vi.advanceTimersByTimeAsync(QUOTA_TTL - 1);
+  await vi.advanceTimersByTimeAsync(QUOTA_AUTO_REFRESH_INTERVAL - 1);
   await q.refresh(readers);
   expect(acp).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(1);
   expect(acp).toHaveBeenCalledTimes(2);
   acp.mockImplementation(() => Promise.resolve(group(Date.now(), "ACP plan", 26)));
-  await vi.advanceTimersByTimeAsync(2 * QUOTA_TTL - 1);
+  await vi.advanceTimersByTimeAsync(2 * QUOTA_AUTO_REFRESH_INTERVAL - 1);
   expect(acp).toHaveBeenCalledTimes(2);
   await vi.advanceTimersByTimeAsync(1);
   expect(acp).toHaveBeenCalledTimes(3);
@@ -399,7 +484,7 @@ it("retries only the transient provider after TTL with bounded backoff, preservi
     availability: "available",
     windows: [{ label: "5h", usedPct: 26 }],
   });
-  await vi.advanceTimersByTimeAsync(10 * QUOTA_TTL);
+  await vi.advanceTimersByTimeAsync(10 * QUOTA_AUTO_REFRESH_INTERVAL);
   expect(acp).toHaveBeenCalledTimes(3);
   expect(codex).toHaveBeenCalledTimes(1);
 });
@@ -412,7 +497,7 @@ it("exhausts transient retries and does not retry an unconfigured provider", asy
   );
   const acp = vi.fn().mockRejectedValue(new Error("retryable"));
   await q.refresh(() => [codex, acp]);
-  await vi.advanceTimersByTimeAsync(10 * QUOTA_TTL);
+  await vi.advanceTimersByTimeAsync(10 * QUOTA_AUTO_REFRESH_INTERVAL);
   expect(codex).toHaveBeenCalledTimes(1);
   expect(acp).toHaveBeenCalledTimes(3);
   expect(vi.getTimerCount()).toBe(0);
@@ -426,7 +511,7 @@ it("stops retrying a provider once a passive sample restores it", async () => {
   await vi.advanceTimersByTimeAsync(1);
   q.accept(group(Date.now(), "ACP plan", 23));
   expect(vi.getTimerCount()).toBe(0);
-  await vi.advanceTimersByTimeAsync(QUOTA_TTL);
+  await vi.advanceTimersByTimeAsync(QUOTA_AUTO_REFRESH_INTERVAL);
   expect(acp).toHaveBeenCalledTimes(1);
 });
 
@@ -452,7 +537,7 @@ it("stops scheduled retries, queued refreshes and active registry waits on shutd
   expect(signal?.aborted).toBe(true);
   expect(q.state().refreshing).toBe(false);
   expect(vi.getTimerCount()).toBe(0);
-  await vi.advanceTimersByTimeAsync(10 * QUOTA_TTL);
+  await vi.advanceTimersByTimeAsync(10 * QUOTA_AUTO_REFRESH_INTERVAL);
   expect(codex).toHaveBeenCalledTimes(1);
   expect(acp).toHaveBeenCalledTimes(1);
 });

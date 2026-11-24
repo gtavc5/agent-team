@@ -1,11 +1,16 @@
-import { snapshotSchema, unavailable, type QuotaSnapshot } from "../quota-schema";
+import {
+  snapshotSchema,
+  unavailable,
+  type QuotaReadOptions,
+  type QuotaSnapshot,
+} from "../quota-schema";
 
 export interface QuotaProviderAdapter<C> {
   id: string;
   coalescesByCredential?: boolean;
   isConfigured(ctx: C): boolean;
   unconfiguredReason?(ctx: C): QuotaSnapshot["reason"];
-  fetchQuota(ctx: C, signal: AbortSignal): Promise<QuotaSnapshot>;
+  fetchQuota(ctx: C, signal: AbortSignal, options?: QuotaReadOptions): Promise<QuotaSnapshot>;
 }
 
 export class QuotaAdapterRegistry<C> {
@@ -38,7 +43,12 @@ export class QuotaAdapterRegistry<C> {
     };
   }
 
-  read(id: string, ctx: C, signal?: AbortSignal): Promise<QuotaSnapshot> {
+  read(
+    id: string,
+    ctx: C,
+    signal?: AbortSignal,
+    options?: QuotaReadOptions,
+  ): Promise<QuotaSnapshot> {
     const adapter = this.adapters.get(id);
     if (!adapter)
       return Promise.resolve({
@@ -63,7 +73,7 @@ export class QuotaAdapterRegistry<C> {
     const work = Promise.race([
       Promise.resolve().then(() => {
         abort.signal.throwIfAborted();
-        return adapter.fetchQuota(ctx, abort.signal);
+        return adapter.fetchQuota(ctx, abort.signal, options);
       }),
       cancelled,
     ])

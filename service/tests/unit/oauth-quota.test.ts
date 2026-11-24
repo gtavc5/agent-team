@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { piAdapters } from "../../src/session/quota/pi-adapters";
 import type { PiQuotaContext } from "../../src/session/quota/pi-context";
-import { QUOTA_TTL } from "../../src/session/quota-schema";
+import { QUOTA_AUTO_REFRESH_INTERVAL } from "../../src/session/quota-schema";
 const jwt = (account: string) =>
   `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: account } })).toString("base64url")}.synthetic`;
 function context(): PiQuotaContext {
@@ -125,7 +125,7 @@ it("coalesces live reads and reuses only same-login results within the TTL", asy
   await Promise.all([r.read(id, ctx), r.read(id, ctx)]);
   await r.read(id, ctx);
   expect(fetcher).toHaveBeenCalledTimes(1);
-  await vi.advanceTimersByTimeAsync(QUOTA_TTL);
+  await vi.advanceTimersByTimeAsync(QUOTA_AUTO_REFRESH_INTERVAL);
   await r.read(id, ctx);
   expect(fetcher).toHaveBeenCalledTimes(2);
   ctx.modelRegistry.getProviderAuth = () =>
@@ -133,6 +133,28 @@ it("coalesces live reads and reuses only same-login results within the TTL", asy
   await r.read(id, ctx);
   expect(fetcher).toHaveBeenCalledTimes(3);
 });
+it("force bypasses a resolved same-login cache while forced in-flight reads still coalesce", async () => {
+  vi.useFakeTimers();
+  const fetcher = vi.fn(() => Promise.resolve(Response.json(openai)));
+  vi.stubGlobal("fetch", fetcher);
+  const r = piAdapters(),
+    ctx = context(),
+    id = "openai-codex";
+  await r.read(id, ctx);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+
+  await Promise.all([
+    r.read(id, ctx, undefined, { force: true }),
+    r.read(id, ctx, undefined, { force: true }),
+  ]);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  await r.read(id, ctx);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+
+  await r.read(id, ctx, undefined, { force: true });
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
 it("isolates a failed vendor and never forwards non-OAuth credentials or server errors", async () => {
   const fetcher = vi.fn((url: string) =>
     Promise.resolve(

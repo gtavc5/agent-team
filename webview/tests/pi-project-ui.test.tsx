@@ -18,6 +18,7 @@ import {
 import { CreateProjectDialog } from "../src/workspace/dialogs";
 import { UiDialogModal } from "../src/workspace/UiDialogModal";
 import { QuotaPanel } from "../src/sidebar/Sidebar";
+import { QUOTA_STALE_AFTER } from "../../service/src/session/quota-schema";
 import { FakeSocket } from "./fakeSocket";
 
 const NOW = 1_800_000_000_000;
@@ -107,7 +108,7 @@ it("hydrates sidebar quota on init and reconnect, refreshes without a turn and e
   expect(app.getByText("Quota used")).toBeTruthy();
   const agyRow = app.getByRole("button", { name: /Agy · Gemini/ });
   expect(agyRow.getAttribute("aria-expanded")).toBe("false");
-  expect(agyRow.textContent).toContain("stale");
+  expect(agyRow.textContent).not.toContain("stale");
   expect(agyRow.textContent).toContain("wk");
   expect(agyRow.textContent).toContain("34%");
   // Details are folded by default.
@@ -119,7 +120,12 @@ it("hydrates sidebar quota on init and reconnect, refreshes without a turn and e
   expect(agyRow.getAttribute("aria-expanded")).toBe("true");
   expect(app.getByText(/34% used/)).toBeTruthy();
   expect(app.getByText(/Resets /)).toBeTruthy();
-  expect(app.getByText(/stale · Updated 2m ago/)).toBeTruthy();
+  expect(app.getByText(/Updated 2m ago/)).toBeTruthy();
+  expect(sock.frames()).toContainEqual({
+    type: "refresh_quota",
+    force: false,
+    providers: ["antigravity-acp"],
+  });
   // Collapse back.
   fireEvent.click(agyRow);
   expect(agyRow.getAttribute("aria-expanded")).toBe("false");
@@ -127,9 +133,14 @@ it("hydrates sidebar quota on init and reconnect, refreshes without a turn and e
   // Expand unavailable row to see full reason.
   fireEvent.click(codexRow);
   expect(app.getByText("unavailable · usage unavailable")).toBeTruthy();
+  expect(sock.frames()).toContainEqual({
+    type: "refresh_quota",
+    force: false,
+    providers: ["native-codex"],
+  });
 
   fireEvent.click(app.getByRole("button", { name: "Refresh" }));
-  expect(sock.frames()).toContainEqual({ type: "refresh_quota" });
+  expect(sock.frames()).toContainEqual({ type: "refresh_quota", force: true });
   receive(sock, { type: "quota_snapshot", quota: { ...quota, refreshing: true } });
   expect((app.getByRole("button", { name: "Refreshing…" }) as HTMLButtonElement).disabled).toBe(
     true,
@@ -165,10 +176,64 @@ it("ages quota without websocket traffic", () => {
     act(() => {
       vi.advanceTimersByTime(60_001);
     });
+    expect(row.textContent).not.toContain("stale");
+    act(() => {
+      vi.advanceTimersByTime(QUOTA_STALE_AFTER - 60_001);
+    });
     expect(row.textContent).toContain("stale");
     fireEvent.click(row);
-    expect(view.getByText(/stale · Updated 1m ago/)).toBeTruthy();
+    expect(view.getByText(/stale · Updated 15m ago/)).toBeTruthy();
   } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("sends non-forced quota hints on open and foreground, not on the heartbeat", () => {
+  vi.useFakeTimers();
+  const visibility = (state: "visible" | "hidden") => {
+    Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+  };
+  try {
+    visibility("visible");
+    const { result } = renderHook(() => useServer());
+    const sock = FakeSocket.instances.at(-1)!;
+    act(() => sock.open());
+    expect(sock.frames()).toEqual([{ type: "refresh_quota", force: false }]);
+    act(() => {
+      result.current.refreshQuota(true);
+    });
+    expect(sock.frames().at(-1)).toEqual({ type: "refresh_quota", force: true });
+
+    sock.sent = [];
+    visibility("hidden");
+    expect(sock.frames()).toEqual([]);
+    visibility("visible");
+    expect(sock.frames()).toEqual([{ type: "refresh_quota", force: false }, { type: "ping" }]);
+    receive(sock, { type: "pong" });
+
+    const originalSend = sock.send.bind(sock);
+    vi.spyOn(sock, "send").mockImplementation((data) => {
+      originalSend(data);
+      if ((JSON.parse(data) as { type?: string }).type === "ping") sock.receive({ type: "pong" });
+    });
+    sock.sent = [];
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(sock.frames()).toEqual([{ type: "ping" }]);
+
+    act(() => sock.drop());
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    const next = FakeSocket.instances.at(-1)!;
+    act(() => next.open());
+    expect(next.frames()).toEqual([{ type: "refresh_quota", force: false }]);
+  } finally {
+    visibility("visible");
     vi.useRealTimers();
   }
 });
@@ -248,8 +313,10 @@ it("deduplicates short names, prioritizes top-2 windows, and shows threshold ton
   const agyFlash = view.getByRole("button", { name: /Agy · Flash/ });
   expect(agyFlash.querySelector(".quota-badge-error")?.textContent).toBe("!");
   expect(agyFlash.textContent).toContain("91%");
+  expect(agyFlash.textContent).not.toContain("stale");
   fireEvent.click(agyFlash);
   expect(view.getByText("unavailable · usage unavailable")).toBeTruthy();
+  expect(view.getByText(/Updated 2m ago/)).toBeTruthy();
 
   // Disambiguates colliding Codex rows from distinct providers.
   view.rerender(
@@ -642,6 +709,7 @@ describe("Project v2", () => {
       result.current.sealProject("p1", "finished");
     });
     expect(sock.frames()).toEqual([
+      { type: "refresh_quota", force: false },
       { type: "create_project", name: "Code", root: "/repo/code" },
       { type: "seal_project", projectId: "p1", reason: "finished" },
     ]);
