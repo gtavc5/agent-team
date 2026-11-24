@@ -2,7 +2,7 @@
 # Unified macOS (launchd) and Linux (systemd --user) service manager for YAAT.
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
 source "$REPO_DIR/scripts/runtime-paths.sh"
 runtime_init_path
 OS_NAME="${YAAT_SERVICE_OS:-$(uname -s)}"
@@ -51,7 +51,10 @@ Commands:
   logs                      View service logs (-n <lines>, --no-follow)
   health                    Check http://127.0.0.1:<port>/manifest.webmanifest
   deploy                    Build, restart, and wait for health (--verify)
-  deploy-deferred [delay]   Schedule detached build+restart (default 10s)
+  deploy-deferred --when-idle --timeout <sec>  Stage and schedule a safe deploy (Linux systemd)
+  deploy-status <id>        Show deferred deployment state
+  deploy-cancel <id>        Cancel before cutover
+  deploy-deferred [delay]   Legacy disruptive deploy for an unstaged instance
   uninstall                 Remove service registration (preserves base dir data)
 
 Options:
@@ -180,6 +183,8 @@ run_cmd() {
 
 SUBCOMMAND=""
 EXTRA_ARGS=""
+WHEN_IDLE=0
+DEPLOY_TIMEOUT=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -259,6 +264,15 @@ while [ "$#" -gt 0 ]; do
       DRY_RUN=1
       shift
       ;;
+    --when-idle)
+      WHEN_IDLE=1
+      shift
+      ;;
+    --timeout)
+      require_arg "$1" "$#"
+      DEPLOY_TIMEOUT="$2"
+      shift 2
+      ;;
     --wait)
       require_arg "$1" "$#"
       WAIT_SEC="$2"
@@ -296,6 +310,11 @@ done
 if [ -z "$SUBCOMMAND" ]; then
   usage
   exit 1
+fi
+
+if [ "$WHEN_IDLE" -ne 0 ] || [ -n "$DEPLOY_TIMEOUT" ]; then
+  [ "$SUBCOMMAND" = deploy-deferred ] && [ "$WHEN_IDLE" -eq 1 ] && [ -n "$DEPLOY_TIMEOUT" ] ||
+    die '--when-idle and --timeout must be used together with deploy-deferred'
 fi
 
 case "$OS_NAME" in
@@ -892,6 +911,14 @@ prepare_deploy_runtime() {
 }
 
 cmd_deploy() {
+  if [ "$DRY_RUN" -eq 0 ] && [ "$OS_NAME" = Linux ]; then
+    mkdir -p "$REPO_DIR/.agent-team"
+    exec 9>>"$REPO_DIR/.agent-team/deploy.lock"
+    flock -n 9 || die 'Another deploy holds the release lock'
+  fi
+  if [ -L "$REPO_DIR/.agent-team/releases/current" ] || [ -e "$REPO_DIR/.agent-team/releases/transaction.json" ]; then
+    die 'Use deploy-deferred --when-idle --timeout <seconds> for staged releases'
+  fi
   local wait="${WAIT_SEC:-15}"
   prepare_deploy_runtime
   if [ "$VERIFY" -eq 1 ]; then
@@ -911,7 +938,7 @@ enqueue_linux_deploy() {
     return 1
   fi
 
-  local args=(--user --no-block --collect --unit="yaat-deploy-$(date +%s)-$$")
+  local args=(--user --no-block --collect --unit="yaat-deploy-${DEPLOY_JOB_ID:-$(date +%s)-$$}")
   local name
   # Transient services do not inherit the caller's environment like scopes do.
   for name in AGENT_TEAM_PORT AGENT_TEAM_BASE_DIR YAAT_SERVICE_LABEL YAAT_PLIST_DIR YAAT_UNIT_DIR \
@@ -924,11 +951,40 @@ enqueue_linux_deploy() {
   if "$SYSTEMD_RUN_BIN" "${args[@]}" "$@" >/dev/null 2>&1; then
     return 0
   fi
-  printf '[warn] systemd-run could not enqueue deferred deploy; using best-effort nohup fallback.\n' >&2
   return 1
 }
 
+cmd_deploy_safe() {
+  [ "$OS_NAME" = Linux ] && [ "$(uname -s)" = Linux ] && command -v flock >/dev/null || die 'Safe deployment requires Linux systemd and flock'
+  [[ "$DEPLOY_TIMEOUT" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$DEPLOY_TIMEOUT" -le 86400 ] || die 'Timeout must be 1–86400 seconds'
+  [ -z "$EXTRA_ARGS" ] && [ "$NO_BUILD" -eq 0 ] && [ "$VERIFY" -eq 0 ] || die 'Safe deployment takes no delay, --verify, or --no-build'
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[dry-run] schedule safe deploy with %ss timeout\n' "$DEPLOY_TIMEOUT"
+    return
+  fi
+  prepare_deploy_runtime
+  local job
+  job="$("$YAAT_NODE_BIN" -e 'console.log(require("node:crypto").randomUUID())')"
+  local controller="$REPO_DIR/scripts/deploy-controller.mjs"
+  "$YAAT_NODE_BIN" "$controller" prepare "$REPO_DIR" "$job"
+  export AGENT_TEAM_PORT="$PORT" AGENT_TEAM_BASE_DIR="$BASE_DIR" YAAT_SERVICE_LABEL="$LABEL"
+  export YAAT_SYSTEMCTL_BIN="$SYSTEMCTL_BIN"
+  if ! DEPLOY_JOB_ID="$job" enqueue_linux_deploy "$REPO_DIR/scripts/deploy-deferred.sh" --when-idle --timeout "$DEPLOY_TIMEOUT" --job "$job"; then
+    "$YAAT_NODE_BIN" "$controller" launch-failed "$REPO_DIR" "$job"
+    die "Could not schedule safe deploy $job via systemd-run; no fallback"
+  fi
+  printf 'Scheduled safe deploy %s. Check with deploy-status %s.\n' "$job" "$job"
+}
+
+cmd_deploy_job() {
+  [ -n "$EXTRA_ARGS" ] || die 'A deploy ID is required'
+  runtime_load_pins "$BASE_DIR"
+  runtime_require_node
+  run_cmd "$YAAT_NODE_BIN" "$REPO_DIR/scripts/deploy-controller.mjs" "$1" "$REPO_DIR" "$EXTRA_ARGS"
+}
+
 cmd_deploy_deferred() {
+  if [ "$WHEN_IDLE" -eq 1 ]; then cmd_deploy_safe; return; fi
   local delay="${EXTRA_ARGS:-10}"
   is_uint "$delay" || die "delay must be a non-negative integer (got '$delay')"
   local script="$REPO_DIR/scripts/deploy-deferred.sh"
@@ -950,6 +1006,7 @@ cmd_deploy_deferred() {
 
   if [ "$OS_NAME" = "Linux" ]; then
     if ! enqueue_linux_deploy "$script" "$delay"; then
+      printf '[warn] systemd-run unavailable; using legacy best-effort nohup fallback.\n' >&2
       if command -v setsid >/dev/null 2>&1; then
         setsid nohup "$script" "$delay" >/dev/null 2>&1 < /dev/null &
       else
@@ -1004,6 +1061,12 @@ case "$SUBCOMMAND" in
     ;;
   deploy-deferred)
     cmd_deploy_deferred
+    ;;
+  deploy-status)
+    cmd_deploy_job status
+    ;;
+  deploy-cancel)
+    cmd_deploy_job cancel
     ;;
   uninstall)
     cmd_uninstall

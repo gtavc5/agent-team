@@ -374,12 +374,13 @@ class PiRpcPlayer {
         done();
       },
     });
-    // Deliver the actual child exit notification without launching a process.
+    // Replay Node's child lifecycle without launching a process.
     const child = new ChildProcess();
     const exit = (code: number) => {
       if (child.exitCode !== null) return;
       Object.assign(child, { exitCode: code });
       child.emit("exit", code, null);
+      stdout.once("end", () => child.emit("close", code, null));
       stdout.end();
     };
     this.exit = exit;

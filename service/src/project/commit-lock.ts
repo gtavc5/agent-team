@@ -17,6 +17,10 @@ export class ProjectCommitLock {
     return result;
   }
 
+  get pending(): number {
+    return this.tails.size;
+  }
+
   isLocked(projectId: string): boolean {
     return this.tails.has(projectId);
   }

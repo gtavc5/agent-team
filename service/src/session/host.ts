@@ -44,6 +44,8 @@ export interface HostSessionHandle extends EventEmitter {
   abort(): void;
   resetContext?(): void;
   dispose?(): Promise<void>;
+  deployBusy?: boolean;
+  retireIdleProcess?(signal: AbortSignal): Promise<void>;
   setEffort?(level: string): void;
   setFastMode?(on: boolean): void;
   setModel?(model: string, effort: string | undefined, fast: boolean): void;
@@ -92,6 +94,7 @@ export interface Host {
   destroySession(agentId: string): Promise<void>;
   restoreSession(agentId: string, state: SessionState): HostSessionHandle;
   quotaReader?(): PiQuotaReader | undefined;
+  readonly pendingCleanup?: number;
   discoverPiModels?(config: SessionConfig): Promise<PiAvailableModel[]>;
   close?(): Promise<void>;
 }
@@ -104,6 +107,11 @@ export class LocalHost implements Host {
   private sessions = new Map<string, HostSessionHandle>();
   private panelHttp?: PanelHttpServer;
   private closing?: Promise<void>;
+  private readonly retiring = new Set<Promise<void>>();
+
+  get pendingCleanup(): number {
+    return this.retiring.size;
+  }
 
   constructor(
     id: string,
@@ -158,9 +166,13 @@ export class LocalHost implements Host {
     const session = this.createSession(agentId, config);
     if (old) {
       old.removeAllListeners();
-      void this.disposeSession(old).catch((error) => {
-        console.error(`[host] Could not dispose replaced session ${agentId}:`, error);
-      });
+      const retirement = this.disposeSession(old);
+      this.retiring.add(retirement);
+      void retirement
+        .finally(() => this.retiring.delete(retirement))
+        .catch((error) => {
+          console.error(`[host] Could not dispose replaced session ${agentId}:`, error);
+        });
     }
     return session;
   }
@@ -210,9 +222,10 @@ export class LocalHost implements Host {
   }
 
   close(): Promise<void> {
-    this.closing ??= Promise.allSettled(
-      [...this.sessions.keys()].map((id) => this.destroySession(id)),
-    ).then(async (results) => {
+    this.closing ??= Promise.allSettled([
+      ...this.retiring,
+      ...[...this.sessions.keys()].map((id) => this.destroySession(id)),
+    ]).then(async (results) => {
       await this.panelHttp?.close();
       const errors = results.flatMap((result) =>
         result.status === "rejected" ? [result.reason as unknown] : [],

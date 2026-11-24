@@ -34,6 +34,7 @@ import {
 import { decodeExtensionUi } from "./pi-extension-ui";
 import { extractPiToolResultText, formatPiToolUse } from "./pi-tool-format";
 import { ACP } from "./quota-schema";
+import { retireOnEof } from "./retire";
 import type {
   ActiveAsyncRunRecord,
   BackgroundTask,
@@ -283,6 +284,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private registered = false;
   private bridgeOwnedToolNames = new Set<string>();
   private activeAsyncRuns: ActiveAsyncRunRecord[] = [];
+  // A terminal status file can precede the live extension's notification.
+  private readonly pendingDeployNotices = new Set<string>();
   private reconciliation?: Promise<void>;
   private reconcileTimer?: NodeJS.Timeout;
   private readonly detachedPids = new Map<number, VerifiedPid & { identity: string }>();
@@ -1093,7 +1096,11 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     }
     const msg = object(event.message);
     if (event.type === "message_start" || event.type === "message_end") {
-      for (const run of decodeSubagentNotifyWire(msg)) this.completeAsyncRun(run);
+      for (const run of decodeSubagentNotifyWire(msg)) {
+        this.pendingDeployNotices.delete(run.runId);
+        this.emit("deploy_activity");
+        this.completeAsyncRun(run);
+      }
     }
     if (event.type === "agent_start") {
       if (!this.isRunning) {
@@ -1408,6 +1415,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     } satisfies ExtensionUiEvent);
   }
   private advanceGeneration(): void {
+    this.pendingDeployNotices.clear();
     this.processGeneration++;
     this.extensionUi({ kind: "reset" });
   }
@@ -1737,7 +1745,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     turn.tools.clear();
     turn.subagents.clear();
   }
-  private completeAsyncRun(update: SubagentNotifyRun): void {
+  private completeAsyncRun(update: SubagentNotifyRun, fromDisk = false): void {
     const run = this.activeAsyncRuns.find((item) => item.runId === update.runId);
     if (!run) return;
     const diskStatus = this.runStatus(run);
@@ -1842,6 +1850,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       });
     }
     if (terminal || run.children.every((child) => terminalStatus(child.status))) {
+      if (fromDisk && this.rpc) this.pendingDeployNotices.add(run.runId);
       this.activeAsyncRuns = this.activeAsyncRuns.filter((item) => item !== run);
       changed = true;
     }
@@ -1949,7 +1958,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         customType: "subagent-notify",
         details: { runId: run.runId, ...(state ? { status: state } : {}), children: steps },
       });
-      if (update) this.completeAsyncRun(update);
+      if (update) this.completeAsyncRun(update, true);
     }
   }
   async stopTask(id: string): Promise<void> {
@@ -2095,6 +2104,49 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       clearTimeout(timer);
       if (onDone) this.off("done", onDone);
     }
+  }
+
+  get deployBusy(): boolean {
+    return Boolean(
+      this.isRunning ||
+      this.starting ||
+      this.closing ||
+      this.retiring ||
+      this.interrupting ||
+      this.pendingOptions ||
+      this.compactingRpc ||
+      this.reconciliation ||
+      this.dialogs.size ||
+      this.activeAsyncRuns.length ||
+      this.pendingDeployNotices.size ||
+      this.rpc?.hasPendingRequests,
+    );
+  }
+
+  async retireIdleProcess(signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    if (this.deployBusy) throw new Error("Pi is busy");
+    const rpc = this.rpc;
+    if (!rpc) return;
+    if (!rpc.child || rpc.stdin.writableEnded) throw new Error("Pi retirement unavailable");
+    await this.captureDetached(rpc.pid, 500);
+    signal.throwIfAborted();
+    if (this.deployBusy || this.rpc !== rpc) throw new Error("Pi is not idle");
+    const state = await rpc.getState({ timeoutMs: 2000 });
+    signal.throwIfAborted();
+    if (
+      this.deployBusy ||
+      this.rpc !== rpc ||
+      state.isStreaming ||
+      state.isCompacting ||
+      state.pendingMessageCount !== 0
+    )
+      throw new Error("Pi is not idle");
+    // Keep the live generation attached until its final frames are drained.
+    // onExit clears the route/transport and the next turn can resume normally.
+    await retireOnEof(rpc.child, rpc.stdin);
+    signal.throwIfAborted();
+    await this.reapDetached(1500);
   }
 
   private retireProcess(): Promise<void> {
@@ -2253,19 +2305,23 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           return [];
         },
       });
-      const reapingDeadline = Date.now() + Math.min(1_500, remainingTotal());
-      const reapRemaining = () => Math.max(0, reapingDeadline - Date.now());
-      await Promise.all(
-        [...this.detachedPids.values()].map(async ({ pid, identity, matchers }) => {
-          if (identity !== (await this.processIdentity(pid, reapRemaining()))) return;
-          await killVerifiedPid(pid, matchers, reapRemaining());
-        }),
-      );
-      for (const pid of this.detachedPids.keys()) if (!alive(pid)) this.detachedPids.delete(pid);
+      await this.reapDetached(Math.min(1500, remainingTotal()));
     } finally {
       this.unregisterRoute();
     }
   }
+  private async reapDetached(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    const remaining = () => Math.max(0, deadline - Date.now());
+    await Promise.all(
+      [...this.detachedPids.values()].map(async ({ pid, identity, matchers }) => {
+        if (identity !== (await this.processIdentity(pid, remaining()))) return;
+        await killVerifiedPid(pid, matchers, remaining());
+      }),
+    );
+    for (const pid of this.detachedPids.keys()) if (!alive(pid)) this.detachedPids.delete(pid);
+  }
+
   private unregisterRoute(): void {
     if (this.registered) this.panelHttp.unregisterSession(this.sessionKey);
     this.registered = false;

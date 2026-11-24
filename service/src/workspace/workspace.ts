@@ -267,6 +267,8 @@ export interface WorkspaceCallbacks {
   onSessionCapabilities?: (wsId: string, agentId: string) => void;
   ensureLoaded?: (ws: Workspace) => boolean;
   canDispatch?: (ws: Workspace) => boolean;
+  onDeployActivity?: () => void;
+  trackCleanup?: (work: Promise<void>) => Promise<void>;
   canDequeue?: () => boolean;
   onRateLimit?: (
     wsId: string,
@@ -460,6 +462,26 @@ export class Workspace {
       if (a.retryPending || (a.pausedUntil && now < a.pausedUntil)) return false;
     }
     return true;
+  }
+
+  get deployBusy(): boolean {
+    if (this.disposed) return false;
+    if (!this.isQuiet || this.hasPendingDialogs) return true;
+    return [...this.agents.values()].some(
+      (entry) => this.dispatchHeld(entry) || entry.session.deployBusy || entry.session.wake,
+    );
+  }
+
+  async retireIdleProcesses(signal: AbortSignal): Promise<void> {
+    if (this.disposed) return;
+    if (this.deployBusy) throw new Error("Workspace is busy");
+    const results = await Promise.allSettled(
+      [...this.agents.values()].map(async ({ session }) => {
+        await session.retireIdleProcess?.(signal);
+      }),
+    );
+    if (results.some((result) => result.status === "rejected"))
+      throw new Error("Backend retirement failed");
   }
 
   // Per agent, the last message another session sent it and what came of
@@ -1088,7 +1110,9 @@ export class Workspace {
     session.setBoundarySteerSource?.(() => this.nextBoundarySteer(agentId, session));
     session.on("steered", (inputId: string) => this.steered(agentId, inputId));
     session.on("unread", (ids: string[]) => this.unread(ids));
+    session.on("deploy_activity", () => this.cb?.onDeployActivity?.());
     session.on("backgroundTasks", () => {
+      if (session.runState === "waiting") this.cb?.onDeployActivity?.();
       this.cb?.onSaveNow?.();
       const entry = this.agents.get(agentId);
       if (entry) this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
@@ -1106,6 +1130,7 @@ export class Workspace {
         if (state === "waiting" || state === "sleeping") entry.input.waiting = true;
         else delete entry.input.waiting;
       }
+      if (state !== "idle") this.cb?.onDeployActivity?.();
       this.cb?.onAgentState?.(this.id, agentId, state);
       // The pending wake-up (and its time) comes and goes with the state.
       if (entry) this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
@@ -1161,12 +1186,15 @@ export class Workspace {
 
   // Stopped first, detached after: stopping closes the agent's open cards
   // through its own events.
-  private async releaseSession(agentId: string, entry: AgentEntry): Promise<void> {
-    const host = this.hostRegistry.get(this.hostId);
-    if (host) await host.destroySession(agentId);
-    else if (entry.session.dispose) await entry.session.dispose();
-    else entry.session.abort();
-    entry.session.removeAllListeners();
+  private releaseSession(agentId: string, entry: AgentEntry): Promise<void> {
+    const cleanup = (async () => {
+      const host = this.hostRegistry.get(this.hostId);
+      if (host) await host.destroySession(agentId);
+      else if (entry.session.dispose) await entry.session.dispose();
+      else entry.session.abort();
+      entry.session.removeAllListeners();
+    })();
+    return this.cb?.trackCleanup?.(cleanup) ?? cleanup;
   }
 
   // The workspace is being deleted: stop every session and let the host

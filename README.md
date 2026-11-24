@@ -261,11 +261,10 @@ full details, including `launchd` `Aqua` Keychain behaviour and dev instances.
 If you expose it beyond localhost, put it behind TLS and keep `[auth]` on —
 agents here run with full filesystem access to the folders you give them.
 
-To redeploy from inside a session — an agent working on this repo cannot
-restart the server mid-turn without killing itself — run
-`scripts/yaat-service.sh deploy-deferred 10` (or `scripts/deploy-deferred.sh 10`
-detached), which builds and restarts after a delay on both macOS and Linux and
-logs to `~/.cache/agent-team-deploy.log`.
+On Linux systemd, run `scripts/yaat-service.sh deploy-deferred --when-idle --timeout 600`
+from the installed checkout. The detached job stages a release and waits for all
+work to finish, including the session that requested it. See [deployment](docs/DEPLOY.md#safe-deferred-deployment-linux-systemd)
+for prerequisites, job status, and cancellation.
 
 ## Layout
 

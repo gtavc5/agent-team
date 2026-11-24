@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
+import { createConnection } from "node:net";
 import * as path from "path";
 import WebSocket from "ws";
 import type { Message, WorkspaceState, AgentState } from "../../src/workspace/workspace";
@@ -320,9 +321,18 @@ function seed(
   return { base, root, web };
 }
 
-async function start(base: string, web: string) {
-  const server = new Server(0, base, web);
+async function start(base: string, web: string, deploy = false, bootFence?: string) {
+  const server = new Server(
+    0,
+    base,
+    web,
+    deploy
+      ? { baseDir: base, port: 0, label: "test", releaseId: "gen-test", installedRepoDir: base }
+      : undefined,
+    bootFence,
+  );
   const port = await server.listening;
+  await server.controlReady;
   const ws = new WebSocket(`ws://127.0.0.1:${port}/`);
   const frames: Array<Record<string, unknown>> = [];
   ws.on("message", (raw: Buffer) => frames.push(JSON.parse(raw.toString()) as never));
@@ -349,6 +359,92 @@ const readState = (base: string, id: string): WorkspaceState => {
 };
 
 describe("server restart with projects", () => {
+  it("treats the lead's own turn as busy, then gates sends and resumes after unseal", async () => {
+    const { base, web } = seed();
+    const { server, frames, send, stop } = await start(base, web, true);
+    const rpc = (message: Record<string, unknown>) =>
+      new Promise<Record<string, unknown>>((resolve, reject) => {
+        const socket = createConnection(path.join(base, "deploy-control/control.sock"), () =>
+          socket.write(JSON.stringify(message) + "\n"),
+        );
+        let reply = "";
+        socket.on("data", (chunk: Buffer) => (reply += chunk.toString()));
+        socket.on("error", reject);
+        socket.on("end", () => resolve(JSON.parse(reply) as Record<string, unknown>));
+      });
+    const input = { type: "send_message", workspaceId: "ws-lead", content: "schedule deploy" };
+    try {
+      send({ ...input, requestId: "one" });
+      await until(
+        () => frames.some((f) => f.type === "send_receipt" && f.requestId === "one"),
+        "admitted lead send",
+      );
+      expect(launches).toHaveLength(1);
+      const status = await rpc({ cmd: "status" });
+      expect(status.blockers).toMatchObject({ workspaces: 1 });
+      const seal = { ...status, cmd: "seal", deployId: "job" };
+      expect(await rpc(seal)).toMatchObject({ sealed: false });
+      launches[0].emit({ kind: "result", content: "" });
+      expect(await rpc(seal)).toMatchObject({ sealed: true, commitReady: true });
+      send({ ...input, requestId: "two", content: "keep this draft" });
+      await until(
+        () =>
+          frames.some((f) => f.type === "error" && f.requestId === "two" && f.retryable === true),
+        "retryable seal rejection",
+      );
+      expect(launches[0].prompts).toEqual(["schedule deploy"]);
+      await rpc({ ...seal, cmd: "unseal" });
+      send({ ...input, requestId: "three", content: "keep this draft" });
+      await until(
+        () => frames.some((f) => f.type === "send_receipt" && f.requestId === "three"),
+        "admitted retry",
+      );
+      expect(launches[0].prompts).toEqual(["schedule deploy", "keep this draft"]);
+    } finally {
+      stop();
+      await server.close();
+    }
+  });
+  it("keeps the candidate fenced, journals a worker report, and dispatches only after verification", async () => {
+    const { base, web } = seed();
+    const transaction = path.join(base, "transaction.json");
+    fs.writeFileSync(transaction, "{}");
+    const { server, frames, send, stop } = await start(base, web, true, transaction);
+    const input = {
+      type: "send_message",
+      workspaceId: "ws-lead",
+      content: "not admitted",
+      requestId: "fenced",
+    };
+    try {
+      const report = sessionsByAgent
+        .get("a-live")!
+        .panelTools!.tools.find((tool) => tool.name === "report_progress")!;
+      await report.handler({ text: "durable report behind the fence" }, undefined, "test-call");
+      const inbox = path.join(base, ".agent-team/projects/proj-1/inbox.json");
+      expect(fs.readFileSync(inbox, "utf8")).toContain("durable report behind the fence");
+      send(input);
+      await until(
+        () =>
+          frames.some(
+            (f) => f.type === "error" && f.requestId === "fenced" && f.retryable === true,
+          ),
+        "fenced send",
+      );
+      expect(launches).toHaveLength(0);
+      fs.unlinkSync(transaction);
+      await vi.waitFor(
+        () => expect(launches[0]?.prompts[0]).toContain("durable report behind the fence"),
+        { timeout: 2000 },
+      );
+      expect(launches[0].prompts).toHaveLength(1);
+    } finally {
+      stop();
+      await server.close();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it("dispatches on the new backend with worker tools and persists the switch", async () => {
     const { base, root, web } = seed();
     fs.writeFileSync(path.join(base, "config.toml"), "[pi]\n");

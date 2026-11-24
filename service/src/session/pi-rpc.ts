@@ -263,11 +263,11 @@ export class PiRpcClient extends EventEmitter {
 
     const child = this.child;
     child?.on("error", (error) => this.failTransport(asError(error)));
-    child?.on("exit", (code, signal) => {
-      this.emitExit(code, signal);
+    // `exit` can precede buffered stdout, including unsolicited turns.
+    child?.on("close", (code, signal) => {
       this.failTransport(new Error(`Pi process exited (${code ?? signal ?? "unknown"})`));
+      this.emitExit(code, signal);
     });
-    child?.on("close", (code, signal) => this.emitExit(code, signal));
   }
 
   static spawn(options: PiRpcSpawnOptions = {}): PiRpcClient {
@@ -281,6 +281,10 @@ export class PiRpcClient extends EventEmitter {
       { stdin: child.stdin, stdout: child.stdout, stderr: child.stderr, child },
       options,
     );
+  }
+
+  get hasPendingRequests(): boolean {
+    return this.pending.size > 0;
   }
 
   get pid(): number | undefined {

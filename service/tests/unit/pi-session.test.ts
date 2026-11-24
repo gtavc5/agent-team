@@ -1,5 +1,5 @@
-import { execFileSync, spawn } from "node:child_process";
-import { once } from "node:events";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -61,6 +61,7 @@ function harness(
     state?: (config: SessionConfig) => SessionState;
     disposition?: string;
     delayedQuota?: boolean;
+    retire?: { trailing?: object };
     enabledModels?: string[];
     startupModel?: { provider: string; id: string };
     models?: Array<{
@@ -155,6 +156,9 @@ function harness(
               sessionId,
               sessionFile,
               thinkingLevel: "low",
+              isStreaming: false,
+              isCompacting: false,
+              pendingMessageCount: 0,
               model: override.startupModel ?? { provider: "mock", id: "test" },
             });
             break;
@@ -199,9 +203,23 @@ function harness(
         callback();
       },
     });
-    const end = vi.fn(() => stdout.end());
+    const child = override.retire
+      ? Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null })
+      : undefined;
+    const end = vi.fn(() => {
+      if (child) {
+        child.exitCode = 0;
+        child.emit("exit", 0, null);
+        if (override.retire?.trailing) event(override.retire.trailing);
+        stdout.once("end", () => child.emit("close", 0, null));
+      }
+      stdout.end();
+    });
     stdin.on("finish", end);
-    const rpc = new PiRpcClient({ stdin, stdout }, { requestTimeoutMs: 800 });
+    const rpc = new PiRpcClient(
+      { stdin, stdout, child: child as ChildProcess | undefined },
+      { requestTimeoutMs: 800 },
+    );
     clients.push({ rpc, event, wire, respond, end });
     return rpc;
   });
@@ -253,6 +271,31 @@ function confirmed(cfg: SessionConfig): SessionState {
     hasConfirmedTurns: true,
   };
 }
+
+describe("Pi deployment retirement", () => {
+  it("holds a busy turn and can start a replacement after clean idle retirement", async () => {
+    const active = harness({ retire: {} });
+    await active.session.send("busy");
+    const signal = new AbortController().signal;
+    await expect(active.session.retireIdleProcess(signal)).rejects.toThrow("busy");
+    expect(active.clients[0].end).not.toHaveBeenCalled();
+    const idle = harness({ retire: {} });
+    await idle.session.ensureStarted();
+    await idle.session.retireIdleProcess(signal);
+    await idle.session.send("after unseal");
+    expect(idle.clients).toHaveLength(2);
+  });
+
+  it("observes an unsolicited start between process exit and stdout close", async () => {
+    const { session } = harness({ retire: { trailing: { type: "agent_start" } } });
+    await session.ensureStarted();
+    const lease = new AbortController();
+    session.on("runState", (state: string) => {
+      if (state === "working") lease.abort(new Error("seal revoked"));
+    });
+    await expect(session.retireIdleProcess(lease.signal)).rejects.toThrow("seal revoked");
+  });
+});
 
 describe("Pi boundary steering", () => {
   async function setup() {
@@ -1212,6 +1255,19 @@ describe("PiSession dispatch and stream state", () => {
       model: "p/observed",
       effort: "high",
     });
+    await session.reconcileAsyncRuns();
+    expect(session.isRunning).toBe(false);
+    expect(session.getState().activeAsyncRuns).toEqual([]);
+    expect(session.deployBusy).toBe(true);
+    event({
+      type: "message_end",
+      message: {
+        role: "custom",
+        customType: "subagent-notify",
+        details: { runId: "observed", status: "completed" },
+      },
+    });
+    await vi.waitFor(() => expect(session.deployBusy).toBe(false));
   });
 
   it("uses observed wire execution without status files and ignores queued siblings' candidates", async () => {

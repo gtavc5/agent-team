@@ -43,7 +43,12 @@ const live: Message = {
   events: [],
 };
 
-function openSocket(sock: FakeSocket, agents: AgentInfo[], others: string[] = []) {
+function openSocket(
+  sock: FakeSocket,
+  agents: AgentInfo[],
+  others: string[] = [],
+  sendReceipt = false,
+) {
   const workspace = (id: string, name: string) => ({
     id,
     name,
@@ -57,6 +62,7 @@ function openSocket(sock: FakeSocket, agents: AgentInfo[], others: string[] = []
   act(() => sock.open());
   sock.receive({
     type: "init",
+    sendReceipt,
     workspaces: [workspace("w1", "w"), ...others.map((id) => workspace(id, id))],
     config: { presets: [], models: [], commands: [], hosts: {} },
     hosts: [],
@@ -66,11 +72,11 @@ function openSocket(sock: FakeSocket, agents: AgentInfo[], others: string[] = []
 // App connected to workspace w1 with `messages` as its newest page.
 function boot(
   messages: Message[],
-  { agents = [AGENT], hasMore = false, others = [] as string[] } = {},
+  { agents = [AGENT], hasMore = false, others = [] as string[], sendReceipt = false } = {},
 ) {
   render(<App />);
   const sock = FakeSocket.instances.at(-1)!;
-  openSocket(sock, agents, others);
+  openSocket(sock, agents, others, sendReceipt);
   sock.receive({ type: "workspace_messages", workspaceId: "w1", messages, hasMore });
   frame();
   return sock;
@@ -186,6 +192,30 @@ describe("composer", () => {
     expect(composer().value).toBe("a long prompt");
     expect(document.querySelector(".error-toast")!.textContent).toMatch(/not connected/i);
     expect(sock.frames().filter((f) => f.type === "send_message")).toEqual([]);
+  });
+
+  it("keeps a draft on a retryable seal response and clears it only after a receipt", async () => {
+    const sock = boot([], { sendReceipt: true });
+    fireEvent.change(composer(), { target: { value: "preserve me" } });
+    fireEvent.keyDown(composer(), { key: "Enter" });
+    const lastSend = () =>
+      sock
+        .frames()
+        .filter((frame) => frame.type === "send_message")
+        .at(-1)!;
+    expect(composer().value).toBe("preserve me");
+    sock.receive({
+      type: "error",
+      message: "Retry shortly",
+      retryable: true,
+      requestId: lastSend().requestId,
+    });
+    await act(async () => {});
+    expect(composer().value).toBe("preserve me");
+    fireEvent.keyDown(composer(), { key: "Enter" });
+    sock.receive({ type: "send_receipt", requestId: lastSend().requestId });
+    await act(async () => {});
+    expect(composer().value).toBe("");
   });
 
   it("leaves another workspace's draft alone when a held send completes", async () => {

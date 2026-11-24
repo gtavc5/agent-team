@@ -44,9 +44,14 @@ export class QuotaMonitor<C> {
   constructor(
     private readonly changed: (state: QuotaState) => void,
     private readonly registry: QuotaAdapterRegistry<C>,
+    private readonly canRefresh = () => true,
   ) {
     for (const id of registry.ids) this.merge(unavailable(id, 0));
   }
+  get inFlight(): boolean {
+    return this.running;
+  }
+
   state(): QuotaState {
     return {
       refreshing: this.refreshing,
@@ -184,7 +189,7 @@ export class QuotaMonitor<C> {
   }
 
   async refresh(context: () => C, options?: QuotaRefreshOptions) {
-    if (this.shutdown.signal.aborted) return;
+    if (this.shutdown.signal.aborted || !this.canRefresh()) return;
     if (this.running) {
       const queued = this.queuedRefresh;
       this.queuedRefresh = {

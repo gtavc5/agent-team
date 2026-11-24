@@ -1,4 +1,5 @@
 import * as path from "path";
+import { existsSync, realpathSync } from "node:fs";
 import { Server } from "./server/server";
 import { doctor } from "./config/doctor";
 import { formatReport } from "./config/diagnostics";
@@ -23,7 +24,36 @@ if (
 } else serve();
 
 function serve() {
-  const server = new Server(port, baseDir, webDir);
+  const installedRepoDir = process.env.AGENT_TEAM_INSTALLED_REPO;
+  const label = process.env.YAAT_SERVICE_LABEL;
+  const generation = realpathSync(__dirname);
+  const legacy = installedRepoDir && generation === path.join(installedRepoDir, "dist");
+  const staged =
+    installedRepoDir &&
+    path.dirname(generation) === path.join(installedRepoDir, ".agent-team/releases");
+  const target =
+    installedRepoDir && label && (staged || (legacy && !process.env.AGENT_TEAM_WEB_DIR))
+      ? {
+          installedRepoDir,
+          label,
+          port,
+          baseDir: realpathSync(baseDir),
+          releaseId: staged ? path.basename(generation) : "legacy",
+        }
+      : undefined;
+  // A new boot must not take work that a failed health check would cut off.
+  // This is a boot fence for an external transaction, not a restored lease.
+  const transaction = staged ? path.join(path.dirname(generation), "transaction.json") : undefined;
+  const server = new Server(
+    port,
+    baseDir,
+    staged ? path.join(generation, "webview") : webDir,
+    target,
+    transaction && existsSync(transaction) ? transaction : undefined,
+  );
+  void server.controlReady.catch((error: unknown) =>
+    console.error("Deploy control unavailable:", error),
+  );
 
   async function shutdown(code = 0): Promise<void> {
     await server.close();

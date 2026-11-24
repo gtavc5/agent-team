@@ -94,6 +94,9 @@ export class CodexSession extends EventEmitter {
   private panelTools: PanelToolset | null = null;
 
   private busy = false;
+  private readonly commandsInFlight = new Set<string>();
+  private panelCalls = 0;
+  private readonly retiring = new Set<Promise<void>>();
   // Every turn and every abort: what an older one's requests answer later
   // is no business of the current one.
   private generation = 0;
@@ -492,9 +495,27 @@ export class CodexSession extends EventEmitter {
     if (this.busy) this.endTurn();
   }
 
-  dispose(): Promise<void> {
+  get deployBusy(): boolean {
+    return Boolean(
+      this.busy ||
+      this.connecting ||
+      this.client?.hasPendingRequests ||
+      this.panelCalls ||
+      this.retiring.size ||
+      this.commandsInFlight.size ||
+      [...this.subagents.values()].some((card) => !card.done),
+    );
+  }
+
+  async retireIdleProcess(signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    if (this.deployBusy) throw new Error("Codex is busy");
+    await this.client?.retireProcess();
+  }
+
+  async dispose(): Promise<void> {
     this.abort();
-    return Promise.resolve();
+    await Promise.all(this.retiring);
   }
 
   private closeProcess(): void {
@@ -502,6 +523,12 @@ export class CodexSession extends EventEmitter {
     this.client = null;
     this.connecting = null;
     this.stopSubagents();
+    this.commandsInFlight.clear();
+    if (client?.exited && !client.closed) {
+      const exited = client.exited;
+      this.retiring.add(exited);
+      void exited.then(() => this.retiring.delete(exited));
+    }
     client?.close();
   }
 
@@ -509,6 +536,7 @@ export class CodexSession extends EventEmitter {
     if (client !== this.client) return;
     this.client = null;
     this.stopSubagents();
+    this.commandsInFlight.clear();
     if (this.busy) this.failTurn(`[Codex error] ${reason}`);
   }
 
@@ -633,8 +661,13 @@ export class CodexSession extends EventEmitter {
   }
 
   private onRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
-    if (method === "item/tool/call")
-      return this.callTool(params as unknown as DynamicToolCallParams);
+    if (method === "item/tool/call") {
+      this.panelCalls++;
+      this.emit("deploy_activity");
+      return this.callTool(params as unknown as DynamicToolCallParams).finally(
+        () => this.panelCalls--,
+      );
+    }
     return Promise.reject(new Error(`agent-team does not answer ${method}`));
   }
 
@@ -659,6 +692,12 @@ export class CodexSession extends EventEmitter {
 
   private onNotification(method: string, params: Record<string, unknown>): void {
     const threadId = params.threadId as string | undefined;
+    const item = params.item as ThreadItem | undefined;
+    if (item?.type === "commandExecution") {
+      if (method === "item/started") this.commandsInFlight.add(item.id);
+      if (method === "item/completed") this.commandsInFlight.delete(item.id);
+    }
+    if (method === "turn/started" || method === "item/started") this.emit("deploy_activity");
     if (threadId && threadId !== this.sessionId) {
       this.onSubagentNotification(threadId, method, params);
       return;

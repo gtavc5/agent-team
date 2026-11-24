@@ -52,6 +52,7 @@ import {
   type ModelDiscoverySnapshot,
 } from "./model-discovery";
 import { HttpHandler } from "./http";
+import { DeployControl, DEPLOY_RETRY, type DeployTarget } from "./deploy-control";
 import { QuotaMonitor, type QuotaRefreshOptions } from "./quota";
 import { inspectAcpRuntime, ACP_PREPARE_STEP } from "../session/acp-readiness";
 import { CodexQuotaSource } from "./native-codex-quota";
@@ -110,6 +111,11 @@ export class Server {
   private staleLeadToolWorkspaces = new Set<string>();
   private readonly restoring: Promise<void>;
   private closing = false;
+  private closePromise?: Promise<void>;
+  private readonly deploy?: DeployControl;
+  readonly controlReady: Promise<void>;
+  private pendingWork = 0;
+  private bootFence?: string;
   private restored = false;
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private sendOrder = new Map<string, Promise<void>>();
@@ -155,14 +161,22 @@ export class Server {
       ],
       55_000,
     ),
+    () => this.dispatchAllowed,
   );
   private system = new SystemMonitor();
   private git: GitScanner<Workspace>;
   private projects: ProjectManager;
   private history: HistoryService;
 
-  constructor(port: number, baseDir: string, webDir: string) {
+  constructor(
+    port: number,
+    baseDir: string,
+    webDir: string,
+    deployTarget?: DeployTarget,
+    bootFence?: string,
+  ) {
     this.baseDir = baseDir;
+    this.bootFence = bootFence;
     this.history = new HistoryService(historyIndexFile(baseDir), historyFile(baseDir));
     this.uploadsDir = path.join(baseDir, "uploads");
     if (!fs.existsSync(this.uploadsDir)) fs.mkdirSync(this.uploadsDir, { recursive: true });
@@ -176,6 +190,36 @@ export class Server {
         this.broadcastUI({ type: "workspace_git_update", workspaceId: w.id, git: w.git, pr: w.pr }),
     );
     this.projects = new ProjectManager(baseDir, this.projectHost());
+    if (deployTarget)
+      this.deploy = new DeployControl(
+        deployTarget,
+        () => ({
+          ...this.projects.deployBlockers(),
+          bootstrap: this.restored ? 0 : 1,
+          workspaces: [...this.workspaces.values()].filter((w) => w.deployBusy).length,
+          requests: this.pendingWork + this.sendOrder.size,
+          backendCleanup: this.hostRegistry
+            .getAll()
+            .reduce((n, host) => n + (host.pendingCleanup ?? 0), 0),
+          probes: (this.recheckingCodexAuth ? 1 : 0) + (this.quota.inFlight ? 1 : 0),
+          bootFence: this.bootFence ? 1 : 0,
+          retries: this.retryTimers.size,
+          shutdown: this.closing ? 1 : 0,
+        }),
+        async (signal) => {
+          const results = await Promise.allSettled(
+            [...this.workspaces.values()].map((w) => w.retireIdleProcesses(signal)),
+          );
+          if (results.some((result) => result.status === "rejected"))
+            throw new Error("Backend retirement failed");
+        },
+        () => {
+          if (!this.dispatchAllowed) return;
+          this.projects.resumeDispatch();
+          for (const w of this.workspaces.values())
+            if (!w.isArchived) for (const id of w.agents.keys()) w.dequeueNext(id);
+        },
+      );
     this.watchConfig();
 
     this.http = new HttpHandler(
@@ -236,6 +280,28 @@ export class Server {
           });
         }),
     );
+    this.controlReady = this.listening.then(() => this.deploy?.listen());
+    if (bootFence) {
+      const releaseFence = () => {
+        if (this.closing || this.bootFence !== bootFence || fs.existsSync(bootFence)) return;
+        fs.unwatchFile(bootFence, releaseFence);
+        this.bootFence = undefined;
+        void this.track(this.resumeRestoredWork()).catch((error: unknown) =>
+          console.error("[restore]", error),
+        );
+      };
+      fs.watchFile(bootFence, { interval: 250 }, releaseFence);
+      void this.listening.then(releaseFence);
+    }
+  }
+
+  private get dispatchAllowed(): boolean {
+    return !this.closing && !this.bootFence && !this.deploy?.sealed;
+  }
+
+  private track<T>(work: Promise<T>): Promise<T> {
+    this.pendingWork++;
+    return work.finally(() => this.pendingWork--);
   }
 
   private initHosts(): HostRegistry {
@@ -386,6 +452,7 @@ export class Server {
     const commands = mergeLocalCommands([]);
     this.sendJson(ws, {
       type: "init",
+      sendReceipt: true,
       quota: this.quotaState(),
       // Identifies the served bundle; a client that reconnects and sees a
       // different id reloads itself (home-screen apps never reload on their own).
@@ -420,6 +487,29 @@ export class Server {
 
   private handleMessage(ws: WebSocket, msg: Record<string, unknown>): void {
     const workspace = this.workspaces.get(msg.workspaceId as string);
+    const reject = (message: string, retryable = false) =>
+      this.sendJson(ws, {
+        type: "error",
+        message,
+        retryable,
+        requestId: msg.requestId,
+      });
+    if (
+      !this.dispatchAllowed &&
+      ![
+        "open_workspace",
+        "load_messages",
+        "load_message_details",
+        "load_subagent_events",
+        "search",
+        "list_dirs",
+        "ping",
+        "mark_seen",
+      ].includes(String(msg.type))
+    ) {
+      reject(DEPLOY_RETRY, true);
+      return;
+    }
     if (
       workspace &&
       this.isProjectSealed(workspace) &&
@@ -441,7 +531,7 @@ export class Server {
         "cancel_wakeup",
       ].includes(String(msg.type))
     ) {
-      this.sendJson(ws, { type: "error", message: "Project is sealed" });
+      reject("Project is sealed");
       return;
     }
     switch (msg.type) {
@@ -635,27 +725,33 @@ export class Server {
           : undefined;
         const quote = msg.quote as
           { messageId: string; agentId: string | null; content: string } | undefined;
-        const send = () =>
-          this.sendMessage(
-            msg.workspaceId as string,
-            msg.content as string,
-            msg.target as string | undefined,
-            images,
-            quote,
-          );
+        const send = async () => {
+          try {
+            await this.sendMessage(
+              msg.workspaceId as string,
+              msg.content as string,
+              msg.target as string | undefined,
+              images,
+              quote,
+            );
+            if (typeof msg.requestId === "string")
+              this.sendJson(ws, { type: "send_receipt", requestId: msg.requestId });
+          } catch (error) {
+            reject(error instanceof Error ? error.message : String(error));
+          }
+        };
         // Sends keep their order even when one waits on an image download.
         const wsId = msg.workspaceId as string;
         const missing = images?.filter((img) => !fs.existsSync(img.path)) ?? [];
         const prev = this.sendOrder.get(wsId);
         if (!prev && missing.length === 0) {
-          void send();
+          void this.track(send());
           return;
         }
         const next = (prev ?? Promise.resolve())
           .then(() => (missing.length ? this.fetchRemoteImages(missing) : undefined))
-          .then(() => {
-            void send();
-          });
+          .then(send)
+          .catch((error: unknown) => reject(String(error)));
         this.sendOrder.set(wsId, next);
         void next.finally(() => {
           if (this.sendOrder.get(wsId) === next) this.sendOrder.delete(wsId);
@@ -672,12 +768,13 @@ export class Server {
         const workspace = this.workspaces.get(msg.workspaceId as string);
         const agentId = msg.agentId as string | undefined;
         if (!workspace) return;
-        void (agentId ? workspace.interruptAgent(agentId) : workspace.interruptAll()).catch(
-          (e: unknown) =>
-            this.sendJson(ws, {
-              type: "error",
-              message: `Stop failed: ${e instanceof Error ? e.message : String(e)}`,
-            }),
+        void this.track(
+          agentId ? workspace.interruptAgent(agentId) : workspace.interruptAll(),
+        ).catch((e: unknown) =>
+          this.sendJson(ws, {
+            type: "error",
+            message: `Stop failed: ${e instanceof Error ? e.message : String(e)}`,
+          }),
         );
         return;
       }
@@ -782,7 +879,9 @@ export class Server {
           return;
         }
         try {
-          void workspace.cancelSubagent(msg.agentId as string, msg.taskId as string).catch((e) => {
+          void this.track(
+            workspace.cancelSubagent(msg.agentId as string, msg.taskId as string),
+          ).catch((e) => {
             this.sendJson(ws, {
               type: "error",
               message: `${e instanceof Error ? e.message : String(e)}`,
@@ -807,10 +906,12 @@ export class Server {
       }
 
       case "forward_message":
-        void this.forwardMessage(
-          msg.workspaceId as string,
-          msg.messageId as string,
-          msg.targetAgentId as string,
+        void this.track(
+          this.forwardMessage(
+            msg.workspaceId as string,
+            msg.messageId as string,
+            msg.targetAgentId as string,
+          ),
         );
         return;
 
@@ -1031,7 +1132,7 @@ export class Server {
       }
       this.broadcastUI({ type: "identities_update", user: this.config.user, presets });
       this.reapplyProviderEnv();
-      void this.refreshPiCatalog();
+      if (this.dispatchAllowed) void this.track(this.refreshPiCatalog());
       console.log("[config] reloaded config.toml");
     });
   }
@@ -1097,21 +1198,9 @@ export class Server {
     quote?: { messageId: string; agentId: string | null; content: string },
   ): Promise<void> {
     const workspace = this.workspaces.get(workspaceId);
-    if (!workspace) {
-      this.broadcastUI({ type: "error", message: "Workspace not found" });
-      return;
-    }
-    if (!this.unarchiveWorkspace(workspace)) return;
-
-    try {
-      await workspace.sendMessage(content, target, images, quote);
-    } catch (e) {
-      this.broadcastUI({
-        type: "error",
-        message: `${e instanceof Error ? e.message : String(e)}`,
-      });
-    }
-
+    if (!workspace) throw new Error("Workspace not found");
+    if (!this.unarchiveWorkspace(workspace)) throw new Error("Workspace could not be loaded");
+    await workspace.sendMessage(content, target, images, quote);
     this.persistWorkspace(workspaceId);
   }
 
@@ -1261,6 +1350,10 @@ export class Server {
       if (workspace.isArchived) workspace.unloadMessages();
     }
     await Promise.all([this.refreshPiCatalog(), this.recheckCodexAuth(false)]);
+    if (!this.bootFence) await this.resumeRestoredWork();
+  }
+
+  private async resumeRestoredWork(): Promise<void> {
     if (this.closing) return;
     try {
       this.projects.adoptAll();
@@ -1331,7 +1424,7 @@ export class Server {
       });
     try {
       const result = action();
-      if (result instanceof Promise) void result.catch(sendError);
+      if (result instanceof Promise) void this.track(result).catch(sendError);
     } catch (error) {
       sendError(error);
     }
@@ -1351,6 +1444,7 @@ export class Server {
 
   private projectHost(): ProjectHost {
     return {
+      dispatchAllowed: () => this.dispatchAllowed,
       workspaces: () => this.workspaces.values(),
       workspace: (id) => this.workspaces.get(id),
       createWorkspace: (name, cwd, link) => this.makeWorkspace(name, cwd, undefined, link),
@@ -1458,6 +1552,7 @@ export class Server {
   }
 
   private sweepArchives(): void {
+    if (!this.dispatchAllowed) return;
     const days = this.config.workspace.archive_after_days;
     if (!days) return;
     const cutoff = Date.now() - days * 86400_000;
@@ -1769,7 +1864,9 @@ export class Server {
       },
       onSaveNow: () => this.persistWorkspaceNow(id),
       canDequeue: () => this.restored,
-      canDispatch: (w) => !this.closing && !this.isProjectSealed(w),
+      canDispatch: (w) => this.dispatchAllowed && !this.isProjectSealed(w),
+      onDeployActivity: () => this.deploy?.observe(true),
+      trackCleanup: (work) => this.track(work),
       ensureLoaded: (w) => this.ensureLoaded(w),
       onReportDeliveryState: (reportId, state, meta) => {
         const w = this.workspaces.get(id);
@@ -1777,6 +1874,7 @@ export class Server {
       },
       onExtensionUi: (event) => this.broadcastUI({ type: "extension_ui", event }),
       onUiDialogRequest: (dialog) => {
+        this.deploy?.observe(true);
         this.broadcastUI({ type: "ui_dialog_request", dialog });
         const w = this.workspaces.get(id);
         if (w) this.projects.showAwaiting(w);
@@ -1816,9 +1914,16 @@ export class Server {
     };
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    return (this.closePromise ??= this.closeOnce());
+  }
+
+  private async closeOnce(): Promise<void> {
     this.closing = true;
+    if (this.bootFence) fs.unwatchFile(this.bootFence);
     this.quota.stop();
+    const retiring = this.deploy?.close();
+    if (retiring) await retiring;
     if (!this.restored) await this.restoring.catch(() => undefined);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.projects.close();

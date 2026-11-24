@@ -30,6 +30,7 @@ const tools = [
   "date",
   "dirname",
   "env",
+  "flock",
   "grep",
   "id",
   "mkdir",

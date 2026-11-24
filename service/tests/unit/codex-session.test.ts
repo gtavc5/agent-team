@@ -48,6 +48,10 @@ class FakeServer {
       },
       onMessage: (cb) => listeners.push(cb),
       onClose: (cb) => closers.push(cb),
+      retireProcess: () => {
+        this.exitConnection(closers, "codex app-server exited (0)");
+        return Promise.resolve();
+      },
       // A real child exits a moment after SIGTERM.
       close: () =>
         queueMicrotask(() => this.exitConnection(closers, "codex app-server exited (SIGTERM)")),
@@ -158,6 +162,18 @@ const echoTools = (handler: (args: Record<string, unknown>) => Promise<string>):
 });
 
 describe("codex app-server session", () => {
+  it("retires the idle process and resumes its thread on the next turn", async () => {
+    const { session } = makeSession();
+    await session.send("first");
+    await expect(session.retireIdleProcess(new AbortController().signal)).rejects.toThrow("busy");
+    server.startTurn();
+    server.completeTurn();
+    expect(session.deployBusy).toBe(false);
+    await session.retireIdleProcess(new AbortController().signal);
+    await session.send("second");
+    expect(server.connections).toBe(2);
+    expect(server.sent("thread/resume")).toEqual([expect.objectContaining({ threadId: "thr_1" })]);
+  });
   it("snapshots reasoning from item start, even before or without a summary", async () => {
     const host = new LocalHost("local", "Local");
     const registry = new HostRegistry();

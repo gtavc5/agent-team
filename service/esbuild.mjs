@@ -3,12 +3,13 @@ import * as path from "path";
 import esbuild from "esbuild";
 
 const watch = process.argv.includes("--watch");
+const outdir = path.resolve(process.env.YAAT_BUILD_OUT_DIR ?? "../dist");
 
 function copyPiBridge() {
-  fs.mkdirSync("../dist", { recursive: true });
-  fs.cpSync("src/session/quota", "../dist/quota", { recursive: true });
+  fs.mkdirSync(outdir, { recursive: true });
+  fs.cpSync("src/session/quota", path.join(outdir, "quota"), { recursive: true });
   for (const file of ["acp-readiness.ts", "pi-panel-bridge.ts", "pi-quota.ts", "quota-schema.ts"]) {
-    fs.copyFileSync(path.resolve("src/session", file), path.resolve("../dist", file));
+    fs.copyFileSync(path.resolve("src/session", file), path.join(outdir, file));
   }
 }
 
@@ -25,7 +26,7 @@ const build = {
     server: "src/index.ts",
     "history-worker": "src/workspace/history-worker.ts",
   },
-  outdir: "../dist",
+  outdir,
 };
 
 if (watch) {

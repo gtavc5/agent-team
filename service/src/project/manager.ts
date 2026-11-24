@@ -104,6 +104,7 @@ const PEER_WINDOW_MS = 10 * 60_000;
 
 // What the manager needs from the server that owns the workspaces.
 export interface ProjectHost {
+  dispatchAllowed?(): boolean;
   workspaces(): Iterable<Workspace>;
   workspace(id: string): Workspace | undefined;
   createWorkspace(name: string, cwd: string, link: ProjectLink): Workspace;
@@ -148,6 +149,31 @@ export type ProjectInfo = Project & { objectives: Array<Objective | BrokenObject
 export class ProjectManager {
   private store: ProjectStore;
   private readonly commitLock = new ProjectCommitLock();
+  private readonly deferredInboxes = new Set<string>();
+  private draining = 0;
+
+  deployBlockers(): Record<string, number> {
+    return {
+      projectCommits: this.commitLock.pending,
+      inboxRecovery: this.draining,
+      projectTimers: this.timers.size,
+    };
+  }
+
+  resumeDispatch(): void {
+    for (const id of this.deferredInboxes) {
+      this.deferredInboxes.delete(id);
+      if (this.store.get(id))
+        void this.drainInbox(id).catch((error) =>
+          console.error("[projects] inbox resume failed", error),
+        );
+    }
+  }
+
+  private assertDispatchAllowed(): void {
+    if (this.host.dispatchAllowed?.() === false)
+      throw new Error("Deployment is sealing this server. Retry shortly.");
+  }
   private readonly journals = new Map<string, ReportJournalStore>();
   // Times handed out by takeStartSlot that are not long past.
   private slots: number[] = [];
@@ -807,6 +833,7 @@ export class ProjectManager {
   }
 
   private carryOnNow(w: Workspace, cut: { id: string }): void {
+    this.assertDispatchAllowed();
     if (this.host.workspace(w.id) !== w || w.isArchived || !w.isQuiet) return;
     const d = w.lastDelivered().find((x) => x.input.id === cut.id);
     if (!d || d.since || d.answered) return;
@@ -999,6 +1026,7 @@ export class ProjectManager {
     from: MessageOrigin,
     prompt: string,
   ): "sent" | "queued" | "steered" {
+    this.assertDispatchAllowed();
     if (target.agents.size === 0) throw new Error(`"${target.name}" has no agent`);
     if (!this.host.restoreWorkspace(target)) throw new Error(`"${target.name}" cannot be loaded`);
     const outcome = target.deliver(text, from, prompt);
@@ -1106,6 +1134,7 @@ export class ProjectManager {
   }
 
   private startSession(projectId: string, a: StartSessionArgs): string {
+    this.assertDispatchAllowed();
     const project = this.require(projectId);
     const input =
       a.cwd === "~" || a.cwd.startsWith("~/") ? path.join(os.homedir(), a.cwd.slice(1)) : a.cwd;
@@ -1479,6 +1508,7 @@ export class ProjectManager {
   }
 
   private messageProject(projectId: string, targetId: string, text: string): string {
+    this.assertDispatchAllowed();
     if (targetId === projectId) throw new Error("That is this project; use message_session");
     const self = this.requireActive(projectId);
     const other = this.requireActive(targetId);
@@ -2017,6 +2047,20 @@ export class ProjectManager {
   }
 
   async drainInbox(id: string, dispatch = true): Promise<void> {
+    if (this.host.dispatchAllowed?.() === false) {
+      this.deferredInboxes.add(id);
+      return;
+    }
+    this.deferredInboxes.delete(id);
+    this.draining++;
+    try {
+      await this.drainInboxNow(id, dispatch);
+    } finally {
+      this.draining--;
+    }
+  }
+
+  private async drainInboxNow(id: string, dispatch: boolean): Promise<void> {
     const recoveries: Promise<void>[] = [];
     let lead: Workspace | undefined;
     await this.commitLock.run(id, () => {
@@ -2105,6 +2149,7 @@ ${body}`,
       this.readEntry(pid, entry, from, count, fromChar),
     queryHistory: (pid, query, project) => this.queryHistory(pid, query, project),
     messageSession: (pid, sid, text) => {
+      this.assertDispatchAllowed();
       const w = this.managed(pid, sid);
       const delay = this.spaceStart(w);
       const outcome = this.deliver(w, text, ...this.fromLead(pid, text));

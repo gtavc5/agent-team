@@ -101,17 +101,24 @@ git pull
 
 `deploy --verify` runs `npm run check && npm test`, builds `dist/`, restarts the service, and waits up to 15 seconds for `http://127.0.0.1:9800/manifest.webmanifest` to return HTTP 200.
 
-### Bootstrapping from inside an agent session (`deploy-deferred`)
+### Safe deferred deployment (Linux systemd)
 
-An agent working inside YAAT is a child process of `node dist/server.js`. Restarting the service inline kills its own session mid-turn. Schedule a detached deferred deploy instead, then finish your response promptly:
+Run these commands from the **installed checkout**, not a worktree. Use one installed service per checkout; use a separate checkout for a second instance. The installed launcher and the running server must already support deploy control. Upgrading an older installation requires one explicitly authorized maintenance build and restart; `--when-idle` refuses an old server without a control socket.
 
 ```bash
-./scripts/yaat-service.sh deploy-deferred 10
+npm run check && npm test
+./scripts/yaat-service.sh deploy-deferred --when-idle --timeout 600
+./scripts/yaat-service.sh deploy-status <id>
+./scripts/yaat-service.sh deploy-cancel <id>
 ```
 
-On Linux, `systemd-run --user --no-block --collect` enqueues a transient service in its own cgroup, so it survives the server unit's `KillMode=control-group` restart. If `systemd-run` or the user bus is unavailable, or the enqueue fails, `setsid nohup` (or just `nohup` if `setsid` is missing) detaches on a best-effort basis: it does not leave the server's cgroup. On macOS, the script detaches via `fork` + `POSIX::setsid()` in `perl`.
+Pass the installed `--base-dir`, `--label`, and `--port` when they are not inherited. `systemd-run --user` starts a separate controller; the command returns the job ID before building. If you schedule from a session, finish your turn rather than polling in it. Your own active turn, background runs, queued work, and scheduled retries prevent cutover. Timeout includes the build and idle wait. Timeout and cancellation before commit do not change either live release pointer or restart the service.
 
-[`scripts/deploy-deferred.sh`](../scripts/deploy-deferred.sh) sleeps 10 seconds, runs `npm run build`, restarts `systemd --user` or `launchd` (or `~/.local/bin/agent-team-service`), and logs a best-effort health probe to `~/.cache/agent-team-deploy.log`.
+The job builds into `.agent-team/releases/<generation>` using the installed runtime pins. The first staged deploy snapshots the legacy `dist/` as its rollback generation. Do not edit staged releases or change shared `node_modules` while deploying. The running launcher resolves `current` once, so an old process never loads assets from the replacement. After sealing admission, the controller records the prior generation, switches the symlink atomically, and verifies the new process identity and public static assets. If verification fails, it restores and verifies the prior generation. This rolls back release files, not application data; use maintenance for incompatible data or dependency changes.
+
+`deploy-status` shows the job phase and aggregate blockers. The transient service journal contains build output. Job state and the rollback journal are under `.agent-team/releases/`. If `recoveryRequired` is true, inspect `transaction.json`, `current`, and the target unit before taking manual action. A boot from an unfinished transaction does not admit work; clear the journal only after you verify the intended release and unit are healthy. No staged release is automatically deleted.
+
+macOS, custom supervisors, and Linux without a systemd user bus do not support `--when-idle` in this phase. The legacy `deploy` and `deploy-deferred [sec]` commands are disruptive and are only available before a release is staged. They do not provide the idle or rollback guarantees.
 
 ---
 
@@ -131,17 +138,19 @@ To register a separate background service for dev, pass distinct `--label`, `--p
 
 ## Service CLI Reference
 
-| Command                      | Purpose                                                                                                   |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `install-deps`               | Install checkout dependencies with the selected Node and npm                                              |
-| `init-config`                | Create base dir (`700`) and `config.toml` (`600`); keeps existing unless `--force`                        |
-| `install`                    | Init config if missing, `npm run build` (unless `--no-build`), write & load service (unless `--no-start`) |
-| `start` / `stop` / `restart` | Control the registered `launchd` / `systemd --user` service                                               |
-| `status`                     | Print `launchctl print` or `systemctl --user status`                                                      |
-| `logs`                       | Tail logs (`-n <lines>`, `--no-follow`)                                                                   |
-| `health`                     | Probe `http://127.0.0.1:<port>/manifest.webmanifest` (`--wait <sec>`)                                     |
-| `deploy`                     | Optional `--verify`, build (unless `--no-build`), restart, `health --wait 15`                             |
-| `deploy-deferred [sec]`      | Detached build + restart after delay (default `10`)                                                       |
-| `uninstall`                  | Unload and remove service file; preserves `~/.yaat` data                                                  |
+| Command                                       | Purpose                                                                                                   |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `install-deps`                                | Install checkout dependencies with the selected Node and npm                                              |
+| `init-config`                                 | Create base dir (`700`) and `config.toml` (`600`); keeps existing unless `--force`                        |
+| `install`                                     | Init config if missing, `npm run build` (unless `--no-build`), write & load service (unless `--no-start`) |
+| `start` / `stop` / `restart`                  | Control the registered `launchd` / `systemd --user` service                                               |
+| `status`                                      | Print `launchctl print` or `systemctl --user status`                                                      |
+| `logs`                                        | Tail logs (`-n <lines>`, `--no-follow`)                                                                   |
+| `health`                                      | Probe `http://127.0.0.1:<port>/manifest.webmanifest` (`--wait <sec>`)                                     |
+| `deploy`                                      | Optional `--verify`, build (unless `--no-build`), restart, `health --wait 15`                             |
+| `deploy-deferred --when-idle --timeout <sec>` | Stage and deploy at quiescence (Linux systemd)                                                            |
+| `deploy-status <id>` / `deploy-cancel <id>`   | Inspect or cancel a deferred job before cutover                                                           |
+| `deploy-deferred [sec]`                       | Legacy disruptive deployment for an unstaged service                                                      |
+| `uninstall`                                   | Unload and remove service file; preserves `~/.yaat` data                                                  |
 
 Key flags: `--base-dir`, `--port`, `--host`, `--label`, `--plist-dir`, `--unit-dir`, `--model`, `--effort`, `--username`, `--password`, `--no-auth`, `--no-build`, `--no-start`, `--verify`, `--force`, `--dry-run`, `--wait`, `-n`, `--no-follow`.

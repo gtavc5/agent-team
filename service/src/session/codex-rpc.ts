@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
+import { retireOnEof } from "./retire";
 
 // `codex app-server`: JSON-RPC 2.0 without the "jsonrpc" field, one message
 // per line over stdio. The protocol is experimental and moves with the
@@ -40,6 +41,8 @@ export interface Transport {
   // The server is gone (exit code or signal, or why it never started).
   onClose(cb: (reason: string) => void): void;
   close(): void;
+  retireProcess?(): Promise<void>;
+  readonly exited?: Promise<void>;
   // The process, where it is one (agy runs each command as a child of it).
   readonly pid?: number;
 }
@@ -113,12 +116,18 @@ export function spawnAppServer(opts: {
     close(`codex app-server exited (${code ?? signal})${tail ? `: ${tail}` : ""}`);
   });
   child.stdin.on("error", () => {});
+  const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
   return {
+    exited,
     write: (msg) => {
       if (!closed) child.stdin.write(JSON.stringify(msg) + "\n");
     },
     onMessage: (cb) => listeners.push(cb),
     onClose: (cb) => closers.push(cb),
+    retireProcess: () => {
+      if (closed || child.stdin.writableEnded) throw new Error("Codex retirement unavailable");
+      return retireOnEof(child, child.stdin);
+    },
     close: () => {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
     },
@@ -194,6 +203,19 @@ export class AppServerClient {
       capabilities: { experimentalApi: true, requestAttestation: false },
     });
     this.notify("initialized");
+  }
+
+  get exited(): Promise<void> | undefined {
+    return this.transport.exited;
+  }
+
+  get hasPendingRequests(): boolean {
+    return this.pending.size > 0;
+  }
+
+  retireProcess(): Promise<void> {
+    if (!this.transport.retireProcess) throw new Error("Codex retirement unavailable");
+    return this.transport.retireProcess();
   }
 
   close(): void {

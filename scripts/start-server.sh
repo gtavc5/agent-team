@@ -2,14 +2,25 @@
 # Start the YAAT / Agent Team server with a service-safe PATH and pre-flight checks.
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
 BASE_DIR="${AGENT_TEAM_BASE_DIR:-$REPO_DIR}"
 source "$REPO_DIR/scripts/runtime-paths.sh"
 runtime_init_path
 runtime_load_pins "$BASE_DIR"
 runtime_require_node
 
-if [ ! -f "$REPO_DIR/dist/server.js" ]; then
+RELEASE_DIR="$REPO_DIR/dist"
+RELEASES="$REPO_DIR/.agent-team/releases"
+if [ -e "$RELEASES/current" ] || [ -L "$RELEASES/current" ]; then
+  [ -L "$RELEASES/current" ] || { echo 'Invalid current release pointer' >&2; exit 1; }
+  RELEASE_DIR="$(cd "$RELEASES/current" && pwd -P)"
+  [ "$(dirname "$RELEASE_DIR")" = "$RELEASES" ] && [[ "$(basename "$RELEASE_DIR")" =~ ^gen-[a-zA-Z0-9-]+$ ]] || {
+    echo 'Invalid current release generation' >&2; exit 1;
+  }
+  # Staged servers must serve their own immutable web assets.
+  unset AGENT_TEAM_WEB_DIR
+fi
+if [ ! -f "$RELEASE_DIR/server.js" ]; then
   printf 'error: %s/dist/server.js not found. Run "npm run build" in %s first.\n' "$REPO_DIR" "$REPO_DIR" >&2
   exit 1
 fi
@@ -34,4 +45,5 @@ fi
 runtime_select_pi || true
 runtime_use_paths
 cd "$REPO_DIR"
-exec "$YAAT_NODE_BIN" dist/server.js "$@"
+export AGENT_TEAM_INSTALLED_REPO="$REPO_DIR" AGENT_TEAM_BASE_DIR="$(cd "$BASE_DIR" && pwd -P)"
+exec "$YAAT_NODE_BIN" "$RELEASE_DIR/server.js" "$@"

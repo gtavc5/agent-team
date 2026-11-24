@@ -523,6 +523,12 @@ export function useServer() {
   });
   const wsRef = useRef<WebSocket | null>(null);
   const buildIdRef = useRef<string | null>(null);
+  const sendReceiptRef = useRef(false);
+  const nextSendRef = useRef(0);
+  const sendWaitersRef = useRef(new Map<string, (accepted: boolean) => void>());
+  const failPendingSends = useCallback(() => {
+    for (const finish of sendWaitersRef.current.values()) finish(false);
+  }, []);
   const reconnectRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   // Pending liveness probe; cleared by any frame from the server.
   const probeRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -584,6 +590,7 @@ export function useServer() {
     (msg: Record<string, unknown>) => {
       switch (msg.type) {
         case "init": {
+          sendReceiptRef.current = msg.sendReceipt === true;
           const buildId = msg.buildId as string | undefined;
           if (buildId && buildIdRef.current && buildIdRef.current !== buildId) {
             // The server was redeployed while we were connected; pick up the
@@ -1144,7 +1151,12 @@ export function useServer() {
           // Answer to a liveness probe; receipt alone clears the timer.
           break;
 
+        case "send_receipt":
+          sendWaitersRef.current.get(String(msg.requestId))?.(true);
+          break;
+
         case "error":
+          if (typeof msg.requestId === "string") sendWaitersRef.current.get(msg.requestId)?.(false);
           console.error("[server]", msg.message);
           setLastError(String(msg.message));
           break;
@@ -1175,8 +1187,8 @@ export function useServer() {
 
   const connect = useCallback((): WebSocket => {
     const ws = new WebSocket(resolveWsUrl());
+    failPendingSends();
     wsRef.current = ws;
-
     ws.onopen = () => {
       setConnected(true);
       refreshQuota(false);
@@ -1185,6 +1197,7 @@ export function useServer() {
       // A socket we already gave up on (failed probe) must not schedule a
       // second reconnect on top of the replacement.
       if (wsRef.current !== ws) return;
+      failPendingSends();
       setConnected(false);
       setRecheckingCodexAuth(false);
       wsRef.current = null;
@@ -1197,7 +1210,7 @@ export function useServer() {
       handleServerMessage(JSON.parse(e.data as string) as Record<string, unknown>);
     };
     return ws;
-  }, [handleServerMessage, refreshQuota, settleProbe]);
+  }, [failPendingSends, handleServerMessage, refreshQuota, settleProbe]);
 
   // Gives `ws` PROBE_TIMEOUT_MS to show it is alive: any frame, or for an
   // attempt still connecting, opening. Otherwise it is replaced by a new
@@ -1450,16 +1463,29 @@ export function useServer() {
         quote?: { messageId: string; agentId: string | null; content: string },
       ): Promise<boolean> => {
         if (probeRef.current) await new Promise<void>((r) => probeWaitersRef.current.push(r));
-        const sent = send({
-          type: "send_message",
-          workspaceId: wsId,
-          content,
-          target,
-          images,
-          quote,
+        const data = { type: "send_message", workspaceId: wsId, content, target, images, quote };
+        if (!sendReceiptRef.current) {
+          const sent = send(data);
+          if (!sent) setLastError("Not connected: the message was not sent");
+          return sent;
+        }
+        const requestId = String(++nextSendRef.current);
+        return new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => {
+            setLastError("No send confirmation. Check the conversation before retrying.");
+            finish(false);
+          }, 120_000);
+          const finish = (accepted: boolean) => {
+            clearTimeout(timer);
+            sendWaitersRef.current.delete(requestId);
+            resolve(accepted);
+          };
+          sendWaitersRef.current.set(requestId, finish);
+          if (!send({ ...data, requestId })) {
+            setLastError("Not connected: the message was not sent");
+            finish(false);
+          }
         });
-        if (!sent) setLastError("Not connected: the message was not sent");
-        return sent;
       },
       [send],
     ),
