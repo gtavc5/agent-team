@@ -12,9 +12,11 @@ export interface AgentPreset {
 }
 
 export const AGENT_PRESETS: AgentPreset[] = [
-  { name: "Kisara", avatar: "avatars/Kisara.jpg", color: "#D8A0D8" },
-  { name: "Isla", avatar: "avatars/Isla.jpg", color: "#C0C0C0" },
-  { name: "Alice", avatar: "avatars/Alice.jpg", color: "#F0D264" },
+  { name: "Laffey", avatar: "avatars/Laffey.jpg", color: "#D8A0D8" },
+  { name: "Allen", avatar: "avatars/Allen.jpg", color: "#8AB4F8" },
+  { name: "Perseus", avatar: "avatars/Perseus.jpg", color: "#C0C0C0" },
+  { name: "Shorekeeper", avatar: "avatars/Shorekeeper.jpg", color: "#7DD3FC" },
+  { name: "Ayanami", avatar: "avatars/Ayanami.jpg", color: "#A5B4FC" },
 ];
 
 export interface ModelOption {

@@ -1,0 +1,10 @@
+yaat (Yet Another Agent Team)
+Copyright 2026 nZh10
+
+This product is a derivative work based on agent-team
+(https://github.com/16bit-ykiko/agent-team),
+originally created by ykiko (Copyright 2026 ykiko) and licensed under
+the Apache License, Version 2.0.
+
+Modifications include Pi backend integration, multi-provider quota
+monitoring, UI/mobile improvements, and updated default presets and assets.

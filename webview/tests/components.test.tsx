@@ -142,7 +142,7 @@ describe("MessageItem", () => {
   it("renders the user's name and image or text avatar", () => {
     const message = msg({ kind: "user", content: "Hello" });
     const d = render(<MessageItem msg={message} agents={[]} />);
-    expect(d.getByAltText("You").getAttribute("src")).toBe("avatars/ykiko.jpg");
+    expect(d.getByAltText("You").getAttribute("src")).toBe("avatars/header.jpg");
     expect(d.getByText("You")).toBeTruthy();
     d.rerender(
       <MessageItem msg={message} agents={[]} user={{ name: "Ada", avatar: "avatars/ada.png" }} />,

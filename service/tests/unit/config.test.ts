@@ -50,7 +50,7 @@ describe("loadConfig", () => {
   it("reads user, lead and agent identities without changing built-in defaults", () => {
     for (const source of ["", "agent_presets = []"]) {
       expect(loadConfig(writeConfig(source))).toMatchObject({
-        user: { name: "You", avatar: "avatars/ykiko.jpg" },
+        user: { name: "You", avatar: "avatars/header.jpg" },
         presets: AGENT_PRESETS,
       });
     }

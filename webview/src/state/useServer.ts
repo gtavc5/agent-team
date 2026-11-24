@@ -379,7 +379,7 @@ export interface SystemStatus {
   hostname: string;
 }
 
-export const DEFAULT_USER = { name: "You", avatar: "avatars/ykiko.jpg" };
+export const DEFAULT_USER = { name: "You", avatar: "avatars/header.jpg" };
 
 export interface AgentPreset {
   model?: string;

@@ -62,7 +62,7 @@ type = "local"
 # Files in avatars/ beside config.toml take precedence over bundled avatars.
 # [user]
 # name = "You"
-# avatar = "avatars/ykiko.jpg"
+# avatar = "avatars/header.jpg"
 
 # Repeat to replace the built-in agent presets; omitted or empty uses built-ins.
 # A project worker can use a preset by exact name, with model and effort overrides.

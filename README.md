@@ -287,6 +287,10 @@ scripts/         start script, deferred deploy, SDK capture + smoke tests, demo 
 .agents/skills/  task-specific playbooks
 ```
 
+## Credits
+
+Originally forked from [16bit-ykiko/agent-team](https://github.com/16bit-ykiko/agent-team) by [ykiko](https://github.com/16bit-ykiko). See [NOTICE](NOTICE) for attribution details.
+
 ## License
 
 [Apache-2.0](LICENSE)

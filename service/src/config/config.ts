@@ -190,7 +190,7 @@ export function loadConfig(baseDir: string): AppConfig {
   const rawUser = parsed.user as Record<string, unknown> | undefined;
   const user = {
     name: optionalString(rawUser?.name) ?? "You",
-    avatar: optionalString(rawUser?.avatar) ?? "avatars/ykiko.jpg",
+    avatar: optionalString(rawUser?.avatar) ?? "avatars/header.jpg",
   };
   return {
     server,
