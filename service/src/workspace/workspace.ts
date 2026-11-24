@@ -321,6 +321,13 @@ function clearRetry(msg: Message): boolean {
   return true;
 }
 
+function copySubagentExecution(target: StreamEvent, source: StreamEvent): void {
+  if (!target.subagent || !source.subagent) return;
+  const { model, effort } = source.subagent;
+  if (model != null) target.subagent.model = model;
+  if (effort != null) target.subagent.effort = effort;
+}
+
 // Apply an inner event to a subagent's transcript. Carriers nest: a
 // grandchild's event arrives as progress(child, _innerEvent: progress(grand,
 // _innerEvent: ev)), so recurse into the nested start's own transcript.
@@ -363,6 +370,7 @@ function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): void
     if (pi >= 0) saEvents.splice(pi, 1);
     const si = saEvents.findIndex((e) => e.kind === "subagent_start" && e.subagent?.taskId === nid);
     if (si >= 0) {
+      copySubagentExecution(saEvents[si], innerEvent);
       saEvents[si].subagent!.status = innerEvent.subagent.status;
       saEvents[si].subagent!.summary = innerEvent.subagent.summary;
       saEvents[si].subagent!.usage = innerEvent.subagent.usage;
@@ -697,7 +705,10 @@ export class Workspace {
         return;
       }
 
-      if (startIdx >= 0) event.contentOffset = msg.events[startIdx].contentOffset;
+      if (startIdx >= 0) {
+        event.contentOffset = msg.events[startIdx].contentOffset;
+        copySubagentExecution(msg.events[startIdx], event);
+      }
       const prev = msg.events.findIndex(
         (e) => e.kind === "subagent_progress" && e.subagent?.taskId === taskId,
       );
@@ -711,6 +722,7 @@ export class Workspace {
       if (startIdx >= 0) {
         const start = msg.events[startIdx];
         event.contentOffset = start.contentOffset;
+        copySubagentExecution(start, event);
         const started = start.subagent!;
         if (finished?.events) {
           started.events = finished.events;

@@ -10,7 +10,7 @@ import {
   executeFallbackAsyncStop,
   isTrackableSubagentMode,
   makeSyntheticSubagentTaskId,
-  reconstructSubagentChildEvents,
+  reconstructSubagentChild,
   resolveCanonicalChildId,
   resolveStopTarget,
   SUBAGENT_MODES,
@@ -403,17 +403,32 @@ describe("native Pi Session v3 decoder", () => {
         message: { role: "assistant", content: [{ type: "text", text: "root" }] },
       },
       {
-        type: "message",
+        type: "thinking_level_change",
         id: "inactive",
         parentId: "root",
-        message: { role: "assistant", content: [{ type: "text", text: "inactive branch" }] },
+        thinkingLevel: "low",
+      },
+      {
+        type: "model_change",
+        id: "model",
+        parentId: "root",
+        provider: "requested-provider",
+        modelId: "requested-id",
+      },
+      {
+        type: "thinking_level_change",
+        id: "effort",
+        parentId: "model",
+        thinkingLevel: "high",
       },
       {
         type: "message",
         id: "active",
-        parentId: "root",
+        parentId: "effort",
         message: {
           role: "assistant",
+          provider: "resolved-provider",
+          model: "resolved-id",
           content: [
             { type: "thinking", thinking: "consider" },
             { type: "text", text: "active branch" },
@@ -437,9 +452,26 @@ describe("native Pi Session v3 decoder", () => {
           content: [{ type: "text", text: "file body" }],
         },
       },
+      {
+        type: "model_change",
+        id: "unused-model",
+        parentId: "result",
+        provider: "p",
+        modelId: "unused",
+      },
+      {
+        type: "thinking_level_change",
+        id: "unused-effort",
+        parentId: "unused-model",
+        thinkingLevel: "off",
+      },
     ]);
     const decoded = decodePiSessionV3Tree(sessionFile);
-    expect(decoded.ok).toBe(true);
+    expect(decoded).toMatchObject({
+      ok: true,
+      model: "resolved-provider/resolved-id",
+      effort: "high",
+    });
     expect(decoded.events.map((event) => event.kind)).toEqual([
       "text",
       "thinking",
@@ -476,6 +508,9 @@ describe("child transcript artifact decoder and reconstruction", () => {
         role: "assistant",
         message: {
           role: "assistant",
+          provider: "artifact-provider",
+          model: "artifact-model",
+          thinkingLevel: "medium",
           content: [
             { type: "thinking", thinking: "artifact thought" },
             { type: "text", text: "artifact text" },
@@ -503,7 +538,11 @@ describe("child transcript artifact decoder and reconstruction", () => {
       },
       { recordType: "truncated", message: "byte limit reached" },
     ]);
-    const events = decodeChildTranscriptArtifact(transcript);
+    const { events, model, effort } = decodeChildTranscriptArtifact(transcript);
+    expect({ model, effort }).toEqual({
+      model: "artifact-provider/artifact-model",
+      effort: "medium",
+    });
     expect(events.map((event) => event.kind)).toEqual([
       "thinking",
       "text",
@@ -520,14 +559,16 @@ describe("child transcript artifact decoder and reconstruction", () => {
 
   it("emits warnings for missing files and metadata-reported gaps", () => {
     const directory = temporaryDirectory();
-    const missing = decodeChildTranscriptArtifact(path.join(directory, "missing.jsonl"));
+    const { events: missing } = decodeChildTranscriptArtifact(
+      path.join(directory, "missing.jsonl"),
+    );
     expect(missing).toHaveLength(1);
     expect(missing[0]).toMatchObject({ kind: "notice", level: "warning" });
     expect(missing[0].content).toContain("missing.jsonl");
 
     const empty = path.join(directory, "empty.jsonl");
     fs.writeFileSync(empty, "");
-    const gaps = decodeChildTranscriptArtifact(empty, undefined, {
+    const { events: gaps } = decodeChildTranscriptArtifact(empty, undefined, {
       outputTruncated: true,
       transcriptError: "disk full",
     });
@@ -553,19 +594,27 @@ describe("child transcript artifact decoder and reconstruction", () => {
       {
         recordType: "message",
         role: "assistant",
-        message: { role: "assistant", content: [{ type: "text", text: "from transcript" }] },
+        message: {
+          role: "assistant",
+          provider: "p",
+          model: "artifact",
+          thinkingLevel: "low",
+          content: [{ type: "text", text: "from transcript" }],
+        },
       },
     ]);
+    expect(reconstructSubagentChild({ sessionFile, transcriptPath: transcript })).toEqual({
+      events: [{ kind: "text", content: "from session" }],
+      model: "p/artifact",
+      effort: "low",
+    });
     expect(
-      reconstructSubagentChildEvents({ sessionFile, transcriptPath: transcript })[0].content,
-    ).toBe("from session");
-    expect(
-      reconstructSubagentChildEvents({
+      reconstructSubagentChild({
         sessionFile: path.join(directory, "gone.jsonl"),
         transcriptPath: transcript,
-      })[0].content,
+      }).events[0].content,
     ).toBe("from transcript");
-    expect(reconstructSubagentChildEvents({})[0]).toMatchObject({
+    expect(reconstructSubagentChild({}).events[0]).toMatchObject({
       kind: "notice",
       level: "warning",
     });

@@ -118,6 +118,8 @@ export interface ThinkingStats {
 export interface SubAgentInfo {
   taskId: string;
   description: string;
+  model?: string;
+  effort?: string;
   prompt?: string;
   agentType?: string;
   status?: "running" | "completed" | "failed" | "stopped";
@@ -192,6 +194,8 @@ export interface ActiveAsyncChildRecord {
   stepIndex: number;
   canonicalChildId: string;
   status?: "pending" | "running" | "completed" | "failed" | "stopped";
+  // Observed execution, retained across restore even if the runner artifacts disappear.
+  execution?: Pick<SubAgentInfo, "model" | "effort">;
 }
 
 export interface ActiveAsyncRunRecord {

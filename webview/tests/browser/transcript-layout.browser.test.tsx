@@ -1,8 +1,14 @@
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
-import { page, cdp } from "vitest/browser";
+import { page, cdp, userEvent } from "vitest/browser";
 import type {} from "@vitest/browser-playwright";
-import { BannerItem, EventItem, MessageItem, SubAgentItem } from "../../src/chat/messages";
+import {
+  BannerItem,
+  EventItem,
+  MessageItem,
+  StepGroup,
+  SubAgentItem,
+} from "../../src/chat/messages";
 import { CreateWorkspaceDialog } from "../../src/workspace/dialogs";
 import { BoardPage } from "../../src/project/BoardPage";
 import { GitBar } from "../../src/workspace/GitBar";
@@ -41,6 +47,142 @@ function lines(el: HTMLElement) {
   range.selectNodeContents(el);
   return new Set([...range.getClientRects()].map((r) => r.top)).size;
 }
+
+it.each([320, 1200])(
+  "fits subagent execution fields at %ipx without exposing trace details",
+  async (width) => {
+    await page.viewport(width, 720);
+    const model = "provider/" + "long-model-identifier-".repeat(12);
+    const { container } = render(
+      <div className="messages">
+        <SubAgentItem
+          ev={{
+            kind: "subagent_start",
+            content: "",
+            subagent: {
+              taskId: "obs",
+              description: "Reviewer",
+              model,
+              effort: "high",
+              status: "completed",
+              durationMs: 3000,
+              lastTool: "hidden-tool",
+              events: [{ kind: "text", content: "hidden-trace" }],
+            },
+          }}
+        />
+      </div>,
+    );
+    const header = get(container, ".subagent-header");
+    expect(header.textContent).toBe(`▸✓Reviewer${model}high3s`);
+    for (const selector of [
+      ".subagent-desc",
+      ".subagent-model",
+      ".subagent-effort",
+      ".subagent-time",
+      ".subagent-status-icon",
+    ]) {
+      const field = get(header, selector);
+      expect(rect(field).width).toBeGreaterThan(0);
+      expect(rect(field).right).toBeLessThanOrEqual(rect(header).right + 0.5);
+    }
+    expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth + 1);
+    const modelField = get(header, ".subagent-model");
+    expect(modelField.scrollWidth).toBeGreaterThan(modelField.clientWidth);
+    expect(modelField.title).toBe(model);
+  },
+);
+
+it.each([
+  [320, "step"],
+  [320, "subagent"],
+  [1200, "step"],
+  [1200, "subagent"],
+] as const)(
+  "collapsing the %ipx %s trace from the bottom restores its off-screen header",
+  async (width, trace) => {
+    await page.viewport(width, 720);
+    const { container, getByRole } = render(
+      <div className="messages" style={{ height: 360, overflowAnchor: "none" }}>
+        <div style={{ flex: "none", height: 210 }} />
+        {trace === "step" ? (
+          <StepGroup
+            group={{
+              step: 0,
+              events: Array.from({ length: 50 }, () => ({
+                kind: "thinking" as const,
+                content: "Thinking about the next step.",
+              })),
+            }}
+          />
+        ) : (
+          <SubAgentItem
+            ev={{
+              kind: "subagent_start",
+              content: "",
+              subagent: {
+                taskId: "trace",
+                description: "Reviewer",
+                status: "completed",
+                summary: "A paragraph of trace details.\n\n".repeat(50),
+              },
+            }}
+          />
+        )}
+        <div style={{ flex: "none", height: 2000 }} />
+      </div>,
+    );
+    const scroller = get(container, ".messages");
+    const header = get(container, `.${trace}-header`);
+    const toggle = get(header, "button");
+    fireEvent.click(toggle);
+    const footer = getByRole("button", { name: `Collapse ${trace} trace` });
+    expect(rect(footer).height).toBeGreaterThanOrEqual(width === 320 ? 44 : 26);
+    if (width === 1200) expect(rect(footer).height).toBeLessThan(44);
+    scroller.scrollTop += rect(footer).bottom - rect(scroller).bottom + 16;
+    expect(rect(footer).top).toBeGreaterThan(rect(scroller).top);
+    expect(rect(footer).bottom).toBeLessThan(rect(scroller).bottom);
+    expect(rect(header).bottom).toBeLessThan(rect(scroller).top);
+    fireEvent.click(footer);
+    expect(footer.isConnected).toBe(false);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(rect(header).top).toBeGreaterThanOrEqual(rect(scroller).top - 1);
+    expect(rect(header).bottom).toBeLessThan(rect(scroller).bottom);
+  },
+);
+
+it("restores keyboard focus and keeps the last collapsed card in view with normal scroll anchoring", async () => {
+  await page.viewport(320, 720);
+  const { container } = render(
+    <div className="messages" style={{ height: 340 }}>
+      <div style={{ flex: "none", height: 500 }} />
+      <SubAgentItem
+        ev={{
+          kind: "subagent_start",
+          content: "",
+          subagent: {
+            taskId: "last",
+            description: "Reviewer",
+            status: "completed",
+            summary: "A long trace paragraph.\n\n".repeat(50),
+          },
+        }}
+      />
+    </div>,
+  );
+  const scroller = get(container, ".messages");
+  const header = get(container, ".subagent-header");
+  const toggle = get(header, "button");
+  await page.getByRole("button", { name: "Expand subagent: Reviewer" }).click();
+  const footer = get(container, ".trace-collapse");
+  footer.focus();
+  expect(rect(header).bottom).toBeLessThan(rect(scroller).top);
+  await userEvent.keyboard("{Enter}");
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  expect(document.activeElement).toBe(toggle);
+  expect(rect(header).top).toBeGreaterThanOrEqual(rect(scroller).top - 1);
+  expect(rect(header).bottom).toBeLessThanOrEqual(rect(scroller).bottom + 1);
+});
 
 it("wraps shell commands and tool paths without letting a long name displace controls", async () => {
   await page.viewport(320, 820);

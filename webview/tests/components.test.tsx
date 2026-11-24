@@ -11,6 +11,35 @@ const sa = (over: Partial<NonNullable<StreamEvent["subagent"]>> = {}): StreamEve
 });
 
 describe("SubAgentItem", () => {
+  it("shows only the execution summary and closes a nonempty trace from its footer", () => {
+    const { container, getByRole, queryByRole } = render(
+      <SubAgentItem
+        ev={sa({
+          status: "completed",
+          model: "provider/resolved",
+          effort: "high",
+          durationMs: 3000,
+          lastTool: "PrivateTool",
+          events: [{ kind: "text", content: "trace" }],
+        })}
+      />,
+    );
+    const header = container.querySelector(".subagent-header")!;
+    expect(header.textContent).toBe("▸✓explore the repoprovider/resolvedhigh3s");
+    expect(queryByRole("button", { name: "Collapse subagent trace" })).toBeNull();
+    fireEvent.click(getByRole("button", { name: "Expand subagent: explore the repo" }));
+    fireEvent.click(getByRole("button", { name: "Collapse subagent trace" }));
+    expect(container.querySelector(".subagent-body")).toBeNull();
+    expect(document.activeElement).toBe(
+      getByRole("button", { name: "Expand subagent: explore the repo" }),
+    );
+  });
+
+  it("does not show a bottom collapse control on an empty subagent", () => {
+    const { getByRole, queryByRole } = render(<SubAgentItem ev={sa()} />);
+    fireEvent.click(getByRole("button", { name: "Expand subagent: explore the repo" }));
+    expect(queryByRole("button", { name: "Collapse subagent trace" })).toBeNull();
+  });
   it("shows a cancel button while running and reports the taskId", () => {
     const onCancel = vi.fn();
     const { container, getByTitle } = render(
@@ -72,6 +101,16 @@ describe("SubAgentItem", () => {
 });
 
 describe("StepGroup", () => {
+  it("returns an expanded step to its collapsed header from the footer", () => {
+    const { getByRole, queryByRole } = render(
+      <StepGroup group={{ step: 0, events: [{ kind: "thinking", content: "step" }] }} />,
+    );
+    expect(queryByRole("button", { name: "Collapse step trace" })).toBeNull();
+    fireEvent.click(getByRole("button", { name: "Expand steps" }));
+    fireEvent.click(getByRole("button", { name: "Collapse step trace" }));
+    expect(queryByRole("button", { name: "Collapse step trace" })).toBeNull();
+    expect(document.activeElement).toBe(getByRole("button", { name: "Expand steps" }));
+  });
   it("omits the step box entirely when a segment only contains a subagent", () => {
     const { container } = render(<StepGroup group={{ step: 0, events: [sa()] }} />);
     expect(container.querySelector(".step-group")).toBeNull();
@@ -459,7 +498,7 @@ describe("MessageItem subagent lifecycle placement", () => {
     const items = container.querySelectorAll(".subagent-item");
     expect(items).toHaveLength(1);
     expect(items[0].className).toContain("subagent-completed");
-    expect(items[0].querySelector(".subagent-label")!.textContent).toBe("Explore");
+    expect(items[0].querySelector(".subagent-desc")!.textContent).toBe("search");
   });
 });
 

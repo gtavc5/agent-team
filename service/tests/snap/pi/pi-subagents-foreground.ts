@@ -8,10 +8,15 @@ export default fixture({
     expect(
       r.events
         .filter((e) => e.kind === "subagent_done")
-        .map((e) => [e.subagent?.taskId, e.subagent?.events]),
+        .map((e) => [
+          e.subagent?.taskId,
+          e.subagent?.model,
+          e.subagent?.effort,
+          e.subagent?.events,
+        ]),
     ).toEqual([
-      ["id-1:0", [{ kind: "text", content: "x".repeat(18) }]],
-      ["id-1:1", [{ kind: "text", content: "x".repeat(17) }]],
+      ["id-1:0", "pi-e2e/scenario", "sample", [{ kind: "text", content: "x".repeat(18) }]],
+      ["id-1:1", "pi-e2e/scenario", "sample", [{ kind: "text", content: "x".repeat(17) }]],
     ]);
   },
 });

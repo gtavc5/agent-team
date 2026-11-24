@@ -75,6 +75,8 @@ export function summarizeEvent(e: StreamEvent): StreamEvent {
           ...(sa.lastTool && { lastTool: sa.lastTool }),
           ...(sa.usage && { usage: sa.usage }),
           ...(sa.durationMs != null && { durationMs: sa.durationMs }),
+          ...(sa.model != null && { model: sa.model }),
+          ...(sa.effort != null && { effort: sa.effort }),
           ...(sa.cancellable !== undefined && { cancellable: sa.cancellable }),
           eventCount: sa.events?.length ?? sa.eventCount ?? 0,
           ...(sa.prompt && { hasPrompt: true }),

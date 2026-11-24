@@ -33,12 +33,15 @@ function scenario(base: string) {
   const transcriptB = path.join(base, "transcript-b.jsonl");
   writeJsonl(nativeA, [
     { type: "session", version: 3, id: "child-a-session" },
+    { type: "thinking_level_change", id: "effort", parentId: null, thinkingLevel: "high" },
     {
       type: "message",
       id: "call",
-      parentId: null,
+      parentId: "effort",
       message: {
         role: "assistant",
+        provider: "test",
+        model: "native-a",
         content: [
           {
             type: "toolCall",
@@ -140,7 +143,15 @@ function scenario(base: string) {
         state: "completed",
         steps: [
           { childId: "", workflowKey: "a", status: "completed", sessionFile: nativeA },
-          { childId: "b", status: "completed", transcriptPath: transcriptB },
+          {
+            childId: "b",
+            status: "completed",
+            transcriptPath: transcriptB,
+            model: "test/status-b",
+            thinking: "off",
+            scheduleOrigin: "private",
+            currentTool: "private-tool",
+          },
         ],
       }),
     );
@@ -178,8 +189,18 @@ describe("Pi subagent projection", () => {
       expect(
         UI.filter((event) => event.kind === "subagent_done").map((event) => event.subagent),
       ).toEqual([
-        expect.objectContaining({ taskId: childA, eventCount: 2 }),
-        expect.objectContaining({ taskId: childB, eventCount: 1 }),
+        expect.objectContaining({
+          taskId: childA,
+          eventCount: 2,
+          model: "test/native-a",
+          effort: "high",
+        }),
+        expect.objectContaining({
+          taskId: childB,
+          eventCount: 1,
+          model: "test/status-b",
+          effort: "off",
+        }),
       ]);
       expect(UI.every((event) => event.subagent?.events === undefined)).toBe(true);
       const stored = loadWorkspaceMessages(base, workspaceId).find((msg) => msg.id === "owner")!;
@@ -188,7 +209,27 @@ describe("Pi subagent projection", () => {
       )!;
       expect(startA.subagent?.events?.[0].content.split("\n")[0]).not.toContain(argsMarker);
       expect(startA.subagent?.events?.[0].toolInput).not.toHaveProperty("filter");
-      expect(startA.subagent).toMatchObject({ status: "completed", eventCount: 2 });
+      expect(startA.subagent).toMatchObject({
+        status: "completed",
+        eventCount: 2,
+        model: "test/native-a",
+        effort: "high",
+      });
+      expect(
+        stored.events!.find((ev) => ev.kind === "subagent_start" && ev.subagent?.taskId === childB)
+          ?.subagent,
+      ).toMatchObject({ model: "test/status-b", effort: "off" });
+      for (const ev of [...UI, ...stored.events!]) {
+        for (const key of [
+          "thinking",
+          "scheduleOrigin",
+          "currentTool",
+          "transcriptPath",
+          "sessionFile",
+        ]) {
+          if (ev.subagent) expect(ev.subagent).not.toHaveProperty(key);
+        }
+      }
       expect(loadAll(base)[0].agents[0].session.activeAsyncRuns).toEqual([]);
       await server.close();
       server = undefined;

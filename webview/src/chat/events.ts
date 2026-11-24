@@ -85,6 +85,8 @@ function foldTask(parts: StreamEvent[]): StreamEvent {
           // a summarised done event says 0, which would hide the transcript.
           description: prev?.description || next.description,
           agentType: next.agentType ?? prev?.agentType,
+          model: next.model ?? prev?.model,
+          effort: next.effort ?? prev?.effort,
           taskType: next.taskType ?? prev?.taskType,
           prompt: next.prompt ?? prev?.prompt,
           hasPrompt: next.hasPrompt ?? prev?.hasPrompt,

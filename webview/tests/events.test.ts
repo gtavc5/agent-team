@@ -202,16 +202,31 @@ describe("timelineBlocks details", () => {
   it("folds a summarised done event without losing the start's count or type", () => {
     const events = [
       ev("subagent_start", {
-        subagent: { taskId: "a", description: "review", agentType: "Explore", eventCount: 36 },
+        subagent: {
+          taskId: "a",
+          description: "review",
+          agentType: "Explore",
+          eventCount: 36,
+          model: "p/start",
+          effort: "low",
+        },
       }),
       ev("subagent_done", {
-        subagent: { taskId: "a", description: "", status: "completed", eventCount: 0 },
+        subagent: {
+          taskId: "a",
+          description: "",
+          status: "completed",
+          eventCount: 0,
+          effort: "high",
+        },
       }),
     ];
     const card = (timelineBlocks(events)[0] as { ev: StreamEvent }).ev;
     expect(card.subagent).toMatchObject({
       status: "completed",
       eventCount: 36,
+      model: "p/start",
+      effort: "high",
       agentType: "Explore",
       description: "review",
     });

@@ -878,6 +878,165 @@ describe("PiSession dispatch and stream state", () => {
     },
   );
 
+  it("projects resolved foreground execution by child index, not launch overrides or plugin metadata", async () => {
+    const { session, clients, events } = harness();
+    await session.send("work");
+    const { event } = clients[0];
+    event({ type: "agent_start" });
+    event({
+      type: "tool_execution_start",
+      toolName: "subagent",
+      toolCallId: "call",
+      args: { tasks: [{ agent: "A", model: "requested", thinking: "low" }, { agent: "B" }] },
+    });
+    for (const start of events.filter((entry) => entry.kind === "subagent_start")) {
+      expect(start.subagent).not.toHaveProperty("model");
+      expect(start.subagent).not.toHaveProperty("effort");
+    }
+    event({
+      type: "tool_execution_end",
+      toolName: "subagent",
+      toolCallId: "call",
+      result: {
+        details: {
+          results: [
+            { index: 1, model: "provider/b", thinking: "off" },
+            {
+              index: 0,
+              model: "provider/a",
+              thinking: "high",
+              progressSummary: { durationMs: 321 },
+              requestedModel: "requested",
+              worktree: true,
+              toolCalls: [{ name: "read" }],
+            },
+          ],
+        },
+      },
+    });
+    const done = events
+      .filter((entry) => entry.kind === "subagent_done")
+      .map((entry) => entry.subagent!);
+    expect(done).toMatchObject([
+      { taskId: "call:0", model: "provider/a", effort: "high" },
+      { taskId: "call:1", model: "provider/b", effort: "off" },
+    ]);
+    expect(done[0].durationMs).toBe(321);
+    for (const key of ["thinking", "requestedModel", "worktree", "toolCalls", "index"]) {
+      expect(done[0]).not.toHaveProperty(key);
+    }
+    event({ type: "agent_settled" });
+  });
+
+  it("does not publish pending async model candidates and updates running cards after observation", async () => {
+    const { session, clients, events, dir } = harness();
+    await session.send("work");
+    const { event } = clients[0];
+    const writeStatus = (state: string, step: Record<string, unknown>) =>
+      fs.writeFileSync(
+        path.join(dir, "status.json"),
+        JSON.stringify({
+          runId: "observed",
+          sessionId: session.sessionId,
+          state,
+          steps: [step],
+        }),
+      );
+    writeStatus("running", { status: "pending", model: "p/candidate", thinking: "low" });
+    event({
+      type: "tool_execution_start",
+      toolName: "subagent",
+      toolCallId: "call",
+      args: { agent: "Scout", async: true },
+    });
+    event({
+      type: "tool_execution_end",
+      toolName: "subagent",
+      toolCallId: "call",
+      result: { details: { asyncDir: dir, runId: "observed" } },
+    });
+    const progress = () => events.filter((ev) => ev.kind === "subagent_progress");
+    await session.reconcileAsyncRuns();
+    expect(progress()).toEqual([]);
+    writeStatus("running", {
+      status: "running",
+      model: "p/candidate",
+      resolvedModel: { provider: "p", model: "observed" },
+      thinking: "high",
+      lastActivityAt: 5,
+    });
+    await session.reconcileAsyncRuns();
+    await session.reconcileAsyncRuns();
+    expect(progress()).toHaveLength(1);
+    expect(progress()[0].subagent).toEqual({
+      taskId: "call:0",
+      description: "",
+      status: "running",
+      cancellable: true,
+      model: "p/observed",
+      effort: "high",
+    });
+    event({ type: "agent_settled" });
+    const saved = session.getState();
+    expect(saved.activeAsyncRuns?.[0].children[0].execution).toEqual({
+      model: "p/observed",
+      effort: "high",
+    });
+    writeStatus("completed", { status: "completed", model: "p/candidate" });
+    const restored = harness({ state: () => saved });
+    await restored.session.reconcileAsyncRuns();
+    expect(restored.events.find((ev) => ev.kind === "subagent_done")?.subagent).toMatchObject({
+      model: "p/observed",
+      effort: "high",
+    });
+  });
+
+  it("uses observed wire execution without status files and ignores queued siblings' candidates", async () => {
+    const { session, clients, events, dir } = harness();
+    await session.send("work");
+    const { event } = clients[0];
+    event({
+      type: "tool_execution_start",
+      toolName: "subagent",
+      toolCallId: "call",
+      args: { tasks: [{ agent: "A" }, { agent: "B" }], async: true },
+    });
+    event({
+      type: "tool_execution_end",
+      toolName: "subagent",
+      toolCallId: "call",
+      result: { details: { asyncDir: dir, runId: "wire" } },
+    });
+    event({
+      type: "message_end",
+      message: {
+        role: "custom",
+        customType: "subagent-notify",
+        details: {
+          runId: "wire",
+          status: "failed",
+          children: [
+            {
+              status: "completed",
+              model: "p/candidate",
+              resolvedModel: { provider: "p", model: "wire" },
+              thinking: "high",
+            },
+            { status: "queued", model: "p/never-ran", thinking: "low" },
+          ],
+        },
+      },
+    });
+    const done = events.filter((ev) => ev.kind === "subagent_done").map((ev) => ev.subagent);
+    expect(done).toMatchObject([
+      { taskId: "call:0", status: "completed", model: "p/wire", effort: "high" },
+      { taskId: "call:1", status: "failed" },
+    ]);
+    expect(done[1]).not.toHaveProperty("model");
+    expect(done[1]).not.toHaveProperty("effort");
+    event({ type: "agent_settled" });
+  });
+
   it("enforces MIME, missing files, and the aggregate 12 MiB raw budget before dispatch", async () => {
     const { dir, session, factory, clients } = harness();
     const before = vi.fn();

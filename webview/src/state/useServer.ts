@@ -44,6 +44,8 @@ export interface ToolInput {
 export interface SubAgentInfo {
   taskId: string;
   description: string;
+  model?: string;
+  effort?: string;
   prompt?: string;
   agentType?: string;
   // SDK task type; absent on older records (all agents).

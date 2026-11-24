@@ -603,6 +603,21 @@ describe("downgradedMessageIds", () => {
 });
 
 describe("robustness", () => {
+  it("keeps execution fields across progress replacement and terminal folding", () => {
+    const out = applyEventsToMessage(msg(), [
+      ev("subagent_start", { subagent: { taskId: "a", description: "review" } }),
+      ev("subagent_progress", {
+        subagent: { taskId: "a", description: "", model: "provider/model", effort: "low" },
+      }),
+      ev("subagent_progress", { subagent: { taskId: "a", description: "", effort: "high" } }),
+      ev("subagent_done", { subagent: { taskId: "a", description: "", status: "completed" } }),
+    ]);
+    expect(out.events![0].subagent).toMatchObject({
+      model: "provider/model",
+      effort: "high",
+      status: "completed",
+    });
+  });
   it("tolerates events without content and keeps the start's description on done", () => {
     expect(toolNameOf({ kind: "tool_use" } as StreamEvent)).toBeNull();
     expect(toolSummary({ kind: "tool_use" } as StreamEvent)).toBe("");

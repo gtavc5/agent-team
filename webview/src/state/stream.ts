@@ -122,6 +122,17 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
         }
         continue;
       }
+      const { model, effort } = ev.subagent;
+      if (model != null || effort != null) {
+        const startIdx = events.findIndex(
+          (e) => e.kind === "subagent_start" && e.subagent?.taskId === ev.subagent?.taskId,
+        );
+        if (startIdx >= 0) {
+          const start = ownSubagent(startIdx);
+          if (model != null) start.model = model;
+          if (effort != null) start.effort = effort;
+        }
+      }
       const idx = events.findIndex(
         (e) => e.kind === "subagent_progress" && e.subagent?.taskId === ev.subagent?.taskId,
       );
@@ -147,6 +158,8 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
             ...ev.subagent,
             description: start.description || ev.subagent.description,
             agentType: ev.subagent.agentType ?? start.agentType,
+            model: ev.subagent.model ?? start.model,
+            effort: ev.subagent.effort ?? start.effort,
             prompt: ev.subagent.prompt ?? start.prompt,
             events: start.events,
             eventCount: Math.max(start.eventCount ?? 0, ev.subagent.eventCount ?? 0) || undefined,
@@ -281,6 +294,8 @@ function applyInnerEvent(sa: SubAgentInfo, innerEv: StreamEvent): void {
         subagent: {
           ...sa.events[si].subagent!,
           status: innerEv.subagent.status,
+          model: innerEv.subagent.model ?? sa.events[si].subagent!.model,
+          effort: innerEv.subagent.effort ?? sa.events[si].subagent!.effort,
           summary: innerEv.subagent.summary,
           usage: innerEv.subagent.usage,
           durationMs: innerEv.subagent.durationMs,
@@ -426,6 +441,8 @@ function sameEvents(cur: StreamEvent[] = [], next: StreamEvent[] = []): boolean 
       return (
         !!c.subagent &&
         c.subagent.status === n.subagent.status &&
+        c.subagent.model === n.subagent.model &&
+        c.subagent.effort === n.subagent.effort &&
         transcriptLength(c.subagent) >= transcriptLength(n.subagent)
       );
     })

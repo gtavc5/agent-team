@@ -633,7 +633,7 @@ describe("StepGroup timeline", () => {
     expect(kids).toEqual(["step-group", "subagent-item", "step-group"]);
     const summaries = [...container.querySelectorAll(".step-summary")].map((e) => e.textContent);
     expect(summaries).toEqual(["2 tool calls", "1 tool call"]);
-    expect(container.querySelector(".subagent-label")!.textContent).toBe("shell");
+    expect(container.querySelector(".subagent-desc")!.textContent).toBe("review");
   });
 });
 

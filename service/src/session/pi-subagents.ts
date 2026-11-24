@@ -144,14 +144,48 @@ export function decodeSubagentNotifyWire(message: unknown): SubagentNotifyRun[] 
   });
 }
 
-export type DecodePiSessionResult =
-  { ok: true; events: StreamEvent[] } | { ok: false; reason: "not_session_v3"; events: [] };
+interface SubagentExecution {
+  model?: string;
+  effort?: string;
+}
 
-interface PiSessionEntry {
-  type?: unknown;
-  id?: unknown;
-  parentId?: unknown;
-  message?: unknown;
+/** Project only execution fields, never request overrides or plugin state. */
+export function projectSubagentExecution(
+  ...sources: (Record<string, unknown> | undefined)[]
+): SubagentExecution {
+  const model = sources.map((source) => stringValue(source?.model)?.trim()).find(Boolean);
+  const effort = sources.map((source) => stringValue(source?.thinking)?.trim()).find(Boolean);
+  return { ...(model && { model }), ...(effort && { effort }) };
+}
+
+interface ChildExecution extends SubagentExecution {
+  events: StreamEvent[];
+}
+
+export type DecodePiSessionResult =
+  ({ ok: true } & ChildExecution) | { ok: false; reason: "not_session_v3"; events: [] };
+
+export function observedStatusExecution(
+  step: Record<string, unknown> | undefined,
+): SubagentExecution {
+  const state = step?.status ?? step?.state;
+  if (state === "pending" || state === "queued") return {};
+  const resolved = objectValue(step?.resolvedModel);
+  const model = sessionModel(resolved?.provider, resolved?.model);
+  return model ? { ...projectSubagentExecution(step), model } : {};
+}
+
+export function assistantExecution(message: Record<string, unknown>): SubagentExecution {
+  const model = sessionModel(message.provider, message.model);
+  const effort = stringValue(message.thinkingLevel)?.trim();
+  return { ...(model && { model }), ...(effort && { effort }) };
+}
+
+function sessionModel(provider: unknown, id: unknown): string | undefined {
+  const model = stringValue(id)?.trim();
+  const prefix = stringValue(provider)?.trim();
+  if (!model) return;
+  return prefix && !model.startsWith(`${prefix}/`) ? `${prefix}/${model}` : model;
 }
 
 function projectAssistantMessage(
@@ -215,7 +249,7 @@ export function decodePiSessionV3Tree(
     return { ok: false, reason: "not_session_v3", events: [] };
   }
 
-  const entries: PiSessionEntry[] = [];
+  const entries: Record<string, unknown>[] = [];
   for (const line of lines.slice(1)) {
     if (!line.trim()) continue;
     try {
@@ -226,12 +260,12 @@ export function decodePiSessionV3Tree(
       // preceding entries remain useful artifact data.
     }
   }
-  const byId = new Map<string, PiSessionEntry>();
+  const byId = new Map<string, Record<string, unknown>>();
   for (const entry of entries) {
     if (typeof entry.id === "string") byId.set(entry.id, entry);
   }
   const leaf = [...entries].reverse().find((entry) => typeof entry.id === "string");
-  const branch: PiSessionEntry[] = [];
+  const branch: Record<string, unknown>[] = [];
   const visited = new Set<string>();
   let current = leaf;
   while (current && typeof current.id === "string" && !visited.has(current.id)) {
@@ -242,17 +276,27 @@ export function decodePiSessionV3Tree(
   branch.reverse();
 
   const events: StreamEvent[] = [];
+  let settings: SubagentExecution = {};
+  let execution: SubagentExecution | undefined;
   for (const entry of branch) {
+    if (entry.type === "model_change")
+      settings.model = sessionModel(entry.provider, entry.modelId) ?? settings.model;
+    if (entry.type === "thinking_level_change")
+      settings.effort = stringValue(entry.thinkingLevel)?.trim() || settings.effort;
     if (entry.type !== "message") continue;
     const message = objectValue(entry.message);
     if (!message) continue;
     if (message.role === "assistant") {
+      // Snapshot settings at the reply, not a change made after it ran.
+      settings = { ...settings, ...assistantExecution(message) };
+      execution = { ...settings };
       events.push(...projectAssistantMessage(message, bridgeOwnedTools, true));
     } else if (message.role === "toolResult" || message.role === "tool_result") {
       events.push(projectToolResult(message));
     }
   }
-  return { ok: true, events };
+  const { model, effort } = execution ?? {};
+  return { ok: true, events, ...(model && { model }), ...(effort && { effort }) };
 }
 
 export interface ChildTranscriptMeta {
@@ -283,20 +327,23 @@ export function decodeChildTranscriptArtifact(
   transcriptPath: string,
   bridgeOwnedTools?: ReadonlySet<string>,
   meta?: ChildTranscriptMeta,
-): StreamEvent[] {
+): ChildExecution {
   let source: string;
   try {
     source = fs.readFileSync(transcriptPath, "utf8");
   } catch (error) {
-    return [
-      transcriptWarning(
-        `Child transcript unavailable at ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,
-      ),
-    ];
+    return {
+      events: [
+        transcriptWarning(
+          `Child transcript unavailable at ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      ],
+    };
   }
 
   const events: StreamEvent[] = [];
   const warnings: StreamEvent[] = [];
+  let execution: SubagentExecution = {};
   const toolCalls = new Map<string, StreamEvent>();
   if (meta?.outputTruncated) {
     warnings.push(
@@ -353,6 +400,7 @@ export function decodeChildTranscriptArtifact(
     if (role === "assistant") {
       // Tool calls are projected from tool_start records; projecting the copy
       // embedded in message_end as well would duplicate every call.
+      execution = { ...execution, ...assistantExecution(message) };
       events.push(...projectAssistantMessage(message, bridgeOwnedTools, false));
     } else if (role === "toolResult" || role === "tool_result") {
       events.push(projectToolResult(message, record.text));
@@ -364,25 +412,34 @@ export function decodeChildTranscriptArtifact(
     }
   }
   events.push(...warnings);
-  return events;
+  return { events, ...execution };
 }
 
-export function reconstructSubagentChildEvents(
+export function reconstructSubagentChild(
   childRef: SubagentChildRef,
   bridgeOwnedTools?: ReadonlySet<string>,
-): StreamEvent[] {
+): ChildExecution {
   if (childRef.sessionFile) {
     const decoded = decodePiSessionV3Tree(childRef.sessionFile, bridgeOwnedTools);
-    if (decoded.ok) return decoded.events;
+    if (decoded.ok) {
+      const { events, model, effort } = decoded;
+      const fallback =
+        childRef.transcriptPath && (!model || !effort)
+          ? decodeChildTranscriptArtifact(childRef.transcriptPath, bridgeOwnedTools, childRef)
+          : undefined;
+      return { events, model: model ?? fallback?.model, effort: effort ?? fallback?.effort };
+    }
   }
   if (childRef.transcriptPath) {
     return decodeChildTranscriptArtifact(childRef.transcriptPath, bridgeOwnedTools, childRef);
   }
-  return [
-    transcriptWarning(
-      `No valid session file or child transcript is available for ${childRef.sessionFile ?? "this subagent child"}.`,
-    ),
-  ];
+  return {
+    events: [
+      transcriptWarning(
+        `No valid session file or child transcript is available for ${childRef.sessionFile ?? "this subagent child"}.`,
+      ),
+    ],
+  };
 }
 
 export type StopTarget =

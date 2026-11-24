@@ -5,13 +5,14 @@ import {
   memo,
   Component,
   useEffect,
+  useLayoutEffect,
   useRef,
   createContext,
   useContext,
 } from "react";
 import type { ReactNode } from "react";
 import type { Message, MessageOrigin, AgentInfo, StreamEvent } from "../state/useServer";
-import { splitEvents, timelineBlocks } from "./events";
+import { timelineBlocks } from "./events";
 import { toolNameOf, toolSummary } from "../state/stream";
 import { copySelectionAsMarkdown } from "./clipboard";
 import { CodeBlock, CopyButton, MdBlock, StreamingMdBlock } from "./markdown";
@@ -482,6 +483,55 @@ export const EventItem = memo(function EventItem({
   );
 });
 
+function useBottomCollapse(open: boolean, close: () => void) {
+  const header = useRef<HTMLDivElement>(null);
+  const toggle = useRef<HTMLButtonElement>(null);
+  const pending = useRef<{ scroller: HTMLElement | null; clipped: boolean } | null>(null);
+  const topOfViewport = (scroller: HTMLElement | null) =>
+    scroller ? scroller.getBoundingClientRect().top + scroller.clientTop : 0;
+
+  useLayoutEffect(() => {
+    if (open || !pending.current || !header.current) return;
+    const { scroller, clipped } = pending.current;
+    pending.current = null;
+    toggle.current?.focus({ preventScroll: true });
+    if (!clipped) return;
+    // Measure again after the body is removed: the browser may already have
+    // clamped the scroll offset, particularly at the end of the transcript.
+    const delta = header.current.getBoundingClientRect().top - topOfViewport(scroller);
+    if (delta < 0) (scroller ?? window).scrollBy({ top: delta, behavior: "instant" });
+  }, [open]);
+
+  return {
+    header,
+    toggle,
+    collapse: () => {
+      const el = header.current;
+      if (el) {
+        let scroller = el.parentElement;
+        while (scroller && !/^(auto|scroll|overlay)$/.test(getComputedStyle(scroller).overflowY)) {
+          scroller = scroller.parentElement;
+        }
+        pending.current = {
+          scroller,
+          clipped: el.getBoundingClientRect().top < topOfViewport(scroller),
+        };
+      }
+      close();
+    },
+  };
+}
+
+function BottomCollapse({ onClick, label }: { onClick: () => void; label: string }) {
+  return (
+    <div className="trace-collapse-footer">
+      <button type="button" className="trace-collapse" onClick={onClick} aria-label={label}>
+        <span aria-hidden="true">▴</span> Collapse
+      </button>
+    </div>
+  );
+}
+
 export const SubAgentItem = memo(function SubAgentItem({
   ev,
   onLoadEvents,
@@ -494,6 +544,7 @@ export const SubAgentItem = memo(function SubAgentItem({
   onLoadDetails?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const bottom = useBottomCollapse(open, () => setOpen(false));
   const sa = ev.subagent;
   // The server holds more of the transcript than the client (a summary
   // page, or a live tail that arrived after the summary).
@@ -510,7 +561,6 @@ export const SubAgentItem = memo(function SubAgentItem({
     sa.status === "failed" ||
     sa.status === "stopped";
   const isRunning = !isDone;
-  const label = sa.agentType || "Agent";
   const statusIcon = isRunning
     ? "↻"
     : sa.status === "completed"
@@ -521,13 +571,7 @@ export const SubAgentItem = memo(function SubAgentItem({
   const statusCls = isRunning ? "running" : (sa.status ?? "failed");
 
   const allInner = sa.events ?? [];
-  // Subagents can spawn subagents of their own; fold their nested lifecycle
-  // events into one entry each and render them as nested SubAgentItems.
-  const { regular: innerEvents, subagents: nestedAgents } = splitEvents(allInner);
-  const totalCount = allInner.length || sa.eventCount || 0;
-  const thinkingEvts = innerEvents.filter((e) => e.kind === "thinking");
-  const toolEvts = innerEvents.filter((e) => e.kind === "tool_use");
-  const textEvts = innerEvents.filter((e) => e.kind === "text");
+  const hasBody = !!(sa.prompt || sa.summary || sa.usage || allInner.length);
 
   const handleToggle = () => {
     const willOpen = !open;
@@ -543,29 +587,33 @@ export const SubAgentItem = memo(function SubAgentItem({
     ? `${Math.round(sa.usage.totalTokens / 1000)}k tokens · ${sa.usage.toolUses} tools`
     : null;
 
-  const headerParts: string[] = [];
-  if (sa.description) headerParts.push(sa.description);
-  if (!sa.description && isRunning && sa.lastTool) headerParts.push(`using ${sa.lastTool}`);
-
+  const role = sa.description || "Subagent";
   return (
     <div className={`subagent-item subagent-${statusCls}`}>
-      <div className="subagent-header" onClick={handleToggle}>
-        <span className="events-toggle">{open ? "▾" : "▸"}</span>
-        <span className={`subagent-status-icon subagent-icon-${statusCls}`}>{statusIcon}</span>
-        <span className="subagent-label">{label}</span>
-        {headerParts.length > 0 && <span className="subagent-desc">{headerParts.join(" · ")}</span>}
-        {totalCount > 0 && (
-          <span className="subagent-counts">
-            {allInner.length > 0
-              ? [
-                  thinkingEvts.length > 0 ? `${thinkingEvts.length} thinking` : null,
-                  toolEvts.length > 0 ? `${toolEvts.length} tool(s)` : null,
-                  textEvts.length > 0 ? `${textEvts.length} text` : null,
-                  nestedAgents.length > 0 ? `${nestedAgents.length} subagent(s)` : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-              : `${totalCount} event(s)`}
+      <div className="subagent-header" ref={bottom.header} onClick={handleToggle}>
+        <button
+          type="button"
+          className="events-toggle trace-header-toggle"
+          ref={bottom.toggle}
+          aria-expanded={open}
+          aria-label={`${open ? "Collapse" : "Expand"} subagent: ${role}`}
+        >
+          {open ? "▾" : "▸"}
+        </button>
+        <span className={`subagent-status-icon subagent-icon-${statusCls}`} title={statusCls}>
+          {statusIcon}
+        </span>
+        <span className="subagent-desc" title={role}>
+          {role}
+        </span>
+        {sa.model && (
+          <span className="subagent-model" title={sa.model}>
+            {sa.model}
+          </span>
+        )}
+        {sa.effort && (
+          <span className="subagent-effort" title={`Effort: ${sa.effort}`}>
+            {sa.effort}
           </span>
         )}
         {ran != null && (
@@ -588,7 +636,7 @@ export const SubAgentItem = memo(function SubAgentItem({
         )}
       </div>
       {open && (
-        <div className="subagent-details">
+        <div className="subagent-details subagent-body">
           {sa.prompt && (
             <div className="subagent-prompt">
               <MdBlock>{sa.prompt}</MdBlock>
@@ -635,6 +683,7 @@ export const SubAgentItem = memo(function SubAgentItem({
             </div>
           )}
           {usageStr && <div className="subagent-usage">{usageStr}</div>}
+          {hasBody && <BottomCollapse onClick={bottom.collapse} label="Collapse subagent trace" />}
         </div>
       )}
     </div>
@@ -746,8 +795,9 @@ function StepBox({
   defaultOpen?: boolean;
 }) {
   const [toggled, setToggled] = useState<boolean | null>(null);
-  if (events.length === 0 && live == null) return null;
   const open = toggled ?? defaultOpen;
+  const bottom = useBottomCollapse(open, () => setToggled(false));
+  if (events.length === 0 && live == null) return null;
   const toggle = () => {
     if (!open) onLoadDetails?.();
     setToggled(!open);
@@ -759,8 +809,16 @@ function StepBox({
     live != null ? [...events, { kind: "thinking", content: "" }] : events;
   return (
     <div className={`step-group${open ? " open" : ""}`}>
-      <div className="step-header" onClick={toggle}>
-        <span className="events-toggle">{open ? "▾" : "▸"}</span>
+      <div className="step-header" ref={bottom.header} onClick={toggle}>
+        <button
+          type="button"
+          className="events-toggle trace-header-toggle"
+          ref={bottom.toggle}
+          aria-expanded={open}
+          aria-label={open ? "Collapse steps" : "Expand steps"}
+        >
+          {open ? "▾" : "▸"}
+        </button>
         {counted.length > 0 && <span className="step-summary">{stepSummary(counted)}</span>}
         {!open && tools.length > 0 && <StepTools tools={tools} />}
       </div>
@@ -770,6 +828,7 @@ function StepBox({
             <EventItem key={i} ev={ev} onLoadDetails={onLoadDetails} />
           ))}
           {live != null && <LiveThinking text={live} />}
+          <BottomCollapse onClick={bottom.collapse} label="Collapse step trace" />
         </div>
       )}
     </div>

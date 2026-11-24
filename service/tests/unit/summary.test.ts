@@ -126,6 +126,9 @@ describe("summarizeEvent", () => {
         subagent: {
           taskId: "t",
           description: "search",
+          model: "provider/resolved",
+          effort: "high",
+          ...{ thinking: "raw", worktree: true, currentTool: "private" },
           agentType: "Explore",
           status: "completed",
           prompt: "look everywhere",
@@ -139,6 +142,8 @@ describe("summarizeEvent", () => {
     expect(s.subagent).toEqual({
       taskId: "t",
       description: "search",
+      model: "provider/resolved",
+      effort: "high",
       agentType: "Explore",
       status: "completed",
       usage: { totalTokens: 10, toolUses: 2, durationMs: 5 },

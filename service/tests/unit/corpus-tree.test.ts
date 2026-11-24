@@ -101,7 +101,7 @@ function message(id: string, events: StreamEvent[], timestamp = 1): Message {
 
 function decodeArtifact(filePath: string): StreamEvent[] {
   if (path.basename(filePath).startsWith("child-transcript")) {
-    return decodeChildTranscriptArtifact(filePath);
+    return decodeChildTranscriptArtifact(filePath).events;
   }
   const decoded = decodePiSessionV3Tree(filePath);
   expect(decoded.ok).toBe(true);
@@ -303,7 +303,7 @@ describe("Synthetic Pi corpus privacy", () => {
     expect(alpha.ok).toBe(true);
     if (!alpha.ok) return;
     const betaMeta = runs[0].children[1];
-    const beta = decodeChildTranscriptArtifact(
+    const { events: beta } = decodeChildTranscriptArtifact(
       corpusFile("child-transcript-truncated.jsonl"),
       undefined,
       betaMeta,

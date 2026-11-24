@@ -1454,6 +1454,38 @@ span.katex-display {
   padding: 2px 0;
   min-width: 0;
 }
+.step-header .trace-header-toggle,
+.subagent-header .trace-header-toggle {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.trace-collapse-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.trace-collapse {
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.trace-collapse:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+@media (max-width: 768px), (pointer: coarse) {
+  .trace-collapse {
+    min-height: 44px;
+  }
+}
 .step-header:hover {
   color: var(--text-secondary);
 }
@@ -1977,27 +2009,29 @@ button.action-target:hover {
     transform: rotate(360deg);
   }
 }
-.subagent-label {
-  font-weight: 600;
-  color: var(--purple);
+.subagent-desc,
+.subagent-model,
+.subagent-effort {
   white-space: nowrap;
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 .subagent-desc {
+  font-weight: 600;
   color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1 1 0;
-  min-width: 0;
 }
-.subagent-counts {
+.subagent-model,
+.subagent-effort {
   color: var(--text-muted);
   font-size: 11px;
-  white-space: nowrap;
+}
+.subagent-model {
+  max-width: 50%;
+}
+.subagent-effort {
   flex-shrink: 0;
+  max-width: 20%;
 }
 .btn-cancel-subagent {
   margin-left: auto;
@@ -3001,7 +3035,6 @@ button.action-target:hover {
 }
 
 @media (max-width: 768px), (max-height: 500px) {
-  .subagent-counts,
   .task-item .task-time {
     display: none;
   }

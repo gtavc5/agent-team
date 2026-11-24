@@ -22,7 +22,10 @@ import {
   executeFallbackAsyncStop,
   isTrackableSubagentMode,
   makeSyntheticSubagentTaskId,
-  reconstructSubagentChildEvents,
+  assistantExecution,
+  observedStatusExecution,
+  projectSubagentExecution,
+  reconstructSubagentChild,
   resolveCanonicalChildId,
   resolveStopTarget,
   type SubagentNotifyRun,
@@ -1469,6 +1472,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         : mode === "parallel"
           ? list(args.tasks)
           : [args];
+    // Model/effort in the tool arguments are requests, not what the child ran.
     const asyncLaunch = args.async === true;
     const children: ActiveAsyncRunRecord["children"] = steps.map((step, index) => {
       const taskId = makeSyntheticSubagentTaskId(id, index);
@@ -1558,43 +1562,46 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           canonicalChildId: resolveCanonicalChildId(step, index),
           status: step.status === "pending" ? "pending" : "running",
         }));
-      if (tool?.args.async !== true) {
-        for (const child of run.children.slice(0, call.children.length))
-          this.event({
-            kind: "subagent_progress",
-            content: "",
-            subagent: {
-              taskId: child.taskId,
-              description: "",
-              status: "running",
-              cancellable: true,
-            },
-          });
-      }
-      for (const child of run.children.slice(call.children.length))
+      for (const child of run.children) {
+        const step = steps[child.stepIndex];
+        const existing = child.stepIndex < call.children.length;
+        const execution = observedStatusExecution(step);
+        if (execution.model) child.execution = execution;
+        if (existing && tool?.args.async === true && !execution.model && !execution.effort)
+          continue;
         this.event({
-          kind: "subagent_start",
+          kind: existing ? "subagent_progress" : "subagent_start",
           content: "",
           subagent: {
             taskId: child.taskId,
-            description: child.canonicalChildId,
+            description: existing ? "" : (text(step?.agent) ?? "Subagent"),
             status: "running",
             cancellable: true,
+            ...execution,
           },
         });
+      }
       this.activeAsyncRuns.push(run);
       this.backgroundChanged();
       void this.captureDetached(this.rpc?.pid);
       return;
     }
     const results = list(detail.results);
-    call.children.forEach((child, index) =>
+    // Older Pi recordings can repeat index 0 for every child.
+    const indices = results.map((result) => result.index);
+    const indexed =
+      indices.every((index) => typeof index === "number") &&
+      new Set(indices).size === indices.length;
+    for (const child of call.children) {
+      const result = indexed
+        ? results.find((item) => item.index === child.stepIndex)
+        : results[child.stepIndex];
       this.childDone(
         child.taskId,
-        terminalStatus(results[index]?.status) ?? (event.isError === true ? "failed" : "completed"),
-        results[index],
-      ),
-    );
+        terminalStatus(result?.status) ?? (event.isError === true ? "failed" : "completed"),
+        result,
+      );
+    }
   }
 
   private childDone(
@@ -1602,10 +1609,11 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     status: SubAgentInfo["status"],
     result?: Json,
     startedAt?: number,
+    execution = projectSubagentExecution(result),
   ): void {
     const summary = text(result?.summary ?? result?.output ?? result?.preview);
-    const events = result
-      ? reconstructSubagentChildEvents(
+    const child = result
+      ? reconstructSubagentChild(
           {
             sessionFile: text(result.sessionFile ?? result.sessionPath),
             transcriptPath: text(result.transcriptPath),
@@ -1614,7 +1622,17 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           },
           this.bridgeOwnedToolNames,
         )
-      : [];
+      : undefined;
+    const events = child?.events ?? [];
+    let observed: ReturnType<typeof assistantExecution> = {};
+    for (const message of list(result?.messages)) {
+      if (message.role === "assistant") observed = { ...observed, ...assistantExecution(message) };
+    }
+    const model = child?.model ?? observed.model ?? execution.model;
+    const effort = child?.effort ?? observed.effort ?? execution.effort;
+    const durationMs =
+      num(result?.durationMs ?? object(result?.progressSummary).durationMs) ??
+      (startedAt === undefined ? undefined : Date.now() - startedAt);
     this.event({
       kind: "subagent_done",
       content: "",
@@ -1625,7 +1643,9 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         summary,
         events,
         eventCount: events.length,
-        durationMs: startedAt === undefined ? undefined : Date.now() - startedAt,
+        durationMs,
+        ...(model && { model }),
+        ...(effort && { effort }),
       },
     });
   }
@@ -1674,7 +1694,35 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         terminalStatus(diskStep?.status) ??
         terminalStatus(childStep?.status) ??
         terminal;
-      if (!status) continue;
+      const wireStep = object(wireResult);
+      const observed = {
+        ...child.execution,
+        ...observedStatusExecution(diskStep),
+        ...observedStatusExecution(wireStep),
+        ...observedStatusExecution(childStep),
+      };
+      if (!status) {
+        const previous = child.execution;
+        if (
+          observed.model &&
+          (previous?.model !== observed.model || previous?.effort !== observed.effort)
+        ) {
+          child.execution = observed;
+          changed = true;
+          this.event({
+            kind: "subagent_progress",
+            content: "",
+            subagent: {
+              taskId: child.taskId,
+              description: "",
+              status: "running",
+              cancellable: true,
+              ...observed,
+            },
+          });
+        }
+        continue;
+      }
       const sessionFile = text(
         wireResult?.sessionFile ??
           diskStep?.sessionFile ??
@@ -1704,9 +1752,6 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       const merged: Json | undefined =
         wireResult || diskStep || childStep
           ? {
-              ...childStep,
-              ...diskStep,
-              ...wireResult,
               ...(sessionFile ? { sessionFile } : {}),
               ...(transcriptPath ? { transcriptPath } : {}),
               ...(summary ? { summary } : {}),
@@ -1714,9 +1759,21 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
               ...(outputTruncated ? { outputTruncated: true } : {}),
             }
           : undefined;
+      // A parent can terminate before a queued child starts. Its roster then
+      // still contains only launch candidates, not execution metadata.
+      const completedSteps = [childStep, wireStep, diskStep].filter((step) => {
+        const state = step?.status ?? step?.state;
+        return (
+          terminalStatus(state) === "completed" ||
+          (state == null && status === "completed" && child.status !== "pending")
+        );
+      });
       child.status = status;
       changed = true;
-      this.childDone(child.taskId, status, merged, run.startedAt);
+      this.childDone(child.taskId, status, merged, run.startedAt, {
+        ...projectSubagentExecution(...completedSteps),
+        ...observed,
+      });
     }
     if (terminal || run.children.every((child) => terminalStatus(child.status))) {
       this.activeAsyncRuns = this.activeAsyncRuns.filter((item) => item !== run);
@@ -1818,7 +1875,9 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         terminalStatus(remoteRun?.state ?? remoteRun?.status) ??
         (status?.state === "running" && pid !== undefined && !alive(pid) ? "failed" : undefined);
       const remoteSteps = list(remoteRun?.steps ?? remoteRun?.children);
-      const steps = diskSteps.length ? diskSteps : remoteSteps;
+      // completeAsyncRun reads the local steps itself; do not hide a newer
+      // remote observation behind a stale local roster.
+      const steps = remoteSteps.length ? remoteSteps : diskSteps;
       const [update] = decodeSubagentNotifyWire({
         role: "custom",
         customType: "subagent-notify",
