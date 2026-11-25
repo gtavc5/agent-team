@@ -1,0 +1,515 @@
+import { cleanup, fireEvent, render } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
+import { page } from "vitest/browser";
+import type {} from "@vitest/browser-playwright";
+import { BannerItem, EventItem, MessageStatus } from "../../src/chat/messages";
+import { MdBlock } from "../../src/chat/markdown";
+import { AgentsPanel, type AgentsPanelActions } from "../../src/panels/AgentsPanel";
+import { SessionStats } from "../../src/panels/SessionStats";
+import { QuotaPanel } from "../../src/sidebar/QuotaPanel";
+import { SystemStatusPanel } from "../../src/sidebar/Sidebar";
+import type { AgentInfo, Project, Workspace } from "../../src/state/useServer";
+import "../../src/styles.css";
+
+const NOW = Date.UTC(2026, 10, 25, 12);
+const no = () => {};
+const agent: AgentInfo = {
+  id: "agent",
+  name: "Agent",
+  model: "model",
+  avatar: "A",
+  color: "#528bff",
+  isDefault: true,
+  context: { tokens: 1200, window: 8192 },
+};
+const workspace: Workspace = {
+  id: "worker",
+  name: "worker",
+  project: "Project",
+  hostId: "local",
+  cwd: "/repo/worker",
+  agents: [agent],
+  messages: [],
+  createdAt: NOW - 1000,
+  lastMessageAt: NOW,
+  projectLink: { projectId: "project", role: "worker" },
+  git: { branch: "feature/symmetry", dirty: 1, ahead: 0, behind: 0 },
+};
+const project: Project = {
+  id: "project",
+  name: "Project",
+  root: "/repo",
+  leadWorkspaceId: "lead",
+  createdAt: NOW - 2000,
+  objectives: [
+    {
+      id: "obj-1",
+      area: "UI",
+      title: "Balanced cards",
+      goal: "Keep content evenly inset",
+      status: "active",
+      priority: "normal",
+      context: "",
+      dependsOn: [],
+      tasks: [{ id: "task-1", text: "Audit every border", state: "doing", session: "worker" }],
+      decisions: [],
+      sessions: ["worker"],
+      notes: "",
+      updatedAt: NOW,
+    },
+  ],
+};
+const actions: AgentsPanelActions = {
+  onOpen: no,
+  onStop: no,
+  onArchive: no,
+  onRestore: no,
+  onSetReporting: no,
+  onAddAgent: no,
+  onClearContext: no,
+  onRemoveAgent: no,
+  onSetModel: no,
+  onSetEffort: no,
+  onStopAll: no,
+  onStopTask: no,
+  onCancelWake: no,
+};
+
+function contentInsets(element: HTMLElement) {
+  const bounds = element.getBoundingClientRect();
+  const computed = getComputedStyle(element);
+  const topBorder = bounds.top + element.clientTop;
+  const bottomBorder = bounds.bottom - parseFloat(computed.borderBottomWidth);
+  const content: DOMRect[] = [];
+  const atomic = /^(BUTTON|INPUT|SELECT|TEXTAREA|SVG|IMG|VIDEO|CANVAS)$/;
+
+  function visit(node: Node) {
+    const owner =
+      node.nodeType === Node.TEXT_NODE ? node.parentElement : node instanceof Element ? node : null;
+    for (
+      let closed = owner?.closest("details:not([open])");
+      closed;
+      closed = closed.parentElement?.closest("details:not([open])")
+    ) {
+      const summary = [...closed.children].find((child) => child.tagName === "SUMMARY");
+      if (closed !== owner && !summary?.contains(owner)) return;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (!node.textContent?.trim()) return;
+      const range = document.createRange();
+      range.selectNode(node);
+      const rect = range.getBoundingClientRect();
+      if (range.getClientRects().length && (rect.width > 0 || rect.height > 0)) content.push(rect);
+      return;
+    }
+    if (!(node instanceof HTMLElement) && !(node instanceof SVGElement)) return;
+    const style = getComputedStyle(node);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      (style.display !== "contents" && node.getClientRects().length === 0) ||
+      node.classList.contains("copy-btn")
+    )
+      return;
+    const inlineBorder =
+      parseFloat(style.borderLeftWidth) > 0 || parseFloat(style.borderRightWidth) > 0;
+    const blockBorders =
+      parseFloat(style.borderTopWidth) > 0 && parseFloat(style.borderBottomWidth) > 0;
+    // Controls, nested disclosure summaries and nested boxes already include
+    // their own content padding. Count it once, at the outermost audited
+    // border. Closed <details> content is excluded above.
+    if (
+      node !== element &&
+      (atomic.test(node.tagName) ||
+        /^H[1-4]$/.test(node.tagName) ||
+        (node.tagName === "SUMMARY" && node.parentElement !== element) ||
+        ((inlineBorder || blockBorders) && node.parentElement !== element) ||
+        node.childNodes.length === 0)
+    ) {
+      content.push(node.getBoundingClientRect());
+      return;
+    }
+    node.childNodes.forEach(visit);
+  }
+  element.childNodes.forEach(visit);
+  if (content.length === 0) throw new Error(`No measurable content in ${element.outerHTML}`);
+  const top = Math.min(...content.map((rect) => rect.top));
+  const bottom = Math.max(...content.map((rect) => rect.bottom));
+  return { top: top - topBorder, bottom: bottomBorder - bottom };
+}
+
+const selectors = {
+  "banner-notice": "#audit-banner-notice > .banner",
+  "banner-list": "#audit-banner-list > .banner",
+  "banner-list-only": "#audit-banner-list-only > .banner",
+  "banner-heading-only": "#audit-banner-heading-only > .banner",
+  "banner-quote-only": "#audit-banner-quote-only > .banner",
+  "banner-code-only": "#audit-banner-code-only > .banner",
+  "banner-schedule": "#audit-banner-schedule > .banner",
+  "banner-compact": "#audit-banner-compact > .banner",
+  "archived-banner": "#audit-archived-banner > .archived-banner",
+  "sealed-banner": "#audit-sealed-banner > .sealed-banner",
+  "status-chip": "#audit-status-chip .status-chip",
+  "event-chip": "#audit-event-chip .event-chip",
+  "event-summary": "#audit-event-chip .event-summary-line",
+  "message-pre": "#audit-message-pre pre",
+  "message-blockquote": "#audit-message-blockquote blockquote",
+  "message-table": "#audit-message-table td",
+  "pr-card": "#audit-pr-card > .pr-card",
+  "agents-chip": "#audit-agents-chip > .agents-chip",
+  "quote-bar": "#audit-quote-bar > .quote-bar",
+  "input-row": "#audit-input-row > .input-row",
+  "system-status": "#audit-system-status > .system-status-panel",
+  "quota-panel": "#audit-quota-panel > .quota-panel",
+  "quota-empty": "#audit-quota-empty > .quota-panel",
+  "quota-details": "#audit-quota-panel .quota-details",
+  "ap-collapsed": "#audit-ap-collapsed .ap-session",
+  "ap-collapsed-busy": "#audit-ap-collapsed-busy .ap-session",
+  "ap-expanded": "#audit-ap-expanded .ap-session",
+  "ap-expanded-readonly": "#audit-ap-expanded-readonly .ap-session",
+  "bp-card": "#audit-bp-card > .bp-card",
+  "bp-node": "#audit-bp-node > .bp-node",
+  "bi-row": "#audit-bi-row > .bi-row",
+  "usage-card": "#audit-usage-card > .usage-card",
+  "stats-collapsed": "#audit-stats .session-stats-turn:nth-of-type(1)",
+  "stats-no-steps": "#audit-stats .session-stats-turn:nth-of-type(2)",
+  "stats-expanded": "#audit-stats .session-stats-turn:nth-of-type(3)",
+  "stats-step-expanded": "#audit-stats .session-stats-turn:nth-of-type(4)",
+  dialog: "#audit-dialog > .dialog",
+  "command-popup": "#audit-command-popup > .command-popup",
+  "ui-option": "#audit-ui-option > .ui-dialog-option",
+  "ui-alert": "#audit-ui-alert > .ui-dialog-alert",
+};
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+it.each([
+  { layout: "desktop", width: 1280, height: 900 },
+  { layout: "mobile", width: 390, height: 844 },
+])("audits representative bordered content geometry on $layout", async ({ width, height }) => {
+  await page.viewport(width, height);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() =>
+      Promise.resolve(
+        Response.json({
+          turns: [
+            { turnId: "collapsed", trigger: "manual", steps: [{ stepId: "s1", kind: "user" }] },
+            { turnId: "no-steps", trigger: "manual", steps: [] },
+            { turnId: "closed-step", trigger: "manual", steps: [{ stepId: "s2", kind: "user" }] },
+            { turnId: "open-step", trigger: "manual", steps: [{ stepId: "s3", kind: "user" }] },
+          ],
+          total: 4,
+          offset: 0,
+          limit: 20,
+        }),
+      ),
+    ),
+  );
+  render(
+    <div style={{ width: "min(720px, 100vw)", padding: 20 }}>
+      <div className="message-content">
+        <div id="audit-banner-notice">
+          <BannerItem ev={{ kind: "notice", content: "A plain notice" }} />
+        </div>
+        <div id="audit-banner-list">
+          <BannerItem
+            ev={{ kind: "notice", level: "schedule", content: "Scheduled prompt\n\n- one\n- two" }}
+          />
+        </div>
+        <div id="audit-banner-list-only">
+          <BannerItem ev={{ kind: "notice", content: "- one\n- two" }} />
+        </div>
+        <div id="audit-banner-heading-only">
+          <BannerItem ev={{ kind: "notice", content: "### Heading" }} />
+        </div>
+        <div id="audit-banner-quote-only">
+          <BannerItem ev={{ kind: "notice", content: "> quoted task" }} />
+        </div>
+        <div id="audit-banner-code-only">
+          <BannerItem ev={{ kind: "notice", content: "```ts\nconst answer = 42;\n```" }} />
+        </div>
+        <div id="audit-banner-schedule">
+          <BannerItem
+            ev={{ kind: "notice", level: "schedule", content: "Scheduled prompt\n\n> quoted task" }}
+          />
+        </div>
+        <div id="audit-banner-compact">
+          <BannerItem ev={{ kind: "compact", content: "Compacted context" }} />
+        </div>
+      </div>
+      <div id="audit-archived-banner">
+        <div className="archived-banner">
+          <span>Archived session</span>
+          <button className="btn-inline">Restore</button>
+        </div>
+      </div>
+      <div id="audit-sealed-banner">
+        <div className="sealed-banner">Sealed project</div>
+      </div>
+      <div id="audit-status-chip">
+        <MessageStatus
+          msg={{
+            id: "message",
+            kind: "agent",
+            agentId: "agent",
+            content: "",
+            timestamp: NOW,
+            status: "done",
+            effort: "high",
+          }}
+        />
+      </div>
+      <div id="audit-event-chip">
+        <EventItem
+          ev={{
+            kind: "tool_use",
+            content: "**Bash** `pwd`",
+            toolName: "Bash",
+            toolInput: { tool: "Bash" },
+          }}
+        />
+      </div>
+      <div id="audit-message-pre" className="message-content">
+        <MdBlock>{"```ts\nconst answer = 42;\n```"}</MdBlock>
+      </div>
+      <div id="audit-message-blockquote" className="message-content">
+        <MdBlock>{"> quoted text"}</MdBlock>
+      </div>
+      <div id="audit-message-table" className="message-content">
+        <MdBlock>{"| A | B |\n| - | - |\n| 1 | 2 |"}</MdBlock>
+      </div>
+      <div id="audit-pr-card">
+        <a className="pr-card pr-open">
+          <span className="pr-number">#42</span>
+          <span className="pr-title">Balanced borders</span>
+          <span className="pr-state">open</span>
+        </a>
+      </div>
+      <div id="audit-agents-chip">
+        <button className="agents-chip">
+          <span className="agents-chip-label">1 agent</span>
+        </button>
+      </div>
+      <div id="audit-quote-bar">
+        <div className="quote-bar">
+          <button className="quote-bar-content">
+            <span className="quote-bar-agent">Agent</span>
+            <span className="quote-bar-preview">Quoted message</span>
+          </button>
+          <button className="quote-bar-close">×</button>
+        </div>
+      </div>
+      <div id="audit-input-row">
+        <div className="input-row">
+          <textarea className="chat-input" defaultValue="Message" />
+          <button>Send</button>
+        </div>
+      </div>
+      <div id="audit-system-status">
+        <SystemStatusPanel
+          status={{
+            osName: "Linux",
+            osArch: "x64",
+            cpuModel: "CPU",
+            cpuCores: 8,
+            hostname: "host",
+            cpuUsage: 20,
+            memUsed: 4 * 1024 ** 3,
+            memTotal: 16 * 1024 ** 3,
+            uptime: 100,
+          }}
+        />
+      </div>
+      <div id="audit-quota-panel">
+        <QuotaPanel
+          quota={{
+            refreshing: false,
+            rows: [
+              {
+                provider: "provider",
+                name: "Provider",
+                availability: "available",
+                observedAt: NOW,
+                windows: [{ label: "5h", usedPct: 40 }],
+              },
+            ],
+          }}
+          now={NOW}
+          connected
+        />
+      </div>
+      <div id="audit-quota-empty">
+        <QuotaPanel quota={{ refreshing: false, rows: [] }} now={NOW} refresh={no} connected />
+      </div>
+      <div id="audit-ap-collapsed" style={{ width: "min(380px, 100%)" }}>
+        <AgentsPanel
+          sessions={[workspace]}
+          project={project}
+          activeWsId="worker"
+          connected
+          models={[]}
+          actions={actions}
+          overview
+        />
+      </div>
+      <div id="audit-ap-collapsed-busy" style={{ width: "min(380px, 100%)" }}>
+        <AgentsPanel
+          sessions={[{ ...workspace, agents: [{ ...agent, busy: true }] }]}
+          project={project}
+          activeWsId="worker"
+          connected
+          models={[]}
+          actions={actions}
+          overview
+        />
+      </div>
+      <div id="audit-ap-expanded" style={{ width: "min(380px, 100%)" }}>
+        <AgentsPanel
+          sessions={[workspace]}
+          project={project}
+          activeWsId="worker"
+          connected
+          models={[]}
+          actions={actions}
+        />
+      </div>
+      <div id="audit-ap-expanded-readonly" style={{ width: "min(380px, 100%)" }}>
+        <AgentsPanel
+          sessions={[workspace]}
+          project={{ ...project, status: "sealed", sealedReason: "Audit complete" }}
+          activeWsId="worker"
+          connected
+          models={[]}
+          actions={actions}
+        />
+      </div>
+      <div id="audit-bp-card">
+        <button className="bp-card">
+          <span className="bp-card-top">
+            <span className="bp-id">obj-1</span>
+          </span>
+          <span className="bp-card-title">Balanced cards</span>
+          <span className="bp-card-goal">Keep content evenly inset</span>
+          <span className="bp-card-foot">
+            <span className="bp-stage stage-ready">ready</span>
+          </span>
+        </button>
+      </div>
+      <div id="audit-bp-node">
+        <button className="bp-node">
+          <span className="bp-node-title">Balanced cards</span>
+          <span className="bp-node-meta">obj-1</span>
+        </button>
+      </div>
+      <div id="audit-bi-row">
+        <button className="bi-row">
+          <span className="bi-row-top">
+            <span className="bi-evidence ev-R">R</span>
+            <span className="bp-id">issue-1</span>
+          </span>
+          <span className="bi-row-text">Inspect border spacing</span>
+        </button>
+      </div>
+      <div id="audit-usage-card">
+        <div className="usage-card">
+          <h3>Total tokens</h3>
+          <strong>1.2K</strong>
+          <p>1K prompt · 200 output</p>
+        </div>
+      </div>
+      <div id="audit-stats">
+        <SessionStats workspaceId="worker" connected agents={[]} />
+      </div>
+      <div id="audit-dialog">
+        <div className="dialog">
+          <h2 className="dialog-title">Confirm</h2>
+          <div className="dialog-body">Continue with the audit?</div>
+          <div className="dialog-actions">
+            <button className="btn-secondary">Cancel</button>
+            <button className="btn-primary">Confirm</button>
+          </div>
+        </div>
+      </div>
+      <div id="audit-command-popup">
+        <div className="command-popup">
+          <div className="command-item">
+            <span className="command-name">/help</span>
+            <span className="command-desc">Show help</span>
+          </div>
+        </div>
+      </div>
+      <div id="audit-ui-option">
+        <button className="ui-dialog-option">Continue</button>
+      </div>
+      <div id="audit-ui-alert">
+        <div className="ui-dialog-alert">
+          <span>Approval required</span>
+          <button>Approve</button>
+        </div>
+      </div>
+    </div>,
+  );
+
+  await expect
+    .poll(() => document.querySelectorAll("#audit-stats .session-stats-turn").length)
+    .toBe(4);
+  const statsTurns = document.querySelectorAll<HTMLElement>("#audit-stats .session-stats-turn");
+  for (const index of [1, 2, 3])
+    fireEvent.click(statsTurns[index].querySelector(":scope > summary")!);
+  fireEvent.click(statsTurns[3].querySelector(".session-stats-step > summary")!);
+
+  fireEvent.click(document.querySelector("#audit-banner-list .banner-toggle")!);
+  fireEvent.click(document.querySelector("#audit-banner-schedule .banner-toggle")!);
+  const collapsedQuota = contentInsets(
+    document.querySelector<HTMLElement>("#audit-quota-panel > .quota-panel")!,
+  );
+  fireEvent.click(document.querySelector("#audit-quota-panel .quota-row-toggle")!);
+
+  const results = Object.entries(selectors).map(([name, selector]) => {
+    const element = document.querySelector<HTMLElement>(selector);
+    expect(element, selector).not.toBeNull();
+    return { name, ...contentInsets(element!) };
+  });
+  for (const { name, top, bottom } of [
+    { name: "quota-collapsed", ...collapsedQuota },
+    ...results,
+  ]) {
+    expect
+      .soft(Math.abs(top - bottom), `${name}: top=${top}, bottom=${bottom}`)
+      .toBeLessThanOrEqual(1.5);
+  }
+});
+
+it("keeps the mobile collapsed Stop target inside its card and clickable", async () => {
+  await page.viewport(390, 844);
+  const stop = vi.fn();
+  render(
+    <div style={{ width: 350 }}>
+      <AgentsPanel
+        sessions={[{ ...workspace, agents: [{ ...agent, busy: true }] }]}
+        project={project}
+        activeWsId="worker"
+        connected
+        models={[]}
+        actions={{ ...actions, onStop: stop }}
+        overview
+      />
+    </div>,
+  );
+  const button = document.querySelector<HTMLElement>(".ap-brief .panel-btn")!;
+  const buttonBounds = button.getBoundingClientRect();
+  const card = document.querySelector<HTMLElement>(".ap-session")!;
+  const cardBounds = card.getBoundingClientRect();
+  expect(buttonBounds.height).toBeGreaterThanOrEqual(40);
+  expect(buttonBounds.top).toBeGreaterThanOrEqual(cardBounds.top + card.clientTop - 0.01);
+  expect(buttonBounds.bottom).toBeLessThanOrEqual(
+    cardBounds.bottom - parseFloat(getComputedStyle(card).borderBottomWidth) + 0.01,
+  );
+  await page.elementLocator(button).click();
+  expect(stop).toHaveBeenCalledOnce();
+});

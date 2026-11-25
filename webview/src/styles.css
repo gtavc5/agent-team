@@ -2304,6 +2304,26 @@ span.katex-display {
 .banner-text p {
   margin: 0;
 }
+/* The banner's own padding is the first and last inset for every Markdown
+   block, not just paragraphs. */
+.banner-text > :first-child {
+  margin-top: 0;
+}
+.banner-text > :last-child {
+  margin-bottom: 0;
+}
+.banner-text > .code-block:first-child > pre {
+  margin-top: 0;
+}
+.banner-text > .code-block:last-child > pre {
+  margin-bottom: 0;
+}
+.banner-text > :is(ul, ol):first-child > li:first-child {
+  margin-top: 0;
+}
+.banner-text > :is(ul, ol):last-child > li:last-child {
+  margin-bottom: 0;
+}
 /* compact/retry banners carry raw text, not markdown: keep their lines. */
 .banner[data-kind="compact"] .banner-text,
 .banner[data-kind="retry"] .banner-text {
@@ -3865,13 +3885,13 @@ button.quote-bar-content:focus-visible {
 .system-status-panel {
   flex-shrink: 0;
   border-top: 1px solid var(--border);
-  padding: 8px 14px 10px;
+  padding: 10px 14px;
 }
 .quota-panel {
   max-height: 40vh;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 4px 10px 5px;
+  padding: 5px 10px;
   font-size: var(--fs-meta);
 }
 .quota-header {
@@ -3879,6 +3899,9 @@ button.quote-bar-content:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+  margin-bottom: 0;
+}
+.quota-header:has(+ .quota-list) {
   margin-bottom: 2px;
 }
 .quota-heading {
@@ -4044,6 +4067,9 @@ button.quote-bar-content:focus-visible {
 .quota-detail-reset,
 .quota-detail-meta {
   color: var(--text-muted);
+}
+.quota-group:last-child .quota-details {
+  margin-bottom: 0;
 }
 @media (hover: hover) and (pointer: fine) {
   .quota-row-toggle:hover,
@@ -6627,7 +6653,7 @@ button.quote-bar-content:focus-visible {
 .ap-session-foot {
   display: flex;
   align-items: center;
-  padding: 4px var(--ap-pad);
+  padding: 4px var(--ap-pad) 10px;
   border-top: 1px solid var(--border);
 }
 .ap-actions {
@@ -6924,9 +6950,9 @@ button.quote-bar-content:focus-visible {
     min-height: 40px;
     font-size: var(--fs-text);
   }
-  /* A Stop as big as a finger, in a line no taller than its text. */
+  /* A Stop as big as a finger, without extending below the card. */
   .ap-brief .panel-btn {
-    margin-block: -12px;
+    margin-block: -12px 0;
   }
   /* A finger's target, laid out as wide as the arrow, the arrow on the
      card's edge. */
@@ -6937,7 +6963,7 @@ button.quote-bar-content:focus-visible {
     padding-left: 10px;
   }
   .ap-session-foot {
-    padding-block: 0;
+    padding-block: 0 2px;
   }
   .ap-agent-actions {
     margin-right: -12px;
@@ -6945,6 +6971,9 @@ button.quote-bar-content:focus-visible {
   }
   .ap-session-head {
     padding-block: 2px;
+  }
+  .ap-brief {
+    padding-bottom: 2px;
   }
   .ap-session-name {
     padding: 8px 0;
@@ -7320,7 +7349,7 @@ button.quote-bar-content:focus-visible {
 }
 .session-stats-steps {
   margin: 0;
-  padding: 0 10px 0 30px;
+  padding: 0 10px 2px 30px;
 }
 .session-stats-steps > li {
   border-top: 1px solid var(--border);
