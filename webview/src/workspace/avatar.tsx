@@ -26,7 +26,7 @@ export function Avatar({
   const isImg = isImageAvatar(avatar);
   return (
     <div
-      className={`agent-avatar${size <= 16 ? " agent-avatar-small" : ""}`}
+      className={`agent-avatar${size <= 24 ? " agent-avatar-compact" : ""}`}
       style={
         {
           "--avatar-color": color,

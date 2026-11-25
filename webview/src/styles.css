@@ -1454,12 +1454,10 @@ button {
   justify-content: center;
   flex-shrink: 0;
   line-height: 1;
-  box-shadow: 0 0 0 1.5px
-    color-mix(in srgb, var(--avatar-color, var(--border)) 40%, var(--text-muted));
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--avatar-color, var(--border)) 40%, var(--border));
 }
-.agent-avatar-small {
-  box-shadow: 0 0 0 1px
-    color-mix(in srgb, var(--avatar-color, var(--border)) 30%, var(--text-muted));
+.agent-avatar-compact {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--avatar-color, var(--border)) 18%, var(--border));
 }
 .avatar-user {
   width: 32px;

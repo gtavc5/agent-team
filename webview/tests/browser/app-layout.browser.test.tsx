@@ -97,10 +97,54 @@ function move(el: HTMLElement, top: number) {
 }
 afterEach(() => {
   cleanup();
+  delete document.documentElement.dataset.theme;
   vi.useRealTimers();
   vi.unstubAllGlobals();
   localStorage.clear();
 });
+
+it.each(["light", "dark"] as const)(
+  "uses compact avatar rings in UI chrome and the full ring only in chat (%s)",
+  async (theme) => {
+    await boot(
+      [],
+      [{ ...ws, agents: [agent, { ...agent, id: "b", name: "Second", avatar: "B" }] }],
+    );
+    document.documentElement.dataset.theme = theme;
+    const chatAvatar = get("#msg-m0 .message-gutter .agent-avatar");
+    const chipAvatars = [...document.querySelectorAll<HTMLElement>(".agents-chip .agent-avatar")];
+    expect(chipAvatars).toHaveLength(2);
+    const compactShadow = getComputedStyle(chipAvatars[0]).boxShadow;
+    const expectCompact = (avatar: HTMLElement) => {
+      expect(avatar.classList.contains("agent-avatar-compact")).toBe(true);
+      expect(getComputedStyle(avatar).boxShadow).toBe(compactShadow);
+    };
+    for (const avatar of chipAvatars) {
+      expectCompact(avatar);
+      expect(getComputedStyle(avatar).boxShadow).toContain("0px 0px 0px 1px");
+    }
+    expect(chipAvatars[1].getBoundingClientRect().left).toBeLessThan(
+      chipAvatars[0].getBoundingClientRect().right,
+    );
+
+    fireEvent.click(get(".agents-chip"));
+    expect(get(".agents-chip").getAttribute("aria-pressed")).toBe("true");
+    expect(getComputedStyle(get(".agents-chip")).borderTopWidth).toBe("1px");
+    expect(getComputedStyle(get(".ap-session")).borderTopWidth).toBe("1px");
+    expectCompact(get(".agents-panel .ap-agent > .agent-avatar"));
+    fireEvent.click(get(".side-panel-close"));
+
+    const input = get<HTMLTextAreaElement>("textarea");
+    fireEvent.change(input, { target: { value: "@", selectionStart: 1 } });
+    expectCompact(get(".mention-popup .agent-avatar"));
+    fireEvent.change(input, { target: { value: "", selectionStart: 0 } });
+    fireEvent.click(get("#msg-m0 .btn-quote"));
+    expectCompact(get(".quote-bar .agent-avatar"));
+
+    expect(chatAvatar.classList.contains("agent-avatar-compact")).toBe(false);
+    expect(getComputedStyle(chatAvatar).boxShadow).not.toBe(compactShadow);
+  },
+);
 
 it("follows a growing tail only until the reader moves up, and resumes at the bottom", async () => {
   const live = turn(18, { status: "streaming", content: "Working" });

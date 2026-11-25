@@ -247,7 +247,7 @@ it("restores manual folds and age-based quiet folds on a fresh mount", async () 
 });
 
 it.each(["light", "dark"] as const)(
-  "adds non-layout avatar rings and a balanced group plus (%s)",
+  "keeps compact avatar rings faint and a balanced group plus (%s)",
   async (theme) => {
     await page.viewport(1280, 800);
     document.documentElement.dataset.theme = theme;
@@ -256,6 +256,11 @@ it.each(["light", "dark"] as const)(
         <Avatar avatar="A" color="#528bff" name="Agent" size={16} />
         <Avatar avatar="avatars/Laffey.jpg" color="#D8A0D8" name="Laffey" size={28} />
         <Avatar avatar="D" color="#050505" name="Dark profile" size={20} />
+        <Avatar avatar="P" color="#528bff" name="Panel agent" size={22} />
+        <Avatar avatar="C" color="#D8A0D8" name="Compact boundary" size={24} />
+        <div className="message-gutter">
+          <Avatar avatar="G" color="#528bff" name="Chat agent" size={32} />
+        </div>
         <div className="avatar-user">U</div>
         <div className="ws-group-header">
           <span className="ws-group-label">Project</span>
@@ -269,17 +274,29 @@ it.each(["light", "dark"] as const)(
       </>,
     );
     const avatars = [...container.querySelectorAll<HTMLElement>(".agent-avatar, .avatar-user")];
-    expect(avatars).toHaveLength(4);
+    expect(avatars).toHaveLength(7);
     expect(rect(avatars[0]).width).toBe(16);
     expect(rect(avatars[0]).height).toBe(16);
     expect(rect(avatars[1]).width).toBe(28);
     expect(rect(avatars[1]).height).toBe(28);
     expect(avatars[0].style.getPropertyValue("--avatar-color")).toBe("#528bff");
     for (const avatar of avatars) expect(style(avatar).boxShadow).not.toBe("none");
-    if (theme === "dark") {
-      expect(style(avatars[2]).boxShadow).not.toContain(
-        style(document.documentElement).backgroundColor,
-      );
+    const expectedRing = (avatar: HTMLElement, width: number, avatarPercent: number) => {
+      const probe = document.createElement("div");
+      const color = avatar.style.getPropertyValue("--avatar-color");
+      probe.style.boxShadow = `0 0 0 ${width}px color-mix(in srgb, ${color} ${avatarPercent}%, var(--border))`;
+      document.body.append(probe);
+      const shadow = style(probe).boxShadow;
+      probe.remove();
+      return shadow;
+    };
+    for (const index of [0, 2, 3, 4]) {
+      expect(avatars[index].classList.contains("agent-avatar-compact")).toBe(true);
+      expect(style(avatars[index]).boxShadow).toBe(expectedRing(avatars[index], 1, 18));
+    }
+    for (const index of [1, 5]) {
+      expect(avatars[index].classList.contains("agent-avatar-compact")).toBe(false);
+      expect(style(avatars[index]).boxShadow).toBe(expectedRing(avatars[index], 1.5, 40));
     }
 
     const add = container.querySelector<HTMLButtonElement>(".ws-group-add")!;
