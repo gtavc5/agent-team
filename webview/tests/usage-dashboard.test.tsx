@@ -45,7 +45,7 @@ it("suppresses superseded view results and refreshes an error", async () => {
     .mockResolvedValueOnce(journeyResponse([]));
   vi.stubGlobal("fetch", request);
   render(<UsageDashboard onClose={vi.fn()} />);
-  fireEvent.click(screen.getByRole("button", { name: "Journey" }));
+  fireEvent.click(screen.getByRole("button", { name: "Records" }));
   expect(await screen.findByText(/Could not load usage/)).toBeTruthy();
   expect(request.mock.calls[0][1]?.signal?.aborted).toBe(true);
   await act(() => {
@@ -55,13 +55,13 @@ it("suppresses superseded view results and refreshes an error", async () => {
   expect(screen.queryByText("92.31%")).toBeNull();
   expect(screen.getByRole("status").textContent).toContain("Could not load usage");
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-  expect(await screen.findByText("No Journey records returned.")).toBeTruthy();
+  expect(await screen.findByText("No records match these filters.")).toBeTruthy();
   expect(request.mock.calls.slice(1).map(([url]) => url)).toEqual(
     Array(2).fill("api/usage/journey?range=30d&unit=inference"),
   );
 });
 
-it("renders the server's Journey order and keeps recorded details on their own rows", async () => {
+it("shows audit records in server order and keeps details on their own rows", async () => {
   const request = vi
     .fn<typeof fetch>()
     .mockResolvedValueOnce(overviewResponse())
@@ -74,7 +74,7 @@ it("renders the server's Journey order and keeps recorded details on their own r
     );
   vi.stubGlobal("fetch", request);
   render(<UsageDashboard onClose={vi.fn()} />);
-  fireEvent.click(screen.getByRole("button", { name: "Journey" }));
+  fireEvent.click(screen.getByRole("button", { name: "Records" }));
   const rows = within(
     await screen.findByRole("list", { name: "Recorded observations and events" }),
   ).getAllByRole("listitem");

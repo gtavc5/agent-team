@@ -161,7 +161,7 @@ it("opens the usage ledger and reopens the same observation after reload", async
         await expect.poll(() => dashboard.locator('svg[role="img"]').count()).toBe(2);
         const [journey] = await Promise.all([
           page.waitForResponse((res) => new URL(res.url()).pathname === "/api/usage/journey"),
-          dashboard.getByRole("button", { name: "Journey", exact: true }).click(),
+          dashboard.getByRole("button", { name: "Records", exact: true }).click(),
         ]);
         expect(await journey.json()).toMatchObject({
           rows: [{ id: "70", cacheRead: 143166, model: "offline-acceptance-model" }],

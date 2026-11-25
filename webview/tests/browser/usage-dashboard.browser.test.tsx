@@ -92,7 +92,7 @@ it("opens the mobile overview without shifting chat and renders two bounded toke
   expect(bounds(main)).toEqual(initialMain);
 });
 
-it("shares all filters with Journey and traverses server cursors at the same UTC window", async () => {
+it("shares all filters with Records and traverses server cursors at the same UTC window", async () => {
   await page.viewport(1280, 800);
   const request = vi.fn<typeof fetch>().mockImplementation((url) => {
     if (typeof url !== "string") throw new Error("Expected a usage URL");
@@ -145,7 +145,7 @@ it("shares all filters with Journey and traverses server cursors at the same UTC
     turn: "turn-1",
   };
   expect(Object.fromEntries(params())).toEqual(filters);
-  await dialog.getByRole("button", { name: "Journey" }).click();
+  await dialog.getByRole("button", { name: "Records" }).click();
   await expect.element(dialog.getByText("example-model", { exact: true })).toBeVisible();
   expect(Object.fromEntries(params())).toEqual(filters);
   const receipt = dialog.getByText("inference-receipt", { exact: true });

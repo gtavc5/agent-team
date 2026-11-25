@@ -216,7 +216,7 @@ export function UsageDashboard({
           {(
             [
               ["overview", "Overview"],
-              ["journey", "Journey"],
+              ["journey", "Records"],
             ] as const
           ).map(([value, label]) => (
             <button
@@ -399,15 +399,15 @@ export function UsageDashboard({
           />
         )}
         {view === "journey" && journey && (
-          <section aria-label="Journey">
+          <section aria-label="Records">
             <p className="usage-journey-note">
-              Recorded observations and events · UTC
+              Usage audit records in UTC, including records without a session link.
               {(filters.model || filters.channel) &&
                 " · Events excluded by model or channel filter"}
             </p>
             {!journey.rows.length ? (
               <p className="usage-notice" role="status">
-                No Journey records returned.
+                No records match these filters.
               </p>
             ) : (
               <ol
@@ -428,7 +428,7 @@ export function UsageDashboard({
       </div>
       <div className="dialog-actions usage-actions">
         {view === "journey" && (
-          <div className="usage-controls usage-pages" role="group" aria-label="Journey pages">
+          <div className="usage-controls usage-pages" role="group" aria-label="Record pages">
             <button
               type="button"
               className="btn-secondary"
