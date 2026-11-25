@@ -305,14 +305,21 @@ it("uses real sidebar groups, archives, history search, confirmations, and debug
       await chat(page, "sheet 头部已经改好");
       await hidden(worker.getByText("your turn"));
       await hidden(worker.locator(".unread-badge"));
-      const diagnostics = page.getByRole("link", { name: "Service diagnostics" });
-      const snapshot = page.getByTitle(
-        "Save a layout debug snapshot (viewport, geometry, DOM) on the server",
-      );
+      const fallbackDiagnostics = page.getByRole("link", { name: "Service diagnostics" });
+      const debugTrigger = page.getByRole("button", {
+        name: "Save snapshot and open debug tools",
+        exact: true,
+      });
+      const stripDiagnostics = page.getByRole("link", { name: "Diagnostics", exact: true });
+      const snapshot = page.getByRole("button", { name: "Snapshot", exact: true });
       const replay = page.getByTitle("Replay rendering demo (synthetic events for visual review)");
-      // Provider readiness depends on the machine. Debug-only actions do not.
+      // Provider readiness depends on the machine. Debug strip state does not.
       const health = (await (await report).json()) as { issues: unknown[] };
-      await (health.issues.length ? visible : hidden)(diagnostics);
+      await (health.issues.length ? visible : hidden)(fallbackDiagnostics);
+      expect(await page.getByRole("link", { name: "JSON", exact: true }).count()).toBe(0);
+      await visible(debugTrigger);
+      expect(await debugTrigger.getAttribute("aria-expanded")).toBe("false");
+      await hidden(stripDiagnostics);
       await hidden(snapshot);
       await hidden(replay);
 
@@ -393,20 +400,22 @@ it("uses real sidebar groups, archives, history search, confirmations, and debug
       await hidden(group);
       expect(new ProjectStore(dir).get(seed.projectId)).toBeUndefined();
 
-      const debugHealthRequests: string[] = [];
+      const debugHealthReport = page.waitForResponse(`${origin}/api/diagnostics`);
+      const snapshotUploads: string[] = [];
       page.on("request", (request) => {
-        if (request.url() === `${origin}/api/diagnostics`) debugHealthRequests.push(request.url());
+        if (request.method() === "POST" && request.url() === `${origin}/debug/snapshot`)
+          snapshotUploads.push(request.url());
       });
       await page.goto(`${origin}/?debug=1`);
       await visible(otherLead);
-      await visible(diagnostics);
-      expect(await diagnostics.getAttribute("href")).toBe("api/diagnostics?format=text");
-      expect(await page.getByRole("link", { name: "JSON", exact: true }).getAttribute("href")).toBe(
-        "api/diagnostics",
-      );
+      await debugHealthReport;
+      expect(await debugTrigger.getAttribute("aria-expanded")).toBe("true");
+      await visible(stripDiagnostics);
+      expect(await stripDiagnostics.getAttribute("href")).toBe("api/diagnostics?format=text");
+      expect(await page.getByRole("link", { name: "JSON", exact: true }).count()).toBe(0);
       await visible(snapshot);
       await visible(replay);
-      expect(debugHealthRequests).toEqual([]);
+      expect(snapshotUploads).toEqual([]);
     },
     (dir, seed) => {
       const workspaces = loadAll(dir);

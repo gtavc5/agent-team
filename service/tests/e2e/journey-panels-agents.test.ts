@@ -434,6 +434,7 @@ it("uses lead and worker agent cards to manage an agent with destructive confirm
       await clear.click();
       await clearDialog.getByRole("button", { name: "Clear context", exact: true }).click();
       await transcript(page, "Perseus context cleared");
+      await usage.waitFor({ state: "hidden" });
 
       const remove = mobile.getByRole("button", { name: "Remove Journey reviewer", exact: true });
       const removeDialog = page.getByRole("dialog", { name: "Remove Journey reviewer?" });
