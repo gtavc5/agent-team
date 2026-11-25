@@ -14,7 +14,7 @@ import {
 } from "../../src/project/tools";
 import type { Project } from "../../src/project/store";
 import type { QuotaSnapshot } from "../../src/session/quota-schema";
-import { localPiBinary } from "../local-pi";
+import { localPiBinary, localPiSdkAnchor } from "../local-pi";
 import {
   discoverLocalPiPackages,
   prepareControlledPiAgentHome,
@@ -37,7 +37,7 @@ import {
   type RestrictedJsonSchema,
 } from "../../src/session/panel-schema";
 
-const piRequire = createRequire(localPiBinary ?? __filename);
+const piRequire = createRequire(localPiSdkAnchor ?? __filename);
 const subagents = localPiBinary && discoverLocalPiPackages().piSubagentsRoot;
 import piPanelBridge from "../../src/session/pi-panel-bridge";
 const { Value } = piRequire("typebox/value") as typeof import("typebox/value");

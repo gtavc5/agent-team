@@ -35,7 +35,7 @@ import type { StreamEvent, UiDialogRequest } from "../../src/session/types";
 import { HistoryService } from "../../src/workspace/history-service";
 import { historyFile, historyIndexFile } from "../../src/workspace/state";
 import type { Workspace, WorkspaceInfo } from "../../src/workspace/workspace";
-import { localPiBinary } from "../local-pi";
+import { localPiBinary, localPiSdkAnchor } from "../local-pi";
 
 const model = "pi-e2e/scenario";
 const markerA = "e2ealphaneedle";
@@ -45,7 +45,7 @@ const foregroundB = "e2eforegroundbeta";
 const note = { slug: "design", content: "pi-e2e note body", expected_version: null };
 
 function writeScenario(file: string, gates: string, subagents: string) {
-  const sdk = createRequire(localPiBinary!)
+  const sdk = createRequire(localPiSdkAnchor!)
     .resolve.paths("@earendil-works/pi-ai")
     ?.map((dir) => path.join(dir, "@earendil-works/pi-ai", "package.json"))
     .find((file) => fs.existsSync(file));
