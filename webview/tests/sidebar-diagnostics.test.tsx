@@ -1,9 +1,11 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { ICONS } from "../src/panels/Icon";
 import { Sidebar, type SidebarProps } from "../src/sidebar/Sidebar";
 
-const TRIGGER = "Save snapshot and open debug tools";
-const DEMO = "Replay rendering demo (synthetic events for visual review)";
+const TRIGGER = "Debug tools";
+const SNAPSHOT = "Capture debug snapshot";
+const DEMO = "Replay demo";
 
 function healthResponse(issues: object[] = []) {
   return { ok: true, json: () => Promise.resolve({ issues }) };
@@ -54,9 +56,9 @@ function sidebar(connected = true, over: Partial<SidebarProps> = {}) {
 
 function expectStripClosed() {
   expect(screen.queryByRole("group", { name: "Debug tools" })).toBeNull();
-  expect(screen.queryByRole("link", { name: "Diagnostics" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Demo" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Snapshot" })).toBeNull();
+  expect(screen.queryByRole("link", { name: /Service diagnostics/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: DEMO })).toBeNull();
+  expect(screen.queryByRole("button", { name: SNAPSHOT })).toBeNull();
 }
 
 afterEach(() => {
@@ -65,92 +67,113 @@ afterEach(() => {
   history.replaceState(null, "", location.pathname);
 });
 
-it("always shows #, captures before unfolding, and deduplicates an in-flight upload", async () => {
+it("purely toggles # without auto-capturing and highlights active state", async () => {
   stubHealth();
-  const upload = deferred();
-  const onDebugSnapshot = vi
-    .fn()
-    .mockImplementationOnce(() => {
-      // App's synchronous collectSnapshot() runs inside this callback.
-      expect(screen.queryByRole("group", { name: "Debug tools" })).toBeNull();
-      expect(screen.getByRole("button", { name: TRIGGER }).getAttribute("aria-expanded")).toBe(
-        "false",
-      );
-      return upload.promise;
-    })
-    .mockImplementation(() => Promise.resolve());
-  sidebar(true, { onDebugSnapshot });
+  const onDebugSnapshot = vi.fn(() => Promise.resolve());
+  const { container } = sidebar(true, { onDebugSnapshot });
   await act(async () => {});
 
   const trigger = screen.getByRole("button", { name: TRIGGER });
   expect(trigger.getAttribute("title")).toBe(TRIGGER);
-  fireEvent.click(trigger);
-  expect(onDebugSnapshot).toHaveBeenCalledTimes(1);
-  expect(trigger.getAttribute("aria-expanded")).toBe("true");
-  const snapshot = screen.getByRole("button", { name: "Snapshot" });
-  expect(snapshot.hasAttribute("disabled")).toBe(true);
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(trigger.getAttribute("aria-pressed")).toBe("false");
+  expectStripClosed();
 
-  // Neither repeated explicit saves nor close/reopen can overlap the upload.
-  fireEvent.click(snapshot);
+  fireEvent.click(trigger);
+  expect(onDebugSnapshot).not.toHaveBeenCalled();
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  expect(trigger.getAttribute("aria-pressed")).toBe("true");
+
+  const diagnostics = screen.getByRole("link", { name: "Service diagnostics" });
+  const demo = screen.getByRole("button", { name: DEMO });
+  const snapshot = screen.getByRole("button", { name: SNAPSHOT });
+  expect(diagnostics.getAttribute("href")).toBe("api/diagnostics?format=text");
+  expect(diagnostics.getAttribute("target")).toBe("_blank");
+  expect(diagnostics.getAttribute("rel")).toBe("noopener noreferrer");
+  expect(diagnostics.textContent).toBe("");
+  expect(demo.textContent).toBe("");
+  expect(snapshot.textContent).toBe("");
+
+  // Distinct linear SVG icons for #, Diagnostics, Demo, and Snapshot (camera != #).
+  const triggerPath = trigger.querySelector("svg path")?.getAttribute("d");
+  const diagnosticsPath = diagnostics.querySelector("svg path")?.getAttribute("d");
+  const demoPath = demo.querySelector("svg path")?.getAttribute("d");
+  const snapshotPath = snapshot.querySelector("svg path")?.getAttribute("d");
+  expect(triggerPath).toBe(ICONS.debug);
+  expect(diagnosticsPath).toBe(ICONS.diagnostics);
+  expect(demoPath).toBe(ICONS.play);
+  expect(snapshotPath).toBe(ICONS.camera);
+  expect(new Set([triggerPath, diagnosticsPath, demoPath, snapshotPath]).size).toBe(4);
+  expect(container.querySelectorAll(".sidebar-debug-dot")).toHaveLength(0);
+
   fireEvent.click(trigger);
   expectStripClosed();
-  fireEvent.click(trigger);
-  expect(onDebugSnapshot).toHaveBeenCalledTimes(1);
-
-  upload.resolve();
-  await act(async () => {});
-  expect(screen.getByRole("button", { name: "Snapshot" }).hasAttribute("disabled")).toBe(false);
-  fireEvent.click(screen.getByRole("button", { name: "Snapshot" }));
-  expect(onDebugSnapshot).toHaveBeenCalledTimes(2);
-  await act(async () => {});
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(trigger.getAttribute("aria-pressed")).toBe("false");
+  expect(onDebugSnapshot).not.toHaveBeenCalled();
 });
 
-it("keeps the strip open and re-enables Snapshot when an upload fails", async () => {
+it("handles consecutive Snapshot clicks with anti-reentry guard and uploading/saved/error feedback", async () => {
   stubHealth();
-  const upload = deferred();
-  const onDebugSnapshot = vi.fn(() => upload.promise);
+  const first = deferred();
+  const second = deferred();
+  const onDebugSnapshot = vi
+    .fn()
+    .mockImplementationOnce(() => first.promise)
+    .mockImplementationOnce(() => second.promise)
+    .mockImplementationOnce(() => Promise.resolve());
   sidebar(true, { onDebugSnapshot });
   await act(async () => {});
 
   fireEvent.click(screen.getByRole("button", { name: TRIGGER }));
-  upload.reject(new Error("read-only filesystem"));
-  await act(async () => {});
+  expect(onDebugSnapshot).not.toHaveBeenCalled();
 
-  expect(screen.getByRole("group", { name: "Debug tools" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: TRIGGER }).getAttribute("aria-expanded")).toBe("true");
-  expect(screen.getByRole("button", { name: "Snapshot" }).hasAttribute("disabled")).toBe(false);
+  const snapshot = screen.getByRole("button", { name: SNAPSHOT });
+  fireEvent.click(snapshot);
   expect(onDebugSnapshot).toHaveBeenCalledTimes(1);
+  expect(snapshot.hasAttribute("disabled")).toBe(true);
+  expect(snapshot.getAttribute("aria-busy")).toBe("true");
+  expect(screen.getByRole("status").textContent).toBe("Saving snapshot…");
+
+  // Repeated clicks and toggling # cannot overlap an in-flight upload.
+  fireEvent.click(snapshot);
+  fireEvent.click(screen.getByRole("button", { name: TRIGGER }));
+  expectStripClosed();
+  fireEvent.click(screen.getByRole("button", { name: TRIGGER }));
+  expect(screen.getByRole("button", { name: SNAPSHOT }).hasAttribute("disabled")).toBe(true);
+  expect(onDebugSnapshot).toHaveBeenCalledTimes(1);
+
+  first.resolve();
+  await act(async () => {});
+  expect(screen.getByRole("button", { name: SNAPSHOT }).hasAttribute("disabled")).toBe(false);
+  expect(screen.getByRole("status").textContent).toBe("Snapshot saved");
+
+  // Consecutive click starts immediately and surfaces failure without closing the strip.
+  fireEvent.click(screen.getByRole("button", { name: SNAPSHOT }));
+  expect(onDebugSnapshot).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("status").textContent).toBe("Saving snapshot…");
+
+  second.reject(new Error("read-only filesystem"));
+  await act(async () => {});
+  expect(screen.getByRole("group", { name: "Debug tools" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: SNAPSHOT }).hasAttribute("disabled")).toBe(false);
+  expect(screen.getByRole("status").textContent).toBe("Snapshot failed");
+
+  // Subsequent retry after failure succeeds.
+  fireEvent.click(screen.getByRole("button", { name: SNAPSHOT }));
+  await act(async () => {});
+  expect(onDebugSnapshot).toHaveBeenCalledTimes(3);
+  expect(screen.getByRole("status").textContent).toBe("Snapshot saved");
 });
 
-it.each(["trigger", "outside", "demo"] as const)(
-  "collapses via %s without capturing again or leaving controls focusable",
-  async (method) => {
-    stubHealth();
-    const onDebugSnapshot = vi.fn(() => new Promise<void>(() => {}));
-    const onReplayDemo = vi.fn();
-    sidebar(true, { onDebugSnapshot, onReplayDemo });
-    await act(async () => {});
-
-    const trigger = screen.getByRole("button", { name: TRIGGER });
-    fireEvent.click(trigger);
-    expect(screen.getByRole("group", { name: "Debug tools" })).toBeTruthy();
-    if (method === "trigger") fireEvent.click(trigger);
-    if (method === "outside") fireEvent.click(document.body);
-    if (method === "demo") fireEvent.click(screen.getByRole("button", { name: "Demo" }));
-
-    expectStripClosed();
-    expect(trigger.getAttribute("aria-expanded")).toBe("false");
-    expect(onDebugSnapshot).toHaveBeenCalledTimes(1);
-    expect(onReplayDemo).toHaveBeenCalledTimes(method === "demo" ? 1 : 0);
-  },
-);
-
-it("collapses on an outside workspace action even when it stops click propagation", async () => {
+it("keeps the strip open on outside clicks, workspace actions, and desktop Demo clicks", async () => {
   stubHealth();
-  const onDebugSnapshot = vi.fn(() => new Promise<void>(() => {}));
+  const onDebugSnapshot = vi.fn(() => Promise.resolve());
+  const onReplayDemo = vi.fn();
   const onCreateIn = vi.fn();
   sidebar(true, {
     onDebugSnapshot,
+    onReplayDemo,
     onCreateIn,
     workspaces: [
       {
@@ -169,33 +192,44 @@ it("collapses on an outside workspace action even when it stops click propagatio
   });
   await act(async () => {});
 
-  fireEvent.click(screen.getByRole("button", { name: TRIGGER }));
+  const trigger = screen.getByRole("button", { name: TRIGGER });
+  fireEvent.click(trigger);
+  expect(screen.getByRole("group", { name: "Debug tools" })).toBeTruthy();
+
+  fireEvent.click(document.body);
+  expect(screen.getByRole("group", { name: "Debug tools" })).toBeTruthy();
+
   fireEvent.click(screen.getByTitle("New workspace in /repo"));
   expect(onCreateIn).toHaveBeenCalledWith("/repo");
-  expectStripClosed();
-  expect(onDebugSnapshot).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("group", { name: "Debug tools" })).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: DEMO }));
+  expect(onReplayDemo).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("group", { name: "Debug tools" })).toBeTruthy();
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  expect(onDebugSnapshot).not.toHaveBeenCalled();
 });
 
-it("restores focus to # on Escape without another snapshot", async () => {
+it("restores focus to # on Escape without capturing", async () => {
   stubHealth();
-  const onDebugSnapshot = vi.fn(() => new Promise<void>(() => {}));
+  const onDebugSnapshot = vi.fn(() => Promise.resolve());
   sidebar(true, { onDebugSnapshot });
   await act(async () => {});
 
   const trigger = screen.getByRole("button", { name: TRIGGER });
   fireEvent.click(trigger);
-  const demo = screen.getByRole("button", { name: "Demo" });
+  const demo = screen.getByRole("button", { name: DEMO });
   demo.focus();
   fireEvent.keyDown(demo, { key: "Escape" });
 
   expectStripClosed();
   expect(document.activeElement).toBe(trigger);
-  expect(onDebugSnapshot).toHaveBeenCalledTimes(1);
+  expect(onDebugSnapshot).not.toHaveBeenCalled();
 });
 
 it("resets on a mobile drawer close and stays collapsed when reopened", async () => {
   stubHealth();
-  const onDebugSnapshot = vi.fn(() => new Promise<void>(() => {}));
+  const onDebugSnapshot = vi.fn(() => Promise.resolve());
   const view = sidebar(true, { sidebarOpen: true, onDebugSnapshot });
   await act(async () => {});
 
@@ -205,10 +239,10 @@ it("resets on a mobile drawer close and stays collapsed when reopened", async ()
   expectStripClosed();
   view.rerender(<Sidebar {...view.props} sidebarOpen={true} />);
   expectStripClosed();
-  expect(onDebugSnapshot).toHaveBeenCalledTimes(1);
+  expect(onDebugSnapshot).not.toHaveBeenCalled();
 });
 
-it("starts open for ?debug=1 without auto-capturing and exposes only text debug controls", async () => {
+it("starts open for ?debug=1 without auto-capturing and exposes one Diagnostics entry", async () => {
   history.replaceState(null, "", "?debug=1");
   const fetch = stubHealth();
   const onDebugSnapshot = vi.fn(() => Promise.resolve());
@@ -216,74 +250,106 @@ it("starts open for ?debug=1 without auto-capturing and exposes only text debug 
   sidebar(true, { onDebugSnapshot, onReplayDemo });
 
   expect(onDebugSnapshot).not.toHaveBeenCalled();
-  const diagnostics = screen.getByRole("link", { name: "Diagnostics" });
-  expect(diagnostics.getAttribute("href")).toBe("api/diagnostics?format=text");
-  expect(diagnostics.getAttribute("target")).toBe("_blank");
-  expect(diagnostics.getAttribute("rel")).toBe("noreferrer");
-  expect(screen.getByTitle(DEMO)).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Snapshot" })).toBeTruthy();
+  const links = screen.getAllByRole("link", { name: "Service diagnostics" });
+  expect(links).toHaveLength(1);
+  expect(links[0].getAttribute("href")).toBe("api/diagnostics?format=text");
+  expect(links[0].getAttribute("target")).toBe("_blank");
+  expect(links[0].getAttribute("rel")).toBe("noopener noreferrer");
+  expect(screen.getByRole("button", { name: DEMO })).toBeTruthy();
+  expect(screen.getByRole("button", { name: SNAPSHOT })).toBeTruthy();
   expect(screen.queryByRole("link", { name: "JSON" })).toBeNull();
-  expect(screen.queryByRole("link", { name: "Service diagnostics" })).toBeNull();
 
   await act(async () => {});
   expect(fetch).toHaveBeenCalledTimes(1);
-  expect(screen.queryByRole("link", { name: "Service diagnostics" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Snapshot" }));
+  fireEvent.click(screen.getByRole("button", { name: SNAPSHOT }));
   expect(onDebugSnapshot).toHaveBeenCalledTimes(1);
   await act(async () => {});
-  fireEvent.click(screen.getByRole("button", { name: "Demo" }));
+  fireEvent.click(screen.getByRole("button", { name: DEMO }));
   expect(onReplayDemo).toHaveBeenCalledTimes(1);
-  expect(onDebugSnapshot).toHaveBeenCalledTimes(1);
-  expectStripClosed();
+  expect(screen.getByRole("group", { name: "Debug tools" })).toBeTruthy();
 });
 
-it("does not flash diagnostics while the initial health probe is unknown", async () => {
+it("does not flash an abnormal indicator while the initial health probe is unknown", async () => {
   const probe = deferred();
   const fetch = vi.fn(() => probe.promise.then(() => healthResponse()));
   vi.stubGlobal("fetch", fetch);
-  sidebar();
+  const { container } = sidebar();
 
   expect(fetch).toHaveBeenCalledTimes(1);
-  expect(screen.queryByRole("link", { name: "Service diagnostics" })).toBeNull();
+  expect(container.querySelectorAll(".sidebar-debug-dot")).toHaveLength(0);
+  expect(screen.queryByRole("link", { name: /Service diagnostics/ })).toBeNull();
   expect(screen.getByRole("button", { name: TRIGGER })).toBeTruthy();
   expectStripClosed();
+
   probe.resolve();
   await act(async () => {});
-  expect(screen.queryByRole("link", { name: "Service diagnostics" })).toBeNull();
+  expect(container.querySelectorAll(".sidebar-debug-dot")).toHaveLength(0);
+  expect(screen.queryByRole("link", { name: /Service diagnostics/ })).toBeNull();
 });
 
 it.each(["offline", "unhealthy"] as const)(
-  "shows one Service diagnostics link and no JSON when %s",
+  "places a single abnormal dot on # when collapsed and moves it to the single Diagnostics entry when expanded (%s)",
   async (state) => {
     const fetch = stubHealth(state === "unhealthy" ? [{}] : []);
-    sidebar(state !== "offline");
+    const { container } = sidebar(state !== "offline");
     await act(async () => {});
 
     expect(fetch).toHaveBeenCalledTimes(state === "offline" ? 0 : 1);
-    const links = screen.getAllByRole("link", { name: "Service diagnostics" });
+    expectStripClosed();
+    expect(screen.queryByRole("link", { name: /Service diagnostics/ })).toBeNull();
+
+    // Collapsed: dot appears only on #, with accessible unhealthy/offline text.
+    const collapsedTrigger = screen.getByRole("button", {
+      name: `Debug tools (service diagnostics ${state})`,
+    });
+    expect(collapsedTrigger.getAttribute("title")).toBe(
+      `Debug tools (service diagnostics ${state})`,
+    );
+    const collapsedDots = container.querySelectorAll(".sidebar-debug-dot");
+    expect(collapsedDots).toHaveLength(1);
+    expect(collapsedTrigger.contains(collapsedDots[0])).toBe(true);
+    expect(collapsedDots[0].getAttribute("aria-hidden")).toBe("true");
+
+    // Expanded: dot moves from # to the single Diagnostics icon link.
+    fireEvent.click(collapsedTrigger);
+    const expandedTrigger = screen.getByRole("button", { name: TRIGGER });
+    const links = screen.getAllByRole("link", { name: `Service diagnostics (${state})` });
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute("href")).toBe("api/diagnostics?format=text");
     expect(links[0].getAttribute("target")).toBe("_blank");
+    expect(links[0].getAttribute("rel")).toBe("noopener noreferrer");
+    expect(links[0].getAttribute("title")).toBe(`Service diagnostics (${state})`);
     expect(screen.queryByRole("link", { name: "JSON" })).toBeNull();
-    expect(screen.getByRole("button", { name: TRIGGER })).toBeTruthy();
-    expectStripClosed();
+
+    const expandedDots = container.querySelectorAll(".sidebar-debug-dot");
+    expect(expandedDots).toHaveLength(1);
+    expect(expandedTrigger.contains(expandedDots[0])).toBe(false);
+    expect(links[0].contains(expandedDots[0])).toBe(true);
+    expect(expandedDots[0].getAttribute("aria-hidden")).toBe("true");
   },
 );
 
-it("surfaces diagnostics when a connected service later becomes degraded", async () => {
+it("surfaces the abnormal indicator when a connected service later becomes degraded", async () => {
   vi.useFakeTimers();
   let issues: object[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(() => Promise.resolve(healthResponse(issues))),
   );
+  let container!: HTMLElement;
   await act(() => {
-    sidebar();
+    ({ container } = sidebar());
     return Promise.resolve();
   });
-  expect(screen.queryByRole("link", { name: "Service diagnostics" })).toBeNull();
+  expect(container.querySelectorAll(".sidebar-debug-dot")).toHaveLength(0);
+  expect(screen.getByRole("button", { name: TRIGGER })).toBeTruthy();
+
   issues = [{}];
   await act(() => vi.advanceTimersByTimeAsync(60_000));
-  expect(screen.getByRole("link", { name: "Service diagnostics" })).toBeTruthy();
-  expect(screen.queryByRole("link", { name: "JSON" })).toBeNull();
+  const trigger = screen.getByRole("button", {
+    name: "Debug tools (service diagnostics unhealthy)",
+  });
+  expect(container.querySelectorAll(".sidebar-debug-dot")).toHaveLength(1);
+  expect(trigger.contains(container.querySelector(".sidebar-debug-dot"))).toBe(true);
+  expect(screen.queryByRole("link", { name: /Service diagnostics/ })).toBeNull();
 });

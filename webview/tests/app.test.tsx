@@ -895,3 +895,71 @@ describe("read state shared by every device", () => {
     expect(marks(sock)).toEqual(["w1"]);
   });
 });
+
+describe("debug strip", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("shows uploading, saved, and failed toast feedback on explicit Snapshot clicks and keeps strip open on desktop Demo", async () => {
+    let resolveUpload!: (res: {
+      ok: boolean;
+      status: number;
+      json: () => Promise<unknown>;
+    }) => void;
+    let uploads = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "api/diagnostics") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ issues: [] }),
+        });
+      }
+      if (url === "debug/snapshot") {
+        uploads += 1;
+        return new Promise((resolve) => {
+          resolveUpload = resolve;
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    boot([settled(1)]);
+    await act(async () => {});
+
+    const trigger = document.querySelector<HTMLButtonElement>(".sidebar-debug")!;
+    fireEvent.click(trigger);
+    expect(uploads).toBe(0);
+    expect(document.querySelector(".sidebar-debug-strip")).not.toBeNull();
+
+    const snapshot = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Capture debug snapshot"]',
+    )!;
+    fireEvent.click(snapshot);
+    expect(uploads).toBe(1);
+    expect(document.querySelector(".info-toast")!.textContent).toBe("Saving debug snapshot…");
+    expect(document.querySelector(".sidebar-debug-status")!.textContent).toBe("Saving snapshot…");
+
+    resolveUpload({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ path: "/tmp/snap-1.json" }),
+    });
+    await act(async () => {});
+    expect(document.querySelector(".info-toast")!.textContent).toBe(
+      "Snapshot saved: /tmp/snap-1.json",
+    );
+    expect(document.querySelector(".sidebar-debug-status")!.textContent).toBe("Snapshot saved");
+
+    fireEvent.click(snapshot);
+    expect(uploads).toBe(2);
+    resolveUpload({ ok: false, status: 500, json: () => Promise.resolve({}) });
+    await act(async () => {});
+    expect(document.querySelector(".info-toast")!.textContent).toContain("Snapshot failed:");
+    expect(document.querySelector(".sidebar-debug-status")!.textContent).toBe("Snapshot failed");
+
+    const demo = document.querySelector<HTMLButtonElement>('button[aria-label="Replay demo"]')!;
+    fireEvent.click(demo);
+    expect(document.querySelector(".sidebar-debug-strip")).not.toBeNull();
+  });
+});

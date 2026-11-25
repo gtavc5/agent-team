@@ -29,7 +29,7 @@ Run installation from a shell where your preferred Node 26+ and Pi are available
 
 ### Diagnose a new installation
 
-Open **Service diagnostics** in the sidebar for the running service's effective settings and last model probe. Offline, unhealthy, or degraded installations show this link directly. At any time, the sidebar's **#** button opens **Diagnostics** and the other debug tools; `?debug=1` opens that strip on load. `GET api/diagnostics` exposes the same report as JSON to an agent, with the panel's normal authentication. Each issue gives a stage, stable code, effective value/source, affected capability, and next step. Proxy values are not printed.
+Open **# → Service diagnostics** in the sidebar for the running service's effective settings and last model probe; `?debug=1` opens that debug toolbar on load. Offline, unhealthy, or degraded installations show an indicator dot on **#** while collapsed and on **Service diagnostics** when expanded. `GET api/diagnostics` exposes the same report as JSON to an agent, with the panel's normal authentication. Each issue gives a stage, stable code, effective value/source, affected capability, and next step. Proxy values are not printed.
 
 After building, you can diagnose an instance even if the service did not start:
 

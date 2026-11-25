@@ -289,7 +289,7 @@ describe("debug snapshot", () => {
     expect(quietSnap.activeTurn?.turnFooter?.text).toBe("");
   });
 
-  it("uploads the pre-collected DOM instead of capturing the opened debug strip", async () => {
+  it("uploads the pre-collected snapshot without re-reading later DOM mutations", async () => {
     document.body.innerHTML = '<div id="root"><div class="app"></div></div>';
     const snapshot = collectSnapshot();
     document.querySelector(".app")!.innerHTML = '<div class="sidebar-debug-strip"></div>';

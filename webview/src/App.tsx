@@ -216,11 +216,17 @@ export function App() {
     return () => clearTimeout(t);
   }, [notice]);
   const takeSnapshot = useCallback(() => {
-    // Capture before Sidebar opens its debug strip; only the upload is async.
     const snapshot = collectSnapshot();
+    setNotice("Saving debug snapshot…");
     return uploadSnapshot(snapshot).then(
-      (p) => setNotice(`Snapshot saved: ${p}`),
-      (e) => setNotice(`Snapshot failed: ${e instanceof Error ? e.message : e}`),
+      (p) => {
+        setNotice(`Snapshot saved: ${p}`);
+        return p;
+      },
+      (e) => {
+        setNotice(`Snapshot failed: ${e instanceof Error ? e.message : e}`);
+        throw e;
+      },
     );
   }, []);
 
@@ -1533,7 +1539,7 @@ export function App() {
     <SessionLinkContext.Provider value={sessionLinks}>
       <div className="app" ref={appRef}>
         {notice && (
-          <div className="info-toast" onClick={() => setNotice(null)} title="Dismiss">
+          <div className="info-toast" role="status" onClick={() => setNotice(null)} title="Dismiss">
             {notice}
           </div>
         )}

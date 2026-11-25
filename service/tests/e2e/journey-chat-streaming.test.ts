@@ -290,7 +290,7 @@ it("pages through older history without losing the scroll anchor, then hydrates 
 // Replay Demo runs in the browser; only the seeded conversations above survive a reload.
 it("streams Replay Demo thinking, drills into a subagent, jumps to a quote and cancels work", async () => {
   const page = await open("?debug=1&demoSpeed=3");
-  await page.locator('button[title*="Replay rendering demo"]').click();
+  await page.getByRole("button", { name: "Replay demo", exact: true }).click();
   await worker(page, "Replay Demo").click();
   const turn = page.locator("#msg-demo-layout-turn");
   // Use the first, longer streaming turn for liveness. Short thinking phases

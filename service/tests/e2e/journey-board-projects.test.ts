@@ -305,20 +305,26 @@ it("uses real sidebar groups, archives, history search, confirmations, and debug
       await chat(page, "sheet 头部已经改好");
       await hidden(worker.getByText("your turn"));
       await hidden(worker.locator(".unread-badge"));
-      const fallbackDiagnostics = page.getByRole("link", { name: "Service diagnostics" });
-      const debugTrigger = page.getByRole("button", {
-        name: "Save snapshot and open debug tools",
+      const health = (await (await report).json()) as { issues: unknown[] };
+      const unhealthy = health.issues.length > 0;
+      const collapsedTrigger = page.getByRole("button", {
+        name: unhealthy ? "Debug tools (service diagnostics unhealthy)" : "Debug tools",
         exact: true,
       });
-      const stripDiagnostics = page.getByRole("link", { name: "Diagnostics", exact: true });
-      const snapshot = page.getByRole("button", { name: "Snapshot", exact: true });
-      const replay = page.getByTitle("Replay rendering demo (synthetic events for visual review)");
-      // Provider readiness depends on the machine. Debug strip state does not.
-      const health = (await (await report).json()) as { issues: unknown[] };
-      await (health.issues.length ? visible : hidden)(fallbackDiagnostics);
+      const expandedTrigger = page.getByRole("button", { name: "Debug tools", exact: true });
+      const stripDiagnostics = page.getByRole("link", {
+        name: unhealthy ? "Service diagnostics (unhealthy)" : "Service diagnostics",
+        exact: true,
+      });
+      const snapshot = page.getByRole("button", { name: "Capture debug snapshot", exact: true });
+      const replay = page.getByRole("button", { name: "Replay demo", exact: true });
+      // No bottom-left fallback link; Diagnostics lives only in the debug toolbar.
+      expect(await page.getByRole("link", { name: /Service diagnostics/ }).count()).toBe(0);
       expect(await page.getByRole("link", { name: "JSON", exact: true }).count()).toBe(0);
-      await visible(debugTrigger);
-      expect(await debugTrigger.getAttribute("aria-expanded")).toBe("false");
+      await visible(collapsedTrigger);
+      expect(await collapsedTrigger.getAttribute("aria-expanded")).toBe("false");
+      expect(await collapsedTrigger.getAttribute("aria-pressed")).toBe("false");
+      expect(await page.locator(".sidebar-debug-dot").count()).toBe(unhealthy ? 1 : 0);
       await hidden(stripDiagnostics);
       await hidden(snapshot);
       await hidden(replay);
@@ -408,13 +414,39 @@ it("uses real sidebar groups, archives, history search, confirmations, and debug
       });
       await page.goto(`${origin}/?debug=1`);
       await visible(otherLead);
-      await debugHealthReport;
-      expect(await debugTrigger.getAttribute("aria-expanded")).toBe("true");
-      await visible(stripDiagnostics);
-      expect(await stripDiagnostics.getAttribute("href")).toBe("api/diagnostics?format=text");
+      const debugHealth = (await (await debugHealthReport).json()) as { issues: unknown[] };
+      const debugUnhealthy = debugHealth.issues.length > 0;
+      const debugCollapsedTrigger = page.getByRole("button", {
+        name: debugUnhealthy ? "Debug tools (service diagnostics unhealthy)" : "Debug tools",
+        exact: true,
+      });
+      const debugStripDiagnostics = page.getByRole("link", {
+        name: debugUnhealthy ? "Service diagnostics (unhealthy)" : "Service diagnostics",
+        exact: true,
+      });
+      expect(await expandedTrigger.getAttribute("aria-expanded")).toBe("true");
+      expect(await expandedTrigger.getAttribute("aria-pressed")).toBe("true");
+      await visible(debugStripDiagnostics);
+      expect(await page.getByRole("link", { name: /Service diagnostics/ }).count()).toBe(1);
+      expect(await debugStripDiagnostics.getAttribute("href")).toBe("api/diagnostics?format=text");
       expect(await page.getByRole("link", { name: "JSON", exact: true }).count()).toBe(0);
+      expect(await page.locator(".sidebar-debug-dot").count()).toBe(debugUnhealthy ? 1 : 0);
+      expect(await expandedTrigger.locator(".sidebar-debug-dot").count()).toBe(0);
+      expect(await debugStripDiagnostics.locator(".sidebar-debug-dot").count()).toBe(
+        debugUnhealthy ? 1 : 0,
+      );
       await visible(snapshot);
       await visible(replay);
+      // Clicking outside keeps the debug strip open; toggling # does not auto-capture.
+      await otherLead.click();
+      await visible(debugStripDiagnostics);
+      await expandedTrigger.click();
+      await hidden(debugStripDiagnostics);
+      expect(await debugCollapsedTrigger.locator(".sidebar-debug-dot").count()).toBe(
+        debugUnhealthy ? 1 : 0,
+      );
+      await debugCollapsedTrigger.click();
+      await visible(debugStripDiagnostics);
       expect(snapshotUploads).toEqual([]);
     },
     (dir, seed) => {

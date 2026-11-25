@@ -18,7 +18,9 @@ export const ICONS = {
   changes: "M8 2.5v6M5 5.5h6M5 12.5h6",
   play: "M5 3.5v9l7.5-4.5z",
   plus: "M8 3.5v9M3.5 8h9",
-  snapshot: "M6 2.5v11M10 2.5v11M2.5 6h11M2.5 10h11",
+  debug: "M6 2.5v11M10 2.5v11M2.5 6h11M2.5 10h11",
+  camera: "M2.5 5.5h2.3l1-2h4.4l1 2h2.3v7.5h-11zM8 11.2a2 2 0 1 0 0-4 2 2 0 0 0 0 4z",
+  diagnostics: "M2 8h2.5l1.7-4.5 3.2 9 1.9-4.5H14",
 } as const;
 
 export type IconName = keyof typeof ICONS;
