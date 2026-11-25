@@ -4,7 +4,7 @@ import { HostRegistry } from "../../src/session/host";
 import { StreamEvent } from "../../src/session/types";
 import { FakeHost, FakeSession } from "./fakes";
 
-function makeWorkspace(model = "gpt-5.6-terra") {
+function makeWorkspace(model = "gpt-5.6-terra", extraCb: Partial<WorkspaceCallbacks> = {}) {
   const host = new FakeHost();
   const registry = new HostRegistry();
   registry.register(host);
@@ -20,6 +20,7 @@ function makeWorkspace(model = "gpt-5.6-terra") {
     },
     onAgentBusy: () => log.push("busy"),
     onAgentIdle: () => log.push("idle"),
+    ...extraCb,
   };
   const ws = new Workspace("ws-1", "test", "proj", "local", "/tmp", registry, cb);
   const agentInfo = ws.addAgent("A", model, "🤖", "#888", {
@@ -1024,6 +1025,48 @@ describe("interrupting a workspace", () => {
     expect(ws.agentInfo(entry).context).toEqual({ tokens: 42000, window: 200000 });
     expect(ws.clearContext(agentInfo.id)).toBe(true);
     expect(ws.agentInfo(entry).context).toBeNull();
+  });
+
+  it("emits agent_updated with context: null on clearContext, and refuses while running", async () => {
+    const updates: Array<{ context: unknown; state: unknown; busy: unknown }> = [];
+    const { ws, session, agentInfo } = makeWorkspace("gpt-5.6-terra", {
+      onAgentUpdated: (_wsId, agent) =>
+        updates.push({ context: agent.context, state: agent.state, busy: agent.busy }),
+    });
+    await ws.sendMessage("hi");
+    session.emit("event", {
+      kind: "result",
+      content: "",
+      context: { tokens: 96_000, window: 1_000_000 },
+    });
+    session.isRunning = false;
+
+    // Refuses while actively running; neither memory nor subscribers clear context.
+    session.isRunning = true;
+    updates.length = 0;
+    expect(ws.clearContext(agentInfo.id)).toBe(false);
+    expect(updates).toEqual([]);
+    expect(ws.getInfo(false).agents[0].context).toEqual({ tokens: 96_000, window: 1_000_000 });
+
+    // Clears context when idle and broadcasts context: null immediately.
+    session.isRunning = false;
+    expect(ws.clearContext(agentInfo.id)).toBe(true);
+    expect(updates).toEqual([{ context: null, state: "idle", busy: false }]);
+    expect(ws.getInfo(false).agents[0].context).toBeNull();
+
+    // Also broadcasts context: null when cleared while waiting (non-running).
+    await ws.sendMessage("again");
+    session.emit("event", {
+      kind: "result",
+      content: "",
+      context: { tokens: 12_000, window: 1_000_000 },
+    });
+    session.isRunning = false;
+    session.emit("runState", "waiting");
+    updates.length = 0;
+    expect(ws.clearContext(agentInfo.id)).toBe(true);
+    expect(updates).toEqual([{ context: null, state: "waiting", busy: false }]);
+    expect(ws.getInfo(false).agents[0].context).toBeNull();
   });
 
   it("renders a turn the backend reports as interrupted like a stop", async () => {

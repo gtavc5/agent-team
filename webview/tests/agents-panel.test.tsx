@@ -516,6 +516,72 @@ describe("the agents panel in the app", () => {
     expect(document.querySelector(".side-panel")).toBeNull();
   });
 
+  for (const state of ["idle", "waiting"] as const) {
+    it(`hides the live context meter on agent_updated with context: null (${state}), matching a fresh snapshot`, () => {
+      const baseAgent =
+        state === "waiting"
+          ? agent("kisara", {
+              state: "waiting",
+              busy: false,
+              backgroundTasks: [
+                { id: "bg-1", type: "bash", description: "sleep 10", since: NOW - 1000 },
+              ],
+              context: { tokens: 96_000, window: 1_000_000 },
+            })
+          : agent("kisara", { context: { tokens: 96_000, window: 1_000_000 } });
+      const used = ws("w1", {
+        name: "modules",
+        projectLink: { projectId: "p1", role: "worker" },
+        agents: [baseAgent],
+      });
+      const sock = boot("w1", [lead, used, w2]);
+      fireEvent.click(document.querySelector(".agents-chip")!);
+      const card = () => document.querySelector('[aria-label="modules"]')!;
+      expect(card().textContent).toContain("96k / 1M");
+
+      act(() => {
+        sock.receive({
+          type: "agent_updated",
+          workspaceId: "w1",
+          agent: { ...baseAgent, context: null },
+        });
+        sock.receive({
+          type: "new_message",
+          workspaceId: "w1",
+          message: {
+            id: "sys-1",
+            kind: "system",
+            agentId: null,
+            content: "A **kisara** context cleared",
+            timestamp: NOW,
+            status: "done",
+          },
+        });
+      });
+
+      expect(card().querySelector(".ap-context")).toBeNull();
+      expect(card().textContent).not.toContain("96k / 1M");
+      // Folded overview brief also matches the fresh snapshot.
+      fireEvent.click(card().querySelector(".ap-toggle")!);
+      const liveBrief = card().querySelector(".ap-brief")!.textContent;
+      if (state === "idle") expect(card().querySelector(".ap-brief-meta")!.textContent).toBe("");
+      else expect(liveBrief).toContain("waiting on background work");
+
+      // Fresh snapshot from init renders the exact same cleared state.
+      const freshUsed = ws("w1", {
+        name: "modules",
+        projectLink: { projectId: "p1", role: "worker" },
+        agents: [{ ...baseAgent, context: null }],
+      });
+      document.body.innerHTML = "";
+      boot("w1", [lead, freshUsed, w2]);
+      fireEvent.click(document.querySelector(".agents-chip")!);
+      expect(card().querySelector(".ap-context")).toBeNull();
+      fireEvent.click(card().querySelector(".ap-toggle")!);
+      expect(card().querySelector(".ap-brief")!.textContent).toBe(liveBrief);
+    });
+  }
+
   it("ignores legacy account updates and offers no account control", () => {
     const sock = boot(
       "lead",

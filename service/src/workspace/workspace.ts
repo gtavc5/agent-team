@@ -2462,12 +2462,12 @@ export class Workspace {
     if (this.dispatchHeld(entry)) return false;
     if (this.hasWork(entry) && entry.input) entry.input.stopped = "user";
     this.dropRetry(entry);
+    entry.lastContext = null;
     if (entry.session.resetContext) entry.session.resetContext();
     else {
       entry.session.abort();
       entry.session.sessionId = null;
     }
-    entry.lastContext = null;
     entry.session.usage = {
       input_tokens: 0,
       output_tokens: 0,
@@ -2477,6 +2477,7 @@ export class Workspace {
       duration_ms: 0,
     };
     this.settleStale(entry);
+    this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
     this.pushSystemMessage(`${entry.info.avatar} **${entry.info.name}** context cleared`);
     return true;
   }

@@ -159,7 +159,7 @@ async function start(base: string, web: string) {
     ws.close();
     return server.close();
   };
-  return { server, frames, send, search, live, stop };
+  return { server, port, frames, send, search, live, stop };
 }
 
 // history.db as it is on disk, through a connection of its own.
@@ -360,4 +360,81 @@ describe("a real server saving histories", () => {
       saved.close();
     }
   });
+
+  for (const state of ["idle", "waiting"] as const) {
+    it(`broadcasts agent_updated with context: null on clear_context (${state}) so live and fresh clients match`, async () => {
+      const { base, web } = seed([
+        ws("ws-a", [
+          msg("u1", "first", 1000, { kind: "user", agentId: null }),
+          msg("a1", "reply", 1001, { context: { tokens: 96_000, window: 1_000_000 } }),
+        ]),
+      ]);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const { port, frames, send, live, stop } = await start(base, web);
+      let freshWs: WebSocket | undefined;
+      try {
+        if (state === "waiting") {
+          const w = live("ws-a") as unknown as {
+            agents: Map<string, { session: FakeSession }>;
+          };
+          w.agents.get("a-1")!.session.emit("runState", "waiting");
+          await until(
+            () =>
+              frames.some(
+                (f) =>
+                  f.type === "agent_updated" &&
+                  f.workspaceId === "ws-a" &&
+                  (f.agent as { state?: string }).state === "waiting",
+              ),
+            "waiting state update",
+          );
+        } else {
+          const init1 = frames.find((f) => f.type === "init") as {
+            workspaces: Array<{ id: string; agents: Array<{ id: string; context?: unknown }> }>;
+          };
+          expect(init1.workspaces.find((w) => w.id === "ws-a")!.agents[0].context).toEqual({
+            tokens: 96_000,
+            window: 1_000_000,
+          });
+        }
+
+        const beforeClear = frames.length;
+        send({ type: "clear_context", workspaceId: "ws-a", agentId: "a-1" });
+        await until(
+          () =>
+            frames
+              .slice(beforeClear)
+              .some((f) => f.type === "agent_updated" && f.workspaceId === "ws-a") &&
+            frames
+              .slice(beforeClear)
+              .some(
+                (f) =>
+                  f.type === "new_message" &&
+                  f.workspaceId === "ws-a" &&
+                  (f.message as Message).content.includes("context cleared"),
+              ),
+          "live clear_context frames",
+        );
+
+        const liveUpdate = frames
+          .slice(beforeClear)
+          .find((f) => f.type === "agent_updated" && f.workspaceId === "ws-a")!;
+        expect(liveUpdate.agent).toMatchObject({ context: null, state, busy: false });
+
+        freshWs = new WebSocket(`ws://127.0.0.1:${port}/`);
+        const freshFrames: Array<Record<string, unknown>> = [];
+        freshWs.on("message", (raw: Buffer) =>
+          freshFrames.push(JSON.parse(raw.toString()) as never),
+        );
+        await until(() => freshFrames.some((f) => f.type === "init"), "fresh client init");
+        const init2 = freshFrames.find((f) => f.type === "init") as {
+          workspaces: Array<{ id: string; agents: Array<Record<string, unknown>> }>;
+        };
+        expect(init2.workspaces.find((w) => w.id === "ws-a")!.agents[0]).toEqual(liveUpdate.agent);
+      } finally {
+        freshWs?.close();
+        await stop();
+      }
+    });
+  }
 });

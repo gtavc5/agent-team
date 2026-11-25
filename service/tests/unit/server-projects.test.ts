@@ -1497,17 +1497,25 @@ describe("server restart with projects", () => {
       );
       expect(archived()).toEqual([]);
 
+      const beforeArchive = frames.length;
       send({ type: "archive_project", projectId: "proj-1", archived: true });
-      await until(() => archived().length === 2, "the project's sessions archived");
+      await until(
+        () =>
+          archived().length === 2 &&
+          frames.slice(beforeArchive).some((f) => f.type === "project_updated"),
+        "the project's sessions archived",
+      );
       expect(archived().sort()).toEqual(["ws-lead", "ws-live"]);
       expect(project().archivedAt).toBeGreaterThan(0);
 
+      const unarchived = () =>
+        frames.filter((f) => f.type === "workspace_unarchived").map((f) => f.workspaceId);
       send({ type: "unarchive_workspace", workspaceId: "ws-w" });
-      await until(() => project().archivedAt === null, "the project back");
-      const unarchived = frames
-        .filter((f) => f.type === "workspace_unarchived")
-        .map((f) => f.workspaceId);
-      expect(unarchived.sort()).toEqual(["ws-lead", "ws-w"]);
+      await until(
+        () => project()?.archivedAt === null && unarchived().length === 2,
+        "the project back",
+      );
+      expect(unarchived().sort()).toEqual(["ws-lead", "ws-w"]);
     } finally {
       await stop();
       log.mockRestore();
