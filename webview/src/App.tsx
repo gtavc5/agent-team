@@ -114,7 +114,7 @@ function compressToBlob(file: File, maxDim = 1600, quality = 0.85): Promise<Blob
   });
 }
 
-async function uploadImage(file: File): Promise<{ name: string; url: string }> {
+export async function uploadImage(file: File): Promise<{ name: string; url: string }> {
   let blob: Blob;
   try {
     blob = await Promise.race([
@@ -126,10 +126,14 @@ async function uploadImage(file: File): Promise<{ name: string; url: string }> {
   } catch {
     blob = file;
   }
-  const contentType = blob instanceof File ? blob.type || "image/jpeg" : "image/jpeg";
+  const contentType = blob.type || "image/jpeg";
   const res = await fetch("upload", {
     method: "POST",
-    headers: { "Content-Type": contentType, "X-Filename": file.name },
+    headers: {
+      "Content-Type": contentType,
+      // Fetch headers require ISO-8859-1; encode non-ASCII names like "截图.png".
+      "X-Filename": encodeURIComponent(file.name),
+    },
     credentials: "include",
     body: blob,
   });

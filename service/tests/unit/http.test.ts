@@ -11,6 +11,7 @@ import * as path from "path";
 import * as zlib from "zlib";
 import { Auth } from "../../src/server/auth";
 import { HttpHandler } from "../../src/server/http";
+import { validatePiAttachments } from "../../src/session/pi";
 import { resolveFilePath } from "../../src/repo/files";
 import type { AuthConfig } from "../../src/config/config";
 import { lsofBinary } from "../lsof";
@@ -353,15 +354,111 @@ describe("uploads and snapshots", () => {
       body: "#!/bin/sh",
     });
     const b = JSON.parse(evil.body.toString()) as { url: string };
-    expect(b.url).toMatch(/^uploads\/\d+-[a-z0-9]+\.sh$/);
+    expect(b.url).toMatch(/^uploads\/\d+-[a-z0-9]+\.jpg$/);
     expect(fs.existsSync(path.join(base, "escape.sh"))).toBe(false);
     expect(fs.readFileSync(path.join(uploads, path.basename(b.url)), "utf-8")).toBe("#!/bin/sh");
+
+    const nulSuffix = await request("/upload", {
+      method: "POST",
+      headers: {
+        Cookie: cookie,
+        "Content-Type": "application/octet-stream",
+        "x-filename": "bad.png%00evil",
+      },
+      body: "plain-bytes",
+    });
+    expect(nulSuffix.status).toBe(200);
+    const c = JSON.parse(nulSuffix.body.toString()) as { url: string; name: string };
+    expect(c.name).toBe("bad.png\0evil");
+    expect(c.url).toMatch(/^uploads\/\d+-[a-z0-9]+\.jpg$/);
 
     const back = await request(`/${a.url}`, { headers: { Cookie: cookie } });
     expect(back.body.toString()).toBe("img");
     expect(back.headers["content-security-policy"]).toBe("sandbox");
     expect((await request("/uploads/none.png", { headers: { Cookie: cookie } })).status).toBe(404);
     expect((await request(`/${a.url}`)).status).toBe(302);
+  });
+
+  it("matches stored upload extension to image magic bytes so re-encoded PNGs pass Pi validation", async () => {
+    const cookie = await login();
+    const jpegBytes = Buffer.from("ffd8ffe000104a46494600010100000100010000ffd9", "hex");
+    const reencodedPng = await request("/upload", {
+      method: "POST",
+      headers: {
+        Cookie: cookie,
+        "Content-Type": "image/jpeg",
+        "X-Filename": "image.png",
+      },
+      body: jpegBytes,
+    });
+    const jpg = JSON.parse(reencodedPng.body.toString()) as { url: string; name: string };
+    expect(jpg.name).toBe("image.png");
+    expect(jpg.url).toMatch(/^uploads\/\d+-[a-z0-9]+\.jpg$/);
+    expect(() => validatePiAttachments(uploads, [path.basename(jpg.url)])).not.toThrow();
+    const servedJpg = await request(`/${jpg.url}`, { headers: { Cookie: cookie } });
+    expect(servedJpg.headers["content-type"]).toBe("image/jpeg");
+
+    const pngBytes = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+    const utf8Png = await request("/upload", {
+      method: "POST",
+      headers: {
+        Cookie: cookie,
+        "Content-Type": "image/png",
+        "X-Filename": encodeURIComponent("屏幕截图.PNG"),
+      },
+      body: pngBytes,
+    });
+    const png = JSON.parse(utf8Png.body.toString()) as { url: string; name: string };
+    expect(png.name).toBe("屏幕截图.PNG");
+    expect(png.url).toMatch(/^uploads\/\d+-[a-z0-9]+\.png$/);
+    expect(() => validatePiAttachments(uploads, [path.basename(png.url)])).not.toThrow();
+    const servedPng = await request(`/${png.url}`, { headers: { Cookie: cookie } });
+    expect(servedPng.headers["content-type"]).toBe("image/png");
+
+    const webpBytes = Buffer.from("52494646100000005745425056503820", "hex");
+    const webpRes = await request("/upload", {
+      method: "POST",
+      headers: {
+        Cookie: cookie,
+        "Content-Type": "image/webp",
+        "X-Filename": "100%.png",
+      },
+      body: webpBytes,
+    });
+    const webp = JSON.parse(webpRes.body.toString()) as { url: string; name: string };
+    expect(webp.name).toBe("100%.png");
+    expect(webp.url).toMatch(/^uploads\/\d+-[a-z0-9]+\.webp$/);
+    expect(() => validatePiAttachments(uploads, [path.basename(webp.url)])).not.toThrow();
+
+    const gifBytes = Buffer.from("GIF89a\x01\x00\x01\x00", "ascii");
+    const gifRes = await request("/upload", {
+      method: "POST",
+      headers: {
+        Cookie: cookie,
+        "Content-Type": "image/gif",
+        "X-Filename": "anim.png",
+      },
+      body: gifBytes,
+    });
+    const gif = JSON.parse(gifRes.body.toString()) as { url: string; name: string };
+    expect(gif.url).toMatch(/^uploads\/\d+-[a-z0-9]+\.gif$/);
+    expect(() => validatePiAttachments(uploads, [path.basename(gif.url)])).not.toThrow();
+  });
+
+  it.each([
+    ["Image/WebP; mode=example", "photo.png", ".webp"],
+    ["application/octet-stream", "photo.PNG", ".png"],
+    ["constructor", "photo.unknown", ".jpg"],
+  ])("restricts fallback to known MIME types and extensions (%s, %s)", async (mime, name, ext) => {
+    const cookie = await login();
+    const res = await request("/upload", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": mime, "X-Filename": name },
+      body: "bytes with no supported signature",
+    });
+    expect(res.status).toBe(200);
+    const uploaded = JSON.parse(res.body.toString()) as { url: string };
+    expect(path.extname(uploaded.url)).toBe(ext);
   });
 
   it("write a layout snapshot under .agent-team/debug", async () => {

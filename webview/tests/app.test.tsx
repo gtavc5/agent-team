@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
 import { render, act, fireEvent, screen, within } from "@testing-library/react";
-import { App } from "../src/App";
+import { App, uploadImage } from "../src/App";
 import * as format from "../src/format";
 import * as telemetry from "../src/telemetry";
 import { AUTO_RELOAD, type AgentInfo, type Message } from "../src/state/useServer";
@@ -961,5 +961,79 @@ describe("debug strip", () => {
     const demo = document.querySelector<HTMLButtonElement>('button[aria-label="Replay demo"]')!;
     fireEvent.click(demo);
     expect(document.querySelector(".sidebar-debug-strip")).not.toBeNull();
+  });
+});
+
+describe("uploadImage", () => {
+  it("uses the compressed Blob's type while keeping the original filename", async () => {
+    const compressed = new Blob(["compressed"], { type: "image/png" });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal(
+      "Image",
+      class {
+        width = 4;
+        height = 4;
+        onload?: () => void;
+        set src(_url: string) {
+          this.onload?.();
+        }
+      },
+    );
+    const createUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:upload-test");
+    const revokeUrl = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const getContext = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue({ drawImage: vi.fn() } as unknown as CanvasRenderingContext2D);
+    // A canvas can fall back to PNG when the requested encoder is unavailable.
+    const toBlob = vi
+      .spyOn(HTMLCanvasElement.prototype, "toBlob")
+      .mockImplementation((callback) => callback(compressed));
+    try {
+      await uploadImage(new File(["original"], "photo.webp", { type: "image/webp" }));
+      expect(toBlob).toHaveBeenCalledWith(expect.any(Function), "image/jpeg", 0.85);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "upload",
+        expect.objectContaining({
+          body: compressed,
+          headers: { "Content-Type": "image/png", "X-Filename": "photo.webp" },
+        }),
+      );
+    } finally {
+      createUrl.mockRestore();
+      revokeUrl.mockRestore();
+      getContext.mockRestore();
+      toBlob.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("encodes non-ASCII filenames in X-Filename and preserves fallback blob Content-Type on image upload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ name: "屏幕截图.png", url: "uploads/1-abc.png" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockImplementation(() => {
+      throw new Error("no canvas in jsdom");
+    });
+    try {
+      const file = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "屏幕截图.png", {
+        type: "image/png",
+      });
+      const res = await uploadImage(file);
+      expect(res).toEqual({ name: "屏幕截图.png", url: "uploads/1-abc.png" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("upload");
+      expect(init.headers).toEqual({
+        "Content-Type": "image/png",
+        "X-Filename": encodeURIComponent("屏幕截图.png"),
+      });
+      expect(init.body).toBe(file);
+    } finally {
+      createObjectURL.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 });
