@@ -764,7 +764,9 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
         <QuotaPanel quota={p.quota} refresh={p.onRefreshQuota} now={now} connected={p.connected} />
       )}
       {p.systemStatus && <SystemStatusPanel status={p.systemStatus} />}
-      {showUsage && <UsageDashboard onClose={() => setShowUsage(false)} />}
+      {showUsage && (
+        <UsageDashboard workspaces={p.workspaces} onClose={() => setShowUsage(false)} />
+      )}
       {deleting && (
         <ConfirmDialog
           telemetryAction="confirm.delete_session"

@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { UsageObservation } from "../../../shared/usage";
 import { DatabaseSync } from "node:sqlite";
 import { piUsage } from "../../src/session/usage-observation";
-import { queryUsage, recordUsage, recordJourney, queryJourney } from "../../src/usage/ledger";
+import { queryUsage, queryJourney } from "../usage-fixtures";
+import { recordUsage, recordJourney } from "../../src/usage/ledger";
 
 let dir: string;
 const obs: UsageObservation = {

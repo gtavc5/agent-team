@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { JourneyEvent, UsageObservation } from "../../../shared/usage";
 import type { RpcMessage } from "../../src/session/codex-rpc";
-import { queryUsage, recordUsage } from "../../src/usage/ledger";
+import { queryUsage } from "../usage-fixtures";
+import { recordUsage } from "../../src/usage/ledger";
 import { loadFixture, readRecording, recordingPath, replay, type Backend } from "./harness";
 
 beforeEach(() => vi.useFakeTimers({ toFake: ["Date"] }));
@@ -50,6 +51,7 @@ it("records only Pi terminal assistant responses, with catalog price and tool id
   expect(usage[2]).toMatchObject({
     id: JSON.stringify(["pi", sessionId, "openai-codex", "id-6"]),
     source: "pi",
+    workspaceId: "ws",
     sessionId,
     unit: "inference",
     model: "gpt-6.2-astra",
@@ -94,6 +96,8 @@ it("records each native Codex thread's last sample once, only after native owner
   const child = usage.filter((row) => row.sessionId !== root);
   expect(parent).toHaveLength(9);
   expect(child).toHaveLength(6);
+  expect(new Set(usage.map((row) => row.workspaceId))).toEqual(new Set(["ws"]));
+  expect(new Set(journey.map((row) => row.workspaceId))).toEqual(new Set(["ws"]));
   const timestamps = usage.map((row) => row.timestamp);
   expect(timestamps).toEqual([...timestamps].sort((a, b) => (a ?? 0) - (b ?? 0)));
   expect(parent[1]).toMatchObject({
@@ -150,6 +154,7 @@ it("keeps stable Codex usage identity across restore and records compaction only
         "01a19c3c-3390-7753-a608-85417eb8a7b6",
       ]),
       source: "codex",
+      workspaceId: "ws",
       sessionId: usage[0].sessionId,
       turnId: "01a19c3c-2f4f-72f3-8c12-14c490e1c13e",
       timestamp: 1793622558406,

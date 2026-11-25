@@ -175,6 +175,26 @@ describe("session cookies", () => {
   });
 });
 
+it("requires auth for bounded usage queries and never serves the retired full-history response", async () => {
+  const headers = { Cookie: await login() };
+  for (const route of ["overview", "journey"])
+    expect((await request(`/api/usage/${route}`)).status).toBe(302);
+  expect((await request("/api/usage", { headers })).status).toBe(404);
+  expect((await request("/api/usage/overview?unit=all", { headers })).status).toBe(400);
+  expect((await request("/api/usage/journey?cursor=invalid", { headers })).status).toBe(400);
+  const overview = await request("/api/usage/overview", { headers });
+  expect(overview.status).toBe(200);
+  expect(overview.headers["cache-control"]).toBe("no-store");
+  expect(JSON.parse(overview.body.toString())).toMatchObject({
+    count: 0,
+    ranking: [],
+    incompleteSources: 0,
+  });
+  expect(JSON.parse(overview.body.toString())).not.toHaveProperty("observations");
+  const page = await request("/api/usage/journey?unit=turn&session=sample", { headers });
+  expect(JSON.parse(page.body.toString())).toMatchObject({ rows: [], nextCursor: null });
+});
+
 it("serves the same runtime facts in both formats only after authentication", async () => {
   const headers = { Cookie: await login() };
   for (const suffix of ["", "?format=text"]) {

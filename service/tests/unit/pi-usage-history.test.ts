@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it, expect } from "vitest";
 import { piUsage } from "../../src/session/usage-observation";
-import { recordUsage, queryUsage, queryJourney } from "../../src/usage/ledger";
+import { queryUsage, queryJourney } from "../usage-fixtures";
+import { recordUsage } from "../../src/usage/ledger";
 import { syncPi } from "../../src/usage/sync";
 
 it("joins live and persisted Pi evidence once, resuming after an incomplete line", () => {

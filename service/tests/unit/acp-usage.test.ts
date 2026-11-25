@@ -4,7 +4,9 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { syncAcp } from "../../src/usage/sync";
-import { queryUsage } from "../../src/usage/ledger";
+import { queryUsage } from "../usage-fixtures";
+import { withLedger } from "../../src/usage/ledger";
+import { journey, overview } from "../../src/usage/queries";
 import { discoverAcpUsageSources, readAcpUsage } from "../../src/usage/acp";
 
 const piId = "00000000-0000-0000-0000-000000000001";
@@ -157,8 +159,33 @@ describe("readAcpUsage", () => {
         }),
       ]),
     );
+    const bindings = () =>
+      withLedger(base, (db) => db.prepare("SELECT * FROM usage_workspace").all());
+    expect(bindings()).toEqual([]);
+    writeFileSync(
+      join(sessions, `sample_${piId}.jsonl`),
+      JSON.stringify({ type: "session", version: 3, id: piId }) + "\n",
+    );
     expect(syncAcp(base, home)).toBe(0);
     expect(queryUsage(base)).toEqual(rows);
+    expect(bindings()).toEqual([{ source: "acp", session: acpId, workspace: "ws-sample" }]);
+    const q = { since: 1795572937358, until: 1795578754154, unit: "inference", model } as const;
+    expect(overview(base, q)).toMatchObject({
+      count: 2,
+      eligible: 2,
+      at96: 0,
+      unpriced: 2,
+      input: 98390,
+      cacheRead: 143166,
+      cacheWrite: 0,
+      output: 530,
+      ranking: [{ model, tokens: 242086 }],
+    });
+    expect(journey(base, q)).toEqual({
+      rows: [rows.find((row) => row.id === "1"), rows.find((row) => row.id === "70")],
+      nextCursor: null,
+    });
+    expect(overview(base, { ...q, workspace: "ws-sample" }).count).toBe(1);
   });
 
   it("keeps usage with unknown generation time and model", () => {

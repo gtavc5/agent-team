@@ -147,14 +147,27 @@ it("opens the usage ledger and reopens the same observation after reload", async
     async (page) => {
       for (const reload of [false, true]) {
         if (reload) await page.reload();
-        await page.getByRole("button", { name: "Usage", exact: true }).click();
+        const [overview] = await Promise.all([
+          page.waitForResponse((res) => new URL(res.url()).pathname === "/api/usage/overview"),
+          page.getByRole("button", { name: "Usage", exact: true }).click(),
+        ]);
+        expect(await overview.json()).toMatchObject({
+          count: 1,
+          cacheRead: 143166,
+          input: 23325,
+          unpriced: 1,
+        });
         const dashboard = page.getByRole("dialog", { name: "Usage dashboard" });
-        await dashboard.getByRole("button", { name: "Journey", exact: true }).click();
-        await dashboard.getByText("offline-acceptance-model", { exact: true }).waitFor();
-        await dashboard
-          .getByText(/143,166 cache read/)
-          .first()
-          .waitFor();
+        await expect.poll(() => dashboard.locator('svg[role="img"]').count()).toBe(2);
+        const [journey] = await Promise.all([
+          page.waitForResponse((res) => new URL(res.url()).pathname === "/api/usage/journey"),
+          dashboard.getByRole("button", { name: "Journey", exact: true }).click(),
+        ]);
+        expect(await journey.json()).toMatchObject({
+          rows: [{ id: "70", cacheRead: 143166, model: "offline-acceptance-model" }],
+          nextCursor: null,
+        });
+        await dashboard.getByText("offline-acceptance-model", { exact: true }).first().waitFor();
       }
     },
     ({ baseDir }) =>
@@ -163,7 +176,7 @@ it("opens the usage ledger and reopens the same observation after reload", async
         unit: "inference",
         id: "70",
         sessionId: "offline-acp",
-        timestamp: 1795578754153,
+        timestamp: Date.now() - 1000,
         model: "offline-acceptance-model",
         input: 23325,
         cacheRead: 143166,

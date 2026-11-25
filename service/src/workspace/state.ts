@@ -117,6 +117,17 @@ export function saveIndex(baseDir: string, workspaceIds: string[]): void {
   writeJson(indexPath(baseDir), { workspaceIds });
 }
 
+/** Read indexed metadata without opening histories or migrating workspace files. */
+export function* readWorkspaceMetadata(baseDir: string): Iterable<WorkspaceState> {
+  const index = readJson<StateIndex>(indexPath(baseDir));
+  if (!Array.isArray(index?.workspaceIds)) return;
+  for (const id of index.workspaceIds) {
+    if (typeof id !== "string" || !/^[a-zA-Z0-9_-]+$/.test(id)) continue;
+    const state = readJson<WorkspaceState>(metaPath(baseDir, id));
+    if (state?.id === id && Array.isArray(state.agents)) yield state;
+  }
+}
+
 export function loadAll(baseDir: string): WorkspaceState[] {
   const index = readJson<StateIndex>(indexPath(baseDir));
   if (!index) return [];

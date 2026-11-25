@@ -573,7 +573,7 @@ async function replayPi(
           { ...config, agentId, piAgentDir: dir, uploadsDir },
           {
             panelHttp: panel,
-            recordUsage: usageRecorder?.recordUsage,
+            recordUsage: this.workspaceUsageRecorder(config.workspaceId)?.recordUsage,
             rpcFactory: player.connect,
             readyTimeoutMs: 1500,
             // RPC is replayed; readiness needs an executable but never launches it.
@@ -585,7 +585,7 @@ async function replayPi(
         session.on("runState", (state: string) => states.push(state));
         return session;
       }
-    })("local", "Local"),
+    })("local", "Local", undefined, usageRecorder),
   );
   const callbacks: WorkspaceCallbacks = {
     onNewMessage: () => {},

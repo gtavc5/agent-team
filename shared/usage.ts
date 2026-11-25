@@ -4,6 +4,7 @@ export interface JourneyEvent {
   sessionId: string;
   turnId?: string;
   timestamp: number | null;
+  workspaceId?: string;
   kind: "tool" | "compaction";
   name: string;
 }
@@ -26,9 +27,39 @@ export interface UsageObservation {
   cacheRead: number;
   cacheWrite: number;
   output: number;
+  workspaceId?: string;
   piSessionId?: string;
   channel?: string;
   turnId?: string;
   toolCalls?: { id: string; name: string }[];
   price: UsagePrice;
+}
+
+export interface UsageFilters {
+  since: number;
+  until: number;
+  unit: UsageObservation["unit"];
+  source?: UsageObservation["source"];
+  channel?: string;
+  model?: string;
+  workspace?: string;
+  session?: string;
+  turn?: string;
+}
+
+type TokenCounts = Pick<UsageObservation, "input" | "cacheRead" | "cacheWrite" | "output">;
+export interface UsageOverview extends TokenCounts {
+  count: number;
+  promptBearing: number;
+  eligible: number;
+  at96: number;
+  unpriced: number;
+  costs: Record<Exclude<UsagePrice["kind"], "unpriced">, number | null>;
+  trend: ({ day: string } & TokenCounts)[];
+  ranking: { model: string | null; tokens: number }[];
+}
+
+export interface UsageJourney {
+  rows: (UsageObservation | JourneyEvent)[];
+  nextCursor: string | null;
 }

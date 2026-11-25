@@ -5,6 +5,7 @@ import type * as http from "http";
 import * as path from "path";
 import { pipeline } from "stream";
 import * as zlib from "zlib";
+import { parseUsageRequest, type UsageRequest } from "../usage/request";
 import { usageView } from "../usage/service";
 import type { Auth } from "./auth";
 import { formatReport, type RuntimeReport } from "../config/diagnostics";
@@ -103,10 +104,26 @@ export class HttpHandler {
         return;
       }
 
-      if (req.method === "GET" && pathname === "/api/usage") {
-        void usageView(this.baseDir).then(
+      if (
+        req.method === "GET" &&
+        (pathname === "/api/usage/overview" || pathname === "/api/usage/journey")
+      ) {
+        let request: UsageRequest;
+        try {
+          request = parseUsageRequest(
+            pathname === "/api/usage/overview" ? "overview" : "journey",
+            url.searchParams,
+          );
+        } catch {
+          json(res, 400, { error: "Invalid usage filters" });
+          return;
+        }
+        void usageView(this.baseDir, request).then(
           (view) => json(res, 200, view),
-          () => json(res, 503, { error: "Usage data unavailable" }),
+          (error: unknown) =>
+            error instanceof RangeError
+              ? json(res, 400, { error: "Invalid usage query" })
+              : json(res, 503, { error: "Usage data unavailable" }),
         );
         return;
       }

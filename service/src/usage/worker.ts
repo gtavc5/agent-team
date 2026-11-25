@@ -1,3 +1,8 @@
 import { parentPort, workerData } from "node:worker_threads";
-import { syncSources } from "./sync";
-parentPort!.postMessage(syncSources((workerData as { baseDir: string }).baseDir));
+import { runUsageJob, type UsageJob } from "./service";
+try {
+  parentPort!.postMessage({ result: runUsageJob(workerData as UsageJob) });
+} catch (error) {
+  if (!(error instanceof RangeError)) throw error;
+  parentPort!.postMessage({ invalid: true });
+}

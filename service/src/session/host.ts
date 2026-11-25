@@ -152,15 +152,26 @@ export class LocalHost implements Host {
     return session;
   }
 
+  protected workspaceUsageRecorder(workspaceId?: string): UsageRecorder | undefined {
+    const recorder = this.usageRecorder;
+    if (!recorder || !workspaceId) return recorder;
+    // Native ownership is established by the backend before emitting a fact.
+    return {
+      recordUsage: (fact) => recorder.recordUsage({ ...fact, workspaceId }),
+      recordJourney: (event) => recorder.recordJourney({ ...event, workspaceId }),
+    };
+  }
+
   createSession(agentId: string, config: SessionConfig): HostSessionHandle {
     if (this.closing) throw new Error("LocalHost is closing");
+    const recorder = this.workspaceUsageRecorder(config.workspaceId);
     let session: HostSessionHandle;
     if (config.backend === "codex") {
-      session = new CodexSession(config, this.usageRecorder);
+      session = new CodexSession(config, recorder);
     } else if (config.backend === "pi") {
       session = new PiSession(
         { ...config, agentId },
-        { panelHttp: this.getPanelHttp(), recordUsage: this.usageRecorder?.recordUsage },
+        { panelHttp: this.getPanelHttp(), recordUsage: recorder?.recordUsage },
       );
     } else {
       throw new Error(`Backend "${config.backend ?? "unknown"}" cannot create new sessions`);
@@ -198,13 +209,14 @@ export class LocalHost implements Host {
 
   restoreSession(agentId: string, state: SessionState): HostSessionHandle {
     if (this.closing) throw new Error("LocalHost is closing");
+    const recorder = this.workspaceUsageRecorder(state.config.workspaceId);
     let session: HostSessionHandle;
     if (state.config.backend === "codex") {
-      session = CodexSession.fromState(state, this.usageRecorder);
+      session = CodexSession.fromState(state, recorder);
     } else if (state.config.backend === "pi") {
       session = PiSession.fromState(
         { ...state, config: { ...state.config, agentId } },
-        { panelHttp: this.getPanelHttp(), recordUsage: this.usageRecorder?.recordUsage },
+        { panelHttp: this.getPanelHttp(), recordUsage: recorder?.recordUsage },
       );
     } else {
       session = new ReadOnlyLegacySession(state);

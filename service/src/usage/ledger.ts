@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from "nod
 import { randomUUID } from "node:crypto";
 import { writeAtomicJson } from "../storage/atomic-write";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLOutputValue } from "node:sqlite";
 import type { JourneyEvent, UsageObservation, UsagePrice } from "../../../shared/usage";
 import { entryPrice, readPrices, type Prices } from "./pricing";
 
@@ -14,8 +14,23 @@ export function withLedger<T>(baseDir: string, work: (db: DatabaseSync) => T): T
   try {
     chmodSync(file, 0o600);
     db.exec("PRAGMA busy_timeout=50");
-    if (!db.prepare("PRAGMA user_version").get()?.user_version)
-      db.exec(`PRAGMA journal_mode=WAL; BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS observations (
+    if (schemaVersion(db) < 2) migrate(db);
+    return work(db);
+  } finally {
+    db.close();
+  }
+}
+
+const schemaVersion = (db: DatabaseSync) =>
+  Number(db.prepare("PRAGMA user_version").get()?.user_version);
+
+function migrate(db: DatabaseSync): void {
+  if (schemaVersion(db) === 0) db.exec("PRAGMA journal_mode=WAL");
+  db.exec("BEGIN IMMEDIATE");
+  // Recheck under the write lock: both the service and import worker can open a fresh ledger.
+  const version = schemaVersion(db);
+  if (version === 0)
+    db.exec(`CREATE TABLE IF NOT EXISTS observations (
       source TEXT NOT NULL, session TEXT NOT NULL, id TEXT NOT NULL, fact TEXT NOT NULL,
       PRIMARY KEY (source,session,id)
     ); CREATE TABLE IF NOT EXISTS acp_cursor (session TEXT PRIMARY KEY, idx INTEGER NOT NULL, partial INTEGER NOT NULL);
@@ -26,11 +41,22 @@ export function withLedger<T>(baseDir: string, work: (db: DatabaseSync) => T): T
     ); CREATE TABLE IF NOT EXISTS receipts (
       source TEXT NOT NULL, session TEXT NOT NULL, id TEXT NOT NULL, dated TEXT NOT NULL, usd REAL NOT NULL,
       PRIMARY KEY (source,session,id)
-    ); PRAGMA user_version=1; COMMIT;`);
-    return work(db);
-  } finally {
-    db.close();
-  }
+    );`);
+  if (version < 2)
+    db.exec(`ALTER TABLE observations ADD COLUMN timestamp REAL AS (json_extract(fact,'$.timestamp'));
+    ALTER TABLE observations ADD COLUMN unit TEXT AS (json_extract(fact,'$.unit'));
+    ALTER TABLE journey ADD COLUMN timestamp REAL AS (json_extract(fact,'$.timestamp'));
+    CREATE INDEX observations_unit_time ON observations(unit,timestamp,source,session,id);
+    CREATE INDEX journey_time ON journey(timestamp,source,session,id);
+    CREATE INDEX observations_session_time ON observations(session,unit,timestamp,source,id);
+    CREATE INDEX journey_session_time ON journey(session,timestamp,source,id);
+    CREATE TABLE IF NOT EXISTS usage_workspace (
+      source TEXT NOT NULL, session TEXT NOT NULL, workspace TEXT NOT NULL,
+      PRIMARY KEY (source,session,workspace)
+    );
+    CREATE INDEX IF NOT EXISTS usage_workspace_workspace ON usage_workspace(workspace,source,session);
+    PRAGMA user_version=2;`);
+  db.exec("COMMIT");
 }
 
 export function insertObservation(db: DatabaseSync, obs: UsageObservation, prices: Prices): void {
@@ -40,13 +66,7 @@ export function insertObservation(db: DatabaseSync, obs: UsageObservation, price
     )
   )
     return;
-  const fact = { ...obs, price: entryPrice(obs, prices) };
-  db.prepare("INSERT OR IGNORE INTO observations VALUES (?, ?, ?, ?)").run(
-    obs.source,
-    obs.sessionId,
-    obs.id,
-    JSON.stringify(fact),
-  );
+  insertLive(db, { ...obs, price: entryPrice(obs, prices) });
 }
 
 /** An unavailable observer must not interrupt a running assistant turn. */
@@ -60,6 +80,12 @@ export function recordJourney(baseDir: string, event: JourneyEvent): void {
 
 type Fact = UsageObservation | JourneyEvent;
 function insertLive(db: DatabaseSync, fact: Fact) {
+  if (fact.workspaceId !== undefined)
+    db.prepare("INSERT OR IGNORE INTO usage_workspace(source,session,workspace) VALUES(?,?,?)").run(
+      fact.source,
+      fact.sessionId,
+      fact.workspaceId,
+    );
   const table = "kind" in fact ? "journey" : "observations";
   db.prepare(`INSERT OR IGNORE INTO ${table} VALUES(?,?,?,?)`).run(
     fact.source,
@@ -101,38 +127,42 @@ function recover(baseDir: string, db: DatabaseSync) {
   }
 }
 
-export function queryJourney(baseDir: string): JourneyEvent[] {
-  return withLedger(baseDir, (db) => {
+/** Collector maintenance: replay pending writes and reconcile the configured receipts. */
+export function maintainUsageLedger(baseDir: string): void {
+  const prices = readPrices(baseDir);
+  withLedger(baseDir, (db) => {
     recover(baseDir, db);
-    return db
-      .prepare("SELECT fact FROM journey ORDER BY rowid")
-      .all()
-      .map((row) => JSON.parse(String(row.fact)) as JourneyEvent);
+    if (!prices.receipts.length) return;
+    const reconcile = db.prepare(`INSERT INTO receipts VALUES(?,?,?,?,?)
+      ON CONFLICT(source,session,id) DO UPDATE SET dated=excluded.dated,usd=excluded.usd
+      WHERE dated < excluded.dated OR (dated = excluded.dated AND usd <> excluded.usd)`);
+    db.exec("BEGIN IMMEDIATE");
+    for (const receipt of prices.receipts)
+      reconcile.run(receipt.source, receipt.sessionId, receipt.id, receipt.asOf, receipt.usd);
+    db.exec("COMMIT");
   });
 }
 
-export function queryUsage(baseDir: string): UsageObservation[] {
-  const prices = readPrices(baseDir);
+/** Keep a consistent snapshot without doing collector maintenance on every page. */
+export function withUsageSnapshot<T>(baseDir: string, work: (db: DatabaseSync) => T): T {
   return withLedger(baseDir, (db) => {
-    recover(baseDir, db);
-    const reconcile = db.prepare(
-      `INSERT INTO receipts VALUES(?,?,?,?,?) ON CONFLICT(source,session,id) DO UPDATE SET dated=excluded.dated,usd=excluded.usd WHERE dated <= excluded.dated`,
-    );
-    for (const receipt of prices.receipts)
-      reconcile.run(receipt.source, receipt.sessionId, receipt.id, receipt.asOf, receipt.usd);
-    return db
-      .prepare(
-        `SELECT fact, dated, usd FROM observations LEFT JOIN receipts USING(source,session,id) ORDER BY observations.rowid`,
-      )
-      .all()
-      .map((row) => {
-        const obs = JSON.parse(String(row.fact)) as UsageObservation;
-        // The estimate stays in the ledger, but the payable amount is only the matched receipt.
-        const price: UsagePrice =
-          row.dated === null
-            ? obs.price
-            : { kind: "reported", usd: Number(row.usd), asOf: String(row.dated) };
-        return { ...obs, price };
-      });
+    db.exec("BEGIN");
+    const result = work(db);
+    db.exec("COMMIT");
+    return result;
   });
+}
+
+export function observationFromRow(row: {
+  fact: SQLOutputValue;
+  dated: SQLOutputValue;
+  usd: SQLOutputValue;
+}): UsageObservation {
+  const obs = JSON.parse(String(row.fact)) as UsageObservation;
+  // The estimate stays in the ledger, but the payable amount is only the matched receipt.
+  const price: UsagePrice =
+    row.dated === null
+      ? obs.price
+      : { kind: "reported", usd: Number(row.usd), asOf: String(row.dated) };
+  return { ...obs, price };
 }
