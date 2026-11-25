@@ -130,7 +130,7 @@ it("unfolds a right-aligned icon desktop strip without layout shift, focus theft
   expect(trigger.getAttribute("aria-expanded")).toBe("true");
   expect(trigger.getAttribute("aria-pressed")).toBe("true");
   expect(style(trigger).backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
-  expect(style(strip).animationName).toBe("sidebar-debug-unfold");
+  expect(style(strip).animationName).toBe("chrome-reveal");
   expect(style(strip).visibility).toBe("visible");
   await expect.poll(() => style(strip).opacity).toBe("1");
   expect(rect(strip).top).toBeCloseTo(rect(header).bottom, 0);

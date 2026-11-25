@@ -42,7 +42,6 @@ it.each([390, 520, 600, 960])("keeps the folded streaming turn stable at %ipx", 
 
   const view = () => (
     <div className="messages">
-      <style>{"* { animation: none !important; transition: none !important; }"}</style>
       <MessageItem msg={msg} agents={agents} />
     </div>
   );

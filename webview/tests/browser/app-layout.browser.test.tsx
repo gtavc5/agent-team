@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { page, userEvent } from "vitest/browser";
+import { cdp, page, userEvent } from "vitest/browser";
+import type {} from "@vitest/browser-playwright";
 import { App } from "../../src/App";
 import type { AgentInfo, Message } from "../../src/state/useServer";
 import { FakeSocket } from "../fakeSocket";
@@ -124,6 +125,26 @@ it("follows a growing tail only until the reader moves up, and resumes at the bo
   move(scroll, scroll.scrollHeight);
   await grow();
   await bottom(scroll);
+});
+
+it("pins a new streaming turn immediately without entry or smooth scrolling", async () => {
+  const { scroll, receive } = await boot();
+  const live = turn(99, { status: "streaming" });
+  receive({ type: "new_message", message: live });
+  expect(gap(scroll)).toBeLessThanOrEqual(1);
+  const message = get("#msg-m99");
+  const content = get("#msg-m99 .message-content");
+  expect(scroll.getAnimations()).toEqual([]);
+  expect(message.getAnimations()).toEqual([]);
+  expect(content.getAnimations({ subtree: true })).toEqual([]);
+  receive({
+    type: "stream_event",
+    messageId: live.id,
+    event: { kind: "text_delta", content: "\n\nMore arriving text." },
+  });
+  await nextPaint();
+  expect(gap(scroll)).toBeLessThanOrEqual(1);
+  expect(content.getAnimations({ subtree: true })).toEqual([]);
 });
 
 function reply(i: number, messageId: string) {
@@ -251,20 +272,30 @@ it("keeps the visible history anchored even if new content grows below while pag
   const target = get("#msg-m2");
   const top = target.getBoundingClientRect().top;
   receive({
-    type: "message",
+    type: "new_message",
     message: turn(99, {
       content: "Streaming reply growing below while older history loads.\n\n".repeat(12),
     }),
   });
   await nextPaint();
+  expect(get("#msg-m99")).toBeTruthy();
+  expect(target.getBoundingClientRect().top).toBeCloseTo(top, 0);
+  const code = "```ts\nconst long = '" + "abcdef".repeat(90) + "';\n```";
   receive({
     type: "workspace_messages",
     before: history[0].timestamp,
-    messages: [turn(-2), turn(-1)],
+    messages: [turn(-2, { content: code }), turn(-1)],
     hasMore: false,
   });
+  const paged = get("#msg-m-2");
+  const codeScroll = get("#msg-m-2 pre code");
+  expect(codeScroll.scrollWidth).toBeGreaterThan(codeScroll.clientWidth + 100);
+  expect(scroll.scrollWidth).toBe(scroll.clientWidth);
+  codeScroll.scrollLeft = 100;
+  expect(codeScroll.scrollLeft).toBe(100);
+  expect(paged.getAnimations({ subtree: true })).toEqual([]);
+  expect(target.getBoundingClientRect().top).toBeCloseTo(top, 0);
   await nextPaint();
-  expect(get("#msg-m-2")).toBeTruthy();
   expect(target.getBoundingClientRect().top).toBeCloseTo(top, 0);
 });
 
@@ -435,21 +466,46 @@ it("keeps the scroll position and draft caret across reconnect", async () => {
   );
 });
 
-it("intercepts the second tap above the closing sidebar", async () => {
-  await boot([], [ws, { ...ws, id: "other", name: "Other workspace" }]);
-  fireEvent.click(get(".mobile-menu-btn"));
-  const target = [...document.querySelectorAll<HTMLElement>(".task-item")].find((row) =>
-    row.textContent?.includes("Other workspace"),
-  )!;
-  await expect.poll(() => target.getBoundingClientRect().left).toBeGreaterThanOrEqual(0);
-  const { x, y, width, height } = target.getBoundingClientRect();
-  fireEvent.click(target);
-  const shield = get(".sidebar-overlay.closing");
-  expect(document.elementFromPoint(x + width / 2, y + height / 2)).toBe(shield);
-  fireEvent.click(shield);
-  expect(document.querySelector(".sidebar-open")).toBeNull();
-  await expect.poll(() => document.querySelector(".sidebar-overlay")).toBeNull();
-});
+it.each(["no-preference", "reduce"])(
+  "opens the mobile drawer in place and shields a second tap (%s)",
+  async (motion) => {
+    const session = cdp();
+    await session.send("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: motion }],
+    });
+    try {
+      const { scroll } = await boot([], [ws, { ...ws, id: "other", name: "Other workspace" }]);
+      move(scroll, 220);
+      const geometry = () => {
+        const { x, y, width, height } = scroll.getBoundingClientRect();
+        return [x, y, width, height, scroll.scrollTop];
+      };
+      const before = geometry();
+      fireEvent.click(get(".mobile-menu-btn"));
+      const sidebar = get(".sidebar-open");
+      expect(sidebar.getBoundingClientRect().left).toBe(0);
+      expect(getComputedStyle(sidebar).animationName).toBe(
+        motion === "reduce" ? "none" : "chrome-reveal",
+      );
+      expect(geometry()).toEqual(before);
+      await nextPaint();
+      expect(geometry()).toEqual(before);
+      const target = [...document.querySelectorAll<HTMLElement>(".task-item")].find((item) =>
+        item.textContent?.includes("Other workspace"),
+      )!;
+      const { x, y, width, height } = target.getBoundingClientRect();
+      fireEvent.click(target);
+      expect(sidebar.getBoundingClientRect().right).toBe(0);
+      const shield = get(".sidebar-overlay.closing");
+      expect(document.elementFromPoint(x + width / 2, y + height / 2)).toBe(shield);
+      fireEvent.click(shield);
+      expect(document.querySelector(".sidebar-open")).toBeNull();
+      await expect.poll(() => document.querySelector(".sidebar-overlay")).toBeNull();
+    } finally {
+      await session.send("Emulation.setEmulatedMedia", { features: [] });
+    }
+  },
+);
 
 it("heals the shell without moving a reader, then can settle the transcript at the end", async () => {
   const { scroll } = await boot();

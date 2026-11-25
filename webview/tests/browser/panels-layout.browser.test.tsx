@@ -161,7 +161,7 @@ it("uses the sidebar type scale and hover affordance on archived project rows", 
   fireEvent.click(get(container, ".ws-shelf .ws-archived-header"));
   const restore = get(container, '.ws-shelf button[title^="Bring"]');
   const row = restore.closest(".ws-group-header")!;
-  expect(style(restore).borderRadius).toBe("8px");
+  expect(style(restore).borderRadius).toBe("5px");
   expect(style(restore).opacity).toBe("0");
   await page.elementLocator(row).hover();
   await expect.poll(() => style(restore).opacity).toBe("1");

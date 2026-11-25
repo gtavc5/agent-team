@@ -153,6 +153,7 @@ it("fits at 390×844 and toggles, dismisses and stops a turn using real touch in
   await page.viewport(390, 844);
   expect(matchMedia("(hover: none)").matches).toBe(true);
   const { row, composer, trigger, popup, checkBounds, sock } = boot();
+  expect(getComputedStyle(trigger).borderRadius).toBe("17px");
   const badge = trigger.querySelector(".stop-count")!;
   expect(
     trigger.getBoundingClientRect().right - badge.getBoundingClientRect().right,

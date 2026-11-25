@@ -424,7 +424,7 @@ export function App() {
   const [sidebarWidth, setSidebarWidth] = useState(260);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // The drawer's overlay outlives it a moment: the second tap of a double
-  // tap on a session lands on it, not on whatever the closing drawer uncovers.
+  // tap on a session lands on it, not on whatever the drawer just uncovered.
   const [sidebarShield, setSidebarShield] = useState(false);
   useEffect(() => {
     if (sidebarOpen) {
@@ -1151,11 +1151,11 @@ export function App() {
       el.scrollTop = anchor.top + delta;
       return;
     }
-    if (prevCount === 0 && msgs.length > 0) {
-      messagesEndRef.current?.scrollIntoView();
-    } else if (msgs.length > prevCount) {
-      if (!userScrolledUpRef.current) {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (msgs.length > prevCount) {
+      // A new turn may already be growing. Pin immediately rather than
+      // starting a smooth scroll that competes with the next delta.
+      if (prevCount === 0 || !userScrolledUpRef.current) {
+        messagesEndRef.current?.scrollIntoView();
       }
     } else if (stuckToBottomRef.current && (streaming || wasStreaming)) {
       if (el) el.scrollTop = el.scrollHeight;

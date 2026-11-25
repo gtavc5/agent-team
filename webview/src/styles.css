@@ -46,8 +46,10 @@
   --purple-soft: color-mix(in srgb, var(--purple) 10%, transparent);
   --scrollbar-thumb: color-mix(in srgb, var(--text-muted) 32%, transparent);
   --scrollbar-thumb-hover: color-mix(in srgb, var(--text-muted) 55%, transparent);
-  --radius: 8px;
   --radius-sm: 5px;
+  --radius: 8px;
+  --radius-overlay: 12px;
+  --motion-quick: 120ms;
   /* Bundled (src/fonts): one font for Latin and Chinese, drawn to sit
      together, the same on every device. */
   --font-mono: "Sarasa Mono SC", "Cascadia Code", Consolas, "JetBrains Mono", Menlo, monospace;
@@ -371,8 +373,7 @@ button {
   padding: 0 12px 8px 16px;
   overflow: hidden;
   color: var(--text-secondary);
-  transform-origin: top;
-  animation: sidebar-debug-unfold 160ms ease-out;
+  animation: chrome-reveal var(--motion-quick) ease-out;
 }
 .sidebar-debug-action {
   position: relative;
@@ -433,21 +434,12 @@ button {
 .sidebar-debug-status-error {
   color: var(--error);
 }
-@keyframes sidebar-debug-unfold {
+@keyframes chrome-reveal {
   from {
-    opacity: 0;
-    transform: translateY(-4px);
-    clip-path: inset(0 0 100% 0);
+    opacity: 0.65;
   }
   to {
     opacity: 1;
-    transform: translateY(0);
-    clip-path: inset(0);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .sidebar-debug-strip {
-    animation: none;
   }
 }
 
@@ -508,7 +500,7 @@ button {
 .search-result-item {
   padding: 8px 14px;
   cursor: pointer;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   margin: 0 6px;
 }
 .search-result-item:hover {
@@ -561,7 +553,7 @@ button {
   font-weight: 600;
   color: var(--text-primary);
   min-width: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
 }
 .ws-group-header.active {
   background: var(--bg-active);
@@ -660,7 +652,7 @@ button {
   font-size: var(--fs-tag);
   font-weight: 500;
   background: var(--bg-tertiary);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 0 6px;
   line-height: 15px;
 }
@@ -679,7 +671,7 @@ button {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   min-width: 0;
 }
 .task-item:hover {
@@ -789,7 +781,7 @@ button {
   min-width: 16px;
   height: 16px;
   padding: 0 5px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--accent-solid);
   color: var(--on-solid);
   font-size: var(--fs-tag);
@@ -805,7 +797,7 @@ button {
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   background: var(--accent-soft);
   color: var(--accent-text);
   font-size: var(--fs-tag);
@@ -856,7 +848,7 @@ button {
   font-size: var(--fs-tag);
   padding: 0 6px;
   line-height: 15px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   opacity: 0;
 }
@@ -878,7 +870,7 @@ button {
   gap: 6px;
   margin: 1px 0 1px 4px;
   padding: 3px 8px 3px 10px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   font-size: var(--fs-meta);
   color: var(--text-muted);
   cursor: pointer;
@@ -901,7 +893,7 @@ button {
   color: var(--text-secondary);
   background: none;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   opacity: 0;
 }
@@ -943,7 +935,7 @@ button {
   overflow-y: auto;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
 }
 .dir-suggest-item {
   padding: 5px 10px;
@@ -1007,7 +999,7 @@ button {
   color: var(--text-secondary);
   background: var(--bg-primary);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 .agents-chip:hover,
@@ -1098,7 +1090,7 @@ button {
   font-size: 10px;
   line-height: 14px;
   padding: 0 5px;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
   color: var(--text-muted);
 }
@@ -1139,7 +1131,7 @@ button {
   font-size: 10px;
   line-height: 14px;
   padding: 0 6px;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
   color: var(--text-muted);
 }
@@ -1189,7 +1181,7 @@ button {
   gap: 12px;
   margin-top: 8px;
   padding: 6px 10px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   background: var(--warning-soft);
   border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
   color: var(--warning);
@@ -1332,11 +1324,6 @@ button {
   height: 5px;
   vertical-align: middle;
 }
-@media (prefers-reduced-motion: reduce) {
-  .delivery-inline .streaming-dot {
-    animation: none;
-  }
-}
 .compact-header {
   display: flex;
   align-items: center;
@@ -1360,7 +1347,7 @@ button {
   font-size: 10.5px;
   line-height: 16px;
   padding: 0 7px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
@@ -1469,7 +1456,7 @@ button {
   position: relative;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   padding: 10px 12px;
   margin: 8px 0;
   overflow-x: auto;
@@ -1835,7 +1822,7 @@ span.katex-display {
   font-weight: 600;
   line-height: 16px;
   padding: 0 7px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   letter-spacing: 0.2px;
   background: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -1888,7 +1875,7 @@ span.katex-display {
   padding: 8px 10px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   font-size: 12px;
   color: var(--text-secondary);
   white-space: pre-wrap;
@@ -1993,7 +1980,7 @@ span.katex-display {
   gap: 8px;
   margin: 5px 0;
   padding: 5px 10px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   font-size: 12px;
   border: 1px solid var(--border);
   background: var(--bg-secondary);
@@ -2210,7 +2197,7 @@ button.action-target:hover {
   border-left: 3px solid var(--purple);
   background: color-mix(in srgb, var(--purple) 5%, transparent);
   padding: 3px 10px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
 }
 .subagent-item.subagent-completed {
   border-left-color: var(--success);
@@ -2394,7 +2381,7 @@ button.action-target:hover {
 .mention-pill {
   display: inline-block;
   padding: 0 7px;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   background: var(--accent-soft);
   color: var(--text-primary);
   font-size: 12px;
@@ -2548,7 +2535,7 @@ button.action-target:hover {
   background: var(--accent-solid);
   color: var(--on-solid);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 0 16px;
   height: 34px;
   font-size: 13px;
@@ -2586,7 +2573,7 @@ button.action-target:hover {
   flex: none;
 }
 .stop-count {
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   padding: 1px 4px;
   background: color-mix(in srgb, currentColor 14%, transparent);
   font-size: 11px;
@@ -2612,9 +2599,10 @@ button.action-target:hover {
   overscroll-behavior: contain;
   padding: 4px;
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: var(--radius-overlay);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-elevated);
+  animation: chrome-reveal var(--motion-quick) ease-out;
 }
 .input-row .stop-actions button {
   display: block;
@@ -2655,7 +2643,7 @@ button.action-target:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px !important;
+  border-radius: var(--radius-sm) !important;
 }
 .btn-attach:hover {
   background: var(--bg-hover) !important;
@@ -2669,7 +2657,7 @@ button.action-target:hover {
   z-index: 1000;
   max-width: 420px;
   padding: 10px 14px;
-  border-radius: var(--radius);
+  border-radius: var(--radius-overlay);
   border: 1px solid var(--border-strong);
   background: var(--bg-secondary);
   color: var(--text-primary);
@@ -2685,7 +2673,7 @@ button.action-target:hover {
   z-index: 1000;
   max-width: 420px;
   padding: 10px 14px;
-  border-radius: var(--radius);
+  border-radius: var(--radius-overlay);
   border: 1px solid color-mix(in srgb, var(--error) 50%, transparent);
   background: var(--bg-secondary);
   color: var(--error);
@@ -2760,7 +2748,7 @@ button.action-target:hover {
 .mention-popup {
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
+  border-radius: var(--radius-overlay);
   margin-bottom: 8px;
   max-height: 260px;
   overflow-y: auto;
@@ -2934,7 +2922,7 @@ button.quote-bar-content:focus-visible {
   gap: 4px;
   font-size: 10px;
   padding: 0 6px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   border: 1px dashed var(--warning);
   color: var(--warning);
   line-height: 15px;
@@ -2968,7 +2956,7 @@ button.quote-bar-content:focus-visible {
 .dialog {
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
-  border-radius: 12px;
+  border-radius: var(--radius-overlay);
   padding: 22px;
   min-width: min(360px, calc(100vw - 24px));
   max-width: min(520px, calc(100vw - 24px));
@@ -2977,6 +2965,17 @@ button.quote-bar-content:focus-visible {
      the viewport on small screens. */
   max-height: calc(100dvh - 24px);
   overflow-y: auto;
+  animation: dialog-reveal var(--motion-quick) ease-out;
+}
+@keyframes dialog-reveal {
+  from {
+    opacity: 0.85;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 .dialog-confirm {
   max-width: 420px;
@@ -3288,6 +3287,7 @@ button.quote-bar-content:focus-visible {
   font-size: var(--fs-tag);
   color: var(--text-secondary);
   overflow-wrap: anywhere;
+  animation: chrome-reveal var(--motion-quick) ease-out;
 }
 .quota-detail-status {
   color: var(--error);
@@ -3377,7 +3377,6 @@ button.quote-bar-content:focus-visible {
   display: block;
   height: 100%;
   border-radius: 3px;
-  transition: width 0.5s ease;
 }
 .status-pct {
   font-size: var(--fs-tag);
@@ -3498,7 +3497,6 @@ button.quote-bar-content:focus-visible {
     z-index: 100;
     width: 280px !important;
     transform: translateX(-100%);
-    transition: transform 0.2s ease;
     box-shadow: none;
     /* The status panel's own bottom padding counts toward the home bar's. */
     padding-bottom: max(0px, calc(env(safe-area-inset-bottom, 0px) - 10px));
@@ -3506,6 +3504,7 @@ button.quote-bar-content:focus-visible {
   .sidebar.sidebar-open {
     transform: translateX(0);
     box-shadow: var(--shadow-elevated);
+    animation: chrome-reveal var(--motion-quick) ease-out;
   }
   /* ?debug=1 may open the strip before the drawer is first revealed. */
   .sidebar:not(.sidebar-open) .sidebar-debug-strip {
@@ -3521,7 +3520,7 @@ button.quote-bar-content:focus-visible {
     z-index: 99;
     background: var(--backdrop);
   }
-  /* Over the drawer as it slides away, too. */
+  /* Keep the second tap from reaching controls the drawer just uncovered. */
   .sidebar-overlay.closing {
     z-index: 101;
     background: transparent;
@@ -3730,6 +3729,7 @@ button.quote-bar-content:focus-visible {
   .input-row .composer-stop .btn-abort {
     width: auto;
     padding: 0 6px;
+    /* The count widens the 34px circular control; keep the same end caps. */
     border-radius: 17px;
   }
   .command-popup,
@@ -3773,7 +3773,7 @@ button.quote-bar-content:focus-visible {
   font-size: var(--fs-tag);
   font-weight: 400;
   line-height: 15px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   color: var(--warning);
   background: var(--warning-soft);
 }
@@ -3838,7 +3838,7 @@ button.quote-bar-content:focus-visible {
   overflow: hidden;
   background: var(--bg-primary);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
+  border-radius: var(--radius-overlay);
   box-shadow: var(--shadow-elevated);
   font-size: var(--fs-text);
   /* Paths, URLs and identifiers break rather than run out of their box. */
@@ -4050,7 +4050,7 @@ button.quote-bar-content:focus-visible {
   color: var(--text-secondary);
   background: none;
   border: 1px solid var(--border-strong);
-  border-radius: 11px;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   cursor: pointer;
 }
@@ -4105,7 +4105,7 @@ button.quote-bar-content:focus-visible {
   padding: 6px 10px;
   color: var(--error);
   border: 1px solid color-mix(in srgb, var(--error) 35%, transparent);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   background: var(--error-soft);
 }
 .bp-group + .bp-group {
@@ -4135,7 +4135,7 @@ button.quote-bar-content:focus-visible {
   color: var(--text-primary);
   background: var(--bg-secondary);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   cursor: pointer;
 }
 .bp-card:hover {
@@ -4226,7 +4226,7 @@ button.quote-bar-content:focus-visible {
   padding: 0 6px;
   font-size: var(--fs-tag);
   line-height: 15px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
 }
 .bp-pill {
@@ -4345,7 +4345,7 @@ button.quote-bar-content:focus-visible {
   background: var(--bg-secondary);
   border: 1px solid var(--border-strong);
   border-left: 3px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   cursor: pointer;
   transition: opacity 0.12s;
 }
@@ -4382,7 +4382,7 @@ button.quote-bar-content:focus-visible {
 .bp-hidden {
   padding: 0 5px;
   border: 1px dashed var(--border-strong);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   font-size: var(--fs-tag);
 }
 .bp-node-meta {
@@ -4496,7 +4496,7 @@ button.quote-bar-content:focus-visible {
   color: var(--text-secondary);
   background: var(--bg-tertiary);
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   overflow: hidden;
   white-space: nowrap;
@@ -4646,7 +4646,7 @@ button.quote-bar-content:focus-visible {
   padding: 0 6px;
   font-size: var(--fs-tag);
   line-height: 16px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
 }
 .bi-evidence {
@@ -4692,7 +4692,7 @@ button.quote-bar-content:focus-visible {
   color: var(--text-primary);
   background: var(--bg-secondary);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   cursor: pointer;
 }
 .bi-row:hover {
@@ -4881,7 +4881,7 @@ button.quote-bar-content:focus-visible {
   font-size: var(--fs-meta);
   color: var(--warning);
   border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   background: var(--warning-soft);
 }
 .bn-body {
@@ -4988,7 +4988,6 @@ button.quote-bar-content:focus-visible {
     height: 28px;
     padding: 0 11px;
     border: 1px solid var(--border-strong);
-    border-radius: 14px;
   }
   .bp-area.active {
     border-color: transparent;
@@ -5115,7 +5114,7 @@ button.quote-bar-content:focus-visible {
      through. */
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-secondary));
   box-shadow: 0 0 0 2px var(--bg-secondary);
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
 }
 .side-panel {
   display: flex;
@@ -5767,7 +5766,7 @@ button.quote-bar-content:focus-visible {
   color: var(--text-secondary);
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -5859,7 +5858,7 @@ button.quote-bar-content:focus-visible {
   padding: 0 6px;
   font-size: var(--fs-tag);
   line-height: 15px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   color: var(--purple);
   background: var(--purple-soft);
 }
@@ -6080,7 +6079,7 @@ button.quote-bar-content:focus-visible {
   padding: 0 6px;
   font-size: var(--fs-tag);
   line-height: 15px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   color: var(--accent-text);
   background: var(--accent-soft);
 }
@@ -6210,7 +6209,6 @@ button.quote-bar-content:focus-visible {
   .bp-chip {
     height: 28px;
     padding: 0 11px;
-    border-radius: 14px;
   }
   .ap-agent-actions button {
     width: 40px;
@@ -6311,7 +6309,7 @@ button.quote-bar-content:focus-visible {
   gap: 7px;
   margin: 5px 0 8px;
   padding: 7px 10px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -6349,12 +6347,12 @@ button.quote-bar-content:focus-visible {
 .bp-sealed {
   padding: 1px 6px;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 .sealed-banner {
   padding: 7px 10px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   background: var(--bg-secondary);
   color: var(--text-muted);
   font-size: 12px;
@@ -6467,7 +6465,7 @@ button.quote-bar-content:focus-visible {
   max-width: min(440px, calc(100vw - 24px));
   padding: 10px 12px;
   border: 1px solid var(--warning);
-  border-radius: var(--radius);
+  border-radius: var(--radius-overlay);
   background: var(--bg-secondary);
   color: var(--warning);
   box-shadow: var(--shadow-elevated);
@@ -6492,5 +6490,43 @@ button.quote-bar-content:focus-visible {
   }
   .command-source {
     order: 2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep status marks and labels visible without pulsing or spinning. */
+  .task-status.running,
+  .agent-status-dot.agent-status-busy,
+  .agent-status-dot.agent-status-waiting,
+  .pr-checks-pending,
+  .streaming-dot,
+  .banner-retry .banner-icon,
+  .subagent-icon-running,
+  .spinner,
+  .quota-refresh.refreshing .icon,
+  .ap-dot.ss-working,
+  .sidebar-debug-strip,
+  .sidebar.sidebar-open,
+  .stop-actions,
+  .quota-details,
+  .dialog,
+  .message-highlight {
+    animation: none;
+  }
+  .message-highlight {
+    background: var(--bg-active);
+  }
+  .btn-primary,
+  .btn-secondary,
+  .btn-danger,
+  .pr-card,
+  .code-block .copy-btn,
+  .event-summary-line .copy-btn,
+  .btn-quote,
+  .input-row,
+  .input-row button,
+  .bp-node,
+  .bn-caret {
+    transition: none;
   }
 }
