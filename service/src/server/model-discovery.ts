@@ -17,12 +17,17 @@ export interface ModelDiscoverySnapshot {
   issues: ModelDiscoveryIssue[];
 }
 
-export function piSessionConfig(config: AppConfig): Partial<SessionConfig> {
+export type PiRuntimeSessionConfig = Pick<
+  SessionConfig,
+  "piPackages" | "piExcludePackages" | "piOffline" | "piAcp"
+>;
+
+export function piSessionConfig(config: AppConfig): PiRuntimeSessionConfig {
   return {
-    piPackages: config.pi?.packages,
-    piExcludePackages: config.pi?.exclude_packages,
+    piPackages: config.pi?.packages ? [...config.pi.packages] : undefined,
+    piExcludePackages: config.pi?.exclude_packages ? [...config.pi.exclude_packages] : undefined,
     piOffline: config.pi?.offline,
-    piAcp: config.pi?.acp,
+    piAcp: config.pi?.acp ? { ...config.pi.acp } : undefined,
   };
 }
 

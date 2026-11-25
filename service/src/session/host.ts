@@ -57,6 +57,9 @@ export interface HostSessionHandle extends EventEmitter {
   readonly wakeDue?: boolean;
   takeWake?(): { prompt: string; reason: string } | null;
   setPanelTools?(tools: PanelToolset | null): void;
+  setPiConfig?(
+    config: Pick<SessionConfig, "piPackages" | "piExcludePackages" | "piOffline" | "piAcp">,
+  ): void;
   stopTask?(taskId: string): Promise<void>;
   simulateRateLimit?(info: { rateLimitType?: string; resetsAt?: number }): void;
   getState(): SessionState;

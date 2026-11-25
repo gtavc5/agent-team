@@ -662,6 +662,35 @@ describe("PiSession ACP readiness", () => {
     expect(fs.readFileSync(profile, "utf8")).toBe("{");
   });
 
+  it("applies updated Pi package exclusions and offline mode from setPiConfig on start", async () => {
+    const dataDir = temp();
+    const keepPkg = path.join(dataDir, "pkg-keep");
+    const dropPkg = path.join(dataDir, "pkg-drop");
+    fs.mkdirSync(keepPkg, { recursive: true });
+    fs.mkdirSync(dropPkg, { recursive: true });
+    const h = harness({
+      config: {
+        piAgentDir: undefined,
+        dataDir,
+        piPackages: [keepPkg, dropPkg],
+        piExcludePackages: [],
+        piOffline: false,
+      },
+    });
+    h.session.setPiConfig({
+      piPackages: [keepPkg, dropPkg],
+      piExcludePackages: ["pkg-drop"],
+      piOffline: true,
+    });
+    await h.session.ensureStarted();
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(dataDir, "pi-agent-home/settings.json"), "utf8"),
+    ) as { packages: string[] };
+    expect(settings.packages).toEqual([fs.realpathSync.native(keepPkg)]);
+    expect(h.factory.mock.calls[0][0].env?.PI_OFFLINE).toBe("1");
+    expect(h.session.getState().config.piExcludePackages).toEqual(["pkg-drop"]);
+  });
+
   it("redirects setup and policy changes for both ACP aliases even with a ready runtime", async () => {
     const runtime = path.join(temp(), "agy");
     fs.writeFileSync(runtime, "not run", { mode: 0o700 });

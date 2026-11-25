@@ -169,6 +169,7 @@ export class Server {
   private git: GitScanner<Workspace>;
   private projects: ProjectManager;
   private history: HistoryService;
+  private readonly startupPiAcp: NonNullable<AppConfig["pi"]>["acp"];
 
   constructor(
     port: number,
@@ -183,6 +184,7 @@ export class Server {
     this.uploadsDir = path.join(baseDir, "uploads");
     if (!fs.existsSync(this.uploadsDir)) fs.mkdirSync(this.uploadsDir, { recursive: true });
     this.config = loadConfig(baseDir);
+    this.startupPiAcp = this.config.pi?.acp ? { ...this.config.pi.acp } : undefined;
     this.telemetry = new TelemetryStore(baseDir, this.config.telemetry);
     applyRuntimeEnvironment(this.config.server.proxy, this.config.pi?.acp?.binary);
     this.hostRegistry = this.initHosts();
@@ -1146,7 +1148,7 @@ export class Server {
         const next = loadConfig(this.baseDir);
         // Service-level environment is fixed for the lifetime of this process.
         next.server.proxy = this.config.server.proxy;
-        if (next.pi) next.pi.acp = this.config.pi?.acp;
+        if (next.pi) next.pi.acp = this.startupPiAcp ? { ...this.startupPiAcp } : undefined;
         this.config = next;
       } catch (error) {
         this.broadcastUI({
@@ -1188,6 +1190,9 @@ export class Server {
       ) {
         this.telemetry.configure(telemetry);
         this.broadcastUI({ type: "telemetry_config", telemetryEnabled: this.telemetry.enabled });
+      }
+      for (const workspace of this.workspaces.values()) {
+        for (const agent of workspace.agents.values()) agent.session.setPiConfig?.(this.piConfig());
       }
       if (this.dispatchAllowed) void this.track(this.refreshPiCatalog());
       console.log("[config] reloaded config.toml");
@@ -1370,7 +1375,9 @@ export class Server {
 
     for (const wsState of states) {
       for (const agent of wsState.agents) {
-        if (agent.session.config.backend === "pi") agent.session.config.piAcp = this.config.pi?.acp;
+        if (agent.session.config.backend === "pi") {
+          Object.assign(agent.session.config, this.piConfig());
+        }
       }
       const workspace = Workspace.fromState(
         wsState,
@@ -1680,7 +1687,10 @@ export class Server {
   }
 
   private piConfig() {
-    return piSessionConfig(this.config);
+    return {
+      ...piSessionConfig(this.config),
+      piAcp: this.startupPiAcp ? { ...this.startupPiAcp } : undefined,
+    };
   }
 
   modelDiscoverySnapshot(): ModelDiscoverySnapshot {

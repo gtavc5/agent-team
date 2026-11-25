@@ -79,6 +79,18 @@ class TestSession extends FakeSession {
     return super.send(input);
   }
 
+  setPiConfig(
+    config: Pick<SessionConfig, "piPackages" | "piExcludePackages" | "piOffline" | "piAcp">,
+  ): void {
+    if (this.sessionConfig.backend !== "pi") return;
+    this.sessionConfig.piPackages = config.piPackages ? [...config.piPackages] : undefined;
+    this.sessionConfig.piExcludePackages = config.piExcludePackages
+      ? [...config.piExcludePackages]
+      : undefined;
+    this.sessionConfig.piOffline = config.piOffline;
+    this.sessionConfig.piAcp = config.piAcp ? { ...config.piAcp } : undefined;
+  }
+
   override abort(): void {
     this.isRunning = false;
   }
@@ -2015,6 +2027,122 @@ describe("rate limits on the server", () => {
       expect(afterSignoutModels).toContainEqual(
         expect.objectContaining({ id: "openai-codex/gpt-5.4", backend: "pi" }),
       );
+    } finally {
+      piCatalog.mockRestore();
+      await stop();
+      log.mockRestore();
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
+  it("refreshes Pi package exclusions and runtime config on restore and config.toml reload", async () => {
+    const { base, root, web } = seed();
+    const piAgent: AgentState = {
+      ...agent("a-pi", "Lead", root),
+      model: "openai-codex/gpt-5.4",
+      session: {
+        ...agent("a-pi", "Lead", root).session,
+        config: {
+          cwd: root,
+          backend: "pi",
+          model: "openai-codex/gpt-5.4",
+          piPackages: ["stale-pkg"],
+          piExcludePackages: ["nzh10-skills"],
+          piOffline: false,
+          piAcp: { permissions: "default" },
+        },
+      },
+    };
+    const codexAgent = agent("a-codex", "Codex", root);
+    const wsState: WorkspaceState = {
+      id: "ws-pi-restore",
+      name: "pi restore",
+      project: "repo",
+      hostId: "local",
+      cwd: root,
+      agents: [piAgent, codexAgent],
+      createdAt: 1,
+      archivedAt: null,
+      messages: [],
+    };
+    saveWorkspace(base, wsState);
+    saveIndex(base, ["ws-lead", "ws-w", "ws-live", "ws-orphan", "ws-pi-restore"]);
+    fs.writeFileSync(
+      path.join(base, "config.toml"),
+      [
+        "[pi]",
+        'exclude_packages = ["nzh10-skills", "pi-btw", "pi-intercom"]',
+        "offline = true",
+        "[pi.acp]",
+        'permissions = "yolo"',
+      ].join("\n") + "\n",
+    );
+
+    const piCatalog = vi.spyOn(LocalHost.prototype, "discoverPiModels").mockResolvedValue([
+      {
+        id: "openai-codex/gpt-5.4",
+        provider: "openai-codex",
+        modelId: "gpt-5.4",
+        name: "GPT-5.4",
+        reasoning: true,
+      },
+    ]);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { stop } = await start(base, web);
+    try {
+      const restoredPi = sessionsByAgent.get("a-pi")!;
+      expect(restoredPi.getState().config).toMatchObject({
+        backend: "pi",
+        piPackages: undefined,
+        piExcludePackages: ["nzh10-skills", "pi-btw", "pi-intercom"],
+        piOffline: true,
+        piAcp: { permissions: "yolo" },
+      });
+      const restoredCodex = sessionsByAgent.get("a-codex")!;
+      expect(restoredCodex.getState().config.piExcludePackages).toBeUndefined();
+      expect(restoredCodex.getState().config.piAcp).toBeUndefined();
+
+      const configPath = path.join(base, "config.toml");
+      fs.writeFileSync(
+        configPath,
+        [
+          "[pi]",
+          'packages = ["npm:pi-subagents"]',
+          'exclude_packages = ["nzh10-skills", "reply-review"]',
+          "offline = false",
+          "[pi.acp]",
+          'permissions = "default"',
+        ].join("\n") + "\n",
+      );
+      const bumped = new Date(Date.now() + 5000);
+      fs.utimesSync(configPath, bumped, bumped);
+      await until(
+        () => restoredPi.getState().config.piOffline === false,
+        "config.toml hot reload of Pi session config",
+      );
+      expect(restoredPi.getState().config).toMatchObject({
+        piPackages: ["npm:pi-subagents"],
+        piExcludePackages: ["nzh10-skills", "reply-review"],
+        piOffline: false,
+        // Service-level ACP policy remains fixed for the lifetime of the server process.
+        piAcp: { permissions: "yolo" },
+      });
+      expect(restoredCodex.getState().config.piPackages).toBeUndefined();
+
+      // Removing [pi] must clear reloadable Pi fields without dropping startup ACP policy.
+      fs.writeFileSync(configPath, "[server]\n");
+      const bumped2 = new Date(Date.now() + 10_000);
+      fs.utimesSync(configPath, bumped2, bumped2);
+      await until(
+        () => restoredPi.getState().config.piPackages === undefined,
+        "config.toml hot reload after removing [pi]",
+      );
+      expect(restoredPi.getState().config).toMatchObject({
+        piPackages: undefined,
+        piExcludePackages: undefined,
+        piOffline: undefined,
+        piAcp: { permissions: "yolo" },
+      });
     } finally {
       piCatalog.mockRestore();
       await stop();

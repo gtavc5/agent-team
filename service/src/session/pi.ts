@@ -798,7 +798,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       (Array.isArray(settings.packages) && settings.packages.length
         ? discoverLocalPiPackages(this.config.piAgentDir)
         : {});
-    this.piSubagentsRoot ??= packages.piSubagentsRoot;
+    this.piSubagentsRoot = this.config.piSubagentsRoot ?? packages.piSubagentsRoot;
     return {
       agentDir,
       settings,
@@ -1360,6 +1360,16 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     } catch (error) {
       this.panelToolsError = message(error);
     }
+  }
+  setPiConfig(
+    config: Pick<SessionConfig, "piPackages" | "piExcludePackages" | "piOffline" | "piAcp">,
+  ): void {
+    this.config.piPackages = config.piPackages ? [...config.piPackages] : undefined;
+    this.config.piExcludePackages = config.piExcludePackages
+      ? [...config.piExcludePackages]
+      : undefined;
+    this.config.piOffline = config.piOffline;
+    this.config.piAcp = config.piAcp ? { ...config.piAcp } : undefined;
   }
   private async applyOptions(rpc: PiRpcClient, generation: number): Promise<void> {
     if (this.pendingOptions) await this.pendingOptions;
