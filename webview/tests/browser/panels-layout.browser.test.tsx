@@ -281,6 +281,7 @@ it("gives model and effort their own unclipped row in a narrow panel, independen
         models={[
           { id: agent.model, label: "Opus", backend: "pi" },
           { id: "github-copilot/claude-opus-5-5", label: "Opus", backend: "pi" },
+          { id: "antigravity-acp/gemini-4-neon", label: "gemini 4 neon", backend: "pi" },
         ]}
         actions={actions}
       />
@@ -294,8 +295,27 @@ it("gives model and effort their own unclipped row in a narrow panel, independen
   const effort = get(top, ".ap-effort");
   const action = get(top, ".ap-agent-actions");
   expect(rect(meta).top).toBeLessThan(rect(name).bottom);
+
+  // A normal docked desktop side panel (~427px wide → ~400px inner) has room
+  // for agent name, model, effort, and actions on one line without wrapping.
+  rerender(
+    view(400, {
+      ...agent,
+      name: "Lead",
+      model: "antigravity-acp/gemini-4-neon",
+      effort: "medium",
+      effortLevels: ["low", "medium", "high"],
+      fast: false,
+    }),
+  );
+  expect(rect(meta).top).toBeLessThan(rect(name).bottom);
+  expect(rect(action).top).toBeLessThan(rect(name).bottom);
+  expect(rect(action).right).toBeLessThanOrEqual(rect(container.firstElementChild!).right);
+  expect(meta.scrollWidth).toBeLessThanOrEqual(meta.clientWidth);
+
   rerender(view(336));
   expect(rect(meta).top).toBeGreaterThanOrEqual(rect(name).bottom);
+  expect(rect(action).top).toBeLessThan(rect(meta).top);
   expect(rect(action).right).toBeLessThanOrEqual(rect(container.firstElementChild!).right);
   expect(rect(model).width).toBeGreaterThan(40);
   expect(rect(effort).left).toBeGreaterThanOrEqual(rect(model).right);

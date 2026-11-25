@@ -5882,18 +5882,27 @@ button.quote-bar-content:focus-visible {
   margin-block: -2px;
   opacity: 0;
 }
-@container (max-width: 460px) {
+/* Only stack model/effort below the name when the panel is narrower than a
+   normal docked desktop side panel (autoPanelWidth min 380px → ~356px inner). */
+@container (max-width: 340px) {
   .ap-agent-top {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "name actions"
+      "meta meta";
     align-items: center;
     gap: 4px 6px;
   }
+  .ap-agent-name {
+    grid-area: name;
+  }
   .ap-agent-actions {
+    grid-area: actions;
     margin-left: 0;
   }
   .ap-meta {
-    grid-column: 1 / -1;
+    grid-area: meta;
     justify-self: stretch;
   }
 }
@@ -6093,6 +6102,29 @@ button.quote-bar-content:focus-visible {
     width: 40px;
     height: 40px;
     font-size: 18px;
+  }
+  /* Touch targets widen .ap-agent-actions to ~82px, so phones stack model/effort below the name. */
+  @container (max-width: 440px) {
+    .ap-agent-top {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas:
+        "name actions"
+        "meta meta";
+      align-items: center;
+      gap: 4px 6px;
+    }
+    .ap-agent-name {
+      grid-area: name;
+    }
+    .ap-agent-actions {
+      grid-area: actions;
+      margin-left: 0;
+    }
+    .ap-meta {
+      grid-area: meta;
+      justify-self: stretch;
+    }
   }
   .fp-bar {
     flex-wrap: wrap;
