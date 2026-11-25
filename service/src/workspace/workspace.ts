@@ -734,7 +734,11 @@ export class Workspace {
     this.cb?.onStreamEvent(this.id, msg, timed, streamAt, retryLabel);
   }
 
-  private beganTurn(entry: AgentEntry): void {
+  private beganTurn(entry: AgentEntry, clearFailure = true): void {
+    if (clearFailure && this.lastResult === "failed") {
+      this.lastResult = undefined;
+      this.cb?.onAttention?.(this.id, this.unseen, this.lastResult);
+    }
     entry.lastStreamAt ??= Date.now();
     this.cb?.onAgentBusy?.(this.id, entry.info.id, entry.lastStreamAt);
   }
@@ -2105,7 +2109,10 @@ export class Workspace {
     agent.currentMsg = null;
     agent.lastStreamAt = undefined;
     agent.retryLabel = undefined;
-    this.beganTurn(agent);
+    const backend = agent.session.getState().config.backend;
+    // Pi compaction is a standalone command, not a new model turn.
+    const standaloneCompact = backend === "pi" && /^\/compact(?:\s|$)/.test(envelope.text.trim());
+    this.beganTurn(agent, !standaloneCompact);
 
     try {
       if (input?.status === "queued") {
@@ -2116,7 +2123,6 @@ export class Workspace {
         this.ensureAgentMsg(agent);
         agent.handler(banner);
       }
-      const backend = agent.session.getState().config.backend;
       const receipt = await agent.session.send(
         backend === "pi" || backend === "codex" ? { ...envelope, trigger } : envelope.text,
         {

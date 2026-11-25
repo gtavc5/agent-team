@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeAttention, summarizeAttention } from "../src/sidebar/attention";
+import { describeAttention, sessionAttention, summarizeAttention } from "../src/sidebar/attention";
 import type { AgentInfo, Project, Workspace } from "../src/state/useServer";
 
 const NOW = 1_800_000_000_000;
@@ -35,6 +35,27 @@ const project = (id: string, archivedAt?: number): Project => ({
 });
 const linked = (id: string, role: "lead" | "worker", over: Partial<Workspace> = {}) =>
   ws(id, { projectLink: { projectId: "p1", role }, ...over });
+
+describe("sessionAttention", () => {
+  it.each(["working", "waiting"] as const)(
+    "suppresses a stale failure while %s but preserves your-turn and unread cues",
+    (state) => {
+      const running = ws("running", {
+        agents: [{ ...agent(state), busy: state === "working" }],
+        lastResult: "failed",
+        unread: 1,
+      });
+      expect(sessionAttention(running)).toBe("unread");
+      expect(sessionAttention({ ...running, unread: 0 })).toBeUndefined();
+      expect(sessionAttention({ ...running, awaitsUser: true })).toBe("yourTurn");
+    },
+  );
+
+  it("keeps failure and unread result behavior while idle", () => {
+    expect(sessionAttention(ws("failed", { lastResult: "failed" }))).toBe("failed");
+    expect(sessionAttention(ws("done", { lastResult: "done", unread: 1 }))).toBe("unread");
+  });
+});
 
 describe("summarizeAttention", () => {
   it("counts each live background session once with Sidebar's exact unread and running predicates", () => {

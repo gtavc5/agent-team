@@ -235,6 +235,37 @@ it.each([
   },
 );
 
+it("clears a failed row and project count on resume across live updates and a fresh snapshot", async () => {
+  await page.viewport(1280, 800);
+  const resumed = workspace("Resumed", 1, { lastResult: "failed", unread: 0 });
+  const unread = workspace("Unread", 2, { unread: 1 });
+  const view = mount();
+  const { receive } = connect([lead, resumed, unread]);
+  expect(cue("Resumed")).toBe("Failed");
+  expect(view.getByRole("status", { name: "Project: 1 failed · 1 unread" })).toBeTruthy();
+
+  receive({ type: "agent_busy", workspaceId: resumed.id, agentId: agent.id, streamAt: NOW });
+  expect(row("Resumed")?.querySelector(".task-status.running")).toBeTruthy();
+  expect(cue("Resumed")).toBeUndefined();
+  receive({ type: "workspace_attention", workspaceId: resumed.id, unread: 0 });
+  expect(cue("Resumed")).toBeUndefined();
+  expect(view.getByRole("status", { name: "Project: 1 unread" })).toBeTruthy();
+  receive({ type: "agent_idle", workspaceId: resumed.id, agentId: agent.id });
+  expect(row("Resumed")?.querySelector(".task-status.running")).toBeNull();
+  expect(cue("Resumed")).toBeUndefined();
+  expect(view.getByRole("status", { name: "Project: 1 unread" })).toBeTruthy();
+
+  receive({
+    type: "init",
+    workspaces: [lead, { ...resumed, agents: [agent], lastResult: undefined }, unread],
+    projects: [project],
+    config,
+  });
+  expect(row("Resumed")?.querySelector(".task-status.running")).toBeNull();
+  expect(cue("Resumed")).toBeUndefined();
+  expect(view.getByRole("status", { name: "Project: 1 unread" })).toBeTruthy();
+});
+
 it("prunes a saved fold after an authoritative empty init, not before it", async () => {
   await page.viewport(1280, 800);
   localStorage.setItem(FOLDED_IDLE_STORAGE_KEY, JSON.stringify(["deleted"]));

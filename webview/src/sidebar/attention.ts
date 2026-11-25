@@ -1,4 +1,5 @@
 import type { Project, Workspace } from "../state/useServer";
+import { workspaceStatus } from "./groups";
 
 export type Attention = "yourTurn" | "failed" | "unread";
 
@@ -12,7 +13,8 @@ export interface AttentionSummary {
 // A live dialog can require an answer even while the turn is still running.
 export function sessionAttention(ws: Workspace): Attention | undefined {
   if (ws.awaitsUser) return "yourTurn";
-  if (ws.lastResult === "failed") return "failed";
+  const status = workspaceStatus(ws);
+  if (ws.lastResult === "failed" && status !== "working" && status !== "waiting") return "failed";
   if ((ws.unread ?? 0) > 0) return "unread";
 }
 

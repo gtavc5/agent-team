@@ -65,6 +65,64 @@ describe("unread results", () => {
     const back = Workspace.fromState(ws.getState(), registry);
     expect(back.getInfo(false)).toMatchObject({ unread: 2, lastResult: "failed" });
   });
+
+  it("clears a stale failure when an externally started turn begins, preserving unread across restore", () => {
+    const updates = vi.fn();
+    const { ws, emit, host } = makeWorkspace(undefined, { onAttention: updates });
+    emit({ kind: "error", content: "failed" });
+    expect(updates).toHaveBeenLastCalledWith(ws.id, 1, "failed");
+    updates.mockClear();
+
+    emit({ kind: "text_delta", content: "running again" });
+
+    expect(updates).toHaveBeenCalledTimes(1);
+    expect(updates).toHaveBeenCalledWith(ws.id, 1, undefined);
+    expect(ws.getInfo(false)).toMatchObject({ unread: 1, lastResult: undefined });
+    const registry = new HostRegistry();
+    registry.register(host);
+    const back = Workspace.fromState(ws.getState(), registry);
+    expect(back.getInfo(false)).toMatchObject({ unread: 1, lastResult: undefined });
+  });
+
+  it("keeps a stale failure through a standalone Pi compaction", async () => {
+    const updates = vi.fn();
+    const { ws, emit, session } = makeWorkspace("provider/model", { onAttention: updates });
+    session.getState().config.backend = "pi";
+    emit({ kind: "error", content: "failed" });
+    updates.mockClear();
+    session.send = (input) => {
+      session.sent.push(typeof input === "string" ? input : input.text);
+      session.isRunning = false;
+      return Promise.resolve();
+    };
+
+    await ws.sendMessage("/compact");
+
+    expect(updates).not.toHaveBeenCalled();
+    expect(ws.getInfo(false)).toMatchObject({ unread: 1, lastResult: "failed" });
+    expect(ws.getState().attention?.lastResult).toBe("failed");
+  });
+
+  it("clears a stale failure on dispatch before a fast Codex result arrives", async () => {
+    const updates = vi.fn();
+    const { ws, emit, session } = makeWorkspace(undefined, { onAttention: updates });
+    emit({ kind: "error", content: "failed" });
+    updates.mockClear();
+    session.send = (input) => {
+      session.sent.push(typeof input === "string" ? input : input.text);
+      session.isRunning = true;
+      expect(updates).toHaveBeenCalledTimes(1);
+      expect(updates).toHaveBeenCalledWith(ws.id, 1, undefined);
+      expect(ws.getInfo(false)).toMatchObject({ unread: 1, lastResult: undefined });
+      session.emit("event", { kind: "result", content: "" });
+      return Promise.resolve();
+    };
+
+    await ws.sendMessage("resume");
+
+    expect(updates).toHaveBeenCalledTimes(1);
+    expect(ws.getInfo(false)).toMatchObject({ unread: 1, lastResult: undefined });
+  });
 });
 
 describe("Workspace event aggregation", () => {

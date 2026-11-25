@@ -1936,6 +1936,7 @@ export class Server {
       },
       onAttention: (wsId, unread, lastResult) => {
         this.broadcastUI({ type: "workspace_attention", workspaceId: wsId, unread, lastResult });
+        if (lastResult === undefined) this.persistWorkspace(wsId);
       },
       onStreamEvent: (wsId, agentMsg, event, streamAt, retryLabel) => {
         if (isLoggedEvent(event)) {

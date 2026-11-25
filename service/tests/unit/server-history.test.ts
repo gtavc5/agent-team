@@ -201,6 +201,49 @@ describe("a real server saving histories", () => {
     }
   });
 
+  it("broadcasts and persists a cleared failure when a failed session resumes", async () => {
+    const seeded = ws("ws-a", [msg("u1", "previous turn", 1000)]);
+    seeded.state.attention = { unread: 1, lastResult: "failed", awaitsUser: false };
+    const { base, web, dir } = seed([seeded]);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const restore = vi.spyOn(LocalHost.prototype, "restoreSession");
+    const { frames, stop } = await start(base, web);
+    try {
+      const session = restore.mock.results.at(-1)!.value as FakeSession;
+      session.isRunning = true;
+      session.emit("event", { kind: "text_delta", content: "resuming externally" });
+      await until(
+        () => frames.some((f) => f.type === "workspace_attention" && f.workspaceId === "ws-a"),
+        "cleared attention broadcast",
+      );
+      const update = frames.find(
+        (f) => f.type === "workspace_attention" && f.workspaceId === "ws-a",
+      )!;
+      expect(update).toMatchObject({ workspaceId: "ws-a", unread: 1 });
+      expect(update).not.toHaveProperty("lastResult");
+
+      const stateFile = path.join(dir, "ws-a.json");
+      await until(() => {
+        const saved = JSON.parse(fs.readFileSync(stateFile, "utf8")) as WorkspaceState;
+        return saved.attention?.unread === 1 && saved.attention.lastResult === undefined;
+      }, "cleared attention persisted");
+    } finally {
+      await stop();
+    }
+
+    const fresh = await start(base, web);
+    try {
+      const init = fresh.frames.find((f) => f.type === "init") as {
+        workspaces: Array<Record<string, unknown>>;
+      };
+      const restored = init.workspaces.find((w) => w.id === "ws-a")!;
+      expect(restored).toMatchObject({ unread: 1 });
+      expect(restored).not.toHaveProperty("lastResult");
+    } finally {
+      await fresh.stop();
+    }
+  });
+
   it("broadcasts enrichment of an unloaded tool owner and persists the authoritative child transcript", async () => {
     const workspaceId = "ws-a";
     const taskId = "child";
