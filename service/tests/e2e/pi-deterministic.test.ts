@@ -100,6 +100,11 @@ export default function (pi) {
             while (!options?.signal?.aborted && !fs.existsSync(path.join(gates, gate)) && Date.now() < deadline) await pause(30);
             reply = fs.existsSync(path.join(gates, gate)) ? marker : "gate-not-released";
           }
+        } else if (prompt === "pi-e2e-hold-parent") {
+          fs.writeFileSync(path.join(gates, "parent-started"), "");
+          const deadline = Date.now() + 45000;
+          while (!options?.signal?.aborted && !fs.existsSync(path.join(gates, "parent-release")) && Date.now() < deadline) await pause(30);
+          reply = "pi-e2e-parent-released";
         } else if (messages.some((m) => text(m).includes("background-notice-survived")) && !fs.existsSync(path.join(gates,"notice-received"))) {
           fs.writeFileSync(path.join(gates,"notice-received"), "");
         } else if (prompt.includes("pi-e2e-lead-plan")) {
@@ -726,6 +731,53 @@ async function runDeterministicPiScenario() {
         }
       }
     }
+
+    offset = frames.length;
+    const { rpc } = leadSession as unknown as { rpc: PiRpcClient };
+    const widgets: Array<{ runs: Array<{ id: string; state: string }> }> = [];
+    const captureWidget = (event: { type?: string; widgetLines?: string[] }) => {
+      const prefix = "PI_SUBAGENT_ASYNC_JSON:";
+      const line = event.widgetLines?.[0];
+      if (event.type === "extension_ui_request" && line?.startsWith(prefix))
+        widgets.push(JSON.parse(line.slice(prefix.length)) as (typeof widgets)[number]);
+    };
+    rpc.on("event", captureWidget);
+    try {
+      prompt(lead, "pi-e2e-launch:widgetbusy");
+      await done(lead, "pi-e2e-launch-returned:widgetbusy");
+      await seen("agent_state", (f) => f.workspaceId === lead && f.state === "waiting", offset);
+      const [run] = leadSession.getState().activeAsyncRuns ?? [];
+      expect(run).toBeDefined();
+      await vi.waitFor(
+        () => {
+          expect(fs.existsSync(path.join(gates, "seen-widgetbusya"))).toBe(true);
+          expect(fs.existsSync(path.join(gates, "seen-widgetbusyb"))).toBe(true);
+        },
+        { timeout: 15000 },
+      );
+      await rpc.prompt(`/subagents-inspect-rpc fixture-request ${run.runId} step:0 --lines 2`);
+      prompt(lead, "pi-e2e-hold-parent");
+      await vi.waitFor(() => expect(fs.existsSync(path.join(gates, "parent-started"))).toBe(true));
+      openGate("widgetbusya");
+      openGate("widgetbusyb");
+      await vi.waitFor(
+        () =>
+          expect(
+            widgets.some((w) => w.runs.some((r) => r.id === run.runId && r.state === "complete")),
+          ).toBe(true),
+        {
+          timeout: 15000,
+        },
+      );
+      expect(leadSession.runState).toBe("working");
+    } finally {
+      rpc.off("event", captureWidget);
+      openGate("widgetbusya");
+      openGate("widgetbusyb");
+      openGate("parent-release");
+    }
+    await done(lead, "pi-e2e-parent-released");
+    await seen("agent_state", (f) => f.workspaceId === lead && f.state === "idle", offset);
 
     // Finish and seal the plain project after the real worker's report reached Pi.
     prompt(worker, "pi-e2e-finish");

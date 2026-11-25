@@ -1,10 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isOutstandingSubagentStatus } from "../../../shared/subagent-status";
 import { applyExtensionUi } from "../../../shared/extension-ui";
 import { hasPersistedPiReport, validatePiAttachments } from "../session/pi";
 import {
   SessionConfig,
   StreamEvent,
+  SubAgentInfo,
   SessionState,
   CommandInfo,
   ContextUsage,
@@ -316,19 +318,20 @@ export interface WorkspaceCallbacks {
 }
 
 // Persisted events from older versions may lack fields the renderer
-// indexes (content), and running tasks cannot survive a restart — at any
-// nesting depth.
-export function normalizeEvents(events: StreamEvent[]): void {
+// indexes (content). Only detached tasks tracked by the session survive a restart.
+export function normalizeEvents(events: StreamEvent[], activeTasks?: ReadonlySet<string>): void {
   for (const ev of events) {
     if (typeof ev.content !== "string") ev.content = "";
     const sa = ev.subagent;
     if (!sa) continue;
-    if (ev.kind === "subagent_start" && (sa.status === "running" || sa.status == null)) {
-      sa.status = "stopped";
-    } else if (sa.status === "running") {
+    if (
+      !activeTasks?.has(sa.taskId) &&
+      (isOutstandingSubagentStatus(sa.status) ||
+        (ev.kind === "subagent_start" && sa.status == null))
+    ) {
       sa.status = "stopped";
     }
-    if (sa.events) normalizeEvents(sa.events);
+    if (sa.events) normalizeEvents(sa.events, activeTasks);
   }
 }
 
@@ -346,17 +349,45 @@ function clearRetry(msg: Message): boolean {
   return true;
 }
 
-function copySubagentExecution(target: StreamEvent, source: StreamEvent): void {
-  if (!target.subagent || !source.subagent) return;
-  const { model, effort } = source.subagent;
-  if (model != null) target.subagent.model = model;
-  if (effort != null) target.subagent.effort = effort;
+function copySubagentExecution(target: SubAgentInfo, source: SubAgentInfo | undefined): void {
+  if (source?.model != null) target.model = source.model;
+  if (source?.effort != null) target.effort = source.effort;
+}
+
+function enrichSubagent(events: StreamEvent[], patch: SubAgentInfo): number | undefined {
+  const matches = events.filter(
+    (e) =>
+      (e.kind === "subagent_start" || e.kind === "subagent_done") &&
+      e.subagent?.taskId === patch.taskId,
+  );
+  if (matches.length === 0) return;
+  const owner = matches.find((e) => e.kind === "subagent_start") ?? matches[0];
+  const revision = 1 + Math.max(...matches.map((e) => e.subagent!.transcriptRevision ?? 0));
+  for (const e of matches) {
+    const sa = e.subagent!;
+    sa.transcriptRevision = revision;
+    copySubagentExecution(sa, patch);
+    if (patch.summary != null) sa.summary = patch.summary;
+    if (patch.durationMs != null) sa.durationMs = patch.durationMs;
+    if (patch.events != null) sa.events = e === owner ? patch.events : undefined;
+    const count = patch.events?.length ?? patch.eventCount;
+    if (count != null) sa.eventCount = count;
+  }
+  return revision;
 }
 
 // Apply an inner event to a subagent's transcript. Carriers nest: a
 // grandchild's event arrives as progress(child, _innerEvent: progress(grand,
 // _innerEvent: ev)), so recurse into the nested start's own transcript.
 function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): boolean {
+  if (innerEvent.kind === "subagent_enrichment") {
+    const patch = innerEvent.subagent;
+    if (!patch) return false;
+    const revision = enrichSubagent(saEvents, patch);
+    if (revision == null) return false;
+    innerEvent.subagent = { ...patch, transcriptRevision: revision };
+    return true;
+  }
   if (
     innerEvent.kind === "tool_use" &&
     innerEvent.toolUseId &&
@@ -403,7 +434,7 @@ function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): bool
     if (pi >= 0) saEvents.splice(pi, 1);
     const si = saEvents.findIndex((e) => e.kind === "subagent_start" && e.subagent?.taskId === nid);
     if (si >= 0) {
-      copySubagentExecution(saEvents[si], innerEvent);
+      copySubagentExecution(saEvents[si].subagent!, innerEvent.subagent);
       saEvents[si].subagent!.status = innerEvent.subagent.status;
       saEvents[si].subagent!.summary = innerEvent.subagent.summary;
       saEvents[si].subagent!.usage = innerEvent.subagent.usage;
@@ -682,7 +713,10 @@ export class Workspace {
     const agent = msg.agentId ? this.agents.get(msg.agentId) : undefined;
     // Do not reset the turn's clock for token estimates or detached work.
     const streamAt =
-      agent?.currentMsg === msg && msg.status === "streaming" && event.kind !== "thinking_tokens"
+      agent?.currentMsg === msg &&
+      msg.status === "streaming" &&
+      event.kind !== "thinking_tokens" &&
+      event.kind !== "subagent_enrichment"
         ? (agent.lastStreamAt = Date.now())
         : undefined;
     let retryLabel: string | null | undefined;
@@ -742,7 +776,10 @@ export class Workspace {
   }
 
   setMessages(messages: Message[]): void {
-    for (const m of messages) restoreMessage(m);
+    const activeTasks = new Map(
+      [...this.agents].map(([id, entry]) => [id, activeSubagentTaskIds(entry.session.getState())]),
+    );
+    for (const m of messages) restoreMessage(m, activeTasks.get(m.agentId ?? ""));
     this.messages = messages;
     this.messagesLoaded = true;
     const last = messages[messages.length - 1];
@@ -825,7 +862,41 @@ export class Workspace {
     if (!msg.events) msg.events = [];
     const taskId = event.subagent?.taskId;
 
-    if (event.kind === "subagent_progress") {
+    if (
+      event.subagent?.events &&
+      (event.kind === "subagent_enrichment" || event.kind === "subagent_done")
+    ) {
+      // A child's own Pi transcript does not contain host-observed nested jobs or monitors.
+      const owner = msg.events.find(
+        (e) => e.kind === "subagent_start" && e.subagent?.taskId === taskId,
+      );
+      const nested = owner?.subagent?.events?.filter(
+        (e) =>
+          e.subagent?.taskId.startsWith("pi-subagent-tree:") ||
+          e.toolUseId?.startsWith("pi-host-step:"),
+      );
+      if (nested?.length)
+        event = {
+          ...event,
+          subagent: { ...event.subagent, events: [...event.subagent.events, ...nested] },
+        };
+    }
+    if (event.kind === "subagent_enrichment") {
+      const patch = event.subagent;
+      if (!patch) return;
+      const revision = enrichSubagent(msg.events, patch);
+      if (revision == null) return;
+      // Keep the authoritative transcript on the server; open cards reload it.
+      const { events, ...fields } = patch;
+      event = {
+        ...event,
+        subagent: {
+          ...fields,
+          eventCount: events?.length ?? fields.eventCount,
+          transcriptRevision: revision,
+        },
+      };
+    } else if (event.kind === "subagent_progress") {
       const innerEvent = event.subagent?._innerEvent;
       const startIdx = msg.events.findIndex(
         (e) => e.kind === "subagent_start" && e.subagent?.taskId === taskId,
@@ -847,7 +918,14 @@ export class Workspace {
 
       if (startIdx >= 0) {
         event.contentOffset = msg.events[startIdx].contentOffset;
-        copySubagentExecution(msg.events[startIdx], event);
+        const started = msg.events[startIdx].subagent!;
+        copySubagentExecution(started, event.subagent);
+        if (
+          event.subagent?.status != null &&
+          (started.status == null || isOutstandingSubagentStatus(started.status))
+        ) {
+          started.status = event.subagent.status;
+        }
       }
       const prev = msg.events.findIndex(
         (e) => e.kind === "subagent_progress" && e.subagent?.taskId === taskId,
@@ -862,8 +940,8 @@ export class Workspace {
       if (startIdx >= 0) {
         const start = msg.events[startIdx];
         event.contentOffset = start.contentOffset;
-        copySubagentExecution(start, event);
         const started = start.subagent!;
+        copySubagentExecution(started, finished);
         if (finished?.events) {
           started.events = finished.events;
           started.eventCount = finished.events.length;
@@ -886,20 +964,26 @@ export class Workspace {
     this.streamed(msg, event);
   }
 
-  // Subagent events can arrive after the message containing subagent_start is
-  // finalized. Search backwards to find the message that owns this subagent.
-  private findToolUseOwner(toolUseId: string): Message | null {
+  private findToolUseOwner(toolUseId: string, agentId?: string): Message | null {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const m = this.messages[i];
+      if (agentId != null && m.agentId !== agentId) continue;
       if (m.events?.some((e) => e.kind === "tool_use" && e.toolUseId === toolUseId)) return m;
     }
     return null;
   }
 
-  private findSubagentOwner(taskId: string): Message | null {
+  private findSubagentOwner(taskId: string, agentId: string, includeDone: boolean): Message | null {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const m = this.messages[i];
-      if (m.events?.some((e) => e.kind === "subagent_start" && e.subagent?.taskId === taskId)) {
+      if (m.agentId !== agentId) continue;
+      if (
+        m.events?.some(
+          (e) =>
+            (e.kind === "subagent_start" || (includeDone && e.kind === "subagent_done")) &&
+            e.subagent?.taskId === taskId,
+        )
+      ) {
         return m;
       }
     }
@@ -942,24 +1026,39 @@ export class Workspace {
       const entry = this.agents.get(agentId);
       if (!entry) return;
 
+      if (event.kind === "subagent_start" && event.toolUseId) {
+        if (!this.messagesLoaded && !this.cb?.ensureLoaded?.(this)) return;
+        const owner = this.findToolUseOwner(event.toolUseId, agentId);
+        if (owner && owner !== entry.currentMsg) {
+          const call = owner.events!.find(
+            (e) => e.kind === "tool_use" && e.toolUseId === event.toolUseId,
+          )!;
+          const start = { ...event, contentOffset: call.contentOffset };
+          owner.events!.push(start);
+          this.streamed(owner, start);
+          this.cb?.onSaveNow?.();
+          return;
+        }
+      }
+
       // Route subagent events to the message containing their subagent_start,
       // even if that message was already finalized. This prevents orphaned
       // subagent entries from appearing in a new message bubble.
-      if (event.kind === "subagent_progress" || event.kind === "subagent_done") {
+      const enrichment = event.kind === "subagent_enrichment";
+      if (event.kind === "subagent_progress" || event.kind === "subagent_done" || enrichment) {
         if (
           !this.messagesLoaded &&
-          (event.kind !== "subagent_done" || !this.cb?.ensureLoaded?.(this))
+          (event.kind === "subagent_progress" || !this.cb?.ensureLoaded?.(this))
         )
           return;
         const taskId = event.subagent?.taskId;
-        if (taskId) {
-          const ownerMsg = this.findSubagentOwner(taskId);
-          if (ownerMsg && ownerMsg !== entry.currentMsg) {
-            this.handleSubagentOnMsg(ownerMsg, event);
-            if (event.kind === "subagent_done") this.cb?.onSaveNow?.();
-            return;
-          }
+        const owner = taskId && this.findSubagentOwner(taskId, agentId, enrichment);
+        if (owner && (owner !== entry.currentMsg || enrichment)) {
+          this.handleSubagentOnMsg(owner, event);
+          if (enrichment || event.kind === "subagent_done") this.cb?.onSaveNow?.();
+          return;
         }
+        if (enrichment) return;
       }
 
       if (event.kind === "thinking_tokens" && !entry.currentMsg) return;
@@ -2839,6 +2938,7 @@ export class Workspace {
     // write an empty one over it.
     ws.messagesLoaded = state.messages !== undefined;
     const cut = new Set<string>();
+    const activeTasks = new Map(state.agents.map((a) => [a.id, activeSubagentTaskIds(a.session)]));
     ws.messages = (state.messages ?? []).map((m) => {
       const msg = {
         ...m,
@@ -2853,7 +2953,7 @@ export class Workspace {
         ws.changed.add(m.id);
         cut.add(m.id);
       }
-      if (restoreMessage(msg)) ws.touch([msg.id]);
+      if (restoreMessage(msg, activeTasks.get(msg.agentId ?? ""))) ws.touch([msg.id]);
       return msg;
     });
     // An orphaned queued report is still owned by the Lead workspace.
@@ -2915,7 +3015,7 @@ export class Workspace {
 }
 
 function updateLiveTiming(msg: Message, event: StreamEvent): StreamEvent {
-  if (msg.status !== "streaming") return event;
+  if (msg.status !== "streaming" || event.kind === "subagent_enrichment") return event;
   if (event.kind === "thinking_delta" && event.durationMs == null) {
     const startedAt = event.startedAt ?? msg.liveThinkingSince ?? Date.now();
     msg.liveThinkingSince = startedAt;
@@ -2935,7 +3035,7 @@ function updateLiveTiming(msg: Message, event: StreamEvent): StreamEvent {
   const hasWork = msg.events?.some(
     (e) =>
       (e.kind === "tool_use" && e.toolResult == null) ||
-      (e.kind === "subagent_start" && e.subagent?.status === "running"),
+      (e.kind === "subagent_start" && isOutstandingSubagentStatus(e.subagent?.status)),
   );
   if (hasWork) delete msg.waitingSince;
   else msg.waitingSince = Date.now();
@@ -2958,9 +3058,25 @@ function dialogKey(agentId: string, generation: number, requestId: string): stri
   return `${agentId}:${generation}:${requestId}`;
 }
 
-function restoreMessage(msg: Message & { queuedPrompt?: string }): boolean {
+function activeSubagentTaskIds(session: SessionState): Set<string> {
+  return new Set(
+    session.activeAsyncRuns?.flatMap((run) =>
+      run.children.flatMap((child) => [
+        child.taskId,
+        ...Object.entries(child.tree?.nodes ?? {})
+          .filter(([, facts]) => isOutstandingSubagentStatus(facts.status))
+          .map(([id]) => id),
+      ]),
+    ),
+  );
+}
+
+function restoreMessage(
+  msg: Message & { queuedPrompt?: string },
+  activeTasks?: ReadonlySet<string>,
+): boolean {
   clearLiveTiming(msg);
-  if (msg.events) normalizeEvents(msg.events);
+  if (msg.events) normalizeEvents(msg.events, activeTasks);
   if (msg.queuedPrompt === undefined) return false;
   msg.queuedEnvelope ??= { inputId: msg.id, text: msg.queuedPrompt };
   delete msg.queuedPrompt;

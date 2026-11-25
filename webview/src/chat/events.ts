@@ -1,7 +1,13 @@
+import { isOutstandingSubagentStatus } from "../../../shared/subagent-status";
 import type { StreamEvent, SubAgentInfo } from "../state/useServer";
 import { PANEL_ACTIONS, panelActionOf } from "../../../shared/panel-actions";
 
-export const SUBAGENT_KINDS = new Set(["subagent_start", "subagent_progress", "subagent_done"]);
+export const SUBAGENT_KINDS = new Set([
+  "subagent_start",
+  "subagent_progress",
+  "subagent_done",
+  "subagent_enrichment",
+]);
 // One-line status banners that render inline rather than inside the
 // collapsed step box: compaction, CLI notices, API retries.
 export const BANNER_KINDS = new Set(["compact", "notice", "retry", "error"]);
@@ -63,7 +69,8 @@ export function transcriptLength(sa: SubAgentInfo): number {
 
 export function isTerminalSubagent(e: StreamEvent): boolean {
   return (
-    e.kind === "subagent_done" || (e.subagent?.status != null && e.subagent.status !== "running")
+    e.kind === "subagent_done" ||
+    (e.subagent?.status != null && !isOutstandingSubagentStatus(e.subagent.status))
   );
 }
 
@@ -103,7 +110,7 @@ function foldSubagents(events: StreamEvent[]): Map<string, StreamEvent> {
   const parts = new Map<string, StreamEvent[]>();
   for (const e of events) {
     const taskId = e.subagent?.taskId;
-    if (!taskId || !isSubagentEvent(e)) continue;
+    if (!taskId || !isSubagentEvent(e) || e.kind === "subagent_enrichment") continue;
     const list = parts.get(taskId);
     if (list) list.push(e);
     else parts.set(taskId, [e]);
@@ -194,7 +201,7 @@ export function timelineBlocks(events: StreamEvent[]): TimelineBlock[] {
   for (const e of events) {
     if (isSubagentEvent(e)) {
       const taskId = e.subagent?.taskId;
-      if (!taskId || placed.has(taskId)) continue;
+      if (!taskId || placed.has(taskId) || e.kind === "subagent_enrichment") continue;
       placed.add(taskId);
       flush();
       blocks.push({ kind: "subagent", ev: folded.get(taskId)! });
@@ -217,6 +224,8 @@ export function timelineBlocks(events: StreamEvent[]): TimelineBlock[] {
 // A message "still has work in flight" when any of its subagents hasn't
 // reached a terminal state — the main agent may already be idle while
 // background subagents keep running.
-export function hasRunningSubagents(events?: StreamEvent[]): boolean {
-  return !!events?.some((e) => e.kind === "subagent_start" && e.subagent?.status === "running");
+export function hasOutstandingSubagents(events?: StreamEvent[]): boolean {
+  return !!events?.some(
+    (e) => e.kind === "subagent_start" && isOutstandingSubagentStatus(e.subagent?.status),
+  );
 }

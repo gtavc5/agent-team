@@ -1,3 +1,4 @@
+import type { SubagentStatus } from "../../../shared/subagent-status";
 import type { ContextUsage } from "../../../shared/context-usage";
 import { configureTelemetry } from "../telemetry";
 import { emptyUi, receiveUi, withoutOwner, type LiveNotice } from "./extensionUi";
@@ -52,12 +53,13 @@ export interface SubAgentInfo {
   agentType?: string;
   // SDK task type; absent on older records (all agents).
   taskType?: string;
-  status?: "running" | "completed" | "failed" | "stopped";
+  status?: SubagentStatus;
   lastTool?: string;
   usage?: { totalTokens: number; toolUses: number; durationMs: number };
   // From the task's start to its end: every kind of task.
   durationMs?: number;
   summary?: string;
+  transcriptRevision?: number;
   eventCount?: number;
   events?: StreamEvent[];
   // Client-only, on a card whose transcript was never loaded: nested tasks
@@ -327,6 +329,7 @@ export interface BackgroundTask {
   type: string;
   description: string;
   since: number;
+  status?: SubagentStatus;
   cancellable?: boolean;
 }
 
@@ -1146,6 +1149,7 @@ export function useServer() {
           const messageId = msg.messageId as string;
           const taskId = msg.taskId as string;
           const saEvents = msg.events as StreamEvent[];
+          const revision = (msg.transcriptRevision as number | undefined) ?? 0;
           flushStreamEvents();
           setWorkspaces((prev) =>
             prev.map((w) => {
@@ -1157,7 +1161,12 @@ export function useServer() {
                   return {
                     ...m,
                     events: m.events.map((e) => {
-                      if (e.subagent?.taskId !== taskId) return e;
+                      // A response requested before enrichment must not repopulate the old slice.
+                      if (
+                        e.subagent?.taskId !== taskId ||
+                        (e.subagent.transcriptRevision ?? 0) !== revision
+                      )
+                        return e;
                       return {
                         ...e,
                         subagent: { ...e.subagent, events: saEvents, eventCount: saEvents.length },

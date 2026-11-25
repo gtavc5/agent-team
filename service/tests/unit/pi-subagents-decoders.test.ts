@@ -361,6 +361,22 @@ describe("subagent-notify wire decoder", () => {
     });
   });
 
+  it("joins separated output previews by run identity rather than output position", () => {
+    const [run] = decodeSubagentNotifyWire({
+      role: "custom",
+      customType: "subagent-notify",
+      details: {
+        runId: "root",
+        childRuns: [{ runId: "a" }, { runId: "b" }],
+        childOutputs: [
+          { runId: "b", preview: "second" },
+          { runId: "a", preview: "first" },
+        ],
+      },
+    });
+    expect(run.children.map((c) => c.summary)).toEqual(["first", "second"]);
+  });
+
   it("attributes siblings in the restored workflow notice by workflow key", () => {
     const [run] = decodeSubagentNotifyWire(restoredMessage("subagent-notify"));
     expect(run.children.map((c) => [c.canonicalChildId, c.stepIndex, c.status])).toEqual([

@@ -1,6 +1,6 @@
 import { estimatedContext, type ContextUsage } from "../../../shared/context-usage";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -45,6 +45,14 @@ import {
   type SubagentNotifyRun,
   type SubagentProjectionState,
 } from "./pi-subagents";
+import { projectPiSubagentTree } from "./pi-subagent-tree";
+import { readPiSubagentFinalOutput } from "./pi-subagent-output";
+import {
+  bindPiSubagentWidgetChildren,
+  decodePiSubagentWidget,
+  decodePiSubagentSnapshot,
+  type PiSubagentWidgetNode,
+} from "./pi-subagent-widget";
 import { decodeExtensionUi } from "./pi-extension-ui";
 import { extractPiToolResultText, formatPiToolUse } from "./pi-tool-format";
 import { ACP } from "./quota-schema";
@@ -516,9 +524,38 @@ function newTurn(generation: number, envelope?: PromptEnvelope): Turn {
 function terminalStatus(value: unknown): SubAgentInfo["status"] | undefined {
   if (["completed", "complete", "success", "succeeded", "done"].includes(String(value)))
     return "completed";
+  if (value === "paused" || value === "partial" || value === "rejected") return value;
+  if (value === "interrupted") return "stopped";
   if (["failed", "error", "crashed"].includes(String(value))) return "failed";
   if (["stopped", "cancelled", "canceled", "aborted", "skipped"].includes(String(value)))
     return "stopped";
+}
+
+function workflowTaskId(run: ActiveAsyncRunRecord, index: number, key: string): string {
+  const candidate = makeSyntheticSubagentTaskId(run.toolCallId, index);
+  return run.children.some((child) => child.taskId === candidate)
+    ? `${run.toolCallId}:key:${key}`
+    : candidate;
+}
+
+function executionDuration(...records: (Json | undefined)[]): number | undefined {
+  for (const r of records) {
+    const duration = num(r?.durationMs ?? object(r?.progressSummary).durationMs);
+    if (duration !== undefined && Number.isSafeInteger(duration) && duration >= 0) return duration;
+  }
+  for (const r of records) {
+    const start = num(r?.startedAt),
+      end = num(r?.endedAt);
+    if (
+      start !== undefined &&
+      end !== undefined &&
+      Number.isSafeInteger(start) &&
+      Number.isSafeInteger(end) &&
+      start >= 0 &&
+      end >= start
+    )
+      return end - start;
+  }
 }
 
 function alive(pid: number): boolean {
@@ -582,6 +619,12 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private registered = false;
   private bridgeOwnedToolNames = new Set<string>();
   private activeAsyncRuns: ActiveAsyncRunRecord[] = [];
+  // Recent settled bindings let delayed completion notices enrich an existing message after restore.
+  private settledAsyncRuns: ActiveAsyncRunRecord[] = [];
+  // Only receipts/checkpoints may claim a root; short history bridges widget-before-receipt.
+  private readonly earlyWidgetRoots: PiSubagentWidgetNode[] = [];
+  private latestWidgetIds = new Set<string>();
+  private readonly pushCoverage = new Map<string, Set<string>>();
   // A terminal status file can precede the live extension's notification.
   private readonly pendingDeployNotices = new Set<string>();
   private reconciliation?: Promise<void>;
@@ -645,6 +688,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     session.effort.desired = state.desiredEffort ?? state.config.effort;
     session.usage = { ...state.usage };
     session.activeAsyncRuns = structuredClone(state.activeAsyncRuns ?? []);
+    session.settledAsyncRuns = structuredClone(state.settledAsyncRuns ?? []);
     for (const run of session.activeAsyncRuns) {
       for (const child of run.children) {
         if (child.execution?.model || child.execution?.effort || child.hasLiveEvents) {
@@ -685,6 +729,9 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       desiredModel: this.model.desired,
       desiredEffort: this.effort.desired,
       activeAsyncRuns: structuredClone(this.activeAsyncRuns),
+      ...(this.settledAsyncRuns.length && {
+        settledAsyncRuns: structuredClone(this.settledAsyncRuns),
+      }),
     };
   }
 
@@ -715,17 +762,33 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     return [...this.dialogs.values()].map(({ request }) => request);
   }
   get backgroundTaskList(): BackgroundTask[] {
-    return this.activeAsyncRuns.flatMap((run) =>
-      run.children
+    return this.activeAsyncRuns.flatMap((run) => {
+      const lanes = run.children
         .filter((child) => !terminalStatus(child.status))
         .map((child) => ({
           id: child.taskId,
           type: "local_agent",
           description: child.canonicalChildId,
-          since: run.startedAt,
+          since: child.startedAt ?? run.startedAt,
+          status:
+            child.status === "queued" || child.status === "pending"
+              ? ("queued" as const)
+              : ("running" as const),
           cancellable: true,
-        })),
-    );
+        }));
+      return lanes.length
+        ? lanes
+        : [
+            {
+              id: run.runId,
+              type: "local_agent",
+              description: run.mode,
+              since: run.startedAt,
+              status: "running" as const,
+              cancellable: true,
+            },
+          ];
+    });
   }
   getAvailableModels(): PiAvailableModel[] {
     return this.models.slice();
@@ -1504,6 +1567,11 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
 
   private handleEvent(event: Json): void {
     if (event.type === "extension_ui_request") {
+      const widget = decodePiSubagentWidget(event);
+      if (widget) {
+        if (widget.runs) this.observeWidget(widget.runs);
+        return;
+      }
       const change = decodeExtensionUi(event, () => this.unhandledUi(event));
       const { method } = event;
       if (change) this.extensionUi(change);
@@ -2056,6 +2124,9 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   }
   private advanceGeneration(): void {
     this.pendingDeployNotices.clear();
+    this.earlyWidgetRoots.length = 0;
+    this.latestWidgetIds.clear();
+    this.pushCoverage.clear();
     this.processGeneration++;
     this.extensionUi({ kind: "reset" });
   }
@@ -2476,6 +2547,10 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       }
       this.activeAsyncRuns.push(run);
       this.startAsyncRunTracker(run);
+      for (const root of this.earlyWidgetRoots.filter((node) => node.id === runId)) {
+        if (this.activeAsyncRuns.includes(run)) this.applyWidgetRoot(run, root);
+      }
+      if (!this.latestWidgetIds.has(runId)) this.pushCoverage.delete(runId);
       this.backgroundChanged();
       void this.captureDetached(this.rpc?.pid);
       return;
@@ -2502,8 +2577,9 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     taskId: string,
     status: SubAgentInfo["status"],
     result?: Json,
-    startedAt?: number,
     execution = projectSubagentExecution(result),
+    enrichment = false,
+    binding?: ActiveAsyncChildRecord,
   ): void {
     const projectionEntry = this.subagentProjectionStates.get(taskId);
     const trackedExecution = projectionEntry?.emittedExecution ?? projectionEntry?.state.execution;
@@ -2514,7 +2590,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       text(result?.sessionFile ?? result?.sessionPath) || text(result?.transcriptPath),
     );
     const child =
-      result && (hasChildRef || !hadLiveEvents)
+      result && (hasChildRef || (!enrichment && !hadLiveEvents))
         ? reconstructSubagentChild(
             {
               sessionFile: text(result.sessionFile ?? result.sessionPath),
@@ -2529,24 +2605,36 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     // session/transcript file exists (or turn aborted), omit events/eventCount so
     // Workspace and client preserve the live transcript instead of wiping it.
     const preserveLive = !hasChildRef && hadLiveEvents;
-    const events = child?.events ?? (preserveLive ? undefined : []);
+    const usefulTranscript = child?.events.some((e) => e.kind !== "notice");
+    const events =
+      (hadLiveEvents || enrichment) && !usefulTranscript
+        ? undefined
+        : (child?.events ?? (preserveLive ? undefined : []));
     let observed: ReturnType<typeof assistantExecution> = {};
     for (const message of list(result?.messages)) {
       if (message.role === "assistant") observed = { ...observed, ...assistantExecution(message) };
     }
     const model = child?.model ?? observed.model ?? execution.model ?? trackedExecution?.model;
     const effort = child?.effort ?? observed.effort ?? execution.effort ?? trackedExecution?.effort;
-    const durationMs =
-      num(result?.durationMs ?? object(result?.progressSummary).durationMs) ??
-      (startedAt === undefined ? undefined : Date.now() - startedAt);
+    const durationMs = executionDuration(result);
+    if (enrichment && !summary && !events && durationMs == null && !model && !effort) return;
+    if (binding) {
+      // Notify may deliver both message_start and message_end. Keep only a compact signature
+      // in the checkpoint, not a second copy of the potentially large child transcript.
+      const signature = createHash("sha256")
+        .update(JSON.stringify([summary, events, durationMs, model, effort]))
+        .digest("hex");
+      if (enrichment && binding.detailSignature === signature) return;
+      binding.detailSignature = signature;
+    }
     this.event({
-      kind: "subagent_done",
+      kind: enrichment ? "subagent_enrichment" : "subagent_done",
       content: "",
       subagent: {
         taskId,
         description: "",
-        status,
-        summary,
+        ...(!enrichment && { status }),
+        ...(summary && { summary }),
         ...(events !== undefined ? { events, eventCount: events.length } : {}),
         durationMs,
         ...(model && { model }),
@@ -2578,29 +2666,175 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     turn.tools.clear();
     turn.subagents.clear();
   }
-  private completeAsyncRun(update: SubagentNotifyRun, fromDisk = false): void {
-    const run = this.activeAsyncRuns.find((item) => item.runId === update.runId);
+  private observeWidget(roots: PiSubagentWidgetNode[]): void {
+    // Absence or retraction only releases push coverage to the fallback. Neither settles work.
+    this.latestWidgetIds = new Set(roots.map((node) => node.id));
+    this.pushCoverage.clear();
+    for (const root of roots) {
+      if (roots.some((other) => other !== root && other.id === root.id)) continue;
+      const run = this.activeAsyncRuns.find((item) => item.runId === root.id);
+      if (run) this.applyWidgetRoot(run, root);
+      else if (!this.settledAsyncRuns.some((item) => item.runId === root.id)) {
+        this.earlyWidgetRoots.push(root);
+        if (this.earlyWidgetRoots.length > 64) this.earlyWidgetRoots.shift();
+      }
+    }
+  }
+
+  private applyWidgetRoot(run: ActiveAsyncRunRecord, root: PiSubagentWidgetNode): void {
+    let pairs = bindPiSubagentWidgetChildren(root, run);
+    const steps = root.children?.filter((node) => node.kind === "step") ?? [];
+    if (steps.length > pairs.length) {
+      // Materialized workflow keys and runner IDs are not necessarily the same. Load the
+      // canonical roster to resolve aliases before claiming pre-existing card positions.
+      const tracker = this.asyncTrackers.get(run.runId);
+      if (tracker) this.discoverWorkflowChildrenFromDisk(tracker);
+      pairs = bindPiSubagentWidgetChildren(root, run);
+      if (run.mode === "workflow") {
+        // A workflow launch can have only a generic placeholder, not a roster. Allocate by
+        // the published key, never by snapshot position (which changes with omissions).
+        for (const node of steps) {
+          if (
+            pairs.some((p) => p.node === node) ||
+            steps.filter((s) => s.id === node.id).length !== 1 ||
+            run.children.some((c) => c.canonicalChildId === node.id || c.childRunId === node.id)
+          )
+            continue;
+          const placeholder =
+            run.children.length === 1 &&
+            run.children[0].canonicalChildId === "step:0" &&
+            !run.children[0].childRunId
+              ? run.children[0]
+              : undefined;
+          const child: ActiveAsyncChildRecord = placeholder ?? {
+            taskId: `${run.toolCallId}:key:${node.id}`,
+            canonicalChildId: node.id,
+            stepIndex: -1,
+          };
+          child.canonicalChildId = node.id;
+          child.stepIndex = -1; // Unknown until the canonical roster identifies the keyed lane.
+          if (!placeholder) {
+            run.children.push(child);
+            this.event({
+              kind: "subagent_start",
+              toolUseId: run.toolCallId,
+              content: "",
+              subagent: {
+                taskId: child.taskId,
+                description: node.agent ?? node.label,
+                status: node.state === "queued" ? "queued" : "running",
+                cancellable: true,
+              },
+            });
+          }
+          pairs.push({ node, child });
+        }
+      }
+    }
+    if (run.mode === "single" && run.children.length === 1 && !steps.length)
+      pairs = [{ child: run.children[0], node: root }];
+    const covered = new Set<string>();
+    this.pushCoverage.set(run.runId, covered);
+    const terminalChildren: SubagentNotifyRun["children"] = [];
+    let changed = false;
+    for (const { node, child } of pairs) {
+      covered.add(child.taskId);
+      const nested = [
+        ...(node.children ?? []),
+        ...(node !== root && child === run.children[0]
+          ? (root.children ?? []).filter((n) => n.kind !== "step")
+          : []),
+      ];
+      if (nested.length) {
+        const tree = projectPiSubagentTree(child.taskId, nested, child.tree);
+        child.tree = tree.state;
+        for (const e of tree.events) this.emitSubagentInnerEvent(child.taskId, e);
+        if (tree.events.length) {
+          child.hasLiveEvents = true;
+          this.getOrCreateProjectionState(child.taskId).hasLiveEvents = true;
+        }
+      }
+      if (terminalStatus(child.status)) continue;
+      child.startedAt = node.startedAt ?? child.startedAt;
+      child.endedAt = node.endedAt ?? child.endedAt;
+      if (terminalStatus(node.state)) {
+        if (
+          node.model &&
+          node.state !== "rejected" &&
+          (node.state === "completed" || node.activity?.turnCount)
+        )
+          child.execution ??= { model: node.model, effort: node.thinking };
+        terminalChildren.push({
+          canonicalChildId: child.canonicalChildId,
+          stepIndex: child.stepIndex,
+          status: node.state,
+        });
+      } else if (node.state === "queued" || node.state === "running") {
+        const execution =
+          node.state === "running"
+            ? {
+                model: child.execution?.model ?? node.model,
+                effort: child.execution?.effort ?? node.thinking,
+              }
+            : {};
+        const statusChanged = child.status !== node.state;
+        child.status = node.state;
+        if (
+          this.emitSubagentMetaProgress(
+            child.taskId,
+            true,
+            execution,
+            node.activity?.currentTool,
+            child,
+            statusChanged,
+          )
+        )
+          changed = true;
+      }
+    }
+    if (terminalChildren.length || terminalStatus(root.state)) {
+      this.completeAsyncRun(
+        { runId: run.runId, status: root.state, children: terminalChildren },
+        true,
+        true,
+      );
+    }
+    if (changed) this.backgroundChanged();
+  }
+
+  private completeAsyncRun(update: SubagentNotifyRun, fromDisk = false, pushed = false): void {
+    const active = this.activeAsyncRuns.find((item) => item.runId === update.runId);
+    const run = active ?? this.settledAsyncRuns.find((item) => item.runId === update.runId);
     if (!run) return;
     const diskStatus = this.runStatus(run);
     const diskSteps = this.syncRunChildrenFromDisk(run, diskStatus);
     const terminal = terminalStatus(update.status);
     let changed = false;
     for (const child of run.children) {
-      if (terminalStatus(child.status)) continue;
+      const alreadySettled = terminalStatus(child.status);
+      if (alreadySettled && fromDisk) continue;
       const wireResult =
-        update.children.find((item) => item.canonicalChildId === child.canonicalChildId) ??
-        update.children.find((item) => item.stepIndex === child.stepIndex);
+        update.children.find(
+          (item) =>
+            item.canonicalChildId === child.canonicalChildId ||
+            (child.childRunId && item.runId === child.childRunId),
+        ) ??
+        (child.stepIndex >= 0 && !pushed
+          ? update.children.find((item) => item.stepIndex === child.stepIndex)
+          : undefined);
       const diskStep =
         diskSteps.find(
           (step, index) => resolveCanonicalChildId(step, index) === child.canonicalChildId,
         ) ?? diskSteps[child.stepIndex];
-      const childRunId = text(diskStep?.runId ?? wireResult?.runId);
+      const childRunId = text(diskStep?.runId ?? wireResult?.runId ?? child.childRunId);
       const childStep = list(this.childRunStatus(run, childRunId)?.steps)[0];
+      if (pushed && !wireResult && !terminal) continue;
       const status =
+        alreadySettled ??
         terminalStatus(wireResult?.status) ??
         terminalStatus(diskStep?.status) ??
         terminalStatus(childStep?.status) ??
-        terminal;
+        (pushed && run.mode !== "single" && !wireResult ? undefined : terminal);
       const wireStep = object(wireResult);
       const observed = {
         ...child.execution,
@@ -2627,28 +2861,56 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       const transcriptPath = text(
         wireResult?.transcriptPath ?? diskStep?.transcriptPath ?? childStep?.transcriptPath,
       );
-      const summary = text(
-        wireResult?.summary ??
-          diskStep?.summary ??
-          diskStep?.output ??
-          diskStep?.preview ??
-          childStep?.summary ??
-          childStep?.output ??
-          childStep?.preview,
-      );
+      const tempRoot = this.asyncRunsRoot() ?? path.dirname(run.asyncDir);
+      const sessionRoot =
+        this.config.piSessionDir ?? (this.sessionFile ? path.dirname(this.sessionFile) : undefined);
+      const archiveFor = (runId: string, stepIndex: number) =>
+        readPiSubagentFinalOutput({
+          resultsDir: path.join(path.dirname(tempRoot), "async-subagent-results"),
+          runId,
+          stepIndex,
+          ownsSession: this.ownsSession,
+          artifactRoots: [
+            path.join(path.dirname(tempRoot), "artifacts"),
+            ...(sessionRoot ? [path.join(sessionRoot, "subagent-artifacts")] : []),
+          ],
+          sessionRoots: sessionRoot ? [sessionRoot] : [],
+        });
+      const archived =
+        archiveFor(run.runId, child.stepIndex) ??
+        (childRunId && childRunId !== run.runId ? archiveFor(childRunId, 0) : undefined);
+      const summary =
+        archived?.text ??
+        text(
+          wireResult?.summary ??
+            diskStep?.summary ??
+            diskStep?.output ??
+            diskStep?.preview ??
+            childStep?.summary ??
+            childStep?.output ??
+            childStep?.preview,
+        );
       const transcriptError = text(
         wireResult?.transcriptError ?? diskStep?.transcriptError ?? childStep?.transcriptError,
       );
       const outputTruncated =
+        archived?.truncated === true ||
         wireResult?.outputTruncated === true ||
         diskStep?.outputTruncated === true ||
         childStep?.outputTruncated === true;
       const merged: Json | undefined =
-        wireResult || diskStep || childStep
+        wireResult || diskStep || childStep || archived || child.endedAt !== undefined
           ? {
               ...(sessionFile ? { sessionFile } : {}),
               ...(transcriptPath ? { transcriptPath } : {}),
               ...(summary ? { summary } : {}),
+              durationMs: executionDuration(
+                childStep,
+                diskStep,
+                wireStep,
+                { startedAt: child.startedAt, endedAt: child.endedAt },
+                run.mode === "single" ? diskStatus : undefined,
+              ),
               ...(transcriptError ? { transcriptError } : {}),
               ...(outputTruncated ? { outputTruncated: true } : {}),
             }
@@ -2662,18 +2924,35 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           (state == null && status === "completed" && child.status !== "pending")
         );
       });
+      // Drain complete records before terminal state makes tail handlers ignore them.
+      const tracker = this.asyncTrackers.get(run.runId);
+      if (!alreadySettled && tracker) {
+        this.pollLiveWatch(tracker.parentWatch, run);
+        for (const watch of tracker.childWatches.values())
+          if (watch.targetTaskId === child.taskId) this.pollLiveWatch(watch, run);
+      }
       child.status = status;
       this.closeAsyncChildWatchesForTask(run.runId, child.taskId);
-      changed = true;
-      this.childDone(child.taskId, status, merged, run.startedAt, {
-        ...projectSubagentExecution(...completedSteps),
-        ...observed,
-      });
+      changed ||= !alreadySettled;
+      this.childDone(
+        child.taskId,
+        status,
+        merged,
+        {
+          ...projectSubagentExecution(...completedSteps),
+          ...observed,
+        },
+        Boolean(alreadySettled),
+        child,
+      );
     }
-    if (terminal || run.children.every((child) => terminalStatus(child.status))) {
+    const childrenSettled = run.children.every((child) => terminalStatus(child.status));
+    if (active && childrenSettled && (terminal || (!pushed && !this.pushCoverage.has(run.runId)))) {
+      this.pushCoverage.delete(run.runId);
       if (fromDisk && this.rpc) this.pendingDeployNotices.add(run.runId);
       this.stopAsyncRunTracker(run.runId);
       this.activeAsyncRuns = this.activeAsyncRuns.filter((item) => item !== run);
+      this.settledAsyncRuns = [...this.settledAsyncRuns.slice(-127), run];
       changed = true;
     }
     if (changed) this.backgroundChanged();
@@ -2732,10 +3011,19 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private syncRunChildrenFromDisk(run: ActiveAsyncRunRecord, diskStatus?: Json): Json[] {
     const diskSteps = list(diskStatus?.steps);
     for (const child of run.children) {
-      const step = diskSteps[child.stepIndex];
+      const step =
+        diskSteps.find(
+          (row, index) => resolveCanonicalChildId(row, index) === child.canonicalChildId,
+        ) ??
+        (child.canonicalChildId === `step:${child.stepIndex}`
+          ? diskSteps[child.stepIndex]
+          : undefined);
       if (!step) continue;
       const resolved = resolveCanonicalChildId(step, child.stepIndex);
       if (resolved !== `step:${child.stepIndex}`) child.canonicalChildId = resolved;
+      child.stepIndex = diskSteps.indexOf(step);
+      if (typeof step.runId === "string" && isSafeChildRunId(step.runId))
+        child.childRunId = step.runId;
     }
     return diskSteps;
   }
@@ -2779,6 +3067,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     execution: { model?: string; effort?: string },
     lastTool?: string,
     asyncChild?: ActiveAsyncChildRecord,
+    statusChanged = false,
   ): boolean {
     if (this.disposed) return false;
     const entry = this.getOrCreateProjectionState(taskId);
@@ -2795,6 +3084,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       asyncChild?.execution?.effort;
     const nextLastTool = lastTool ?? entry.lastTool;
     const changed =
+      statusChanged ||
       nextModel !== prevExecution?.model ||
       nextEffort !== prevExecution?.effort ||
       nextLastTool !== entry.lastTool;
@@ -2823,7 +3113,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       subagent: {
         taskId,
         description: "",
-        status: "running",
+        status: asyncChild?.status === "queued" ? "queued" : "running",
         cancellable,
         ...(nextModel ? { model: nextModel } : {}),
         ...(nextEffort ? { effort: nextEffort } : {}),
@@ -3104,8 +3394,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
             index = 0;
             while (run.children.some((c) => c.stepIndex === index)) index++;
           }
-          const taskId = makeSyntheticSubagentTaskId(run.toolCallId, index);
           const resolvedId = resolveCanonicalChildId(record, index);
+          const taskId = workflowTaskId(run, index, resolvedId);
           const initialStatus =
             record.state === "pending" || record.status === "pending" ? "pending" : "running";
           child = {
@@ -3117,6 +3407,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           run.children.push(child);
           this.event({
             kind: "subagent_start",
+            toolUseId: run.toolCallId,
             content: "",
             subagent: {
               taskId,
@@ -3198,7 +3489,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           run.children.find((c) => c.canonicalChildId === canonicalChildId) ??
           run.children.find((c) => c.stepIndex === index);
         if (existing) continue;
-        const taskId = makeSyntheticSubagentTaskId(run.toolCallId, index);
+        const taskId = workflowTaskId(run, index, canonicalChildId);
         const status = step.status === "pending" ? "pending" : "running";
         const child: ActiveAsyncChildRecord = {
           taskId,
@@ -3209,6 +3500,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         run.children.push(child);
         this.event({
           kind: "subagent_start",
+          toolUseId: run.toolCallId,
           content: "",
           subagent: {
             taskId,
@@ -3241,7 +3533,18 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private pollAsyncRunTracker(tracker: AsyncRunTracker): void {
     if (this.disposed) return;
     this.pollLiveWatch(tracker.parentWatch, tracker.run);
-    this.discoverWorkflowChildrenFromDisk(tracker);
+    const covered = this.pushCoverage.get(tracker.run.runId);
+    if (
+      !covered ||
+      tracker.run.children.some(
+        (child) =>
+          !terminalStatus(child.status) &&
+          (!covered.has(child.taskId) ||
+            (tracker.run.mode === "workflow" &&
+              (!child.childRunId || !tracker.childWatches.has(child.childRunId)))),
+      )
+    )
+      this.discoverWorkflowChildrenFromDisk(tracker);
     for (const watch of tracker.childWatches.values()) {
       this.pollLiveWatch(watch, tracker.run);
     }
@@ -3309,24 +3612,42 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     });
     return this.reconciliation;
   }
-  private async reconcile(): Promise<void> {
+  private async reconcile(only?: ActiveAsyncRunRecord): Promise<void> {
     const generation = this.processGeneration;
-    for (const run of [...this.activeAsyncRuns]) {
+    for (const run of only ? [only] : [...this.activeAsyncRuns]) {
       if (this.disposed || generation !== this.processGeneration) return;
       const status = this.runStatus(run);
       const diskSteps = this.syncRunChildrenFromDisk(run, status);
       const pid = num(status?.pid ?? status?.runnerPid);
-      const remote = this.panelHttp.isControlConnected(this.sessionKey)
-        ? object(
-            await this.panelHttp
-              .sendSubagentsRpc(this.sessionKey, "status", { id: run.runId }, this.statsTimeoutMs)
-              .catch(() => undefined),
-          )
-        : {};
-      if (this.disposed || generation !== this.processGeneration) return;
+      const remote =
+        (only || !this.pushCoverage.has(run.runId)) &&
+        this.panelHttp.isControlConnected(this.sessionKey)
+          ? object(
+              await this.panelHttp
+                .sendSubagentsRpc(this.sessionKey, "status", { id: run.runId }, this.statsTimeoutMs)
+                .catch(() => undefined),
+            )
+          : {};
+      if (
+        this.disposed ||
+        generation !== this.processGeneration ||
+        !this.activeAsyncRuns.includes(run)
+      )
+        continue;
       const snapshot = object(remote.asyncSnapshot);
+      // The control endpoint also returns the bounded v1 projection. It is not an
+      // indexed completion roster. Apply its explicit identities, without claiming push coverage.
+      const projected = decodePiSubagentSnapshot(snapshot)?.find((node) => node.id === run.runId);
+      if (projected) {
+        const coverage = this.pushCoverage.get(run.runId);
+        this.applyWidgetRoot(run, projected);
+        if (this.activeAsyncRuns.includes(run) && coverage)
+          this.pushCoverage.set(run.runId, coverage);
+        else this.pushCoverage.delete(run.runId);
+        if (!this.activeAsyncRuns.includes(run)) continue;
+      }
       const remoteRun = [
-        ...list(snapshot.runs ?? snapshot.jobs),
+        ...list(snapshot.jobs),
         object(remote.run),
         object(object(remote.details).run),
       ].find((item) => (item.runId ?? item.id ?? item.asyncId) === run.runId);
@@ -3346,13 +3667,31 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       if (update) this.completeAsyncRun(update, true);
     }
   }
+  private async checkAcceptedStop(
+    target: NonNullable<ReturnType<typeof resolveStopTarget>>,
+  ): Promise<void> {
+    const generation = this.processGeneration;
+    for (const waitMs of [0, 50, 150, 400, 1000]) {
+      if (waitMs) await delay(waitMs);
+      if (
+        this.disposed ||
+        generation !== this.processGeneration ||
+        !this.activeAsyncRuns.includes(target.run) ||
+        (target.scope === "child" && terminalStatus(target.child.status))
+      )
+        return;
+      await this.reconcile(target.run);
+    }
+  }
+
   async stopTask(id: string): Promise<void> {
     if (this.disposed) throw new Error("Pi session is disposed");
     await this.stop(id);
   }
   private async stop(id: string, timeoutMs?: number): Promise<void> {
     const target = resolveStopTarget(this.activeAsyncRuns, id);
-    if (!target) throw new Error(`Unknown Pi subagent task: ${id}`);
+    if (!target || (target.scope === "child" && terminalStatus(target.child.status)))
+      throw new Error(`Unknown Pi subagent task: ${id}`);
     const connected = this.panelHttp.isControlConnected(this.sessionKey);
     if (target.scope === "child") {
       const deadline = Date.now() + Math.min(3_000, timeoutMs ?? 3_000);
@@ -3390,6 +3729,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         throw new Error(
           text(result.error) ?? text(object(result.error).code) ?? "Pi subagent stop failed",
         );
+      void this.checkAcceptedStop(target);
       return;
     }
     if (!this.piSubagentsRoot) {
@@ -3406,6 +3746,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       ownsSession: this.ownsSession,
     });
     if (!result.ok) throw new Error(result.error);
+    void this.checkAcceptedStop(target);
   }
 
   private retiring?: Promise<void>;

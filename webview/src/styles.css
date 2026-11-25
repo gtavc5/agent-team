@@ -1981,6 +1981,10 @@ span.katex-display {
 /* A command in a card (a background shell's) or a banner wraps like a tool
    call in the steps, instead of one long scrolling bar. */
 .subagent-prompt pre,
+.subagent-partial .subagent-summary {
+  border-left-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 6%, transparent);
+}
 .subagent-summary pre,
 .banner-text pre {
   white-space: pre-wrap;
@@ -2255,13 +2259,20 @@ button.action-target:hover {
   border-left-color: var(--success);
   background: color-mix(in srgb, var(--success) 4%, transparent);
 }
-.subagent-item.subagent-failed {
+.subagent-item.subagent-failed,
+.subagent-item.subagent-rejected {
   border-left-color: var(--error);
   background: color-mix(in srgb, var(--error) 4%, transparent);
 }
+.subagent-item.subagent-queued,
+.subagent-item.subagent-paused,
 .subagent-item.subagent-stopped {
   border-left-color: var(--text-muted);
   background: transparent;
+}
+.subagent-item.subagent-partial {
+  border-left-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 4%, transparent);
 }
 .subagent-item .subagent-item {
   margin: 4px 0;
@@ -2291,11 +2302,17 @@ button.action-target:hover {
 .subagent-icon-completed {
   color: var(--success);
 }
-.subagent-icon-failed {
+.subagent-icon-failed,
+.subagent-icon-rejected {
   color: var(--error);
 }
+.subagent-icon-queued,
+.subagent-icon-paused,
 .subagent-icon-stopped {
   color: var(--text-muted);
+}
+.subagent-icon-partial {
+  color: var(--warning);
 }
 @keyframes spin {
   from {
@@ -2362,10 +2379,12 @@ button.action-target:hover {
   background: color-mix(in srgb, var(--success) 6%, transparent);
   border-radius: 2px;
 }
-.subagent-failed .subagent-summary {
+.subagent-failed .subagent-summary,
+.subagent-rejected .subagent-summary {
   border-left-color: var(--error);
   background: color-mix(in srgb, var(--error) 6%, transparent);
 }
+.subagent-paused .subagent-summary,
 .subagent-stopped .subagent-summary {
   border-left-color: var(--text-muted);
   background: transparent;

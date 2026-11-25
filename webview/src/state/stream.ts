@@ -1,3 +1,4 @@
+import { isOutstandingSubagentStatus } from "../../../shared/subagent-status";
 import type { StreamEvent, Message, SubAgentInfo } from "./useServer";
 import {
   attachToolResult,
@@ -127,6 +128,10 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
       }
       continue;
     }
+    if (ev.kind === "subagent_enrichment") {
+      if (ev.subagent) enrichSubagent(events, ev.subagent);
+      continue;
+    }
     if (ev.kind === "subagent_done" && taskId) {
       finishSubagent(events, ev, taskId);
       continue;
@@ -208,7 +213,7 @@ export function withoutLiveTiming(m: Message): Message {
 // tracks what loading it would show.
 function unloadedGrowth(sa: SubAgentInfo, innerEv: StreamEvent): number {
   const nid = innerEv.subagent?.taskId;
-  if (innerEv.kind === "tool_result") return 0;
+  if (innerEv.kind === "tool_result" || innerEv.kind === "subagent_enrichment") return 0;
   if (innerEv.kind === "subagent_progress" && nid) {
     if (innerSubagentEvent(innerEv)) return 0;
     if (sa.liveProgress?.includes(nid)) return 0;
@@ -258,7 +263,7 @@ function finishSubagent(events: StreamEvent[], done: StreamEvent, taskId: string
       !done.subagent?.events &&
       done.subagent?.eventCount != null &&
       base.subagent?.events !== undefined &&
-      base.subagent?.status === "running"
+      isOutstandingSubagentStatus(base.subagent?.status)
     ) {
       merged.subagent = {
         ...merged.subagent!,
@@ -273,6 +278,35 @@ function finishSubagent(events: StreamEvent[], done: StreamEvent, taskId: string
       ? { ...done, subagent: mergeSubagentInfo(fallback.subagent, done.subagent!) }
       : done,
   );
+}
+
+function enrichSubagent(events: StreamEvent[], patch: SubAgentInfo): void {
+  const start = findSubagentEvent(events, "subagent_start", patch.taskId);
+  const count = patch.events?.length ?? patch.eventCount;
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    const sa = e.subagent;
+    if (sa?.taskId !== patch.taskId || (e.kind !== "subagent_start" && e.kind !== "subagent_done"))
+      continue;
+    const revision = patch.transcriptRevision;
+    if (revision != null && revision <= (sa.transcriptRevision ?? 0)) continue;
+    events[i] = {
+      ...e,
+      subagent: {
+        ...sa,
+        ...(revision != null && { transcriptRevision: revision }),
+        ...(patch.model != null && { model: patch.model }),
+        ...(patch.effort != null && { effort: patch.effort }),
+        ...(patch.durationMs != null && { durationMs: patch.durationMs }),
+        ...(patch.summary != null && { summary: patch.summary, summaryLength: undefined }),
+        ...(count != null && {
+          events: i === start || start < 0 ? patch.events : undefined,
+          eventCount: count,
+          liveProgress: undefined,
+        }),
+      },
+    };
+  }
 }
 
 function applyInnerEvent(sa: SubAgentInfo, innerEv: StreamEvent): void {
@@ -301,6 +335,8 @@ function applyInnerEvent(sa: SubAgentInfo, innerEv: StreamEvent): void {
       applyInnerEvent(subagent, inner);
       events[start] = { ...events[start], subagent };
     }
+  } else if (innerEv.kind === "subagent_enrichment") {
+    if (innerEv.subagent) enrichSubagent(events, innerEv.subagent);
   } else if (innerEv.kind === "subagent_done" && taskId) {
     finishSubagent(events, innerEv, taskId);
   } else {
@@ -345,8 +381,10 @@ export function mergeDetailEvents(
     if (!serverEv.subagent?.taskId) return serverEv;
     const clientEv = clientEvents.find((e) => e.subagent?.taskId === serverEv.subagent!.taskId);
     const kept = clientEv?.subagent?.events;
+    const sameRevision =
+      (clientEv?.subagent?.transcriptRevision ?? 0) === (serverEv.subagent.transcriptRevision ?? 0);
     // Shorter than the server's is a live tail with a gap before it.
-    if (kept?.length && kept.length >= transcriptLength(serverEv.subagent)) {
+    if (sameRevision && kept?.length && kept.length >= transcriptLength(serverEv.subagent)) {
       return { ...serverEv, subagent: { ...serverEv.subagent, events: kept } };
     }
     return serverEv;
@@ -441,6 +479,7 @@ function sameEvents(cur: StreamEvent[] = [], next: StreamEvent[] = []): boolean 
         c.subagent.status === n.subagent.status &&
         c.subagent.model === n.subagent.model &&
         c.subagent.effort === n.subagent.effort &&
+        (c.subagent.transcriptRevision ?? 0) === (n.subagent.transcriptRevision ?? 0) &&
         transcriptLength(c.subagent) >= transcriptLength(n.subagent)
       );
     })

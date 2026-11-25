@@ -93,6 +93,7 @@ export function summarizeEvent(e: StreamEvent): StreamEvent {
           ...(sa.effort != null && { effort: sa.effort }),
           ...(sa.cancellable !== undefined && { cancellable: sa.cancellable }),
           eventCount: sa.events?.length ?? sa.eventCount ?? 0,
+          ...(sa.transcriptRevision != null && { transcriptRevision: sa.transcriptRevision }),
           ...(sa.prompt && { hasPrompt: true }),
           ...(sa.summary && { summaryLength: sa.summary.length }),
         };

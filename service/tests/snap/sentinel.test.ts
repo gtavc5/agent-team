@@ -15,6 +15,9 @@ const allowedNames = new Set([
   "pixel.png",
   "fixture.ts",
   "pi-captures.ts",
+  // Reserved JSON widget kind identifiers, not hostnames.
+  "pi-subagents.async-status-snapshot",
+  "pi-subagents.inspect-reply",
 ]);
 
 function privateHost(host: string): boolean {

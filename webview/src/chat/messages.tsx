@@ -12,7 +12,8 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import type { Message, MessageOrigin, AgentInfo, StreamEvent } from "../state/useServer";
-import { isTerminalSubagent, timelineBlocks, type TimelineBlock } from "./events";
+import { hasOutstandingSubagents, timelineBlocks, type TimelineBlock } from "./events";
+import { isOutstandingSubagentStatus, type SubagentStatus } from "../../../shared/subagent-status";
 import { toolNameOf, toolSummary } from "../state/stream";
 import { copySelectionAsMarkdown } from "./clipboard";
 import { CodeBlock, CopyButton, FileRefCode, MdBlock, StreamingMdBlock } from "./markdown";
@@ -627,6 +628,17 @@ function hasVisibleEventBody(ev: StreamEvent): boolean {
   return ev.kind !== "thinking" || !!ev.content.trim() || (ev.contentLength ?? 0) > 0;
 }
 
+const SUBAGENT_STATUS_ICONS: Record<SubagentStatus, string> = {
+  queued: "◷",
+  running: "↻",
+  completed: "✓",
+  failed: "✗",
+  partial: "◐",
+  paused: "Ⅱ",
+  stopped: "◼",
+  rejected: "⊘",
+};
+
 export const SubAgentItem = memo(function SubAgentItem({
   ev,
   onLoadEvents,
@@ -644,21 +656,15 @@ export const SubAgentItem = memo(function SubAgentItem({
   // The server holds more of the transcript than the client (a summary
   // page, or a live tail that arrived after the summary).
   const needsLoad = !!sa && (sa.eventCount ?? 0) > (sa.events?.length ?? 0);
+  const transcriptRevision = sa?.transcriptRevision;
   useEffect(() => {
     if (open && needsLoad && onLoadEvents && sa?.taskId) onLoadEvents(sa.taskId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch once per open/needsLoad flip; sa and onLoadEvents change identity on every stream update
-  }, [open, needsLoad]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch once per open/needsLoad flip or transcript replacement; sa and onLoadEvents change identity on every stream update
+  }, [open, needsLoad, transcriptRevision]);
   if (!sa) return null;
 
-  const isRunning = !isTerminalSubagent(ev);
-  const statusIcon = isRunning
-    ? "↻"
-    : sa.status === "completed"
-      ? "✓"
-      : sa.status === "stopped"
-        ? "◼"
-        : "✗";
-  const statusCls = isRunning ? "running" : (sa.status ?? "failed");
+  const status = sa.status ?? (ev.kind === "subagent_done" ? "failed" : "stopped");
+  const outstanding = isOutstandingSubagentStatus(status);
 
   const allInner = sa.events ?? [];
   const hasBody = !!(sa.prompt || sa.summary || sa.usage || allInner.some(hasVisibleEventBody));
@@ -672,14 +678,14 @@ export const SubAgentItem = memo(function SubAgentItem({
   // Its time is in the header, measured from this run's start: the CLI's
   // counts from the first, a resumed agent's idle time between included.
   // Records from before it was measured: the CLI's time of a finished agent.
-  const ran = sa.durationMs ?? (isRunning ? undefined : sa.usage?.durationMs);
+  const ran = sa.durationMs ?? (outstanding ? undefined : sa.usage?.durationMs);
   const usageStr = sa.usage
     ? `${Math.round(sa.usage.totalTokens / 1000)}k tokens · ${sa.usage.toolUses} tools`
     : null;
 
   const role = sa.description || "Subagent";
   return (
-    <div className={`subagent-item subagent-${statusCls}`}>
+    <div className={`subagent-item subagent-${status}`}>
       <div className="subagent-header" ref={bottom.header} onClick={handleToggle}>
         <button
           type="button"
@@ -690,8 +696,8 @@ export const SubAgentItem = memo(function SubAgentItem({
         >
           {open ? "▾" : "▸"}
         </button>
-        <span className={`subagent-status-icon subagent-icon-${statusCls}`} title={statusCls}>
-          {statusIcon}
+        <span className={`subagent-status-icon subagent-icon-${status}`} title={status}>
+          {SUBAGENT_STATUS_ICONS[status]}
         </span>
         <span className="subagent-desc" title={role}>
           {role}
@@ -711,8 +717,8 @@ export const SubAgentItem = memo(function SubAgentItem({
             {formatRunTime(ran)}
           </span>
         )}
-        {isRunning && <span className="streaming-dot" />}
-        {isRunning && sa.cancellable !== false && onCancel && (
+        {status === "running" && <span className="streaming-dot" />}
+        {outstanding && sa.cancellable !== false && onCancel && (
           <button
             className="btn-cancel-subagent"
             title="Cancel this subagent"
@@ -1045,9 +1051,7 @@ function isRunningTool(e: StreamEvent): boolean {
 // A tool call still running or a subagent still working: the turn is not
 // waiting on the model.
 function workInFlight(events: StreamEvent[]): boolean {
-  return events.some(
-    (e) => isRunningTool(e) || (e.kind === "subagent_start" && e.subagent?.status === "running"),
-  );
+  return events.some(isRunningTool) || hasOutstandingSubagents(events);
 }
 
 const WAIT_SHOWN_AFTER_S = 15;

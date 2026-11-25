@@ -1868,6 +1868,177 @@ describe("PiSession dispatch and stream state", () => {
     await vi.waitFor(() => expect(session.deployBusy).toBe(false));
   });
 
+  it("keeps sparse workflow identities separate from later roster indices and sparse RPC responses", async () => {
+    const h = harness({ options: { livePollIntervalMs: 10 } });
+    await h.session.send("workflow");
+    const event = h.clients[0].event;
+    const node = (state: string) => ({
+      kind: "pi-subagents.async-status-snapshot",
+      version: 1,
+      runs: [
+        {
+          kind: "workflow",
+          id: "wf",
+          label: "workflow",
+          state: "running",
+          children: [{ kind: "step", id: "review", label: "review", state }],
+        },
+      ],
+    });
+    event({
+      type: "tool_execution_start",
+      toolName: "subagent",
+      toolCallId: "call",
+      args: { workflow: "workflow", async: true },
+    });
+    event({
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "subagent-async",
+      widgetLines: ["PI_SUBAGENT_ASYNC_JSON:" + JSON.stringify(node("running"))],
+    });
+    event({ type: "extension_ui_request", method: "setWidget", widgetKey: "subagent-async" });
+    event({
+      type: "tool_execution_end",
+      toolName: "subagent",
+      toolCallId: "call",
+      result: { details: { mode: "workflow", runId: "wf", asyncDir: h.dir } },
+    });
+    fs.writeFileSync(
+      path.join(h.dir, "status.json"),
+      JSON.stringify({
+        state: "running",
+        sessionId: h.session.sessionId,
+        runId: "wf",
+        steps: ["build", "review"].map((workflowKey) => ({ workflowKey, status: "running" })),
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(h.session.backgroundTaskList.map((t) => t.id)).toEqual(["call:0", "call:key:build"]),
+    );
+    vi.spyOn(h.panel, "isControlConnected").mockReturnValue(true);
+    const status = vi
+      .spyOn(h.panel, "sendSubagentsRpc")
+      .mockResolvedValue({ asyncSnapshot: node("failed") });
+    await h.session.reconcileAsyncRuns();
+    expect(status).toHaveBeenCalled();
+    expect(h.session.backgroundTaskList.map((t) => t.id)).toEqual(["call:key:build"]);
+    expect(
+      h.events.filter((e) => e.kind === "subagent_done").map((e) => e.subagent?.taskId),
+    ).toEqual(["call:0"]);
+    event({
+      type: "message_end",
+      message: {
+        role: "custom",
+        customType: "subagent-notify",
+        details: { runId: "wf", status: "completed" },
+      },
+    });
+    event({ type: "agent_settled" });
+  });
+
+  it("binds recorded workflow widget lanes without local files while the parent is busy", async () => {
+    const { session, clients, events, dir } = harness();
+    await session.send("launch");
+    const { event } = clients[0];
+    const frames = piFrames("messages/subagents-widgets");
+    const asyncWidgets = frames.filter((f) => f.widgetKey === "subagent-async");
+    event(asyncWidgets[0]);
+    event({
+      type: "tool_execution_start",
+      toolName: "subagent",
+      toolCallId: "workflow",
+      args: { workflow: "example", async: true },
+    });
+    event({
+      type: "tool_execution_end",
+      toolName: "subagent",
+      toolCallId: "workflow",
+      result: { details: { mode: "workflow", runId: "fixture-run", asyncDir: dir } },
+    });
+    for (const frame of asyncWidgets.slice(1)) event(frame);
+    expect(events.filter((e) => e.kind === "subagent_done").map((e) => e.subagent)).toMatchObject([
+      { taskId: "workflow:0", status: "completed", durationMs: 269, model: "pi-e2e/scenario" },
+      {
+        taskId: "workflow:key:child-2",
+        status: "completed",
+        durationMs: 246,
+        model: "pi-e2e/scenario",
+      },
+    ]);
+    expect(session.backgroundTaskList).toEqual([]);
+    expect(session.runState).toBe("working");
+    event({ type: "agent_settled" });
+  });
+
+  it.each(["complete", "partial", "failed", "rejected", "paused", "stopped"])(
+    "settles pushed %s during the parent turn, then enriches the original card",
+    async (terminal) => {
+      const { session, clients, events, dir } = harness();
+      await session.send("background");
+      const { event } = clients[0];
+      const widget = (state: string) =>
+        event({
+          type: "extension_ui_request",
+          method: "setWidget",
+          widgetKey: "subagent-async",
+          widgetLines: [
+            `PI_SUBAGENT_ASYNC_JSON:${JSON.stringify({ kind: "pi-subagents.async-status-snapshot", version: 1, runs: [{ id: "owned", kind: "subagent", label: "Agent", state, startedAt: 101, ...(state === terminal ? { endedAt: 122 } : {}) }] })}`,
+          ],
+        });
+      const ui = vi.fn();
+      session.on("extension_ui", ui);
+      widget("queued");
+      event({
+        type: "tool_execution_start",
+        toolName: "subagent",
+        toolCallId: "call",
+        args: { agent: "Agent", async: true },
+      });
+      event({
+        type: "tool_execution_end",
+        toolName: "subagent",
+        toolCallId: "call",
+        result: { details: { asyncDir: dir, runId: "owned" } },
+      });
+      expect(session.backgroundTaskList.map((t) => t.id)).toEqual(["call:0"]);
+      expect(events.at(-1)?.subagent?.status).toBe("queued");
+      widget("running");
+      event({ type: "extension_ui_request", method: "setWidget", widgetKey: "subagent-async" });
+      expect(session.backgroundTaskList).toHaveLength(1);
+      widget(terminal);
+      widget(terminal);
+      widget("running");
+      expect(session.runState).toBe("working");
+      expect(session.backgroundTaskList).toEqual([]);
+      expect(ui).not.toHaveBeenCalled();
+      expect(events.filter((e) => e.kind === "subagent_done").map((e) => e.subagent)).toMatchObject(
+        [
+          {
+            taskId: "call:0",
+            status: terminal === "complete" ? "completed" : terminal,
+            durationMs: 21,
+          },
+        ],
+      );
+      event({
+        type: "message_end",
+        message: {
+          role: "custom",
+          customType: "subagent-notify",
+          details: { runId: "owned", status: terminal, children: [{ summary: "late output" }] },
+        },
+      });
+      expect(events.filter((e) => e.kind === "subagent_done")).toHaveLength(1);
+      expect(events.find((e) => e.kind === "subagent_enrichment")?.subagent).toMatchObject({
+        taskId: "call:0",
+        summary: "late output",
+      });
+      event({ type: "agent_settled" });
+      expect(session.runState).toBe("idle");
+    },
+  );
+
   it("uses observed wire execution without status files and ignores queued siblings' candidates", async () => {
     const { session, clients, events, dir } = harness();
     await session.send("work");
@@ -3113,7 +3284,10 @@ describe("PiSession interrupt recovery", () => {
     const asyncDir = temp();
     const file = path.join(asyncDir, "status.json");
     const stopFile = path.join(asyncDir, "control", "stop-request.json");
-    const h = harness({ config: { piSubagentsRoot: pkg }, options: { reconcileIntervalMs: 20 } });
+    const h = harness({
+      config: { piSubagentsRoot: pkg },
+      options: { reconcileIntervalMs: 60_000 },
+    });
     await h.session.send("background");
     const status = {
       runId: "run",
@@ -3207,6 +3381,7 @@ describe("PiSession interrupt recovery", () => {
     ).toEqual(["stopped"]);
     fs.writeFileSync(finishB, "");
     await expect(exited).resolves.toEqual([0, null]);
+    await h.session.reconcileAsyncRuns();
     await vi.waitFor(() => expect(h.session.runState).toBe("idle"));
     expect(
       h.events

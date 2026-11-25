@@ -661,6 +661,7 @@ export class Server {
             messageId: msg.messageId,
             taskId: msg.taskId,
             events: ev?.subagent?.events ?? [],
+            transcriptRevision: ev?.subagent?.transcriptRevision,
           });
         }
         return;

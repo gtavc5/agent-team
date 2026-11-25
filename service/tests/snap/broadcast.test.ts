@@ -144,7 +144,7 @@ function clientFold(frames: Frame[], mode: "each" | "hidden") {
 const norm = (m: unknown) =>
   JSON.parse(
     JSON.stringify(m, (k: string, v: unknown) =>
-      k === "_innerEvent" || k === "eventCount" ? undefined : v,
+      k === "_innerEvent" || k === "eventCount" || k === "transcriptRevision" ? undefined : v,
     ),
   ) as unknown;
 

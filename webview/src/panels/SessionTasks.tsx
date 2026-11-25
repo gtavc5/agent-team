@@ -1,3 +1,4 @@
+import { isOutstandingSubagentStatus } from "../../../shared/subagent-status";
 import { useEffect, useState } from "react";
 import type { AgentInfo, Workspace } from "../state/useServer";
 import { agentState } from "../workspace/agents";
@@ -30,13 +31,16 @@ export function AgentTasks({
   const now = useNow(1000);
   return (
     <div className="tp-tasks">
-      {(a.backgroundTasks ?? []).map((t) => (
+      {outstandingBackgroundTasks(a).map((t) => (
         <div key={t.id} className="tp-task">
           <span className={`tp-type t-${t.type}`}>{TYPE_LABEL[t.type] ?? t.type}</span>
           <span className="tp-desc" title={t.description}>
             {t.description || t.id}
           </span>
-          {t.since > 0 && <span className="tp-when">{elapsed(now - t.since)}</span>}
+          {t.status === "queued" && <span className="tp-when">Queued</span>}
+          {t.status !== "queued" && t.since > 0 && (
+            <span className="tp-when">{elapsed(now - t.since)}</span>
+          )}
           {t.cancellable !== false && (
             <button
               className="panel-btn danger tp-stop"
@@ -75,18 +79,24 @@ export function AgentTasks({
 // A wake-up is cancelled by closing the CLI process: not while a turn runs
 // in it, nor while background tasks do (the server refuses both).
 function canCancelWake(a: AgentInfo): boolean {
-  return agentState(a) !== "working" && (a.backgroundTasks?.length ?? 0) === 0;
+  return agentState(a) !== "working" && outstandingBackgroundTasks(a).length === 0;
+}
+
+export function outstandingBackgroundTasks(a: AgentInfo) {
+  return (a.backgroundTasks ?? []).filter(
+    (t) => t.status == null || isOutstandingSubagentStatus(t.status),
+  );
 }
 
 export function hasWork(a: AgentInfo): boolean {
-  return (a.backgroundTasks?.length ?? 0) > 0 || !!a.wake;
+  return outstandingBackgroundTasks(a).length > 0 || !!a.wake;
 }
 
 export function workCount(sessions: Workspace[]): number {
   let n = 0;
   for (const w of sessions) {
     if (w.archivedAt != null) continue;
-    for (const a of w.agents) n += (a.backgroundTasks?.length ?? 0) + (a.wake ? 1 : 0);
+    for (const a of w.agents) n += outstandingBackgroundTasks(a).length + (a.wake ? 1 : 0);
   }
   return n;
 }

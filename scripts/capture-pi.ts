@@ -160,8 +160,11 @@ function modelName(msg: Record<string, unknown>) {
   return `${String(msg.provider)}/${String(msg.model)}`;
 }
 export async function capturePi(args: string[], snap: string) {
-  if (args.length === 1 && ["scenario", "compaction-and-retry", "retry-failed"].includes(args[0])) {
-    const scenario = args[0] === "scenario";
+  if (
+    args.length === 1 &&
+    ["scenario", "scenario-widgets", "compaction-and-retry", "retry-failed"].includes(args[0])
+  ) {
+    const scenario = args[0] === "scenario" || args[0] === "scenario-widgets";
     const url = new URL(
       scenario ? "./capture-pi-scenario.mjs" : "./capture-pi-retry.mjs",
       import.meta.url,
@@ -170,7 +173,10 @@ export async function capturePi(args: string[], snap: string) {
       string,
       (snap: string, failed?: boolean) => Promise<void> | void
     >;
-    await mod[scenario ? "captureScenario" : "captureRetry"](snap, args[0] === "retry-failed");
+    await mod[scenario ? "captureScenario" : "captureRetry"](
+      snap,
+      args[0] === "retry-failed" || args[0] === "scenario-widgets",
+    );
     return;
   }
   const clean = sanitizer();

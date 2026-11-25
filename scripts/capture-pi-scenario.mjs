@@ -6,6 +6,8 @@ import { execFileSync } from "node:child_process";
 import { steerReceipt } from "../service/tests/snap/pi-capture-contract.ts";
 import { moreExcerpts } from "./pi-scenario-excerpts.mjs";
 import { sanitizer } from "./capture-pi.ts";
+import { extractScenarioWidgets } from "./pi-scenario-widgets.mjs";
+import { discoverLocalPiPackages } from "../service/src/session/pi-agent-home.ts";
 
 const rows = (text) =>
   text
@@ -187,7 +189,7 @@ export function extract(dir, snap) {
     );
   }
 }
-export function captureScenario(snap) {
+export function captureScenario(snap, widgets = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-scenario-"));
   try {
     const root = path.resolve(snap, "../../..");
@@ -197,6 +199,8 @@ export function captureScenario(snap) {
       [
         path.join(root, "node_modules/vitest/vitest.mjs"),
         "run",
+        "--config",
+        "vitest.e2e.config.mjs",
         "tests/e2e/pi-deterministic.test.ts",
       ],
       {
@@ -206,7 +210,20 @@ export function captureScenario(snap) {
         stdio: "inherit",
       },
     );
-    extract(dir, snap);
+    if (widgets) {
+      const { piSubagentsRoot } = discoverLocalPiPackages();
+      const cli = execFileSync(process.env.PI_BINARY ?? "pi", ["--version"], {
+        encoding: "utf8",
+      }).trim();
+      const { version: piSubagents } = JSON.parse(
+        fs.readFileSync(path.join(piSubagentsRoot, "package.json"), "utf8"),
+      );
+      const sessions = fs
+        .readdirSync(dir)
+        .filter((n) => n.endsWith(".jsonl"))
+        .map((n) => rows(fs.readFileSync(path.join(dir, n), "utf8")));
+      extractScenarioWidgets(sessions, snap, { cli, piSubagents });
+    } else extract(dir, snap);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

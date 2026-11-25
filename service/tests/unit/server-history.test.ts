@@ -201,6 +201,148 @@ describe("a real server saving histories", () => {
     }
   });
 
+  it("broadcasts enrichment of an unloaded tool owner and persists the authoritative child transcript", async () => {
+    const workspaceId = "ws-a";
+    const taskId = "child";
+    const messageId = "owner";
+    const toolUseId = "tool";
+    const { base, web } = seed([
+      ws(workspaceId, [
+        msg(messageId, "before after", 1000, {
+          events: [{ kind: "tool_use", content: "call", toolUseId, contentOffset: 6 }],
+        }),
+      ]),
+    ]);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const restore = vi.spyOn(LocalHost.prototype, "restoreSession");
+    const { live, frames, stop } = await start(base, web);
+    const session = restore.mock.results.at(-1)!.value as FakeSession;
+    const subagent = { taskId, description: "review" };
+    const events = [{ kind: "text", content: "authoritative child output" }];
+    try {
+      session.emit("event", { kind: "text_delta", content: "Unrelated current turn" });
+      session.emit("event", {
+        kind: "subagent_start",
+        content: "",
+        toolUseId,
+        subagent: { ...subagent, status: "queued" },
+      });
+      session.emit("event", {
+        kind: "subagent_progress",
+        content: "",
+        subagent: { ...subagent, status: "running" },
+      });
+      expect(live(workspaceId).messages[0].events?.[1].subagent?.status).toBe("running");
+      session.emit("event", {
+        kind: "subagent_done",
+        content: "",
+        subagent: { ...subagent, status: "partial", events: [{ kind: "text", content: "stale" }] },
+      });
+      session.emit("event", { kind: "result", content: "" });
+      session.emit("event", {
+        kind: "subagent_enrichment",
+        content: "",
+        subagent: { taskId, description: "", durationMs: 300 },
+      });
+      (live(workspaceId) as unknown as { unloadMessages(): void }).unloadMessages();
+      session.emit("event", {
+        kind: "subagent_enrichment",
+        content: "",
+        subagent: {
+          taskId,
+          description: "",
+          model: "provider/model",
+          effort: "high",
+          durationMs: 500,
+          summary: "final summary",
+          events,
+        },
+      });
+      await until(
+        () =>
+          frames.some(
+            (f) =>
+              f.type === "stream_event" &&
+              (f.event as { subagent?: { transcriptRevision?: number } }).subagent
+                ?.transcriptRevision === 2,
+          ),
+        "enrichment frame",
+      );
+      expect(
+        frames.filter(
+          (f) =>
+            f.type === "stream_event" && (f.event as { kind: string }).kind.startsWith("subagent_"),
+        ),
+      ).toMatchObject([
+        { messageId, event: { kind: "subagent_start", contentOffset: 6 } },
+        { messageId, event: { kind: "subagent_progress" } },
+        { messageId, event: { kind: "subagent_done" } },
+        {
+          messageId,
+          event: {
+            kind: "subagent_enrichment",
+            subagent: { transcriptRevision: 1, durationMs: 300 },
+          },
+        },
+        {
+          messageId,
+          event: {
+            kind: "subagent_enrichment",
+            subagent: { taskId, eventCount: 1, summary: "final summary", transcriptRevision: 2 },
+          },
+        },
+      ]);
+      const last = frames
+        .filter((f) => (f.event as { kind: string } | undefined)?.kind === "subagent_enrichment")
+        .at(-1)!;
+      expect((last.event as { subagent: unknown }).subagent).not.toHaveProperty("events");
+    } finally {
+      await stop();
+    }
+    const fresh = await start(base, web);
+    try {
+      fresh.send({ type: "open_workspace", workspaceId });
+      fresh.send({ type: "load_message_details", workspaceId, messageId });
+      fresh.send({ type: "load_subagent_events", workspaceId, messageId, taskId });
+      await until(
+        () => fresh.frames.some((f) => f.type === "subagent_events"),
+        "fresh child details",
+      );
+      const reply = (
+        fresh.frames.find((f) => f.type === "workspace_messages")!.messages as Message[]
+      ).find((m) => m.id === messageId)!;
+      expect(reply.events!.map((e) => e.kind)).toEqual([
+        "tool_use",
+        "subagent_start",
+        "subagent_done",
+      ]);
+      for (const e of reply.events!.slice(1)) {
+        expect(e.subagent).toMatchObject({
+          ...subagent,
+          status: "partial",
+          model: "provider/model",
+          effort: "high",
+          durationMs: 500,
+          summaryLength: 13,
+          eventCount: 1,
+          transcriptRevision: 2,
+        });
+      }
+      const detail = fresh.frames.find((f) => f.type === "message_details")!.events as NonNullable<
+        Message["events"]
+      >;
+      for (const e of detail.slice(1)) {
+        expect(e.subagent).toMatchObject({ summary: "final summary", transcriptRevision: 2 });
+      }
+      expect(fresh.frames.find((f) => f.type === "subagent_events")).toMatchObject({
+        events,
+        transcriptRevision: 2,
+      });
+    } finally {
+      await fresh.stop();
+    }
+  });
+
   it("the sidebar finds what was said in live and archived histories", async () => {
     const { base, web } = seed([
       ws("ws-a", [msg("u1", "the zeppelin bug again", 1000, { kind: "user", agentId: null })]),

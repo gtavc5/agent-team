@@ -1,3 +1,4 @@
+import type { SubagentStatus } from "../../../shared/subagent-status";
 import type { ContextUsage } from "../../../shared/context-usage";
 export type { ContextUsage } from "../../../shared/context-usage";
 
@@ -45,6 +46,7 @@ export type StreamEventKind =
   | "subagent_start"
   | "subagent_progress"
   | "subagent_done"
+  | "subagent_enrichment"
   | "compact"
   // One-line banner from the CLI loop: hook feedback, notifications,
   // permission denials, compact failures, auth prompts.
@@ -122,12 +124,14 @@ export interface SubAgentInfo {
   effort?: string;
   prompt?: string;
   agentType?: string;
-  status?: "running" | "completed" | "failed" | "stopped";
+  status?: SubagentStatus;
   lastTool?: string;
   usage?: { totalTokens: number; toolUses: number; durationMs: number };
   // From the task's start to its end, by our clock: every kind of task.
   durationMs?: number;
   summary?: string;
+  // Advanced by the workspace on each enrichment, including metadata-only updates.
+  transcriptRevision?: number;
   eventCount?: number;
   events?: StreamEvent[];
   hasPrompt?: boolean;
@@ -155,6 +159,7 @@ export interface BackgroundTask {
   description: string;
   // Epoch ms when the panel first saw it.
   since: number;
+  status?: SubagentStatus;
   cancellable?: boolean;
 }
 
@@ -195,7 +200,11 @@ export interface ActiveAsyncChildRecord {
   stepIndex: number;
   canonicalChildId: string;
   childRunId?: string;
-  status?: "pending" | "running" | "completed" | "failed" | "stopped";
+  detailSignature?: string;
+  tree?: import("./pi-subagent-tree").PiSubagentTreeState;
+  status?: "pending" | SubagentStatus;
+  startedAt?: number;
+  endedAt?: number;
   // Observed execution, retained across restore even if the runner artifacts disappear.
   execution?: Pick<SubAgentInfo, "model" | "effort">;
   hasLiveEvents?: boolean;
@@ -326,6 +335,7 @@ export interface SessionState {
   desiredModel?: string;
   desiredEffort?: string;
   activeAsyncRuns?: ActiveAsyncRunRecord[];
+  settledAsyncRuns?: ActiveAsyncRunRecord[];
 }
 
 export const REPORT_MARKER_PREFIX = "[agent-team:report:";

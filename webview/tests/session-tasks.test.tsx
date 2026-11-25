@@ -107,6 +107,34 @@ describe("a session's background work, in its card", () => {
     expect(panel([quiet]).querySelector(".tp-tasks")).toBeNull();
   });
 
+  it("counts queued tasks without showing elapsed time or including settled children", () => {
+    const card = ws("work", [
+      agent("a", {
+        backgroundTasks: [
+          {
+            id: "q",
+            type: "local_agent",
+            description: "Queued child",
+            status: "queued",
+            since: NOW - 1000,
+          },
+          {
+            id: "p",
+            type: "local_agent",
+            description: "Paused child",
+            status: "paused",
+            since: NOW - 1000,
+          },
+        ],
+      }),
+    ]);
+    const container = panel([card]);
+    expect(workCount([card])).toBe(1);
+    expect(container.querySelectorAll(".tp-task")).toHaveLength(1);
+    expect(container.querySelector(".tp-when")?.textContent).toBe("Queued");
+    expect(within(container).getByRole("button", { name: "Stop Queued child" })).toBeTruthy();
+  });
+
   it("hides the stop button for a task that cannot be cancelled", () => {
     const card = ws("readonly", [
       agent("a", {

@@ -829,6 +829,7 @@ function renderEvents(
     switch (e.kind) {
       case "subagent_progress":
       case "subagent_done":
+      case "subagent_enrichment":
         // Folded into their start by the aggregation.
         continue;
       case "subagent_start": {
@@ -909,7 +910,10 @@ export function clientView(events: StreamEvent[], backend: Backend = "codex"): M
   // The reply an error finished; the turn's result has nothing left to end.
   let failed = false;
   for (const raw of events) {
-    const e = backend === "pi" && raw.kind === "subagent_done" ? stripChildTranscript(raw) : raw;
+    const e =
+      backend === "pi" && (raw.kind === "subagent_done" || raw.kind === "subagent_enrichment")
+        ? stripChildTranscript(raw)
+        : raw;
     if (e.kind === "text") continue;
     if (e.kind === "result" && !cur && failed) {
       failed = false;
@@ -927,18 +931,28 @@ export function clientView(events: StreamEvent[], backend: Backend = "codex"): M
     // workspace routes it; a resumed agent has a card in an older one too.
     const taskId = e.subagent?.taskId;
     const holds = (m: ClientMessage) =>
-      m.events!.some((x) => x.kind === "subagent_start" && x.subagent?.taskId === taskId);
+      m.events!.some(
+        (x) =>
+          (x.kind === "subagent_start" ||
+            (e.kind === "subagent_enrichment" && x.kind === "subagent_done")) &&
+          x.subagent?.taskId === taskId,
+      );
     const owner =
-      taskId && (e.kind === "subagent_progress" || e.kind === "subagent_done")
+      taskId &&
+      (e.kind === "subagent_progress" ||
+        e.kind === "subagent_done" ||
+        e.kind === "subagent_enrichment")
         ? [...msgs].reverse().find(holds)
         : undefined;
+    if (e.kind === "subagent_enrichment" && !owner) continue;
     if (owner && owner !== cur) {
       msgs[msgs.indexOf(owner)] = applyEventsToMessage(owner, [e]);
       continue;
     }
-    // A result for a call an earlier reply made, as the workspace routes it.
+    // A result or card for a tool call an earlier reply made.
     const caller =
-      e.kind === "tool_result" &&
+      (e.kind === "tool_result" || e.kind === "subagent_start") &&
+      e.toolUseId &&
       !cur?.events!.some((x) => x.kind === "tool_use" && x.toolUseId === e.toolUseId)
         ? [...msgs]
             .reverse()
@@ -990,7 +1004,11 @@ export function clientView(events: StreamEvent[], backend: Backend = "codex"): M
 export const strip = (m: Message): unknown =>
   JSON.parse(
     JSON.stringify(m.events, (k: string, v: unknown) =>
-      k === "_innerEvent" || k === "contentOffset" || k === "step" || k === "toolInput"
+      k === "_innerEvent" ||
+      k === "contentOffset" ||
+      k === "step" ||
+      k === "toolInput" ||
+      k === "transcriptRevision"
         ? undefined
         : v,
     ),
@@ -1003,6 +1021,11 @@ export function stripChildTranscript(event: StreamEvent): StreamEvent {
   const count = Math.max(summary.eventCount ?? 0, events.length);
   return {
     ...event,
-    subagent: { ...summary, eventCount: count || (event.kind === "subagent_done" ? 0 : undefined) },
+    subagent: {
+      ...summary,
+      eventCount:
+        count ||
+        (event.kind === "subagent_done" || event.kind === "subagent_enrichment" ? 0 : undefined),
+    },
   };
 }
