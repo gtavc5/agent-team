@@ -10,7 +10,62 @@
     <!-- Installable as a home-screen app: standalone display hides the browser
          chrome, the status bar overlays the page (safe-area insets in CSS). -->
     <link rel="manifest" href="manifest.webmanifest" />
-    <meta name="theme-color" content="#21252b" />
+    <meta name="theme-color" content="#f2f3f5" />
+    <script>
+      // Run before styles or app code. These chrome colors match --bg-secondary.
+      (() => {
+        const key = "yaat-theme";
+        const system = matchMedia("(prefers-color-scheme: dark)");
+        const root = document.documentElement;
+        const meta = document.querySelector('meta[name="theme-color"]');
+        const changes = new EventTarget();
+        const preference = (value) => (value === "light" || value === "dark" ? value : null);
+        let storage;
+        let override = null;
+        try {
+          storage = window.localStorage;
+          override = preference(storage.getItem(key));
+        } catch {
+          // The current tab can still choose a theme when storage is blocked.
+        }
+        const update = () => {
+          const theme = override ?? (system.matches ? "dark" : "light");
+          const changed = root.dataset.theme !== theme;
+          root.dataset.theme = theme;
+          root.style.colorScheme = theme;
+          meta.content = theme === "dark" ? "#1c1c1c" : "#f2f3f5";
+          if (changed) changes.dispatchEvent(new Event("change"));
+        };
+        update();
+        system.addEventListener("change", update);
+        window.addEventListener("storage", (event) => {
+          if (
+            storage &&
+            event.storageArea === storage &&
+            (event.key === key || event.key === null)
+          ) {
+            override = preference(event.newValue);
+            update();
+          }
+        });
+        window.yaatTheme = {
+          get: () => root.dataset.theme,
+          subscribe: (listener) => {
+            changes.addEventListener("change", listener);
+            return () => changes.removeEventListener("change", listener);
+          },
+          toggle: () => {
+            override = root.dataset.theme === "dark" ? "light" : "dark";
+            try {
+              storage?.setItem(key, override);
+            } catch {
+              // Keep the explicit choice in memory for this tab.
+            }
+            update();
+          },
+        };
+      })();
+    </script>
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />

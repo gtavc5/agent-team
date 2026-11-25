@@ -82,7 +82,10 @@ describe("MobileMenuButton", () => {
   it("renders a quiet session count, amber your-turn state, and an accessible status", () => {
     const onClick = vi.fn();
     const { rerender } = render(
-      <MobileMenuButton attention={{ count: 2, unread: 2, yourTurn: 0 }} onClick={onClick} />,
+      <MobileMenuButton
+        attention={{ count: 2, unread: 2, yourTurn: 0, failed: 0 }}
+        onClick={onClick}
+      />,
     );
     const button = () => document.querySelector<HTMLButtonElement>(".mobile-menu-btn")!;
     const badge = () => button().querySelector(".attention-badge");
@@ -93,7 +96,10 @@ describe("MobileMenuButton", () => {
     expect(badge()!.classList).not.toContain("attention-badge-your-turn");
 
     rerender(
-      <MobileMenuButton attention={{ count: 2, unread: 1, yourTurn: 1 }} onClick={onClick} />,
+      <MobileMenuButton
+        attention={{ count: 2, unread: 1, yourTurn: 1, failed: 0 }}
+        onClick={onClick}
+      />,
     );
     expect(button().getAttribute("aria-label")).toBe(
       "Open workspace menu: 2 background sessions need attention, 1 your turn",
@@ -111,7 +117,10 @@ describe("MobileMenuButton", () => {
     expect(onClick).toHaveBeenCalledTimes(1);
 
     rerender(
-      <MobileMenuButton attention={{ count: 0, unread: 0, yourTurn: 0 }} onClick={onClick} />,
+      <MobileMenuButton
+        attention={{ count: 0, unread: 0, yourTurn: 0, failed: 0 }}
+        onClick={onClick}
+      />,
     );
     expect(badge()).toBeNull();
     expect(button().getAttribute("aria-label")).toBe(

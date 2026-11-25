@@ -203,7 +203,7 @@ describe("debug snapshot", () => {
                   </div>
                 </div>
               </div>
-              <div class="turn-footer">Waiting for the model · 8s</div>
+              <div class="turn-footer">No new events for 18s</div>
             </div>
           </div>
           <div class="system-message">Notice 1</div>
@@ -225,7 +225,7 @@ describe("debug snapshot", () => {
     expect(step.liveThinking!.selector).toBe(".live-thinking");
 
     expect(snap.activeTurn!.turnFooter?.state).toBe("waiting");
-    expect(snap.activeTurn!.turnFooter?.text).toBe("Waiting for the model · 8s");
+    expect(snap.activeTurn!.turnFooter?.text).toBe("No new events for 18s");
     expect(snap.activeTurn!.trailingSiblings).toBe(4);
 
     // No tool payloads, panel action payloads, or subagent prompts/summaries leak anywhere.

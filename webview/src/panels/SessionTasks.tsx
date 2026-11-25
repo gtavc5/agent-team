@@ -1,3 +1,4 @@
+import { isOutstandingSubagentStatus } from "../../../shared/subagent-status";
 import { useEffect, useState } from "react";
 import { isZh } from "../i18n";
 import { tPanel, usePanelT, type PanelMessageKey } from "../i18n/panels";
@@ -33,7 +34,7 @@ export function AgentTasks({
   const now = useNow(1000);
   return (
     <div className="tp-tasks">
-      {(a.backgroundTasks ?? []).map((task) => {
+      {outstandingBackgroundTasks(a).map((task) => {
         const typeKey = TYPE_LABEL_KEY[task.type];
         return (
           <div key={task.id} className="tp-task">
@@ -41,7 +42,10 @@ export function AgentTasks({
             <span className="tp-desc" title={task.description}>
               {task.description || task.id}
             </span>
-            {task.since > 0 && <span className="tp-when">{elapsed(now - task.since)}</span>}
+            {task.status === "queued" && <span className="tp-when">{t("taskQueued")}</span>}
+            {task.status !== "queued" && task.since > 0 && (
+              <span className="tp-when">{elapsed(now - task.since)}</span>
+            )}
             {task.cancellable !== false && (
               <button
                 className="panel-btn danger tp-stop"
@@ -82,18 +86,24 @@ export function AgentTasks({
 // A wake-up is cancelled by closing the CLI process: not while a turn runs
 // in it, nor while background tasks do (the server refuses both).
 function canCancelWake(a: AgentInfo): boolean {
-  return agentState(a) !== "working" && (a.backgroundTasks?.length ?? 0) === 0;
+  return agentState(a) !== "working" && outstandingBackgroundTasks(a).length === 0;
+}
+
+export function outstandingBackgroundTasks(a: AgentInfo) {
+  return (a.backgroundTasks ?? []).filter(
+    (t) => t.status == null || isOutstandingSubagentStatus(t.status),
+  );
 }
 
 export function hasWork(a: AgentInfo): boolean {
-  return (a.backgroundTasks?.length ?? 0) > 0 || !!a.wake;
+  return outstandingBackgroundTasks(a).length > 0 || !!a.wake;
 }
 
 export function workCount(sessions: Workspace[]): number {
   let n = 0;
   for (const w of sessions) {
     if (w.archivedAt != null) continue;
-    for (const a of w.agents) n += (a.backgroundTasks?.length ?? 0) + (a.wake ? 1 : 0);
+    for (const a of w.agents) n += outstandingBackgroundTasks(a).length + (a.wake ? 1 : 0);
   }
   return n;
 }

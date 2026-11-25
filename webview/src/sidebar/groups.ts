@@ -1,9 +1,13 @@
 import type { Project, Workspace } from "../state/useServer";
 import { tWorkspace } from "../i18n/workspace";
-import { isAgentActive } from "../workspace/agents";
+import { sessionState } from "../panels/scope";
+import { agentState, isAgentActive } from "../workspace/agents";
+import { sessionAttention } from "./attention";
 
 // Groups older than this default to collapsed in the sidebar.
 export const STALE_MS = 3 * 86_400_000;
+
+export type GroupStatus = "working" | "waiting" | "sleeping" | "idle";
 
 export interface WorkspaceGroup {
   // Group key = the workspace cwd, so same-folder workspaces fold together;
@@ -16,7 +20,26 @@ export interface WorkspaceGroup {
   archived: Workspace[];
   // Newest activity, the archived sessions' included.
   lastActive: number;
+  createdAt: number;
   running: boolean;
+  status: GroupStatus;
+}
+
+// Effective sidebar status: preserve the independent `busy` flag when
+// `agent_busy` arrives before `agent_state` flips an explicit "idle" state.
+export function workspaceStatus(ws: Workspace): GroupStatus {
+  if (ws.archivedAt != null) return "idle";
+  if (ws.agents.some((a) => a.busy)) return "working";
+  const s = sessionState(ws);
+  return s === "archived" ? "idle" : s;
+}
+
+function groupStatus(workspaces: Workspace[]): GroupStatus {
+  const states = workspaces.map(workspaceStatus);
+  for (const s of ["working", "waiting", "sleeping"] as const) {
+    if (states.includes(s)) return s;
+  }
+  return "idle";
 }
 
 function lastActive(ws: Workspace): number {
@@ -36,12 +59,12 @@ export function archivedWorkspaces(workspaces: Workspace[], projects: Project[] 
     .sort((a, b) => lastActive(b) - lastActive(a));
 }
 
-// Two-level sidebar: live workspaces grouped by folder, groups sorted by most
-// recent activity, workspaces within a group likewise. Projects come first,
-// each with its lead on top of the sessions it started.
+// Projects come first, each with its lead above its workers. Positions are
+// based on creation rather than message activity, which changes mid-read.
 export function groupWorkspaces(
   workspaces: Workspace[],
   projects: Project[] = [],
+  noPathLabel = tWorkspace("noPath"),
 ): WorkspaceGroup[] {
   const byId = new Map(projects.map((p) => [p.id, p]));
   const byKey = new Map<string, { live: Workspace[]; archived: Workspace[] }>();
@@ -59,10 +82,12 @@ export function groupWorkspaces(
   for (const [key, { live, archived }] of byKey) {
     const project = byId.get(key.slice("project:".length));
     const isLead = (w: Workspace) => (w.projectLink?.role === "lead" ? 1 : 0);
-    live.sort((a, b) => isLead(b) - isLead(a) || lastActive(b) - lastActive(a));
+    live.sort(
+      (a, b) => isLead(b) - isLead(a) || b.createdAt - a.createdAt || a.id.localeCompare(b.id),
+    );
     archived.sort((a, b) => lastActive(b) - lastActive(a));
     const folderLabel =
-      key === "(no path)" ? tWorkspace("noPath") : (key.split("/").filter(Boolean).pop() ?? key);
+      key === "(no path)" ? noPathLabel : (key.split("/").filter(Boolean).pop() ?? key);
     groups.push({
       key,
       label: project?.name ?? folderLabel,
@@ -70,10 +95,17 @@ export function groupWorkspaces(
       workspaces: live,
       archived,
       lastActive: Math.max(...[...live, ...archived].map(lastActive)),
-      running: live.some((w) => w.agents.some(isAgentActive)),
+      createdAt: project?.createdAt ?? Math.min(...live.map((w) => w.createdAt)),
+      running: live.some((w) => w.agents.some((a) => a.busy || isAgentActive(a))),
+      status: groupStatus(live),
     });
   }
-  groups.sort((a, b) => (b.project ? 1 : 0) - (a.project ? 1 : 0) || b.lastActive - a.lastActive);
+  groups.sort(
+    (a, b) =>
+      (b.project ? 1 : 0) - (a.project ? 1 : 0) ||
+      b.createdAt - a.createdAt ||
+      a.key.localeCompare(b.key),
+  );
   return groups;
 }
 
@@ -88,5 +120,31 @@ export function isGroupExpanded(
 ): boolean {
   const override = overrides[group.key];
   if (override !== undefined) return override;
-  return containsActive || group.running || now - group.lastActive < STALE_MS;
+  return containsActive || !!group.project || group.running || now - group.lastActive < STALE_MS;
+}
+
+export function canFoldWorker(ws: Workspace, activeWsId: string | null): boolean {
+  return (
+    ws.projectLink?.role === "worker" &&
+    ws.archivedAt == null &&
+    ws.id !== activeWsId &&
+    !ws.queued &&
+    !sessionAttention(ws) &&
+    !ws.agents.some((a) => a.busy || agentState(a) !== "idle")
+  );
+}
+
+export function initialIdleWorkers(
+  group: WorkspaceGroup,
+  activeWsId: string | null,
+  now: number,
+): string[] {
+  if (!group.project || group.project.archivedAt != null) return [];
+  return group.workspaces
+    .filter(
+      (ws) =>
+        canFoldWorker(ws, activeWsId) &&
+        (ws.lastResult === "done" || now - lastActive(ws) >= STALE_MS),
+    )
+    .map((ws) => ws.id);
 }

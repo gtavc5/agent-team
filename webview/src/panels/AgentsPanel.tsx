@@ -17,11 +17,18 @@ import {
   usableModels,
 } from "../workspace/models";
 import { EffortSelect, effortOf, selectableLevels } from "../workspace/EffortSelect";
-import { agentState, stateLabel } from "../workspace/agents";
+import { agentNameColor, agentState, stateLabel } from "../workspace/agents";
 import { formatRelative, formatTokens } from "../format";
 import { usePanelT, type PanelMessageKey } from "../i18n/panels";
 import { DEFAULT_BRANCH, sessionName, sessionState, sessionWork } from "./scope";
-import { AgentTasks, hasWork, soon, workCount, type TaskActions } from "./SessionTasks";
+import {
+  AgentTasks,
+  hasWork,
+  outstandingBackgroundTasks,
+  soon,
+  workCount,
+  type TaskActions,
+} from "./SessionTasks";
 import { Icon } from "./Icon";
 import { InlineMd } from "../chat/markdown";
 import { RoleTag } from "../workspace/RoleTag";
@@ -205,7 +212,7 @@ function SessionCard({
           {w.agents.map((a) => (
             <span key={a.id} className="ap-brief-agent">
               <AgentAvatar agent={a} size={16} />
-              <span className="clip" style={{ color: a.color }}>
+              <span className="clip" style={{ color: agentNameColor(a.color) }}>
                 {a.name}
               </span>
               <span className={`ap-brief-meta as-${agentState(a)}`}>{brief(a, connected, t)}</span>
@@ -317,12 +324,12 @@ function SessionCard({
 // An agent in a folded card: what it is doing, or how full its context is.
 function brief(a: AgentInfo, connected: boolean, t: ReturnType<typeof usePanelT>): string {
   if (agentState(a) !== "idle") return localizedAgentState(a, connected, t);
-  return a.context ? formatTokens(a.context.tokens) : "";
+  return a.context ? formatTokens(a.context.tokens) : a.context === null ? t("contextUnknown") : "";
 }
 
 // A folded card's background work: how much runs, and the next wake-up.
 function tasksTag(w: Workspace, t: ReturnType<typeof usePanelT>): string {
-  const running = w.agents.reduce((n, a) => n + (a.backgroundTasks?.length ?? 0), 0);
+  const running = w.agents.reduce((n, a) => n + outstandingBackgroundTasks(a).length, 0);
   const wakes = w.agents.flatMap((a) => (a.wake ? [a.wake.at] : []));
   const parts: string[] = [];
   if (running > 0) parts.push(t("inBackgroundCount", { count: running }));
@@ -359,7 +366,7 @@ function AgentRow({
   const state = agentState(a);
   const ctx = a.context;
   const pct = ctx && ctx.window ? Math.min(100, Math.round((ctx.tokens / ctx.window) * 100)) : null;
-  const bg = a.backgroundTasks ?? [];
+  const bg = outstandingBackgroundTasks(a);
   const { backend, allowOtherBackend, ids } = switchable(a, models, codexAuth);
   const modelOptions = modelLabels(ids);
   const showCodexSetup =
@@ -384,7 +391,7 @@ function AgentRow({
         <AgentAvatar agent={a} size={22} />
         <div className="ap-agent-main">
           <div className="ap-agent-top">
-            <span className="ap-agent-name" style={{ color: a.color }}>
+            <span className="ap-agent-name" style={{ color: agentNameColor(a.color) }}>
               {a.name}
             </span>
             <span className={`ap-meta${hasControls ? " has-controls" : ""}`}>
@@ -469,10 +476,11 @@ function AgentRow({
                 ` · ${t("inBackgroundCount", { count: bg.length })}`}
             </div>
           )}
+          {ctx === null && <div className="ap-context">{t("contextUnknown")}</div>}
           {ctx && pct !== null && (
             <div
               className="ap-context"
-              title={t("contextTokensTitle", {
+              title={t(ctx.estimated ? "contextEstimateTitle" : "contextTokensTitle", {
                 used: ctx.tokens.toLocaleString(),
                 total: ctx.window.toLocaleString(),
               })}

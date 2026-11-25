@@ -11,7 +11,7 @@ export default fixture({
     expect(agentMessages(r)[0]).toMatchObject({
       status: "done",
       content: "xxxxx",
-      context: { tokens: 412, window: 272000 },
+      context: { tokens: 449, window: 272000, estimated: true },
     });
     expect(r.sessions[0].usage).toMatchObject({ input_tokens: 412, output_tokens: 37, turns: 1 });
     expect(r.pi!.checkpoints.stats.contextUsage).toMatchObject({

@@ -1,5 +1,8 @@
+import type { SubagentStatus } from "../../../shared/subagent-status";
+import type { ContextUsage } from "../../../shared/context-usage";
 import { setServerLanguage } from "../i18n";
-import { configureTelemetry } from "../telemetry";
+import { configureTelemetry, recordTelemetry } from "../telemetry";
+import type { TelemetryAction } from "../../../shared/telemetry";
 import { emptyUi, receiveUi, withoutOwner, type LiveNotice } from "./extensionUi";
 import {
   sameAgent,
@@ -52,12 +55,13 @@ export interface SubAgentInfo {
   agentType?: string;
   // SDK task type; absent on older records (all agents).
   taskType?: string;
-  status?: "running" | "completed" | "failed" | "stopped";
+  status?: SubagentStatus;
   lastTool?: string;
   usage?: { totalTokens: number; toolUses: number; durationMs: number };
   // From the task's start to its end: every kind of task.
   durationMs?: number;
   summary?: string;
+  transcriptRevision?: number;
   eventCount?: number;
   events?: StreamEvent[];
   // Client-only, on a card whose transcript was never loaded: nested tasks
@@ -86,11 +90,6 @@ export interface PrInfo {
   state: "open" | "merged" | "closed";
   draft: boolean;
   checks: "success" | "failure" | "pending" | null;
-}
-
-export interface ContextUsage {
-  tokens: number;
-  window: number;
 }
 
 // Thinking over a whole turn (Claude only).
@@ -123,7 +122,7 @@ export interface StreamEvent {
   startedAt?: number;
   waitingSince?: number | null;
   tokens?: number;
-  context?: ContextUsage;
+  context?: ContextUsage | null;
   subagent?: SubAgentInfo;
   // Present on summary pages instead of the bodies.
   contentLength?: number;
@@ -287,7 +286,7 @@ export interface Message {
   fast?: boolean;
   // The model the turn ran on; an agent's model can change mid-session.
   model?: string;
-  context?: ContextUsage;
+  context?: ContextUsage | null;
   thinking?: ThinkingStats;
   // History pages arrive as summaries; full events load on first expand.
   detail?: "summary";
@@ -309,6 +308,8 @@ export interface AgentInfo {
   canSwitchBackend?: boolean;
   busy?: boolean;
   state?: RunState;
+  lastStreamAt?: number;
+  retryLabel?: string;
   // Transient label of what the agent is doing (compacting, a long tool...).
   activity?: string | null;
   // Current reasoning effort level, when the model supports one.
@@ -319,7 +320,7 @@ export interface AgentInfo {
   // Background work the agent is waiting on (background Bash, subagents,
   // Monitor); the CLI reports back on its own when it finishes.
   backgroundTasks?: BackgroundTask[];
-  // Context occupancy at the end of its last turn, when known.
+  // Context occupancy at its latest backend boundary, when known.
   context?: ContextUsage | null;
   // The scheduled wake-up it sleeps until.
   wake?: { at: number; reason: string } | null;
@@ -330,6 +331,7 @@ export interface BackgroundTask {
   type: string;
   description: string;
   since: number;
+  status?: SubagentStatus;
   cancellable?: boolean;
 }
 
@@ -365,10 +367,10 @@ export interface Workspace {
   projectLink?: ProjectLink;
   // A worker stopped on the user's reply (its task asked them something).
   awaitsUser?: boolean;
-  // Messages since any client last showed the session (the server counts).
+  // Actionable results since any client last read the session (server-owned).
   unread?: number;
-  // Client only: bumped each time a client marks the session seen.
-  seenTick?: number;
+  lastResult?: "done" | "failed";
+  queued?: boolean;
   hasMore?: boolean;
   messagesLoaded?: boolean;
   // An older page has been requested and not yet arrived.
@@ -487,6 +489,29 @@ function resolveWsUrl(): string {
 
 export type SendOutcome = "not_sent" | "rejected" | "accepted" | "unknown";
 
+function wsTelemetryAction(data: { type: string; force?: unknown }): TelemetryAction | undefined {
+  switch (data.type) {
+    case "send_message":
+      return "chat.send";
+    case "interrupt":
+    case "abort":
+    case "cancel_subagent":
+      return "chat.stop";
+    case "cancel_queued":
+      return "chat.cancel_queued";
+    case "cancel_wakeup":
+      return "chat.cancel_wakeup";
+    case "load_message_details":
+      return "trace.load_details";
+    case "archive_workspace":
+      return "workspace.archive";
+    case "unarchive_workspace":
+      return "workspace.restore";
+    case "refresh_quota":
+      return data.force === true ? "quota.refresh" : undefined;
+  }
+}
+
 export function useServer() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -585,7 +610,30 @@ export function useServer() {
     const batch = pendingEventsRef.current;
     if (batch.length === 0) return;
     pendingEventsRef.current = [];
-    setWorkspaces((prev) => applyStreamBatch(prev, batch));
+    type Progress = Pick<AgentInfo, "lastStreamAt" | "retryLabel">;
+    const updates = new Map<string, Map<string, Progress>>();
+    for (const { wsId, agentId, streamAt, retryLabel } of batch) {
+      if (!agentId || (streamAt == null && retryLabel === undefined)) continue;
+      let agents = updates.get(wsId);
+      if (!agents) updates.set(wsId, (agents = new Map<string, Progress>()));
+      const progress = agents.get(agentId) ?? {};
+      if (streamAt != null) progress.lastStreamAt = streamAt;
+      if (retryLabel !== undefined) progress.retryLabel = retryLabel ?? undefined;
+      agents.set(agentId, progress);
+    }
+    setWorkspaces((prev) =>
+      applyStreamBatch(prev, batch).map((w) => {
+        const agents = updates.get(w.id);
+        if (!agents) return w;
+        return {
+          ...w,
+          agents: w.agents.map((a) => {
+            const progress = agents.get(a.id);
+            return progress ? { ...a, ...progress } : a;
+          }),
+        };
+      }),
+    );
   }, []);
 
   const scheduleFlush = useCallback(() => {
@@ -618,6 +666,7 @@ export function useServer() {
             return;
           }
           if (buildId) buildIdRef.current = buildId;
+          flushStreamEvents();
           setQuota((msg.quota as QuotaState | undefined) ?? null);
           const incoming = msg.workspaces as Workspace[];
           setWorkspaces((prev) => {
@@ -625,16 +674,15 @@ export function useServer() {
             const prevMap = new Map(prev.map((w) => [w.id, w]));
             return incoming.map((w) => {
               const existing = prevMap.get(w.id);
-              const kept = existing?.seenTick ? { ...w, seenTick: existing.seenTick } : w;
               if (existing?.messagesLoaded) {
                 return {
-                  ...kept,
+                  ...w,
                   messages: existing.messages,
                   messagesLoaded: true,
                   hasMore: existing.hasMore,
                 };
               }
-              return kept;
+              return w;
             });
           });
           const config = msg.config as {
@@ -671,6 +719,7 @@ export function useServer() {
         }
 
         case "workspace_updated": {
+          flushStreamEvents();
           const info = msg.workspace as Workspace;
           setWorkspaces((prev) =>
             prev.map((w) =>
@@ -681,7 +730,6 @@ export function useServer() {
                     messagesLoaded: w.messagesLoaded,
                     hasMore: w.hasMore,
                     loadingOlder: w.loadingOlder,
-                    seenTick: w.seenTick,
                   }
                 : w,
             ),
@@ -689,12 +737,18 @@ export function useServer() {
           break;
         }
 
-        case "workspace_seen": {
-          const wsId = msg.workspaceId as string;
+        case "workspace_attention": {
+          const unread = msg.unread as number;
+          const lastResult = msg.lastResult as Workspace["lastResult"];
           setWorkspaces((prev) =>
-            prev.map((w) =>
-              w.id === wsId ? { ...w, unread: 0, seenTick: (w.seenTick ?? 0) + 1 } : w,
-            ),
+            prev.map((w) => (w.id === msg.workspaceId ? { ...w, unread, lastResult } : w)),
+          );
+          break;
+        }
+
+        case "workspace_seen": {
+          setWorkspaces((prev) =>
+            prev.map((w) => (w.id === msg.workspaceId ? { ...w, unread: 0 } : w)),
           );
           break;
         }
@@ -851,7 +905,9 @@ export function useServer() {
                 ...w,
                 messages,
                 hasMore: keptOlder ? w.hasMore : hasMore,
-                loadingOlder: false,
+                // A newest-page reply cannot complete an older-page request
+                // that still targets the same cursor.
+                loadingOlder: w.loadingOlder && messages[0]?.timestamp === w.messages[0]?.timestamp,
               };
             }),
           );
@@ -886,6 +942,7 @@ export function useServer() {
         }
 
         case "agent_updated": {
+          flushStreamEvents();
           const wsId = msg.workspaceId as string;
           const agent = msg.agent as AgentInfo;
           setWorkspaces((prev) =>
@@ -893,7 +950,17 @@ export function useServer() {
               w.id === wsId
                 ? {
                     ...w,
-                    agents: w.agents.map((a) => (a.id === agent.id ? { ...a, ...agent } : a)),
+                    agents: w.agents.map((a) =>
+                      a.id === agent.id
+                        ? {
+                            ...a,
+                            ...agent,
+                            context: agent.context,
+                            lastStreamAt: agent.lastStreamAt,
+                            retryLabel: agent.retryLabel,
+                          }
+                        : a,
+                    ),
                   }
                 : w,
             ),
@@ -934,8 +1001,8 @@ export function useServer() {
                 ? {
                     ...w,
                     messages: [...w.messages, message],
-                    lastMessageAt: message.timestamp,
-                    unread: (w.unread ?? 0) + 1,
+                    lastMessageAt: Math.max(w.lastMessageAt ?? w.createdAt, message.timestamp),
+                    queued: (msg.queued as boolean | undefined) ?? w.queued,
                   }
                 : w,
             ),
@@ -949,6 +1016,9 @@ export function useServer() {
             wsId: msg.workspaceId as string,
             messageId: msg.messageId as string,
             event: msg.event as StreamEvent,
+            agentId: msg.agentId as string | undefined,
+            streamAt: msg.streamAt as number | undefined,
+            retryLabel: msg.retryLabel as string | null | undefined,
           });
           scheduleFlush();
           break;
@@ -960,7 +1030,7 @@ export function useServer() {
           const status = msg.status as Message["status"];
           const content = msg.content as string;
           const events = msg.events as StreamEvent[] | undefined;
-          const context = msg.context as ContextUsage | undefined;
+          const context = msg.context as ContextUsage | null | undefined;
           const effort = msg.effort as string | undefined;
           const thinking = msg.thinking as ThinkingStats | undefined;
           // The completion payload strips subagent transcripts, so events
@@ -971,6 +1041,7 @@ export function useServer() {
               if (w.id !== wsId) return w;
               return {
                 ...w,
+                queued: (msg.queued as boolean | undefined) ?? w.queued,
                 messages: w.messages.map((m) => {
                   if (m.id !== messageId) return m;
                   const merged = events ? mergeDetailEvents(m.events, events) : undefined;
@@ -983,7 +1054,7 @@ export function useServer() {
                       : {}),
                     ...("steering" in msg ? { steering: msg.steering === true || undefined } : {}),
                     ...(merged ? { events: merged } : {}),
-                    ...(context ? { context } : {}),
+                    ...(context !== undefined ? { context } : {}),
                     ...(effort ? { effort } : {}),
                     ...(thinking ? { thinking } : {}),
                   };
@@ -995,6 +1066,7 @@ export function useServer() {
         }
 
         case "agent_busy": {
+          flushStreamEvents();
           const wsId = msg.workspaceId as string;
           const agentId = msg.agentId as string;
           setWorkspaces((prev) =>
@@ -1003,7 +1075,15 @@ export function useServer() {
                 ? {
                     ...w,
                     agents: w.agents.map((a) =>
-                      a.id === agentId ? { ...a, busy: true, canSwitchBackend: false } : a,
+                      a.id === agentId
+                        ? {
+                            ...a,
+                            busy: true,
+                            canSwitchBackend: false,
+                            lastStreamAt: msg.streamAt as number | undefined,
+                            retryLabel: undefined,
+                          }
+                        : a,
                     ),
                   }
                 : w,
@@ -1013,6 +1093,7 @@ export function useServer() {
         }
 
         case "agent_idle": {
+          flushStreamEvents();
           const wsId = msg.workspaceId as string;
           const agentId = msg.agentId as string;
           setWorkspaces((prev) =>
@@ -1020,7 +1101,11 @@ export function useServer() {
               w.id === wsId
                 ? {
                     ...w,
-                    agents: w.agents.map((a) => (a.id === agentId ? { ...a, busy: false } : a)),
+                    agents: w.agents.map((a) =>
+                      a.id === agentId
+                        ? { ...a, busy: false, lastStreamAt: undefined, retryLabel: undefined }
+                        : a,
+                    ),
                   }
                 : w,
             ),
@@ -1052,7 +1137,14 @@ export function useServer() {
           setWorkspaces((prev) =>
             prev.map((w) =>
               w.id === wsId
-                ? { ...w, archivedAt, messages: [], messagesLoaded: false, hasMore: false }
+                ? {
+                    ...w,
+                    archivedAt,
+                    agents: w.agents.map((a) => ({ ...a, context: undefined })),
+                    messages: [],
+                    messagesLoaded: false,
+                    hasMore: false,
+                  }
                 : w,
             ),
           );
@@ -1093,6 +1185,7 @@ export function useServer() {
           const messageId = msg.messageId as string;
           const taskId = msg.taskId as string;
           const saEvents = msg.events as StreamEvent[];
+          const revision = (msg.transcriptRevision as number | undefined) ?? 0;
           flushStreamEvents();
           setWorkspaces((prev) =>
             prev.map((w) => {
@@ -1104,7 +1197,12 @@ export function useServer() {
                   return {
                     ...m,
                     events: m.events.map((e) => {
-                      if (e.subagent?.taskId !== taskId) return e;
+                      // A response requested before enrichment must not repopulate the old slice.
+                      if (
+                        e.subagent?.taskId !== taskId ||
+                        (e.subagent.transcriptRevision ?? 0) !== revision
+                      )
+                        return e;
                       return {
                         ...e,
                         subagent: { ...e.subagent, events: saEvents, eventCount: saEvents.length },
@@ -1145,7 +1243,13 @@ export function useServer() {
           const messageId = msg.messageId as string;
           setWorkspaces((prev) =>
             prev.map((w) =>
-              w.id === wsId ? { ...w, messages: w.messages.filter((m) => m.id !== messageId) } : w,
+              w.id === wsId
+                ? {
+                    ...w,
+                    queued: (msg.queued as boolean | undefined) ?? w.queued,
+                    messages: w.messages.filter((m) => m.id !== messageId),
+                  }
+                : w,
             ),
           );
           break;
@@ -1200,19 +1304,29 @@ export function useServer() {
     if (detailRefetchRef.current.size > 0) flushDetailRefetches();
   }, [workspaces, flushDetailRefetches]);
 
-  const send = useCallback((data: unknown): boolean => {
-    if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
-    wsRef.current.send(JSON.stringify(data));
-    return true;
-  }, []);
+  const send = useCallback(
+    (data: { type: string; [key: string]: unknown }, userIntent = false): boolean => {
+      if (userIntent) {
+        const action = wsTelemetryAction(data);
+        if (action) recordTelemetry(action);
+      }
+      if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
+      wsRef.current.send(JSON.stringify(data));
+      return true;
+    },
+    [],
+  );
 
   const refreshQuota = useCallback(
     (force = true, providers?: readonly string[]) =>
-      send({
-        type: "refresh_quota",
+      send(
+        {
+          type: "refresh_quota",
+          force,
+          ...(providers ? { providers: [...providers] } : {}),
+        },
         force,
-        ...(providers ? { providers: [...providers] } : {}),
-      }),
+      ),
     [send],
   );
 
@@ -1403,9 +1517,11 @@ export function useServer() {
     ),
     loadMessageDetails: useCallback(
       (wsId: string, messageId: string) =>
-        send({ type: "load_message_details", workspaceId: wsId, messageId }),
+        send({ type: "load_message_details", workspaceId: wsId, messageId }, true),
       [send],
     ),
+    // An open trace can refetch as new events arrive. Its toggle is tracked
+    // at the UI, not here at the effect-driven request.
     loadSubagentEvents: useCallback(
       (wsId: string, messageId: string, taskId: string) =>
         send({ type: "load_subagent_events", workspaceId: wsId, messageId, taskId }),
@@ -1427,12 +1543,13 @@ export function useServer() {
       (wsId: string, agentId: string, taskId: string) => {
         if (wsId === "replay-demo") {
           // Demo workspace exists only client-side; emulate the stop locally.
+          recordTelemetry("chat.stop");
           void import("../dev/replayFixture").then(({ cancelDemoSubagent }) =>
             cancelDemoSubagent(handleServerMessage, taskId),
           );
           return;
         }
-        send({ type: "cancel_subagent", workspaceId: wsId, agentId, taskId });
+        send({ type: "cancel_subagent", workspaceId: wsId, agentId, taskId }, true);
       },
       [send, handleServerMessage],
     ),
@@ -1467,7 +1584,7 @@ export function useServer() {
     ),
     cancelQueued: useCallback(
       (wsId: string, messageId: string) =>
-        send({ type: "cancel_queued", workspaceId: wsId, messageId }),
+        send({ type: "cancel_queued", workspaceId: wsId, messageId }, true),
       [send],
     ),
     searchServer: useCallback((query: string) => send({ type: "search", query }), [send]),
@@ -1497,11 +1614,12 @@ export function useServer() {
         target?: string,
         images?: Array<{ name: string; url: string }>,
         quote?: { messageId: string; agentId: string | null; content: string },
+        source?: "composer",
       ): Promise<SendOutcome> => {
         if (probeRef.current) await new Promise<void>((r) => probeWaitersRef.current.push(r));
         const data = { type: "send_message", workspaceId: wsId, content, target, images, quote };
         const outcome = !sendReceiptRef.current
-          ? send(data)
+          ? send(data, source === "composer")
             ? "unknown"
             : "not_sent"
           : await new Promise<SendOutcome>((resolve) => {
@@ -1513,7 +1631,7 @@ export function useServer() {
                 resolve(result);
               };
               sendWaitersRef.current.set(requestId, finish);
-              if (!send({ ...data, requestId })) finish("not_sent");
+              if (!send({ ...data, requestId }, source === "composer")) finish("not_sent");
             });
         if (outcome === "unknown")
           setLastError("Delivery is unconfirmed. Check the conversation before sending again.");
@@ -1529,18 +1647,22 @@ export function useServer() {
       [send],
     ),
     abort: useCallback(
-      (wsId: string, agentId?: string) => send({ type: "abort", workspaceId: wsId, agentId }),
+      (wsId: string, agentId?: string) => send({ type: "abort", workspaceId: wsId, agentId }, true),
       [send],
     ),
-    // Stop the running turn only; background tasks and wake-ups go on.
+    // One stop intent may fan out to several running turns; tasks and wake-ups go on.
     interrupt: useCallback(
-      (wsId: string, agentId?: string) => send({ type: "interrupt", workspaceId: wsId, agentId }),
+      (wsId: string, agentIds?: string[]) => {
+        for (const [i, agentId] of (agentIds ?? [undefined]).entries()) {
+          send({ type: "interrupt", workspaceId: wsId, agentId }, i === 0);
+        }
+      },
       [send],
     ),
     markSeen: useCallback((wsId: string) => send({ type: "mark_seen", workspaceId: wsId }), [send]),
     cancelWakeup: useCallback(
       (wsId: string, agentId: string) =>
-        send({ type: "cancel_wakeup", workspaceId: wsId, agentId }),
+        send({ type: "cancel_wakeup", workspaceId: wsId, agentId }, true),
       [send],
     ),
     clearContext: useCallback(
@@ -1550,11 +1672,11 @@ export function useServer() {
     ),
     restartServer: useCallback(() => send({ type: "restart_server" }), [send]),
     archiveWorkspace: useCallback(
-      (wsId: string) => send({ type: "archive_workspace", workspaceId: wsId }),
+      (wsId: string) => send({ type: "archive_workspace", workspaceId: wsId }, true),
       [send],
     ),
     unarchiveWorkspace: useCallback(
-      (wsId: string) => send({ type: "unarchive_workspace", workspaceId: wsId }),
+      (wsId: string) => send({ type: "unarchive_workspace", workspaceId: wsId }, true),
       [send],
     ),
     setReporting: useCallback(

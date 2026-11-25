@@ -1,5 +1,6 @@
 import { useWorkspaceT } from "../i18n/workspace";
 import type { GitInfo, PrInfo } from "../state/useServer";
+import { Icon } from "../panels/Icon";
 
 // Branch, working-tree and PR summary for the workspace header.
 export function GitBar({ git, pr }: { git: GitInfo | null; pr: PrInfo | null }) {
@@ -47,7 +48,7 @@ export function GitBar({ git, pr }: { git: GitInfo | null; pr: PrInfo | null }) 
     <>
       {git?.branch && (
         <span className="ws-info-item ws-info-branch" title={dirtyTitle}>
-          <span className="ws-info-icon">&#9831;</span>
+          <Icon name="branch" />
           <span className="ws-branch-name">{git.branch}</span>
           {git.dirty > 0 && <span className="git-badge git-dirty">●{git.dirty}</span>}
           {git.ahead > 0 && <span className="git-badge git-ahead">↑{git.ahead}</span>}

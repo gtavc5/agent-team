@@ -60,7 +60,6 @@ describe("project groups", () => {
     activeWsId: "lead",
     connected: true,
     groupOverrides: {},
-    finishedStatus: {},
     searchQuery: "",
     searchHits: null,
     systemStatus: null,
@@ -119,7 +118,7 @@ describe("project groups", () => {
     expect(container.querySelector(".ws-group-project .events-toggle")!.textContent).toBe("");
   });
 
-  it("mark a worker waiting for the user's reply, until it runs again or is open", () => {
+  it("shows an authoritative user wait even when the session is open or a dialog holds an active turn", () => {
     const waiting = { ...worker, awaitsUser: true };
     const working = {
       ...waiting,
@@ -131,14 +130,13 @@ describe("project groups", () => {
       render(
         <Sidebar {...sidebarProps()} workspaces={[lead, w]} activeWsId={activeWsId} />,
       ).container.querySelector(".task-item .awaits-tag");
-    expect(tag(waiting)?.textContent).toBe("your turn");
-    expect(tag(waiting)?.getAttribute("title")).toBe("Waiting for your reply");
+    expect(tag(waiting)?.textContent).toBe("Your turn");
     expect(tag(worker)).toBeNull();
-    expect(tag(working)).toBeNull();
-    expect(tag(waiting, "w1")).toBeNull();
+    expect(tag(working)?.textContent).toBe("Your turn");
+    expect(tag(waiting, "w1")?.textContent).toBe("Your turn");
   });
 
-  it("show the lead's unread count on the project's row", () => {
+  it("includes the lead's unread result in the project summary", () => {
     const props = {
       ...sidebarProps(),
       activeWsId: "w1",
@@ -147,7 +145,7 @@ describe("project groups", () => {
     const { container } = render(<Sidebar {...props} />);
     const header = container.querySelector(".ws-group-project")!;
     expect(header.className).not.toContain("active");
-    expect(header.querySelector(".unread-badge")!.textContent).toBe("2");
+    expect(header.querySelector(".ws-group-attention")!.textContent).toBe("1 unread");
   });
 
   it("summarizes lead and worker attention on a collapsed row without expanding it", () => {
@@ -168,14 +166,9 @@ describe("project groups", () => {
     };
     const { container, getByRole } = render(<Sidebar {...props} />);
     const header = container.querySelector(".ws-group-project")!;
-    const summary = getByRole("status", { name: "clice: 3 sessions need attention, 1 your turn" });
-    expect(summary.querySelector(".attention-badge")!.textContent).toBe("3");
-    expect(summary.querySelector(".attention-badge")!.classList).toContain(
-      "attention-badge-your-turn",
-    );
-    expect(summary.querySelector(".awaits-tag")!.textContent).toBe("your turn");
+    const summary = getByRole("status", { name: "clice: 2 need you · 2 unread" });
+    expect(summary.textContent).toBe("2 need you · 2 unread");
     expect(header.querySelector(".ws-group-count")).toBeNull();
-    expect(header.querySelector(".unread-badge")).toBeNull();
     expect(container.querySelector(".ws-group-items")).toBeNull();
     expect(props.onToggleGroup).not.toHaveBeenCalled();
   });
@@ -366,7 +359,6 @@ describe("archives in the sidebar", () => {
     activeWsId: "lead",
     connected: true,
     groupOverrides: {},
-    finishedStatus: {},
     searchQuery: "",
     searchHits: null,
     systemStatus: null,

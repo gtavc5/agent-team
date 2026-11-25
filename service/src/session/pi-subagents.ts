@@ -107,8 +107,26 @@ function decodeNotifyRun(value: unknown): SubagentNotifyRun | undefined {
         : Array.isArray(run.childOutputs)
           ? run.childOutputs
           : [];
+  // Workflow notices may separate execution identity from output metadata; the
+  // output array is not necessarily in roster order. Only join explicit keys.
+  const outputs =
+    Array.isArray(run.childOutputs) && rawChildren !== run.childOutputs
+      ? run.childOutputs.map(objectValue)
+      : [];
   const children = rawChildren.flatMap((child, index) => {
-    const decoded = decodeNotifyChild(child, index);
+    const row = objectValue(child);
+    const matches = outputs.filter(
+      (output) =>
+        row &&
+        output &&
+        (typeof row.runId === "string" && typeof output.runId === "string"
+          ? row.runId === output.runId
+          : typeof row.workflowKey === "string" && row.workflowKey === output.workflowKey),
+    );
+    const decoded = decodeNotifyChild(
+      matches.length === 1 ? { ...matches[0], ...row } : child,
+      index,
+    );
     if (
       decoded &&
       !decoded.sessionFile &&

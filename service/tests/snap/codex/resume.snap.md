@@ -8,7 +8,7 @@
   notice:warning "Codex: Model metadata for `gpt-6-luna` not found. Defaulting to fallback metadata; this can degrade …"
 ## 4 user done
   text "/compact"
-## 5 agent done ctx 5493/258400
+## 5 agent done
   notice:warning "Codex: Configured service tier `priority` is not advertised as supported for model `gpt-6-luna` and …"
   compact "Context compacted"
 ## 6 user done

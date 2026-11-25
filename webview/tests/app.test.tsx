@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
-import { render, act, fireEvent, screen, within } from "@testing-library/react";
-import { App } from "../src/App";
+import { render, renderHook, act, fireEvent, screen, within } from "@testing-library/react";
+import { App, uploadImage } from "../src/App";
 import * as format from "../src/format";
 import * as telemetry from "../src/telemetry";
-import { AUTO_RELOAD, type AgentInfo, type Message } from "../src/state/useServer";
+import { AUTO_RELOAD, useServer, type AgentInfo, type Message } from "../src/state/useServer";
 
 import { FakeSocket } from "./fakeSocket";
 
@@ -196,6 +196,66 @@ describe("render cost of a live transcript", () => {
     });
     expect(timeEl().textContent).toBe(format.formatShortDateTime(todayTs));
     expect(timeEl().getAttribute("title")).toBe(format.formatFullDateTime(todayTs));
+  });
+});
+
+describe("UI telemetry middleware", () => {
+  it("delegates only the closest allowed click or focus action", () => {
+    const record = vi.spyOn(telemetry, "recordTelemetry");
+    boot([]);
+    const rail = document.querySelector('.side-rail [aria-label="Changes"]')!;
+    fireEvent.click(rail.querySelector("svg")!);
+    fireEvent.click(rail.querySelector("svg")!);
+    const search = screen.getByPlaceholderText("Search messages…");
+    fireEvent.click(search);
+    fireEvent.focus(search);
+    for (const invalid of ["workspace-secret", "chat.send", "trace.tool_toggle/secret"]) {
+      rail.setAttribute("data-telemetry", invalid);
+      fireEvent.click(rail);
+    }
+    const target = document.createElement("div");
+    target.setAttribute("data-telemetry", "trace.subagent_toggle");
+    const cancel = document.createElement("button");
+    target.append(cancel);
+    document.querySelector(".app")!.append(target);
+    fireEvent.click(cancel);
+    fireEvent.click(target);
+    target.remove();
+    expect(record.mock.calls).toEqual([
+      ["panel.diff"],
+      ["panel.close"],
+      ["sidebar.search"],
+      ["trace.subagent_toggle"],
+    ]);
+  });
+
+  it("records user dispatch once and excludes automatic quota, paging, and trace hydration", () => {
+    const record = vi.spyOn(telemetry, "recordTelemetry");
+    const { result } = renderHook(useServer);
+    const sock = FakeSocket.instances.at(-1)!;
+    openSocket(sock, [AGENT]);
+    act(() => {
+      result.current.refreshQuota(false, ["provider"]);
+      result.current.loadMessages("w1", 123);
+      result.current.markSeen("w1");
+      result.current.loadSubagentEvents("w1", "message-private", "task-private");
+    });
+    expect(record).not.toHaveBeenCalled();
+    act(() => {
+      result.current.refreshQuota(true, ["provider"]);
+      result.current.loadMessageDetails("w1", "message-private");
+      result.current.archiveWorkspace("w1");
+      result.current.unarchiveWorkspace("w1");
+      result.current.interrupt("w1", ["private-1", "private-2"]);
+    });
+    expect(sock.frames().filter(({ type }) => type === "interrupt")).toHaveLength(2);
+    expect(record.mock.calls).toEqual([
+      ["quota.refresh"],
+      ["trace.load_details"],
+      ["workspace.archive"],
+      ["workspace.restore"],
+      ["chat.stop"],
+    ]);
   });
 });
 
@@ -627,7 +687,7 @@ describe("files panel", () => {
       await act(async () => {});
       expect(lastFetch()).toBe(`api/file?ws=w1&path=${encodeURIComponent(path)}&literal=1`);
       expect(panel()!.querySelector(".fp-btn[href]")?.getAttribute("href")).toContain("&literal=1");
-      expect(record.mock.calls).toEqual([["chat.file_link"]]);
+      expect(record.mock.calls).toEqual([["trace.step_toggle"], ["chat.file_link"]]);
     },
   );
 
@@ -776,15 +836,20 @@ describe("read state shared by every device", () => {
   const newMessage = (workspaceId: string, id: string): unknown => ({
     type: "new_message",
     workspaceId,
-    message: { ...settled(9), id },
+    message: { ...settled(9), id, status: "streaming" },
+  });
+  const result = (workspaceId: string, unread = 1, lastResult = "done") => ({
+    type: "workspace_attention",
+    workspaceId,
+    unread,
+    lastResult,
   });
 
   it("marks the session on screen read, but not from a page in the background", () => {
     const sock = boot([settled(1)], { others: ["w2"] });
-    expect(marks(sock)).toContain("w1");
-    sock.sent = [];
+    expect(marks(sock)).toEqual([]);
     setVisibility("hidden");
-    sock.receive(newMessage("w1", "n1"));
+    sock.receive(result("w1"));
     expect(marks(sock)).toEqual([]);
     setVisibility("visible");
     expect(marks(sock)).toEqual(["w1"]);
@@ -793,17 +858,19 @@ describe("read state shared by every device", () => {
     act(() => {
       window.dispatchEvent(new Event("blur"));
     });
-    sock.receive(newMessage("w1", "n2"));
+    sock.receive(result("w1", 2));
     expect(marks(sock)).toEqual([]);
   });
 
-  it("counts a session's new messages until any device shows it", () => {
+  it("shows only authoritative unread results until any device reads them", () => {
     const sock = boot([settled(1)], { others: ["w2"] });
     sock.receive(newMessage("w2", "n1"));
     sock.receive(newMessage("w2", "n2"));
-    expect(row("w2").querySelector(".unread-badge")!.textContent).toBe("2");
+    expect(row("w2").querySelector(".session-attention")).toBeNull();
+    sock.receive(result("w2", 2));
+    expect(row("w2").querySelector(".session-attention")!.textContent).toBe("Unread result");
     sock.receive({ type: "workspace_seen", workspaceId: "w2" });
-    expect(row("w2").querySelector(".unread-badge")).toBeNull();
+    expect(row("w2").querySelector(".session-attention")).toBeNull();
   });
 
   const reconnect = (sock: FakeSocket) => {
@@ -817,7 +884,7 @@ describe("read state shared by every device", () => {
   it("marks again after a reconnect when a mark went into a dead socket", () => {
     const sock = boot([settled(1)]);
     setVisibility("hidden");
-    sock.receive(newMessage("w1", "n1"));
+    sock.receive(result("w1"));
     sock.close();
     setVisibility("visible");
     const next = reconnect(sock);
@@ -843,14 +910,12 @@ describe("read state shared by every device", () => {
     expect(marks(next)).toContain("w1");
   });
 
-  it("keeps a finished mark across a reconnect", () => {
+  it("uses the reconnect snapshot instead of a remembered completion", () => {
     const sock = boot([settled(1)], { others: ["w2"] });
-    sock.receive({ type: "workspace_seen", workspaceId: "w2" });
-    sock.receive(newMessage("w2", "n1"));
-    sock.receive({ type: "agent_busy", workspaceId: "w2", agentId: "a1" });
-    sock.receive({ type: "agent_idle", workspaceId: "w2", agentId: "a1" });
+    sock.receive(result("w2"));
+    expect(row("w2").querySelector(".session-attention")!.textContent).toBe("Unread result");
     openSocket(reconnect(sock), [AGENT], ["w2"]);
-    expect(row("w2").querySelector(".task-status")!.className).toContain("done");
+    expect(row("w2").querySelector(".session-attention")).toBeNull();
   });
 
   it("reads nothing from a page left untouched for minutes", () => {
@@ -863,7 +928,7 @@ describe("read state shared by every device", () => {
     const sock = FakeSocket.instances.at(-1)!;
     if (sock.readyState !== FakeSocket.OPEN) openSocket(sock, [AGENT]);
     sock.sent = [];
-    sock.receive(newMessage("w1", "n1"));
+    sock.receive(result("w1"));
     expect(marks(sock)).toEqual([]);
     act(() => {
       window.dispatchEvent(new Event("pointerdown"));
@@ -871,23 +936,20 @@ describe("read state shared by every device", () => {
     expect(marks(sock)).toEqual(["w1"]);
   });
 
-  it("drops a session's finished mark once another device has shown it", () => {
-    const sock = boot([settled(1)], { others: ["w2", "w3"] });
-    sock.receive(newMessage("w2", "n1"));
-    for (const w of ["w2", "w3"]) {
-      sock.receive({ type: "agent_busy", workspaceId: w, agentId: "a1" });
-      sock.receive({ type: "agent_idle", workspaceId: w, agentId: "a1" });
-    }
-    expect(row("w2").querySelector(".task-status")!.className).toContain("done");
-    // Nothing of w3 unread: a device was showing it as it ended.
-    expect(row("w3").querySelector(".task-status")!.className).not.toContain("done");
+  it("keeps a failure actionable after being read; later success supersedes it", () => {
+    const sock = boot([settled(1)], { others: ["w2"] });
+    sock.receive(result("w2", 1, "failed"));
+    expect(row("w2").querySelector(".session-attention")!.textContent).toBe("Failed");
     sock.receive({ type: "workspace_seen", workspaceId: "w2" });
-    expect(row("w2").querySelector(".task-status")!.className).not.toContain("done");
+    expect(row("w2").querySelector(".session-attention")!.textContent).toBe("Failed");
+    sock.receive(result("w2"));
+    expect(row("w2").querySelector(".session-attention")!.textContent).toBe("Unread result");
   });
 
   it("reads nothing after reloading itself for a new build until someone touches the page", () => {
     sessionStorage.setItem(AUTO_RELOAD, "1");
     const sock = boot([settled(1)]);
+    sock.receive(result("w1"));
     expect(marks(sock)).toEqual([]);
     act(() => {
       window.dispatchEvent(new Event("keydown"));
@@ -961,5 +1023,79 @@ describe("debug strip", () => {
     const demo = document.querySelector<HTMLButtonElement>('button[aria-label="Replay demo"]')!;
     fireEvent.click(demo);
     expect(document.querySelector(".sidebar-debug-strip")).not.toBeNull();
+  });
+});
+
+describe("uploadImage", () => {
+  it("uses the compressed Blob's type while keeping the original filename", async () => {
+    const compressed = new Blob(["compressed"], { type: "image/png" });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal(
+      "Image",
+      class {
+        width = 4;
+        height = 4;
+        onload?: () => void;
+        set src(_url: string) {
+          this.onload?.();
+        }
+      },
+    );
+    const createUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:upload-test");
+    const revokeUrl = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const getContext = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue({ drawImage: vi.fn() } as unknown as CanvasRenderingContext2D);
+    // A canvas can fall back to PNG when the requested encoder is unavailable.
+    const toBlob = vi
+      .spyOn(HTMLCanvasElement.prototype, "toBlob")
+      .mockImplementation((callback) => callback(compressed));
+    try {
+      await uploadImage(new File(["original"], "photo.webp", { type: "image/webp" }));
+      expect(toBlob).toHaveBeenCalledWith(expect.any(Function), "image/jpeg", 0.85);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "upload",
+        expect.objectContaining({
+          body: compressed,
+          headers: { "Content-Type": "image/png", "X-Filename": "photo.webp" },
+        }),
+      );
+    } finally {
+      createUrl.mockRestore();
+      revokeUrl.mockRestore();
+      getContext.mockRestore();
+      toBlob.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("encodes non-ASCII filenames in X-Filename and preserves fallback blob Content-Type on image upload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ name: "屏幕截图.png", url: "uploads/1-abc.png" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockImplementation(() => {
+      throw new Error("no canvas in jsdom");
+    });
+    try {
+      const file = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "屏幕截图.png", {
+        type: "image/png",
+      });
+      const res = await uploadImage(file);
+      expect(res).toEqual({ name: "屏幕截图.png", url: "uploads/1-abc.png" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("upload");
+      expect(init.headers).toEqual({
+        "Content-Type": "image/png",
+        "X-Filename": encodeURIComponent("屏幕截图.png"),
+      });
+      expect(init.body).toBe(file);
+    } finally {
+      createObjectURL.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 });

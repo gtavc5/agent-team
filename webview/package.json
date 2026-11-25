@@ -5,9 +5,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "vitest run",
-    "test:fast": "vitest run --config vitest.fast.config.mjs",
-    "test:browser": "vitest run --config vitest.browser.config.ts",
+    "test": "node ../scripts/run-tests.mjs webview unit",
+    "test:fast": "node ../scripts/run-tests.mjs webview fast",
+    "test:browser": "node ../scripts/run-tests.mjs webview browser",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json"
   },

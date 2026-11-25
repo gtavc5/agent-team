@@ -1,5 +1,11 @@
 import type { AgentInfo, RunState } from "../state/useServer";
 
+// A configured avatar color may be near-white or near-black. Keep it as a
+// tint on names so they remain readable on either theme's surfaces.
+export function agentNameColor(color: string): string {
+  return `color-mix(in srgb, ${color} 25%, var(--text-primary))`;
+}
+
 // Effective run state of an agent. Servers that predate `state` only send
 // the busy flag, so derive from it.
 export function agentState(a: AgentInfo): RunState {

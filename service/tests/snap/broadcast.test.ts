@@ -2,7 +2,12 @@
 // captures broadcast frames, and folds them with the client's own functions.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { StreamEvent } from "../../src/session/types";
-import type { WorkspaceCallbacks } from "../../src/workspace/workspace";
+import { LocalHost, HostRegistry } from "../../src/session/host";
+import {
+  Workspace,
+  type AgentRuntimeInfo,
+  type WorkspaceCallbacks,
+} from "../../src/workspace/workspace";
 import { summarizeMessages } from "../../src/workspace/summary";
 import {
   type Backend,
@@ -37,8 +42,10 @@ async function replayBroadcast(backend: Backend, name: string) {
   const rec = readRecording(recordingPath(backend, name));
   const fixture = await loadFixture(backend, name);
   const frames: Frame[] = [];
+  const liveAgents = new Map<string, AgentRuntimeInfo>();
   const at = () => Date.now();
   const cb: WorkspaceCallbacks = {
+    onAgentUpdated: (_ws, agent) => void liveAgents.set(agent.id, clone(agent)),
     onNewMessage: (_ws, message) =>
       frames.push({ type: "new_message", t: at(), message: clone(message) }),
     onStreamEvent: (_ws, msg, event) =>
@@ -62,7 +69,12 @@ async function replayBroadcast(backend: Backend, name: string) {
       }),
   };
   const replayed = await replaySnap(backend, rec, fixture, cb);
-  return { frames, messages: replayed.messages };
+  return {
+    frames,
+    messages: replayed.messages,
+    workspaceState: replayed.workspaceState,
+    liveAgents,
+  };
 }
 
 interface LiveSpan {
@@ -117,7 +129,7 @@ function clientFold(frames: Frame[], mode: "each" | "hidden") {
           status: f.status as ClientMessage["status"],
           content: f.content as string,
           ...(merged ? { events: merged } : {}),
-          ...(f.context ? { context: f.context as ClientMessage["context"] } : {}),
+          ...("context" in f ? { context: f.context as ClientMessage["context"] } : {}),
           ...(f.effort ? { effort: f.effort as string } : {}),
           ...(f.thinking ? { thinking: f.thinking as ClientMessage["thinking"] } : {}),
         };
@@ -132,7 +144,7 @@ function clientFold(frames: Frame[], mode: "each" | "hidden") {
 const norm = (m: unknown) =>
   JSON.parse(
     JSON.stringify(m, (k: string, v: unknown) =>
-      k === "_innerEvent" || k === "eventCount" ? undefined : v,
+      k === "_innerEvent" || k === "eventCount" || k === "transcriptRevision" ? undefined : v,
     ),
   ) as unknown;
 
@@ -153,6 +165,29 @@ describe("broadcast parity", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
+
+  it.each([
+    ["pi", "basic-turn", { tokens: 449, window: 272000, estimated: true }],
+    ["pi", "antigravity-acp-turn", { tokens: 15444, window: 1000000, estimated: true }],
+    ["pi", "compaction-and-retry", null],
+    ["codex", "resume", { tokens: 53324, window: 258400, estimated: true }],
+  ] as const)(
+    "%s/%s keeps occupancy through broadcast and workspace reopen",
+    async (backend, name, expected) => {
+      const { frames, workspaceState, liveAgents } = await replayBroadcast(backend, name);
+      const registry = new HostRegistry();
+      registry.register(new LocalHost("local", "Local"));
+      const reopened = Workspace.fromState(clone(workspaceState), registry).getInfo();
+      expect(liveAgents.get(reopened.agents[0].id)?.context).toEqual(expected);
+      expect(reopened.agents[0].context).toEqual(expected);
+      const storedReply = reopened.messages.filter((m) => m.kind === "agent").at(-1)!;
+      expect(storedReply.context).toEqual(expected);
+      for (const mode of ["each", "hidden"] as const) {
+        const { msgs } = clientFold(frames, mode);
+        expect(msgs.find((m) => m.id === storedReply.id)?.context).toEqual(expected);
+      }
+    },
+  );
 
   for (const [backend, name] of FIXTURES) {
     for (const mode of ["each", "hidden"] as const) {

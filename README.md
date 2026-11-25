@@ -42,9 +42,10 @@ new work. The panel provides the orchestration and UI, not a model of its own.
 - **Surviving restarts and limits** — a turn a server restart cut off is
   carried on by the panel itself; a turn stopped by a usage limit is retried
   after the window resets.
-- Leads and workers write to you in Simplified Chinese (code, identifiers
-  and commits stay English); the instruction is in
-  `service/src/project/tools.ts`.
+- By default (`init-config` / `config.example.toml`), `[user].language` tells leads
+  and workers to address you in Simplified Chinese while repository artifacts,
+  project-board entries, and agent-to-agent instructions stay English
+  (`service/src/project/tools.ts`).
 
 ## The panel
 
@@ -95,9 +96,15 @@ new work. The panel provides the orchestration and UI, not a model of its own.
   history leaves memory (still on disk) and idle CLI processes shut down.
   Sending a message restores them.
 
+### Session attention
+
+The sidebar keeps session positions fixed as turns run. Each session shows its highest-priority cue: Your turn, Failed, or Unread result. Only an answer, failure, or new request for the user's input adds unread attention. The project row summarizes its lead and workers even when folded. A silent active turn shows the time since its last stream event, not a guessed cause. Read, idle workers can be folded without moving sessions that need attention.
+
+Switching sessions keeps the reader at the same message, or follows the latest reply if they were already at the bottom. Jump to latest resumes following.
+
 ### Account quota
 
-The sidebar shows last-observed account limits separately from CPU and memory. Refresh reads native Codex limits and asks one connected Pi session for its registered providers. Antigravity ACP uses the provider’s `/usage` event; Pi OAuth logins for `openai-codex` and `kimi-coding` use their respective read-only account usage endpoints. None starts a model turn. An unconfigured backend is neutral, not a quota failure. While Pi or ACP is getting ready, the sidebar shows what it is waiting for. Installing the ACP runtime triggers a new read from a connected Pi session. A transient read failure retries that provider at most twice; last-known bars retain their original observation time. Pi providers without a verified quota reader report unsupported.
+The sidebar keeps the last-observed account limits visible in a compact summary. Open a quota row to see observation time and the manual Refresh button. CPU and memory are under Debug tools. Refresh reads native Codex limits and asks one connected Pi session for its registered providers. Antigravity ACP uses the provider’s `/usage` event; Pi OAuth logins for `openai-codex` and `kimi-coding` use their respective read-only account usage endpoints. None starts a model turn. An unconfigured backend is neutral, not a quota failure. While Pi or ACP is getting ready, the sidebar shows what it is waiting for. Installing the ACP runtime triggers a new read from a connected Pi session. A transient read failure retries that provider at most twice; last-known values retain their original observation time. Pi providers without a verified quota reader report unsupported.
 
 Pi sessions load `/quota` automatically. To use the same command in standalone Pi, run `pi -e /path/to/yaat/service/src/session/pi-quota.ts` from an installed checkout. `/quota` checks all registered providers regardless of the current model. Enable `pi-antigravity-acp-provider` for ACP readings. OAuth quota comes from Pi’s credential resolver, not from the native Codex login. No account pooling or credential switching is performed.
 
@@ -147,14 +154,19 @@ With pixi, `pixi run serve` builds and starts in one step.
 ```bash
 pixi run dev-webview         # Vite dev server with HMR
 npm run check                # tsc (strict) + ESLint + prettier, zero tolerance
-npm test                     # service + webview (Vitest, no browser)
+npm test                     # service + webview unit tests (Vitest, no browser)
+npm run test:fast            # smaller service + webview suites
 npm run fmt                  # prettier
 ```
 
 For layout changes, install Playwright's Chromium (`npx playwright install chromium`,
 or `npx playwright install --with-deps chromium` on Linux if system libraries are missing).
-Run `npm run test:browser` for headless geometry tests, or `npm run test:slow` for the
-full local checks, unit tests, and browser suite before committing or pushing.
+Run `npm run test:browser` for headless geometry tests or `npm run test:slow` for
+local checks, unit, browser, and end-to-end tests. Pass a file filter to a workspace
+command (for example, `npm test -w service -- tests/unit/issues.test.ts`). Set
+`VERBOSE=1` or pass `-- --reporter=verbose` for Vitest's detailed output. The
+`test:fast` timing note uses a 15-second budget per workspace; set
+`YAAT_FAST_BUDGET_MS` to override it without changing the test exit status.
 
 To try the UI without touching your own data, seed a demo — a project with a
 lead, workers, history and a board; no session is started — into a separate
@@ -226,9 +238,11 @@ offline = true               # set false to allow Pi npm access on startup
 # restart_command = ["launchctl", "kickstart", "-k", "gui/501/com.yaat.server"]
 ```
 
-Omitting `[user].language` adds no language instruction. A language change
-is reflected in Pi's project instructions on the next turn and in Codex on
-thread start or resume in a new app-server process.
+Omitting `[user].language` omits only the user-facing chat language rule (agents
+choose how to reply to you), while keeping the English rule for repository
+artifacts, project-board entries, and agent-to-agent instructions and reports. A
+language change is reflected in Pi's project instructions on the next turn and in
+Codex on thread start or resume in a new app-server process.
 
 If upgrading from a config with `[providers.*]`, migrate custom Pi providers to
 `~/.pi/agent/models.json` and remove those tables from `config.toml`. The managed
@@ -253,10 +267,13 @@ to YAAT maintainers or third parties; v1 has no external upload or sharing featu
 Events contain a timestamp, an ephemeral random token per page load, a narrow or
 wide layout flag, and a fixed action and outcome. They never contain chat text,
 prompts, search terms, file paths, or user, project, workspace or session IDs.
-Actions cover panel navigation, changes of active workspace, sidebar search focus
-and archive toggles, manual quota refresh, add dialogs, and explicit open/confirm/cancel
-for clearing context, removing an agent, or deleting a session. Chat actions count
-file preview, send, and stop requests, not successful reads, delivery, or stops.
+Actions cover panel navigation, workspace switches and archive/restore, sidebar
+search focus and archive toggles, manual quota refresh, add dialogs, and explicit
+open/confirm/cancel for clearing context, removing an agent, or deleting a session.
+Chat actions include Jump to latest, trace toggles, and file preview, send, and
+stop requests. A trace toggle and an explicit detail request are distinct actions;
+automatic synchronization and trace refreshes are excluded. Request events do not
+imply successful reads, delivery, or stops.
 
 Inspect the local JSON at `/api/telemetry/summary?days=30` (uses the panel's
 existing login). It includes counts by layout, action and outcome, common

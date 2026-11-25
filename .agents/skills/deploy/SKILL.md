@@ -5,7 +5,7 @@ description: Build and verify YAAT safely; use the staged controller only for an
 
 # Deploy safely
 
-An agent in the panel usually works inside the service it would restart. For ordinary verification run `npm run check && npm test && npm run build` in your worktree; do not overwrite `dist/` in the installed checkout while it serves that directory. To run a second instance, use a separate build, port and `AGENT_TEAM_BASE_DIR` with a scratch config. Sending a prompt there still uses the selected provider and account.
+An agent in the panel usually works inside the service it would restart. Follow the verification rule in [AGENTS.md](../../../AGENTS.md) in your worktree. Do not overwrite `dist/` in the installed checkout while it serves that directory. To run a second instance, use a separate build, port and `AGENT_TEAM_BASE_DIR` with a scratch config. Sending a prompt there still uses the selected provider and account.
 
 Only when the user explicitly asks for a production restart in this turn, finish the changes and verification, then from the installed checkout with the correct base directory, label and port:
 

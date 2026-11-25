@@ -292,8 +292,8 @@ it("uses real sidebar groups, archives, history search, confirmations, and debug
       const group = page.locator(".ws-group:has(> .ws-group-project)", { hasText: "agent-team" });
       const lead = group.locator(".ws-group-label", { hasText: "agent-team" });
       const worker = group.locator(".task-item", { hasText: "mobile panels" });
-      await visible(worker.locator(".unread-badge", { hasText: "3" }));
-      await visible(worker.getByText("your turn"));
+      await visible(worker.getByText("Your turn"));
+      await hidden(worker.getByText("Unread result"));
       expect(await group.locator(".task-item", { hasText: "agent-team · lead" }).count()).toBe(0);
       await lead.click();
       await chat(page, "分成两件事");
@@ -303,10 +303,10 @@ it("uses real sidebar groups, archives, history search, confirmations, and debug
       await button(group, "Unfold agent-team").click();
       await worker.click();
       await chat(page, "sheet 头部已经改好");
-      await hidden(worker.getByText("your turn"));
-      await hidden(worker.locator(".unread-badge"));
-      const health = (await (await report).json()) as { issues: unknown[] };
-      const unhealthy = health.issues.length > 0;
+      await visible(worker.getByText("Your turn"));
+      await hidden(worker.getByText("Unread result"));
+      const health = (await (await report).json()) as { issues: { severity?: string }[] };
+      const unhealthy = health.issues.some((issue) => issue.severity !== "info");
       const collapsedTrigger = page.getByRole("button", {
         name: unhealthy ? "Debug tools (service diagnostics unhealthy)" : "Debug tools",
         exact: true,
@@ -414,8 +414,10 @@ it("uses real sidebar groups, archives, history search, confirmations, and debug
       });
       await page.goto(`${origin}/?debug=1`);
       await visible(otherLead);
-      const debugHealth = (await (await debugHealthReport).json()) as { issues: unknown[] };
-      const debugUnhealthy = debugHealth.issues.length > 0;
+      const debugHealth = (await (await debugHealthReport).json()) as {
+        issues: { severity?: string }[];
+      };
+      const debugUnhealthy = debugHealth.issues.some((issue) => issue.severity !== "info");
       const debugCollapsedTrigger = page.getByRole("button", {
         name: debugUnhealthy ? "Debug tools (service diagnostics unhealthy)" : "Debug tools",
         exact: true,
@@ -452,7 +454,10 @@ it("uses real sidebar groups, archives, history search, confirmations, and debug
     (dir, seed) => {
       const workspaces = loadAll(dir);
       const mobile = workspaces.find((ws) => ws.id === seed.workspaces.mobile)!;
-      saveWorkspace(dir, { ...mobile, unread: 3 });
+      saveWorkspace(dir, {
+        ...mobile,
+        attention: { unread: 3, lastResult: "done", awaitsUser: true },
+      });
       const readme = workspaces.find((ws) => ws.id === seed.workspaces.solo)!;
       const projects = new ProjectStore(dir);
       const other = projects.create("Other project", readme.cwd);

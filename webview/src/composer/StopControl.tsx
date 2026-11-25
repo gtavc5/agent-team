@@ -20,9 +20,13 @@ export function StopControl({
         className="btn-abort"
         aria-label={tr("stopAgent", { name: agent.name })}
         title={tr("stopAgentTitle", { name: agent.name })}
+        aria-description={tr("stopAgentDescription")}
         onClick={() => onStop([agent.id])}
       >
         <Icon name="stop" />
+        <span className="stop-label" aria-hidden="true">
+          Stop
+        </span>
       </button>
     );
   }
@@ -114,6 +118,8 @@ function StopPopover({
         type="button"
         className="btn-abort"
         aria-label={tr("stopRunningAgents", { count })}
+        title={tr("chooseTurnsToStop")}
+        aria-description={tr("chooseTurnsToStopDescription")}
         aria-expanded={!!mode}
         aria-controls={mode ? id : undefined}
         onClick={() => {
@@ -136,11 +142,16 @@ function StopPopover({
             aria-label={tr("stopRunningTurns")}
           >
             {busyAgents.map((agent) => (
-              <button key={agent.id} type="button" onClick={() => stop([agent])}>
+              <button
+                key={agent.id}
+                type="button"
+                title={tr("stopAgentTitle", { name: agent.name })}
+                onClick={() => stop([agent])}
+              >
                 {tr("stopAgent", { name: agent.name })}
               </button>
             ))}
-            <button type="button" onClick={() => stop(busyAgents)}>
+            <button type="button" title={tr("stopAllTurnsTitle")} onClick={() => stop(busyAgents)}>
               {tr("stopAll", { count })}
             </button>
           </div>

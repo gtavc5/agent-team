@@ -42,7 +42,6 @@ it.each([390, 520, 600, 960])("keeps the folded streaming turn stable at %ipx", 
 
   const view = () => (
     <div className="messages">
-      <style>{"* { animation: none !important; transition: none !important; }"}</style>
       <MessageItem msg={msg} agents={agents} />
     </div>
   );
@@ -118,7 +117,7 @@ it.each([390, 520, 600, 960])("keeps the folded streaming turn stable at %ipx", 
   advanceTo(quietSince + 4_999);
   checkPhase("");
   advanceTo(quietSince + 5_000);
-  checkPhase("Waiting for the model · 5s");
+  checkPhase("");
   replayNext(); // thinking_start
   checkPhase("Thinking · 0s");
   expect(query(".step-summary").textContent).toBe("4 tool calls");
@@ -243,8 +242,8 @@ it.each([390, 520, 600, 960])("keeps standalone thinking stable at %ipx", async 
   fireEvent.click(toggle);
   expect(header.textContent).toBe("▸1 thinking");
   expect(rect(box).height).toBe(collapsedHeight);
-  void act(() => vi.advanceTimersByTime(5_000));
-  expect(footer.textContent).toBe("Waiting for the model · 5s");
+  void act(() => vi.advanceTimersByTime(15_000));
+  expect(footer.textContent).toBe("No new events for 15s");
   expect(rect(footer).height).toBe(footerHeight);
   flush({ kind: "tool_use", content: "**Read**", toolName: "Read", startedAt: Date.now() });
   expect(footer.textContent).toBe("");

@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
+import * as net from "node:net";
 import { DeployControl } from "../../src/server/deploy-control";
 import * as path from "path";
 import WebSocket from "ws";
@@ -11,7 +12,13 @@ import type { Objective } from "../../src/project/objectives";
 
 import { Server } from "../../src/server/server";
 import { ProjectManager } from "../../src/project/manager";
-import { closeHistory, historyOf, saveIndex, saveWorkspace } from "../../src/workspace/state";
+import {
+  closeHistory,
+  historyOf,
+  readWorkspaceMetadata,
+  saveIndex,
+  saveWorkspace,
+} from "../../src/workspace/state";
 import type { PiAvailableModel, PromptEnvelope, SessionConfig } from "../../src/session/types";
 import * as codex from "../../src/session/codex";
 import * as acpReadiness from "../../src/session/acp-readiness";
@@ -39,7 +46,15 @@ interface Launch {
 
 let launches: Launch[] = [];
 let sessionsByAgent = new Map<string, TestSession>();
-const ENV_KEYS = ["HOME", "AGY_ACP_BIN", "https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"];
+const proxyEnvKeys = [
+  "https_proxy",
+  "HTTPS_PROXY",
+  "http_proxy",
+  "HTTP_PROXY",
+  "all_proxy",
+  "ALL_PROXY",
+];
+const ENV_KEYS = ["HOME", "AGY_ACP_BIN", "no_proxy", "NO_PROXY", ...proxyEnvKeys];
 let savedEnv: Record<string, string | undefined>;
 
 class TestSession extends FakeSession {
@@ -125,7 +140,7 @@ class TestSession extends FakeSession {
 
 beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
-  for (const k of ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"]) delete process.env[k];
+  for (const k of proxyEnvKeys) delete process.env[k];
   launches = [];
   sessionsByAgent = new Map();
   vi.spyOn(codex, "probeCodexAuth").mockResolvedValue({
@@ -369,6 +384,68 @@ const readState = (base: string, id: string): WorkspaceState => {
   closeHistory(base);
   return { ...meta, messages };
 };
+
+describe("server ACP proxy lifecycle", () => {
+  it.each([
+    {
+      label: "default without an outbound proxy",
+      config: undefined,
+      outbound: false,
+      enabled: true,
+    },
+    { label: "explicitly disabled", config: false, outbound: false, enabled: false },
+    { label: "default with an outbound proxy", config: undefined, outbound: true, enabled: false },
+    {
+      label: "explicit opt-in with an outbound proxy",
+      config: true,
+      outbound: true,
+      enabled: true,
+    },
+  ])("reports proxy health: $label", async ({ config, outbound, enabled }) => {
+    const { base, web } = seed();
+    if (outbound) process.env.HTTPS_PROXY = "http://127.0.0.1:9";
+    if (config !== undefined)
+      fs.appendFileSync(path.join(base, "config.toml"), `\n[pi.acp.proxy]\nenabled = ${config}\n`);
+    vi.spyOn(LocalHost.prototype, "discoverPiModels").mockResolvedValue([]);
+    const server = new Server(0, base, web);
+    try {
+      await server.controlReady;
+      const port = await server.listening;
+      const response = await fetch(`http://127.0.0.1:${port}/api/diagnostics`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ccpaProxy: enabled ? { totalRequests: 0, activeH2Sessions: 0 } : null,
+      });
+    } finally {
+      await server.close();
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
+  it("refuses to start on a busy proxy port without rewriting the workspace index", async () => {
+    const { base, web } = seed();
+    const occupied = net.createServer();
+    await new Promise<void>((resolve) => occupied.listen(0, "127.0.0.1", resolve));
+    try {
+      const before = [...readWorkspaceMetadata(base)].map((workspace) => workspace.id);
+      expect(before.length).toBeGreaterThan(0);
+      const { port } = occupied.address() as net.AddressInfo;
+      fs.appendFileSync(path.join(base, "config.toml"), `\n[pi.acp.proxy]\nport = ${port}\n`);
+      const catalog = vi.spyOn(LocalHost.prototype, "discoverPiModels").mockResolvedValue([]);
+      const server = new Server(0, base, web);
+      try {
+        await expect(server.controlReady).rejects.toThrow();
+        expect(catalog).not.toHaveBeenCalled();
+      } finally {
+        await server.close();
+      }
+      expect([...readWorkspaceMetadata(base)].map((workspace) => workspace.id)).toEqual(before);
+    } finally {
+      await new Promise<void>((resolve) => occupied.close(() => resolve()));
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+});
 
 describe("server restart with projects", () => {
   it("persists a local model change before sending its receipt and correlates malformed-image errors", async () => {
@@ -1413,6 +1490,82 @@ describe("server restart with projects", () => {
     fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
   });
 
+  it("reconciles a lead's persisted wait before showing a new dialog to connected clients", async () => {
+    const { base, web } = seed();
+    saveWorkspace(base, {
+      ...readState(base, "ws-lead"),
+      attention: { unread: 0, awaitsUser: true },
+    });
+    closeHistory(base);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { frames, stop } = await start(base, web);
+    try {
+      const snapshot = frames.find((f) => f.type === "init")!.workspaces as Array<{
+        id: string;
+        awaitsUser?: boolean;
+      }>;
+      expect(snapshot.find((w) => w.id === "ws-lead")!.awaitsUser).toBeUndefined();
+      sessionsByAgent.get("a-lead")!.emit("ui_dialog_request", {
+        workspaceId: "ws-lead",
+        agentId: "a-lead",
+        processGeneration: 1,
+        requestId: "new-dialog",
+      });
+      const update = () =>
+        frames.find(
+          (f) =>
+            f.type === "workspace_updated" &&
+            (f.workspace as { id: string; awaitsUser?: boolean }).id === "ws-lead" &&
+            (f.workspace as { awaitsUser?: boolean }).awaitsUser,
+        );
+      await until(() => Boolean(update()), "live lead wait");
+      expect(update()?.workspace).toMatchObject({ unread: 1, awaitsUser: true });
+    } finally {
+      await stop();
+      log.mockRestore();
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
+  it("projects the remaining queue when a client cancels or removes an agent", async () => {
+    const { base, web } = seed();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { frames, send, stop } = await start(base, web);
+    try {
+      const workspaceId = "ws-live";
+      send({ type: "send_message", workspaceId, content: "First turn" });
+      await until(() => launches.length === 1, "first turn");
+      const queued = (content: string) =>
+        frames.find(
+          (f) =>
+            f.type === "new_message" &&
+            f.workspaceId === workspaceId &&
+            (f.message as Message).content === content &&
+            f.queued === true,
+        )?.message as Message | undefined;
+      for (const content of ["Cancel", "Remove with agent"]) {
+        send({ type: "send_message", workspaceId, content });
+        await until(() => Boolean(queued(content)), `queued ${content}`);
+        const messageId = queued(content)!.id;
+        if (content === "Cancel") send({ type: "cancel_queued", workspaceId, messageId });
+        else send({ type: "remove_agent", workspaceId, agentId: "a-live" });
+        const removed = () =>
+          frames.find(
+            (f) =>
+              f.type === "message_removed" &&
+              f.workspaceId === workspaceId &&
+              f.messageId === messageId,
+          );
+        await until(() => Boolean(removed()), `removed ${content}`);
+        expect(removed()).toMatchObject({ queued: false });
+      }
+    } finally {
+      await stop();
+      log.mockRestore();
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
   it("has the projects check a worker whose turn ended or who went idle", async () => {
     const { base, web } = seed();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -1600,12 +1753,12 @@ describe("server restart with projects", () => {
       const leadId = (created()!.workspace as { id: string }).id;
       send({ type: "send_message", workspaceId: leadId, content: "hello" });
       await until(() => launches.length === 1, "lead query");
-      expect(launches[0]).toMatchObject({ model: "gpt-6-astra", effort: undefined });
+      expect(launches[0]).toMatchObject({ model: "gpt-6.2-astra", effort: undefined });
 
       const start_session = launches[0].panel!.tools.find((t) => t.name === "start_session")!;
       await start_session.handler({ title: "w", cwd: ".", task: "t" });
       await until(() => launches.length === 2, "worker query");
-      expect(launches[1]).toMatchObject({ model: "gpt-6-astra", effort: undefined });
+      expect(launches[1]).toMatchObject({ model: "gpt-6.2-astra", effort: undefined });
     } finally {
       await stop();
       log.mockRestore();

@@ -10,6 +10,11 @@ export default fixture({
       totalTokens: 15444,
       maxTokens: 1000000,
     });
+    expect(agentMessages(r)[0].context).toEqual({
+      tokens: 15444,
+      window: 1000000,
+      estimated: true,
+    });
     expect(agentMessages(r)[0].events).toEqual([
       expect.objectContaining({ kind: "thinking" }),
       expect.objectContaining({ kind: "tool_use", toolName: "read", toolResult: "x".repeat(31) }),

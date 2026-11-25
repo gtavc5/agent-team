@@ -21,6 +21,7 @@ import { ReadOnlyLegacySession } from "./legacy";
 import { PanelHttpServer } from "./panel-http";
 import { PiSession } from "./pi";
 import type { PanelToolset } from "../project/tools";
+import type { UsageRecorder } from "./usage-observation";
 
 export interface BoundarySteer {
   envelope: PromptEnvelope;
@@ -123,6 +124,8 @@ export class LocalHost implements Host {
       piReaderReady: (providers: string[]) => void;
       codex: (limits: RateLimitSnapshot) => void;
     },
+    private readonly usageRecorder?: UsageRecorder,
+    private readonly ccpaProxyUrl?: () => string | undefined,
   ) {
     this.id = id;
     this.label = label;
@@ -150,13 +153,31 @@ export class LocalHost implements Host {
     return session;
   }
 
+  protected workspaceUsageRecorder(workspaceId?: string): UsageRecorder | undefined {
+    const recorder = this.usageRecorder;
+    if (!recorder || !workspaceId) return recorder;
+    // Native ownership is established by the backend before emitting a fact.
+    return {
+      recordUsage: (fact) => recorder.recordUsage({ ...fact, workspaceId }),
+      recordJourney: (event) => recorder.recordJourney({ ...event, workspaceId }),
+    };
+  }
+
   createSession(agentId: string, config: SessionConfig): HostSessionHandle {
     if (this.closing) throw new Error("LocalHost is closing");
+    const recorder = this.workspaceUsageRecorder(config.workspaceId);
     let session: HostSessionHandle;
     if (config.backend === "codex") {
-      session = new CodexSession(config);
+      session = new CodexSession(config, recorder);
     } else if (config.backend === "pi") {
-      session = new PiSession({ ...config, agentId }, { panelHttp: this.getPanelHttp() });
+      session = new PiSession(
+        { ...config, agentId },
+        {
+          panelHttp: this.getPanelHttp(),
+          recordUsage: recorder?.recordUsage,
+          ccpaProxyUrl: this.ccpaProxyUrl?.(),
+        },
+      );
     } else {
       throw new Error(`Backend "${config.backend ?? "unknown"}" cannot create new sessions`);
     }
@@ -193,13 +214,18 @@ export class LocalHost implements Host {
 
   restoreSession(agentId: string, state: SessionState): HostSessionHandle {
     if (this.closing) throw new Error("LocalHost is closing");
+    const recorder = this.workspaceUsageRecorder(state.config.workspaceId);
     let session: HostSessionHandle;
     if (state.config.backend === "codex") {
-      session = CodexSession.fromState(state);
+      session = CodexSession.fromState(state, recorder);
     } else if (state.config.backend === "pi") {
       session = PiSession.fromState(
         { ...state, config: { ...state.config, agentId } },
-        { panelHttp: this.getPanelHttp() },
+        {
+          panelHttp: this.getPanelHttp(),
+          recordUsage: recorder?.recordUsage,
+          ccpaProxyUrl: this.ccpaProxyUrl?.(),
+        },
       );
     } else {
       session = new ReadOnlyLegacySession(state);
@@ -212,7 +238,7 @@ export class LocalHost implements Host {
     const agentId = `model-catalog-${Math.random().toString(36).slice(2)}`;
     const session = new PiSession(
       { ...config, agentId },
-      { catalogOnly: true, panelHttp: this.getPanelHttp() },
+      { catalogOnly: true, panelHttp: this.getPanelHttp(), ccpaProxyUrl: this.ccpaProxyUrl?.() },
     );
     this.sessions.set(agentId, session);
     try {

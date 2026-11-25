@@ -17,6 +17,7 @@ import { ensureWebviewBuilt } from "../../../scripts/bench-demo";
 import { seedDemo, type SeedDemoResult } from "../../../scripts/seed-demo";
 import { Server } from "../../src/server/server";
 import * as codex from "../../src/session/codex";
+import { recordUsage } from "../../src/usage/ledger";
 import { LocalHost } from "../../src/session/host";
 
 const alpha = "journey/alpha";
@@ -107,7 +108,7 @@ effort = "max"
           msg.text().includes("404")
         )
           return;
-        errors.push(msg.text());
+        errors.push(`${msg.text()} (${url})`);
       });
     });
     const page = await context.newPage();
@@ -140,6 +141,66 @@ const transcript = (page: Page, marker: string) =>
   page.locator(".messages", { hasText: marker }).waitFor();
 const worker = (page: Page, name: string) => page.locator(".task-item", { hasText: name });
 const card = (page: Page, name: string) => page.getByRole("region", { name, exact: true });
+
+it("opens the usage ledger and reopens the same observation after reload", async () => {
+  await journey(
+    async (page) => {
+      for (const reload of [false, true]) {
+        if (reload) await page.reload();
+        const [overview] = await Promise.all([
+          page.waitForResponse((res) => new URL(res.url()).pathname === "/api/usage/overview"),
+          page.getByRole("button", { name: "Usage", exact: true }).click(),
+        ]);
+        expect(await overview.json()).toMatchObject({
+          count: 1,
+          cacheRead: 143166,
+          input: 23325,
+          unpriced: 1,
+          ranking: [{ model: "offline-acceptance-model", tokens: 166698 }],
+        });
+        const dashboard = page.getByRole("dialog", { name: "Usage dashboard" });
+        await expect.poll(() => dashboard.locator('svg[role="img"]').count()).toBe(2);
+        const [journey] = await Promise.all([
+          page.waitForResponse((res) => new URL(res.url()).pathname === "/api/usage/journey"),
+          dashboard.getByRole("button", { name: "Records", exact: true }).click(),
+        ]);
+        expect(await journey.json()).toMatchObject({
+          total: 1,
+          page: 1,
+          pageSize: 30,
+          rows: [{ id: "70", cacheRead: 143166, model: "offline-acceptance-model-high" }],
+          nextCursor: null,
+        });
+        await dashboard
+          .getByText("offline-acceptance-model-high", { exact: true })
+          .first()
+          .waitFor();
+        const [refreshed] = await Promise.all([
+          page.waitForResponse((res) => {
+            const url = new URL(res.url());
+            return url.pathname === "/api/usage/journey" && url.searchParams.get("refresh") === "1";
+          }),
+          dashboard.getByRole("button", { name: "Refresh", exact: true }).click(),
+        ]);
+        expect(await refreshed.json()).toMatchObject({ page: 1, total: 1, sourcesPending: false });
+      }
+    },
+    ({ baseDir }) =>
+      recordUsage(baseDir, {
+        source: "acp",
+        unit: "inference",
+        id: "70",
+        sessionId: "offline-acp",
+        timestamp: Date.now() - 1000,
+        model: "offline-acceptance-model-high",
+        input: 23325,
+        cacheRead: 143166,
+        cacheWrite: 0,
+        output: 207,
+        price: { kind: "unpriced", usd: null },
+      }),
+  );
+}, 45_000);
 
 it("browses workspace files, quotes real selected lines, and recovers from a missing file", async () => {
   await journey(
@@ -360,7 +421,9 @@ it("uses lead and worker agent cards to manage an agent with destructive confirm
       const fold = mobile.getByRole("button", { name: "Fold mobile panels", exact: true });
       const unfold = mobile.getByRole("button", { name: "Unfold mobile panels", exact: true });
       await unfold.click();
-      const usage = mobile.locator(".ap-context");
+      const usage = mobile
+        .locator(".ap-agent", { has: page.getByText("Perseus", { exact: true }) })
+        .locator(".ap-context");
       await usage.waitFor();
       expect(await usage.textContent()).toMatch(/\S+ \/ 1M/);
       await fold.click();
@@ -434,7 +497,7 @@ it("uses lead and worker agent cards to manage an agent with destructive confirm
       await clear.click();
       await clearDialog.getByRole("button", { name: "Clear context", exact: true }).click();
       await transcript(page, "Perseus context cleared");
-      await usage.waitFor({ state: "hidden" });
+      await expect.poll(() => usage.count()).toBe(0);
 
       const remove = mobile.getByRole("button", { name: "Remove Journey reviewer", exact: true });
       const removeDialog = page.getByRole("dialog", { name: "Remove Journey reviewer?" });
@@ -462,4 +525,99 @@ it("uses lead and worker agent cards to manage an agent with destructive confirm
     undefined,
     true,
   );
+}, 45_000);
+
+it("sets the theme before app startup and preserves the workspace across theme changes", async () => {
+  await journey(async (page) => {
+    const origin = new URL(page.url()).origin;
+    const browser = page.context().browser()!;
+    for (const mobile of [false, true]) {
+      const system = mobile ? "dark" : "light";
+      const opposite = mobile ? "light" : "dark";
+      const viewport = mobile ? { width: 390, height: 844 } : { width: 1440, height: 900 };
+      const context = await browser.newContext({ viewport, colorScheme: system, hasTouch: mobile });
+      try {
+        const tab = await context.newPage();
+        const entry = "**/assets/index-*.js";
+        const bootstrap = async (theme: "light" | "dark") => {
+          let resume!: () => void;
+          const bundleReady = new Promise<void>((resolve) => {
+            resume = resolve;
+          });
+          await tab.route(entry, async (route) => {
+            await bundleReady;
+            await route.continue();
+          });
+          try {
+            await tab.goto(origin, { waitUntil: "commit" });
+            await tab.waitForFunction(
+              (value) => document.documentElement.dataset.theme === value,
+              theme,
+            );
+            expect(await tab.locator("#root .app").count()).toBe(0);
+            const early = await tab.evaluate(() => ({
+              scheme: document.documentElement.style.colorScheme,
+              chrome: document.querySelector('meta[name="theme-color"]')?.getAttribute("content"),
+            }));
+            expect(early.scheme).toBe(theme);
+            expect(early.chrome).toBe(theme === "dark" ? "#1c1c1c" : "#f2f3f5");
+          } finally {
+            resume();
+            await tab.unrouteAll({ behavior: "wait" });
+          }
+          await tab.locator(".ws-group-project").waitFor({ state: "attached" });
+        };
+        const openDrawer = async () => {
+          if (mobile) await tab.getByRole("button", { name: /^Open workspace menu/ }).click();
+        };
+        const toggle = tab.getByRole("button", { name: "Dark theme" });
+        const applied = async (theme: "light" | "dark") => {
+          await expect
+            .poll(() => toggle.getAttribute("aria-pressed"))
+            .toBe(String(theme === "dark"));
+          const colors = await tab.evaluate(() => ({
+            applied: document.documentElement.dataset.theme,
+            scheme: getComputedStyle(document.documentElement).colorScheme,
+            meta: document.querySelector('meta[name="theme-color"]')?.getAttribute("content"),
+            chrome: getComputedStyle(document.documentElement)
+              .getPropertyValue("--bg-secondary")
+              .trim(),
+          }));
+          expect(colors).toEqual({
+            applied: theme,
+            scheme: theme,
+            meta: colors.chrome,
+            chrome: colors.chrome,
+          });
+        };
+
+        await bootstrap(system);
+        await openDrawer();
+        await tab.locator(".ws-group-project").click();
+        await transcript(tab, "分成两件事");
+        await openDrawer();
+        await applied(system);
+        await tab.evaluate(() => document.fonts.ready.then(() => undefined));
+        const geometry = () =>
+          tab.evaluate(() =>
+            [".messages", ".input-row", ".ws-group-project"].map((selector) => {
+              const { width, height } = document.querySelector(selector)!.getBoundingClientRect();
+              return [width, height];
+            }),
+          );
+        const before = await geometry();
+        await tab.emulateMedia({ colorScheme: opposite });
+        await applied(opposite);
+        await toggle.click();
+        await applied(system);
+        expect(await geometry()).toEqual(before);
+        await transcript(tab, "分成两件事");
+        await bootstrap(system); // Explicit choice wins over the opposite OS setting at reload.
+        await openDrawer();
+        await applied(system);
+      } finally {
+        await context.close();
+      }
+    }
+  });
 }, 45_000);

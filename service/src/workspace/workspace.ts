@@ -1,11 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isOutstandingSubagentStatus } from "../../../shared/subagent-status";
 import { applyExtensionUi } from "../../../shared/extension-ui";
 import { isChineseLanguage } from "../i18n";
 import { hasPersistedPiReport, validatePiAttachments } from "../session/pi";
 import {
   SessionConfig,
   StreamEvent,
+  SubAgentInfo,
   SessionState,
   CommandInfo,
   ContextUsage,
@@ -75,7 +77,7 @@ export interface Message {
   fast?: boolean;
   // Agent replies: the model the turn ran on (an agent's model can change).
   model?: string;
-  context?: ContextUsage;
+  context?: ContextUsage | null;
   // Thinking tokens and time of the turn, when the backend reports them.
   thinking?: ThinkingStats;
   // "summary" when the events carry only chips/counts (history pages); the
@@ -102,14 +104,17 @@ export interface AgentRuntimeInfo extends AgentInfo {
   busy: boolean;
   state: RunState;
   activity: string | null;
+  lastStreamAt?: number;
+  retryLabel?: string;
   effort: string | null;
   // The levels /effort takes for its model.
   effortLevels: string[];
   fast: boolean;
   // Background work the agent is waiting on (see RunState "waiting").
   backgroundTasks: BackgroundTask[];
-  // Context occupancy at the end of its last turn, when known.
-  context: ContextUsage | null;
+  // Context occupancy at its latest backend boundary. Undefined means there
+  // is no occupancy to show (fresh, cleared, or an archived/unloaded history).
+  context?: ContextUsage | null;
   // A scheduled wake-up it is sleeping until.
   wake: { at: number; reason: string } | null;
 }
@@ -176,9 +181,10 @@ export interface WorkspaceInfo {
   // A worker stopped on the user (project/manager.ts awaitsUser); the server
   // adds it to the list it sends.
   awaitsUser?: boolean;
-  // Messages since any client last showed the session: one count for every
-  // device, so a reply read on the phone is read on the desktop too.
+  // Actionable results since any client last read the session.
   unread: number;
+  lastResult?: "done" | "failed";
+  queued?: boolean;
 }
 
 export interface WorkspaceState {
@@ -196,7 +202,7 @@ export interface WorkspaceState {
   lastActivityAt?: number;
   archivedAt?: number | null;
   projectLink?: ProjectLink;
-  unread?: number;
+  attention?: { unread: number; lastResult?: WorkspaceInfo["lastResult"]; awaitsUser: boolean };
 }
 
 type CommandOutcome = string | { forward: string } | null;
@@ -225,8 +231,13 @@ export interface AgentEntry {
   // Transient "doing X right now" label from the session (see setActivity).
   activity?: string | null;
   runState?: RunState;
-  // Context at the end of the last turn; undefined until looked up.
+  lastStreamAt?: number;
+  retryLabel?: string;
+  // Context at the latest boundary; the cache flag distinguishes an
+  // intentionally absent value from one that has not been resolved yet.
   lastContext?: ContextUsage | null;
+  hasCachedContext?: boolean;
+  contextRevision?: number;
   // The message the agent got last, and the last one from another session
   // (the same record while nothing came after it).
   input?: TurnInput;
@@ -239,15 +250,23 @@ export interface AgentEntry {
 export interface TurnInput {
   id: string;
   replies: string[];
-  stopped?: "user" | "restart";
+  stopped?: "user" | "restart" | "lead";
   answered?: boolean;
+  finished?: boolean;
   // Background work or a wake-up was still to come: a crash cuts it off.
   waiting?: boolean;
 }
 
 export interface WorkspaceCallbacks {
   onNewMessage: (wsId: string, msg: Message) => void;
-  onStreamEvent: (wsId: string, msg: Message, event: StreamEvent) => void;
+  onStreamEvent: (
+    wsId: string,
+    msg: Message,
+    event: StreamEvent,
+    streamAt?: number,
+    retryLabel?: string | null,
+  ) => void;
+  onAttention?: (wsId: string, unread: number, lastResult: WorkspaceInfo["lastResult"]) => void;
   onMessageDone: (
     wsId: string,
     msgId: string,
@@ -259,7 +278,7 @@ export interface WorkspaceCallbacks {
       steering?: boolean;
     },
   ) => void;
-  onAgentBusy?: (wsId: string, agentId: string) => void;
+  onAgentBusy?: (wsId: string, agentId: string, streamAt: number) => void;
   onAgentIdle?: (wsId: string, agentId: string) => void;
   onSaveNow?: () => void;
   onReportDeliveryState?: (
@@ -301,19 +320,20 @@ export interface WorkspaceCallbacks {
 }
 
 // Persisted events from older versions may lack fields the renderer
-// indexes (content), and running tasks cannot survive a restart — at any
-// nesting depth.
-export function normalizeEvents(events: StreamEvent[]): void {
+// indexes (content). Only detached tasks tracked by the session survive a restart.
+export function normalizeEvents(events: StreamEvent[], activeTasks?: ReadonlySet<string>): void {
   for (const ev of events) {
     if (typeof ev.content !== "string") ev.content = "";
     const sa = ev.subagent;
     if (!sa) continue;
-    if (ev.kind === "subagent_start" && (sa.status === "running" || sa.status == null)) {
-      sa.status = "stopped";
-    } else if (sa.status === "running") {
+    if (
+      !activeTasks?.has(sa.taskId) &&
+      (isOutstandingSubagentStatus(sa.status) ||
+        (ev.kind === "subagent_start" && sa.status == null))
+    ) {
       sa.status = "stopped";
     }
-    if (sa.events) normalizeEvents(sa.events);
+    if (sa.events) normalizeEvents(sa.events, activeTasks);
   }
 }
 
@@ -331,17 +351,45 @@ function clearRetry(msg: Message): boolean {
   return true;
 }
 
-function copySubagentExecution(target: StreamEvent, source: StreamEvent): void {
-  if (!target.subagent || !source.subagent) return;
-  const { model, effort } = source.subagent;
-  if (model != null) target.subagent.model = model;
-  if (effort != null) target.subagent.effort = effort;
+function copySubagentExecution(target: SubAgentInfo, source: SubAgentInfo | undefined): void {
+  if (source?.model != null) target.model = source.model;
+  if (source?.effort != null) target.effort = source.effort;
+}
+
+function enrichSubagent(events: StreamEvent[], patch: SubAgentInfo): number | undefined {
+  const matches = events.filter(
+    (e) =>
+      (e.kind === "subagent_start" || e.kind === "subagent_done") &&
+      e.subagent?.taskId === patch.taskId,
+  );
+  if (matches.length === 0) return;
+  const owner = matches.find((e) => e.kind === "subagent_start") ?? matches[0];
+  const revision = 1 + Math.max(...matches.map((e) => e.subagent!.transcriptRevision ?? 0));
+  for (const e of matches) {
+    const sa = e.subagent!;
+    sa.transcriptRevision = revision;
+    copySubagentExecution(sa, patch);
+    if (patch.summary != null) sa.summary = patch.summary;
+    if (patch.durationMs != null) sa.durationMs = patch.durationMs;
+    if (patch.events != null) sa.events = e === owner ? patch.events : undefined;
+    const count = patch.events?.length ?? patch.eventCount;
+    if (count != null) sa.eventCount = count;
+  }
+  return revision;
 }
 
 // Apply an inner event to a subagent's transcript. Carriers nest: a
 // grandchild's event arrives as progress(child, _innerEvent: progress(grand,
 // _innerEvent: ev)), so recurse into the nested start's own transcript.
 function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): boolean {
+  if (innerEvent.kind === "subagent_enrichment") {
+    const patch = innerEvent.subagent;
+    if (!patch) return false;
+    const revision = enrichSubagent(saEvents, patch);
+    if (revision == null) return false;
+    innerEvent.subagent = { ...patch, transcriptRevision: revision };
+    return true;
+  }
   if (
     innerEvent.kind === "tool_use" &&
     innerEvent.toolUseId &&
@@ -388,7 +436,7 @@ function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): bool
     if (pi >= 0) saEvents.splice(pi, 1);
     const si = saEvents.findIndex((e) => e.kind === "subagent_start" && e.subagent?.taskId === nid);
     if (si >= 0) {
-      copySubagentExecution(saEvents[si], innerEvent);
+      copySubagentExecution(saEvents[si].subagent!, innerEvent.subagent);
       saEvents[si].subagent!.status = innerEvent.subagent.status;
       saEvents[si].subagent!.summary = innerEvent.subagent.summary;
       saEvents[si].subagent!.usage = innerEvent.subagent.usage;
@@ -414,8 +462,10 @@ export class Workspace {
   lastActivityAt: number;
   archivedAt: number | null = null;
   projectLink?: ProjectLink;
-  // Messages since a client last showed it (WorkspaceInfo.unread).
   unseen = 0;
+  lastResult: WorkspaceInfo["lastResult"];
+  // Last projected wait state, persisted so reconnecting does not re-mark it unread.
+  projectedAwaitsUser = false;
   // False once the history has been unloaded (archived workspace). Every
   // path that touches `messages` must call ensureLoaded via the server first.
   messagesLoaded = true;
@@ -512,8 +562,9 @@ export class Workspace {
     agentId: string;
     input: Message;
     replies: Message[];
-    stopped?: "user" | "restart";
+    stopped?: "user" | "restart" | "lead";
     answered: boolean;
+    finished: boolean;
     since: boolean;
   }> {
     const out = [];
@@ -528,7 +579,8 @@ export class Workspace {
         replies,
         stopped: d.stopped,
         answered: !!d.answered,
-        since: a.input !== d,
+        finished: !!d.finished,
+        since: a.input !== d && !a.input?.finished,
       });
     }
     return out;
@@ -543,7 +595,8 @@ export class Workspace {
     agentId: string;
     input: Message;
     replies: Message[];
-    stopped?: "user" | "restart";
+    stopped?: "user" | "restart" | "lead";
+    finished?: boolean;
   }> {
     const out = [];
     for (const [agentId, a] of this.agents) {
@@ -552,7 +605,7 @@ export class Workspace {
         const input = this.messages.find((m) => m.id === t.id);
         if (!input) continue;
         const replies = this.messages.filter((m) => t.replies.includes(m.id));
-        out.push({ agentId, input, replies, stopped: t.stopped });
+        out.push({ agentId, input, replies, stopped: t.stopped, finished: t.finished });
         continue;
       }
       const typed = (idx: number) => {
@@ -603,6 +656,44 @@ export class Workspace {
     }
   }
 
+  // Active turn input IDs across agents, captured when finish_task runs so
+  // replaying an offline report never hands back a newer user-owned turn.
+  currentInputIds(): string[] {
+    const ids = new Set<string>();
+    for (const a of this.agents.values()) {
+      const id = a.input?.id ?? a.delivered?.id;
+      if (id) ids.add(id);
+    }
+    return [...ids];
+  }
+
+  // A successful finish_task handed the reporting turn back to the lead.
+  markFinished(inputIds: readonly string[]): void {
+    for (const a of this.agents.values()) {
+      const turn = a.input ?? a.delivered;
+      // Replay may see the same input after the user stopped it. A report
+      // already applied to that input cannot release it again.
+      if (!turn || turn.finished || !inputIds.includes(turn.id)) continue;
+      turn.finished = true;
+      if (turn.stopped === "user") delete turn.stopped;
+      if (a.delivered) {
+        a.delivered.finished = true;
+        if (a.delivered.stopped === "user") delete a.delivered.stopped;
+      }
+    }
+  }
+
+  // Ownership blockers readable from persisted agent state even when an
+  // archived workspace's messages are not loaded in memory.
+  persistedOwnershipBlocker(): "taken_over" | "user_stopped" | null {
+    for (const a of this.agents.values()) {
+      const d = a.delivered;
+      if (d && a.input !== d && !a.input?.finished) return "taken_over";
+      if (d?.stopped === "user" || a.input?.stopped === "user") return "user_stopped";
+    }
+    return null;
+  }
+
   takeChanged(): Set<string> {
     const changed = this.changed;
     this.changed = new Set();
@@ -621,7 +712,39 @@ export class Workspace {
   private streamed(msg: Message, event: StreamEvent): void {
     this.changed.add(msg.id);
     const timed = updateLiveTiming(msg, event);
-    this.cb?.onStreamEvent(this.id, msg, timed);
+    const agent = msg.agentId ? this.agents.get(msg.agentId) : undefined;
+    // Do not reset the turn's clock for token estimates or detached work.
+    const streamAt =
+      agent?.currentMsg === msg &&
+      msg.status === "streaming" &&
+      event.kind !== "thinking_tokens" &&
+      event.kind !== "subagent_enrichment"
+        ? (agent.lastStreamAt = Date.now())
+        : undefined;
+    let retryLabel: string | null | undefined;
+    if (agent && agent.currentMsg === msg) {
+      if (event.kind === "retry") retryLabel = event.content || null;
+      else if (agent.retryLabel && RETRY_PROGRESS_KINDS.has(event.kind)) retryLabel = null;
+      if (retryLabel !== undefined) agent.retryLabel = retryLabel ?? undefined;
+    }
+    this.cb?.onStreamEvent(this.id, msg, timed, streamAt, retryLabel);
+  }
+
+  private beganTurn(entry: AgentEntry): void {
+    entry.lastStreamAt ??= Date.now();
+    this.cb?.onAgentBusy?.(this.id, entry.info.id, entry.lastStreamAt);
+  }
+
+  private endedTurn(entry: AgentEntry): void {
+    entry.lastStreamAt = undefined;
+    entry.retryLabel = undefined;
+    this.cb?.onAgentIdle?.(this.id, entry.info.id);
+  }
+
+  private recordResult(result: NonNullable<WorkspaceInfo["lastResult"]>): void {
+    this.lastResult = result;
+    this.unseen++;
+    this.cb?.onAttention?.(this.id, this.unseen, result);
   }
 
   private finished(
@@ -643,7 +766,6 @@ export class Workspace {
   private pushMessage(msg: Message): void {
     this.messages.push(msg);
     if (msg.timestamp > this.lastActivityAt) this.lastActivityAt = msg.timestamp;
-    this.unseen++;
     this.cb?.onNewMessage(this.id, msg);
   }
 
@@ -656,7 +778,10 @@ export class Workspace {
   }
 
   setMessages(messages: Message[]): void {
-    for (const m of messages) restoreMessage(m);
+    const activeTasks = new Map(
+      [...this.agents].map(([id, entry]) => [id, activeSubagentTaskIds(entry.session.getState())]),
+    );
+    for (const m of messages) restoreMessage(m, activeTasks.get(m.agentId ?? ""));
     this.messages = messages;
     this.messagesLoaded = true;
     const last = messages[messages.length - 1];
@@ -675,7 +800,7 @@ export class Workspace {
       timestamp: Date.now(),
       status: "done",
       ...(extra?.events && { events: extra.events }),
-      ...(extra?.context && { context: extra.context }),
+      ...(extra?.context !== undefined && { context: extra.context }),
     };
     this.pushMessage(msg);
   }
@@ -716,7 +841,7 @@ export class Workspace {
     for (const m of this.messages) if (m.agentId === entry.info.id && m !== live) this.settle(m);
     if (entry.currentMsg && !live) {
       entry.currentMsg = null;
-      this.cb?.onAgentIdle?.(this.id, entry.info.id);
+      this.endedTurn(entry);
     }
   }
 
@@ -739,7 +864,41 @@ export class Workspace {
     if (!msg.events) msg.events = [];
     const taskId = event.subagent?.taskId;
 
-    if (event.kind === "subagent_progress") {
+    if (
+      event.subagent?.events &&
+      (event.kind === "subagent_enrichment" || event.kind === "subagent_done")
+    ) {
+      // A child's own Pi transcript does not contain host-observed nested jobs or monitors.
+      const owner = msg.events.find(
+        (e) => e.kind === "subagent_start" && e.subagent?.taskId === taskId,
+      );
+      const nested = owner?.subagent?.events?.filter(
+        (e) =>
+          e.subagent?.taskId.startsWith("pi-subagent-tree:") ||
+          e.toolUseId?.startsWith("pi-host-step:"),
+      );
+      if (nested?.length)
+        event = {
+          ...event,
+          subagent: { ...event.subagent, events: [...event.subagent.events, ...nested] },
+        };
+    }
+    if (event.kind === "subagent_enrichment") {
+      const patch = event.subagent;
+      if (!patch) return;
+      const revision = enrichSubagent(msg.events, patch);
+      if (revision == null) return;
+      // Keep the authoritative transcript on the server; open cards reload it.
+      const { events, ...fields } = patch;
+      event = {
+        ...event,
+        subagent: {
+          ...fields,
+          eventCount: events?.length ?? fields.eventCount,
+          transcriptRevision: revision,
+        },
+      };
+    } else if (event.kind === "subagent_progress") {
       const innerEvent = event.subagent?._innerEvent;
       const startIdx = msg.events.findIndex(
         (e) => e.kind === "subagent_start" && e.subagent?.taskId === taskId,
@@ -761,7 +920,14 @@ export class Workspace {
 
       if (startIdx >= 0) {
         event.contentOffset = msg.events[startIdx].contentOffset;
-        copySubagentExecution(msg.events[startIdx], event);
+        const started = msg.events[startIdx].subagent!;
+        copySubagentExecution(started, event.subagent);
+        if (
+          event.subagent?.status != null &&
+          (started.status == null || isOutstandingSubagentStatus(started.status))
+        ) {
+          started.status = event.subagent.status;
+        }
       }
       const prev = msg.events.findIndex(
         (e) => e.kind === "subagent_progress" && e.subagent?.taskId === taskId,
@@ -776,8 +942,8 @@ export class Workspace {
       if (startIdx >= 0) {
         const start = msg.events[startIdx];
         event.contentOffset = start.contentOffset;
-        copySubagentExecution(start, event);
         const started = start.subagent!;
+        copySubagentExecution(started, finished);
         if (finished?.events) {
           started.events = finished.events;
           started.eventCount = finished.events.length;
@@ -800,49 +966,101 @@ export class Workspace {
     this.streamed(msg, event);
   }
 
-  // Subagent events can arrive after the message containing subagent_start is
-  // finalized. Search backwards to find the message that owns this subagent.
-  private findToolUseOwner(toolUseId: string): Message | null {
+  private findToolUseOwner(toolUseId: string, agentId?: string): Message | null {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const m = this.messages[i];
+      if (agentId != null && m.agentId !== agentId) continue;
       if (m.events?.some((e) => e.kind === "tool_use" && e.toolUseId === toolUseId)) return m;
     }
     return null;
   }
 
-  private findSubagentOwner(taskId: string): Message | null {
+  private findSubagentOwner(taskId: string, agentId: string, includeDone: boolean): Message | null {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const m = this.messages[i];
-      if (m.events?.some((e) => e.kind === "subagent_start" && e.subagent?.taskId === taskId)) {
+      if (m.agentId !== agentId) continue;
+      if (
+        m.events?.some(
+          (e) =>
+            (e.kind === "subagent_start" || (includeDone && e.kind === "subagent_done")) &&
+            e.subagent?.taskId === taskId,
+        )
+      ) {
         return m;
       }
     }
     return null;
   }
 
-  private createEventHandler(agentId: string): (event: StreamEvent) => void {
-    return (event: StreamEvent) => {
+  private updateLastContext(entry: AgentEntry, context: ContextUsage | null | undefined): number {
+    entry.lastContext = context;
+    entry.hasCachedContext = true;
+    const revision = (entry.contextRevision ?? 0) + 1;
+    entry.contextRevision = revision;
+    this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
+    return revision;
+  }
+
+  private recordTerminalContext(
+    entry: AgentEntry,
+    msg: Message,
+    context: ContextUsage | null | undefined,
+    pending?: Promise<ContextUsage | null>,
+  ): void {
+    if (context === undefined) return;
+    msg.context = context;
+    const revision = this.updateLastContext(entry, context);
+    if (!pending) return;
+    // Pi reads terminal stats without delaying settlement or queue delivery.
+    void pending.then((reported) => {
+      if (!reported || this.agents.get(entry.info.id) !== entry) return;
+      if (!this.messagesLoaded && !this.cb?.ensureLoaded?.(this)) return;
+      const stored = this.findMessage(msg.id);
+      if (!stored) return;
+      stored.context = reported;
+      if (entry.contextRevision === revision) this.updateLastContext(entry, reported);
+      this.finished(stored.id, stored.status, stored.content, stored.events, { context: reported });
+    });
+  }
+
+  private createEventHandler(agentId: string) {
+    return (event: StreamEvent, contextPending?: Promise<ContextUsage | null>) => {
       const entry = this.agents.get(agentId);
       if (!entry) return;
+
+      if (event.kind === "subagent_start" && event.toolUseId) {
+        if (!this.messagesLoaded && !this.cb?.ensureLoaded?.(this)) return;
+        const owner = this.findToolUseOwner(event.toolUseId, agentId);
+        if (owner && owner !== entry.currentMsg) {
+          const call = owner.events!.find(
+            (e) => e.kind === "tool_use" && e.toolUseId === event.toolUseId,
+          )!;
+          const start = { ...event, contentOffset: call.contentOffset };
+          owner.events!.push(start);
+          this.streamed(owner, start);
+          this.cb?.onSaveNow?.();
+          return;
+        }
+      }
 
       // Route subagent events to the message containing their subagent_start,
       // even if that message was already finalized. This prevents orphaned
       // subagent entries from appearing in a new message bubble.
-      if (event.kind === "subagent_progress" || event.kind === "subagent_done") {
+      const enrichment = event.kind === "subagent_enrichment";
+      if (event.kind === "subagent_progress" || event.kind === "subagent_done" || enrichment) {
         if (
           !this.messagesLoaded &&
-          (event.kind !== "subagent_done" || !this.cb?.ensureLoaded?.(this))
+          (event.kind === "subagent_progress" || !this.cb?.ensureLoaded?.(this))
         )
           return;
         const taskId = event.subagent?.taskId;
-        if (taskId) {
-          const ownerMsg = this.findSubagentOwner(taskId);
-          if (ownerMsg && ownerMsg !== entry.currentMsg) {
-            this.handleSubagentOnMsg(ownerMsg, event);
-            if (event.kind === "subagent_done") this.cb?.onSaveNow?.();
-            return;
-          }
+        const owner = taskId && this.findSubagentOwner(taskId, agentId, enrichment);
+        if (owner && (owner !== entry.currentMsg || enrichment)) {
+          this.handleSubagentOnMsg(owner, event);
+          if (enrichment || event.kind === "subagent_done") this.cb?.onSaveNow?.();
+          return;
         }
+        if (enrichment) return;
       }
 
       if (event.kind === "thinking_tokens" && !entry.currentMsg) return;
@@ -887,13 +1105,12 @@ export class Workspace {
           return;
         }
         if (event.kind === "notice" || event.kind === "compact" || event.kind === "retry") {
-          if (isCompactedEvent(event)) {
-            entry.lastContext = event.context ?? null;
-            this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
+          if (event.kind === "compact" && event.context !== undefined) {
+            this.updateLastContext(entry, event.context);
             this.pushSystemMessage(event.content, {
               agentId,
               events: [event],
-              ...(event.context && { context: event.context }),
+              context: event.context,
             });
             return;
           }
@@ -921,7 +1138,7 @@ export class Workspace {
         event.kind !== "error" &&
         event.kind !== "compact"
       ) {
-        this.cb?.onAgentBusy?.(this.id, agentId);
+        this.beganTurn(entry);
       }
 
       if (event.kind === "text_delta") {
@@ -950,34 +1167,29 @@ export class Workspace {
           entry.session.getState().config.backend === "codex"
         )
           this.ensureAgentMsg(entry);
+        if (event.interrupted && entry.input) entry.input.stopped = "user";
         if (entry.currentMsg) {
-          // Defense in depth: a turn that ends with neither text nor any
-          // visible event is a failure (CLI crash, network drop, spawn
-          // problem) — render a diagnostic instead of a silent empty bubble.
+          // A turn that ends with neither text nor any visible event is a failure,
+          // not a silent empty bubble or a normal tool-only turn.
           if (event.interrupted) {
-            if (entry.input) entry.input.stopped = "user";
             entry.currentMsg.content = withInterrupted(entry.currentMsg.content);
           } else if (!entry.currentMsg.content.trim() && !(entry.currentMsg.events ?? []).length) {
             entry.currentMsg.content =
               "*(no output — the session ended without producing anything; check network/credentials or server logs)*";
+            this.recordResult("failed");
+          } else if (concludingText(entry.currentMsg) || entry.input?.finished) {
+            this.recordResult("done");
           }
           entry.currentMsg.status = "done";
           clearLiveTiming(entry.currentMsg);
           // The retry succeeded; "API retry 2/10 in 5s" is no longer true.
           clearRetry(entry.currentMsg);
-          if (event.context) {
-            entry.currentMsg.context = event.context;
-            entry.lastContext = event.context;
-            this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
-          } else if (isCompactedMessage(entry.currentMsg) && !entry.currentMsg.context) {
-            entry.lastContext = null;
-            this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
-          }
+          this.recordTerminalContext(entry, entry.currentMsg, event.context, contextPending);
           if (event.effort) entry.currentMsg.effort = event.effort;
           if (event.thinking) entry.currentMsg.thinking = event.thinking;
-          const contextPatch = event.context ?? entry.currentMsg.context;
+          const contextPatch = entry.currentMsg.context;
           const patch = {
-            ...(contextPatch && { context: contextPatch }),
+            ...(contextPatch !== undefined && { context: contextPatch }),
             ...(event.effort && { effort: event.effort }),
             ...(event.thinking && { thinking: event.thinking }),
           };
@@ -997,6 +1209,7 @@ export class Workspace {
           }
         }
         this.finishReply(entry);
+        if (event.interrupted && this.projectLink?.role === "worker") this.cb?.onSaveNow?.();
       } else if (event.kind === "error") {
         // The error is an event (rendered as a red banner where it
         // happened); appending it to the text as well showed it twice.
@@ -1005,11 +1218,9 @@ export class Workspace {
         // The model saw the prompt a waiting retry would send: it carries on.
         if (entry.retryPending && answered(msg)) entry.lastEnvelope = undefined;
         msg.status = "error";
+        this.recordResult("failed");
         clearLiveTiming(msg);
-        if (isCompactedMessage(msg) && !msg.context) {
-          entry.lastContext = null;
-          this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
-        }
+        this.recordTerminalContext(entry, msg, event.context, contextPending);
         event.contentOffset = msg.content.length;
         msg.events!.push(event);
         this.streamed(msg, event);
@@ -1018,7 +1229,7 @@ export class Workspace {
           "error",
           msg.content,
           msg.events,
-          msg.context ? { context: msg.context } : undefined,
+          msg.context !== undefined ? { context: msg.context } : undefined,
         );
         this.finishReply(entry);
       } else if (event.kind === "subagent_progress" || event.kind === "subagent_done") {
@@ -1073,10 +1284,9 @@ export class Workspace {
             ? Math.min(Math.max(0, event.contentOffset), msg.content.length)
             : msg.content.length;
         msg.events!.push(event);
-        if (isCompactedEvent(event)) {
+        if (event.kind === "compact" && event.context !== undefined) {
           msg.context = event.context;
-          entry.lastContext = event.context ?? null;
-          this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
+          this.updateLastContext(entry, event.context);
         }
         this.streamed(msg, event);
       }
@@ -1089,7 +1299,7 @@ export class Workspace {
     // input fenced until its receipt arrives, then notify idle after settlement.
     if (entry.openingPrompt?.input) return;
     entry.openingPrompt = undefined;
-    this.cb?.onAgentIdle?.(this.id, entry.info.id);
+    this.endedTurn(entry);
     setTimeout(() => this.afterTurn(entry.info.id), 0);
   }
 
@@ -1219,7 +1429,11 @@ export class Workspace {
     session.on("wakeDue", () => this.dequeueNext(agentId));
     session.on("runState", (state: RunState) => {
       const entry = this.agents.get(agentId);
-      if (entry) entry.runState = state;
+      if (entry) {
+        entry.runState = state;
+        if (state === "working") entry.lastStreamAt ??= Date.now();
+        else entry.lastStreamAt = undefined;
+      }
       if (entry?.input) {
         if (state === "working") delete entry.input.stopped;
         if (state === "waiting" || state === "sleeping") entry.input.waiting = true;
@@ -1362,12 +1576,7 @@ export class Workspace {
       );
     }
     if (text === "/context") {
-      return (
-        agent.session
-          .getContextUsage?.()
-          .then((data) => (data ? formatContextUsage(data, zh) : noActiveSession(zh))) ??
-        noActiveSession(zh)
-      );
+      return formatContextUsage(this.lastContext(agent), agent.info.model, zh);
     }
     if (text === "/effort" || text.startsWith("/effort ")) {
       return this.handleEffortCommand(text.slice("/effort".length).trim(), agent);
@@ -1891,12 +2100,16 @@ export class Workspace {
 
   // Steered messages a turn ended without reading: the queue's again, and
   // it runs them next; the lead's, once the session no longer reports to
-  // it, are dropped.
+  // it or is taken over / stopped by the user, are dropped.
   private unread(ids: string[]): void {
     const back = this.messages.filter((m) => m.steering && ids.includes(m.id));
     for (const m of back) {
       delete m.steering;
-      if (this.projectLink?.unreported && (m.from?.role === "lead" || m.from?.role === "panel")) {
+      const entry = m.queuedFor ? this.agents.get(m.queuedFor) : undefined;
+      if (
+        (m.from?.role === "lead" || m.from?.role === "panel") &&
+        (this.projectLink?.unreported || (entry && this.leadBlockedOnAgent(entry)))
+      ) {
         this.messages.splice(this.messages.indexOf(m), 1);
         this.cb?.onMessageRemoved?.(this.id, m.id);
       } else {
@@ -1967,7 +2180,9 @@ export class Workspace {
     }
     if (agent.currentMsg) this.settle(agent.currentMsg);
     agent.currentMsg = null;
-    this.cb?.onAgentBusy?.(this.id, agent.info.id);
+    agent.lastStreamAt = undefined;
+    agent.retryLabel = undefined;
+    this.beganTurn(agent);
 
     try {
       if (input?.status === "queued") {
@@ -2066,7 +2281,6 @@ export class Workspace {
       throw error;
     }
     if (msg.timestamp > this.lastActivityAt) this.lastActivityAt = msg.timestamp;
-    this.unseen++;
     this.cb?.onNewMessage(this.id, msg);
   }
 
@@ -2132,7 +2346,7 @@ export class Workspace {
     if (entry.session.isRunning) return;
     if (entry.currentMsg) this.settle(entry.currentMsg);
     entry.currentMsg = null;
-    this.cb?.onAgentIdle?.(this.id, entry.info.id);
+    this.endedTurn(entry);
   }
 
   private cancelOpeningPrompt(entry: AgentEntry, reason: string): void {
@@ -2328,6 +2542,32 @@ export class Workspace {
     this.dequeueNext(agentId);
   }
 
+  // Whether the lead has lost dispatch rights on this worker agent (unreported,
+  // taken over by a direct user turn/queue, or stopped by the user).
+  private leadBlockedOnAgent(entry: AgentEntry): boolean {
+    if (this.projectLink?.role !== "worker") return false;
+    if (this.projectLink.unreported) return true;
+    const d = entry.delivered;
+    if (d && entry.input !== d && !entry.input?.finished) return true;
+    if (d?.stopped === "user" || entry.input?.stopped === "user") return true;
+    return this.messages.some((m) => m.status === "queued" && m.kind === "user" && !m.from);
+  }
+
+  private dropQueuedLeadFor(agentId: string): void {
+    if (this.projectLink?.role !== "worker") return;
+    const queued = this.messages.filter(
+      (m) =>
+        m.status === "queued" &&
+        m.queuedFor === agentId &&
+        (m.from?.role === "lead" || m.from?.role === "panel"),
+    );
+    for (const m of queued) {
+      if (this.cancelQueued(m.id, true)) {
+        this.cb?.onMessageRemoved?.(this.id, m.id);
+      }
+    }
+  }
+
   // Runs whenever an agent becomes idle: promote the oldest queued message
   // for that agent and dispatch its stored prompt.
   dequeueNext(agentId: string): void {
@@ -2340,9 +2580,23 @@ export class Workspace {
     )
       return;
     if (this.held(entry)) return;
-    const msg = this.messages.find(
-      (m) => m.status === "queued" && m.queuedFor === agentId && !m.steering,
-    );
+    let msg: Message | undefined;
+    while (true) {
+      const candidate = this.messages.find(
+        (m) => m.status === "queued" && m.queuedFor === agentId && !m.steering,
+      );
+      if (!candidate) break;
+      if (
+        (candidate.from?.role === "lead" || candidate.from?.role === "panel") &&
+        this.leadBlockedOnAgent(entry)
+      ) {
+        if (!this.cancelQueued(candidate.id)) break;
+        this.cb?.onMessageRemoved?.(this.id, candidate.id);
+        continue;
+      }
+      msg = candidate;
+      break;
+    }
     if (!msg) {
       // After the queue, as the CLI orders its own wake-ups.
       const wake = entry.session.wakeDue ? entry.session.takeWake?.() : null;
@@ -2498,17 +2752,26 @@ export class Workspace {
     if (!entry) return;
     const busy = this.hasWork(entry);
     this.cancelOpeningPrompt(entry, "Cancelled by user");
+    this.dropQueuedLeadFor(agentId);
     entry.session.abort();
     this.finalizeAbort(entry, busy);
+    if (this.projectLink?.role === "worker") this.cb?.onSaveNow?.();
   }
 
-  abortAll(by: "user" | "restart" = "user"): void {
+  abortAll(by: "user" | "restart" | "lead" = "user"): void {
     for (const entry of this.agents.values()) {
       const busy = this.hasWork(entry);
-      if (by === "user") this.cancelOpeningPrompt(entry, "Cancelled by user");
+      if (by !== "restart") {
+        this.cancelOpeningPrompt(
+          entry,
+          by === "lead" ? "Cancelled by project lead" : "Cancelled by user",
+        );
+      }
+      if (by === "user") this.dropQueuedLeadFor(entry.info.id);
       entry.session.abort();
       this.finalizeAbort(entry, busy, by);
     }
+    if (by === "user" && this.projectLink?.role === "worker") this.cb?.onSaveNow?.();
   }
 
   // A turn, background task or wake-up that a stop would cut short.
@@ -2538,13 +2801,20 @@ export class Workspace {
       return;
     }
     this.settleStale(entry);
-    const inputBefore = entry.input?.id;
+    const inputBefore = entry.input;
     const msgBefore = entry.currentMsg?.id;
+    if (this.projectLink?.role === "worker") {
+      // Codex can return unread steers before its interrupted result, and
+      // Pi can stop before producing any result. Fence both before the call.
+      this.dropQueuedLeadFor(agentId);
+      if (session.isRunning && inputBefore) inputBefore.stopped = "user";
+      this.cb?.onSaveNow?.();
+    }
     if (
       session.isRunning &&
       !(await session.interrupt()) &&
       session.isRunning &&
-      entry.input?.id === inputBefore &&
+      entry.input === inputBefore &&
       entry.currentMsg?.id === msgBefore
     ) {
       this.abortAgent(agentId);
@@ -2566,16 +2836,20 @@ export class Workspace {
     return null;
   }
 
-  private finalizeAbort(entry: AgentEntry, busy: boolean, by: "user" | "restart" = "user"): void {
+  private finalizeAbort(
+    entry: AgentEntry,
+    busy: boolean,
+    by: "user" | "restart" | "lead" = "user",
+  ): void {
     if (busy && entry.input) entry.input.stopped = by;
-    if (by === "user") this.dropRetry(entry);
+    if (by !== "restart") this.dropRetry(entry);
     if (entry.currentMsg && entry.currentMsg.status === "streaming") {
       entry.currentMsg.content = withInterrupted(entry.currentMsg.content);
       this.settle(entry.currentMsg);
     }
     entry.currentMsg = null;
     this.settleStale(entry);
-    this.cb?.onAgentIdle?.(this.id, entry.info.id);
+    this.endedTurn(entry);
     setTimeout(() => this.dequeueNext(entry.info.id), 0);
   }
 
@@ -2585,7 +2859,6 @@ export class Workspace {
     if (this.dispatchHeld(entry)) return false;
     if (this.hasWork(entry) && entry.input) entry.input.stopped = "user";
     this.dropRetry(entry);
-    entry.lastContext = null;
     if (entry.session.resetContext) entry.session.resetContext();
     else {
       entry.session.abort();
@@ -2600,8 +2873,10 @@ export class Workspace {
       duration_ms: 0,
     };
     this.settleStale(entry);
-    this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
-    this.pushSystemMessage(`${entry.info.avatar} **${entry.info.name}** context cleared`);
+    this.updateLastContext(entry, undefined);
+    this.pushSystemMessage(`${entry.info.avatar} **${entry.info.name}** context cleared`, {
+      agentId,
+    });
     return true;
   }
 
@@ -2611,35 +2886,48 @@ export class Workspace {
 
   agentInfo(a: AgentEntry): AgentRuntimeInfo {
     const state = a.session.getState();
+    const context = this.lastContext(a);
     return {
       ...a.info,
       canSwitchBackend: this.canSwitchBackend(a, state),
       busy: a.session.isRunning || !!a.openingPrompt,
       state: this.agentState(a),
       activity: a.activity ?? null,
+      ...(a.lastStreamAt != null && { lastStreamAt: a.lastStreamAt }),
+      ...(a.retryLabel && { retryLabel: a.retryLabel }),
       effort: state.config.effort ?? null,
       effortLevels: this.effortLevels(a, a.info.model) ?? [],
       fast: Boolean(state.config.fast),
       backgroundTasks: a.session.backgroundTaskList ?? [],
-      context: this.lastContext(a),
+      ...(context !== undefined && { context }),
       wake: a.session.wake ?? null,
     };
   }
 
-  // From the newest reply that recorded one; an unloaded history (archived)
-  // leaves it unknown, and a compaction without a post-compaction estimate
-  // stops the scan so pre-compaction occupancy never resurfaces.
-  private lastContext(a: AgentEntry): ContextUsage | null {
-    if (a.lastContext !== undefined) return a.lastContext;
-    if (!this.messagesLoaded) return null;
-    let found: ContextUsage | null = null;
-    for (let i = this.messages.length - 1; i >= 0 && !found; i--) {
+  // Undefined hides occupancy for fresh, cleared, and archived histories.
+  // Null is an explicitly unknown backend boundary: both it and compaction
+  // stop the search so older occupancy never resurfaces.
+  private lastContext(a: AgentEntry): ContextUsage | null | undefined {
+    if (this.isArchived || !this.messagesLoaded) return undefined;
+    if (a.hasCachedContext) return a.lastContext;
+    let found: ContextUsage | null | undefined;
+    for (let i = this.messages.length - 1; i >= 0; i--) {
       const m = this.messages[i];
       if (m.agentId !== a.info.id) continue;
-      if (m.context) found = m.context;
-      else if (isCompactedMessage(m)) break;
+      // Older clear markers carried context: null. They mean absent, not an
+      // unknown turn boundary, regardless of what older messages recorded.
+      if (isContextClearedMessage(m)) break;
+      if (m.context !== undefined) {
+        found = m.context;
+        break;
+      }
+      if (isCompactedMessage(m)) {
+        found = null;
+        break;
+      }
     }
     a.lastContext = found;
+    a.hasCachedContext = true;
     return found;
   }
 
@@ -2659,7 +2947,13 @@ export class Workspace {
       archivedAt: this.archivedAt,
       ...(this.projectLink && { projectLink: this.projectLink }),
       unread: this.unseen,
+      lastResult: this.lastResult,
+      queued: this.hasQueuedInput,
     };
+  }
+
+  get hasQueuedInput(): boolean {
+    return this.messages.some((m) => m.kind === "user" && m.status === "queued");
   }
 
   getMessages(): Message[] {
@@ -2679,7 +2973,11 @@ export class Workspace {
           ...a.info,
           session: a.session.getState(),
           ...(a.delivered && {
-            delivered: { ...a.delivered, ...(a.input !== a.delivered && { since: true }) },
+            delivered: {
+              ...a.delivered,
+              ...(a.input?.finished && a.input.stopped === "user" && { stopped: "user" }),
+              ...(a.input !== a.delivered && !a.input?.finished && { since: true }),
+            },
           }),
           ...(a.retryPending && { pausedUntil: a.pausedUntil, lastEnvelope: a.lastEnvelope }),
         };
@@ -2689,7 +2987,11 @@ export class Workspace {
       lastActivityAt: this.lastActivityAt,
       archivedAt: this.archivedAt,
       ...(this.projectLink && { projectLink: this.projectLink }),
-      ...(this.unseen && { unread: this.unseen }),
+      attention: {
+        unread: this.unseen,
+        lastResult: this.lastResult,
+        awaitsUser: this.projectedAwaitsUser,
+      },
     };
   }
 
@@ -2714,11 +3016,15 @@ export class Workspace {
     ws.createdAt = state.createdAt;
     ws.archivedAt = state.archivedAt ?? null;
     ws.projectLink = state.projectLink;
-    ws.unseen = state.unread ?? 0;
+    // Old unread counts included input, placeholders, and system messages.
+    ws.unseen = state.attention?.unread ?? 0;
+    ws.lastResult = state.attention?.lastResult;
+    ws.projectedAwaitsUser = state.attention?.awaitsUser ?? false;
     // No messages: the history could not be read, and a save must not
     // write an empty one over it.
     ws.messagesLoaded = state.messages !== undefined;
     const cut = new Set<string>();
+    const activeTasks = new Map(state.agents.map((a) => [a.id, activeSubagentTaskIds(a.session)]));
     ws.messages = (state.messages ?? []).map((m) => {
       const msg = {
         ...m,
@@ -2733,7 +3039,7 @@ export class Workspace {
         ws.changed.add(m.id);
         cut.add(m.id);
       }
-      if (restoreMessage(msg)) ws.touch([msg.id]);
+      if (restoreMessage(msg, activeTasks.get(msg.agentId ?? ""))) ws.touch([msg.id]);
       return msg;
     });
     // An orphaned queued report is still owned by the Lead workspace.
@@ -2781,7 +3087,7 @@ export class Workspace {
       });
       if (agentState.delivered) {
         const { since, waiting, ...delivered } = agentState.delivered;
-        if (waiting || cut.has(delivered.replies[delivered.replies.length - 1])) {
+        if (!delivered.stopped && (waiting || cut.has(delivered.replies.at(-1)!))) {
           delivered.stopped = "restart";
         }
         const entry = ws.agents.get(agentState.id)!;
@@ -2795,7 +3101,7 @@ export class Workspace {
 }
 
 function updateLiveTiming(msg: Message, event: StreamEvent): StreamEvent {
-  if (msg.status !== "streaming") return event;
+  if (msg.status !== "streaming" || event.kind === "subagent_enrichment") return event;
   if (event.kind === "thinking_delta" && event.durationMs == null) {
     const startedAt = event.startedAt ?? msg.liveThinkingSince ?? Date.now();
     msg.liveThinkingSince = startedAt;
@@ -2815,7 +3121,7 @@ function updateLiveTiming(msg: Message, event: StreamEvent): StreamEvent {
   const hasWork = msg.events?.some(
     (e) =>
       (e.kind === "tool_use" && e.toolResult == null) ||
-      (e.kind === "subagent_start" && e.subagent?.status === "running"),
+      (e.kind === "subagent_start" && isOutstandingSubagentStatus(e.subagent?.status)),
   );
   if (hasWork) delete msg.waitingSince;
   else msg.waitingSince = Date.now();
@@ -2838,9 +3144,25 @@ function dialogKey(agentId: string, generation: number, requestId: string): stri
   return `${agentId}:${generation}:${requestId}`;
 }
 
-function restoreMessage(msg: Message & { queuedPrompt?: string }): boolean {
+function activeSubagentTaskIds(session: SessionState): Set<string> {
+  return new Set(
+    session.activeAsyncRuns?.flatMap((run) =>
+      run.children.flatMap((child) => [
+        child.taskId,
+        ...Object.entries(child.tree?.nodes ?? {})
+          .filter(([, facts]) => isOutstandingSubagentStatus(facts.status))
+          .map(([id]) => id),
+      ]),
+    ),
+  );
+}
+
+function restoreMessage(
+  msg: Message & { queuedPrompt?: string },
+  activeTasks?: ReadonlySet<string>,
+): boolean {
   clearLiveTiming(msg);
-  if (msg.events) normalizeEvents(msg.events);
+  if (msg.events) normalizeEvents(msg.events, activeTasks);
   if (msg.queuedPrompt === undefined) return false;
   msg.queuedEnvelope ??= { inputId: msg.id, text: msg.queuedPrompt };
   delete msg.queuedPrompt;
@@ -2852,6 +3174,17 @@ function restoreMessage(msg: Message & { queuedPrompt?: string }): boolean {
 function answered(msg: Message): boolean {
   const output = ["thinking", "tool_use", "subagent_start"];
   return !!msg.content.trim() || !!msg.events?.some((e) => output.includes(e.kind));
+}
+
+// A plan or preamble before the last tool call is not the turn's conclusion.
+function concludingText(msg: Message): boolean {
+  let after = 0;
+  for (const e of msg.events ?? []) {
+    if (e.kind === "tool_use" || e.kind === "tool_result" || e.kind === "subagent_start") {
+      after = Math.max(after, e.contentOffset ?? 0);
+    }
+  }
+  return !!msg.content.slice(after).trim();
 }
 
 function lastThinking(events: StreamEvent[]): StreamEvent | undefined {
@@ -2959,67 +3292,23 @@ function formatUsageInfo(data: Record<string, unknown>, zh = false): string {
   return lines.join("\n");
 }
 
-function formatContextUsage(data: Record<string, unknown>, zh = false): string {
-  const total = data.totalTokens as number | undefined;
-  const max = data.maxTokens as number | undefined;
-  const pct = data.percentage as number | undefined;
-  const model = data.model as string | undefined;
-  const categories = data.categories as Array<Record<string, unknown>> | undefined;
-
-  const lines: string[] = [zh ? "## 上下文占用" : "## Context Usage"];
-  if (model) lines.push(zh ? `**模型：** ${model}` : `**Model:** ${model}`);
-  if (total != null && max != null) {
-    const bar = renderBar(pct ?? (total / max) * 100);
-    lines.push(
-      zh
-        ? `**Tokens：** ${(total / 1000).toFixed(1)}k / ${(max / 1000).toFixed(1)}k ${bar} ${(pct ?? 0).toFixed(1)}%`
-        : `**Tokens:** ${(total / 1000).toFixed(1)}k / ${(max / 1000).toFixed(1)}k ${bar} ${(pct ?? 0).toFixed(1)}%`,
-    );
-  }
-
-  if (categories?.length) {
-    lines.push(
-      "",
-      zh ? "| 类别 | Tokens | 占比 |" : "| Category | Tokens | % |",
-      "|---|---:|---:|",
-    );
-    for (const c of categories) {
-      const name = c.name as string;
-      const tokens = c.tokens as number;
-      const share = max ? ((tokens / max) * 100).toFixed(1) : "—";
-      lines.push(`| ${name} | ${(tokens / 1000).toFixed(1)}k | ${share}% |`);
-    }
-  }
-
-  const api = data.apiUsage as Record<string, number> | undefined;
-  if (api) {
-    lines.push("", zh ? "### API 用量（本会话）" : "### API Usage (this session)");
-    lines.push(
-      zh
-        ? `- **输入：** ${(api.input_tokens / 1000).toFixed(1)}k`
-        : `- **Input:** ${(api.input_tokens / 1000).toFixed(1)}k`,
-    );
-    lines.push(
-      zh
-        ? `- **输出：** ${(api.output_tokens / 1000).toFixed(1)}k`
-        : `- **Output:** ${(api.output_tokens / 1000).toFixed(1)}k`,
-    );
-    if (api.cache_read_input_tokens) {
-      lines.push(
-        zh
-          ? `- **缓存读取：** ${(api.cache_read_input_tokens / 1000).toFixed(1)}k`
-          : `- **Cache read:** ${(api.cache_read_input_tokens / 1000).toFixed(1)}k`,
-      );
-    }
-    if (api.cache_creation_input_tokens) {
-      lines.push(
-        zh
-          ? `- **缓存写入：** ${(api.cache_creation_input_tokens / 1000).toFixed(1)}k`
-          : `- **Cache write:** ${(api.cache_creation_input_tokens / 1000).toFixed(1)}k`,
-      );
-    }
-  }
-
+function formatContextUsage(
+  context: ContextUsage | null | undefined,
+  model: string,
+  zh: boolean,
+): string {
+  const lines = zh
+    ? ["## 上下文占用", `**模型：** ${model}`]
+    : ["## Context Usage", `**Model:** ${model}`];
+  if (context === undefined)
+    return [...lines, zh ? "**占用：** 空" : "**Occupancy:** Empty"].join("\n");
+  if (context === null)
+    return [...lines, zh ? "**占用：** 未知" : "**Occupancy:** Unknown"].join("\n");
+  const { tokens, window, estimated } = context;
+  const pct = (tokens / window) * 100;
+  lines.push(
+    `${zh ? `**Tokens${estimated ? "（估算）" : ""}：**` : `**Tokens${estimated ? " (estimate)" : ""}:**`} ${(tokens / 1000).toFixed(1)}k / ${(window / 1000).toFixed(1)}k ${renderBar(pct)} ${pct.toFixed(1)}%`,
+  );
   return lines.join("\n");
 }
 
@@ -3031,6 +3320,10 @@ function renderBar(pct: number): string {
 // A turn the user stopped keeps what it said, marked.
 function withInterrupted(content: string): string {
   return content ? `${content}\n\n*\\[interrupted\\]*` : "*\\[interrupted\\]*";
+}
+
+function isContextClearedMessage(msg: Message): boolean {
+  return msg.kind === "system" && msg.content.endsWith(" context cleared");
 }
 
 function isCompactedEvent(event: StreamEvent): boolean {

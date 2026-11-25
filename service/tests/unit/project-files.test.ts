@@ -330,7 +330,8 @@ describe("VS Code's CLI", () => {
         await openInVSCode("/repo/a.cpp", undefined, {
           serverDir: path.join(dir, "server"),
           runtimeDirs: [run],
-          timeoutMs: 300,
+          // macOS may take over 300 ms to launch a newly created executable.
+          timeoutMs: 1500,
         });
         expect(fs.readFileSync(log, "utf-8").trim()).toBe(live);
         const sleeper = Number(fs.readFileSync(pid, "utf-8"));

@@ -922,22 +922,21 @@ describe("live thinking", () => {
     const estimated = applyEventsToMessage(msg({ status: "streaming" }), [
       ev("compact", {
         content: "Context compacted (threshold): 300000 → ~40000 tokens",
-        context: { window: 1_048_576, tokens: 40_000 },
+        context: { window: 1_048_576, tokens: 40_000, estimated: true },
       }),
     ]);
-    expect(estimated.context).toEqual({ window: 1_048_576, tokens: 40_000 });
+    expect(estimated.context).toEqual({ window: 1_048_576, tokens: 40_000, estimated: true });
 
     // Aborted compaction leaves existing context intact.
     const aborted = applyEventsToMessage(estimated, [
       ev("compact", { content: "Compaction aborted (manual)" }),
     ]);
-    expect(aborted.context).toEqual({ window: 1_048_576, tokens: 40_000 });
+    expect(aborted.context).toEqual({ window: 1_048_576, tokens: 40_000, estimated: true });
 
     // Successful compaction without an estimate clears stale context immediately.
     const cleared = applyEventsToMessage(aborted, [
-      ev("compact", { content: "Context compacted (overflow): 42000 tokens" }),
+      ev("compact", { content: "Context compacted (overflow): 42000 tokens", context: null }),
     ]);
-    expect(cleared.context).toBeUndefined();
-    expect("context" in cleared).toBe(false);
+    expect(cleared.context).toBeNull();
   });
 });

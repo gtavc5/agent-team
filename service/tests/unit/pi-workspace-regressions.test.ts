@@ -186,7 +186,7 @@ describe("Pi workspace lifecycle regressions", () => {
       expect(input.status).toBe("starting");
       expect(input.dispatchAttempt).toBeUndefined();
       expect(ws.cancelQueued(input.id)).toBe(false);
-      expect(ws.unseen).toBe(unseen + 1);
+      expect(ws.unseen).toBe(unseen);
       expect(agentMsgs()).toHaveLength(0);
       const restoredStatus = () => {
         const restored = Workspace.fromState(structuredClone(ws.getState()), registry);
@@ -214,7 +214,7 @@ describe("Pi workspace lifecycle regressions", () => {
       await sending;
       expect(input.status).toBe("done");
       expect(agentMsgs()).toHaveLength(1);
-      expect(ws.unseen).toBe(unseen + 2);
+      expect(ws.unseen).toBe(unseen);
       expect(ws.agents.get(agent.id)?.input?.replies).toEqual([agentMsgs()[0].id]);
       expect(agentMsgs()[0].content).toBe("answer");
     },

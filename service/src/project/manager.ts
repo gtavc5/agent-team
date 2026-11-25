@@ -184,7 +184,6 @@ export class ProjectManager {
   private issueStores = new Map<string, IssueStore>();
   private settling = new Map<string, ReturnType<typeof setTimeout>>();
   private carrying = new Set<string>();
-  private awaiting = new Set<string>();
   private closed = false;
 
   constructor(
@@ -672,31 +671,24 @@ export class ProjectManager {
     this.settleAfter(w, SETTLE_MS);
   }
 
-  // Whether the clients are to show the worker as waiting for the user,
-  // noted as what they were all last sent: only for what goes to all of
-  // them (see showAllAwaiting for one that connects).
   awaitsUser(w: Workspace): boolean {
-    const awaits = this.waits(w);
-    if (awaits) this.awaiting.add(w.id);
-    else this.awaiting.delete(w.id);
-    return awaits;
+    return this.waits(w);
   }
 
-  // Tells the clients when it changed.
+  // Only an edge into waiting counts, not each snapshot or later idle check.
   showAwaiting(w: Workspace): void {
     const waiting = this.waits(w);
-    if (waiting === this.awaiting.has(w.id)) return;
-    if (waiting) this.awaiting.add(w.id);
-    else this.awaiting.delete(w.id);
+    if (waiting === w.projectedAwaitsUser) return;
+    w.projectedAwaitsUser = waiting;
+    if (waiting) w.unseen++;
+    this.host.persistWorkspace(w);
     this.host.workspaceChanged(w);
   }
 
   // Before a client that connects gets the list: the others are told first
   // what changed unseen (a stop, an archive), so all hold the same.
   showAllAwaiting(): void {
-    for (const w of this.host.workspaces()) {
-      if (w.projectLink?.role === "worker") this.showAwaiting(w);
-    }
+    for (const w of this.host.workspaces()) this.showAwaiting(w);
   }
 
   private waits(w: Workspace): boolean {
@@ -866,7 +858,12 @@ export class ProjectManager {
     );
     for (const m of queued) {
       if (w.cancelQueued(m.id, evenSteered)) {
-        this.host.broadcast({ type: "message_removed", workspaceId: w.id, messageId: m.id });
+        this.host.broadcast({
+          type: "message_removed",
+          workspaceId: w.id,
+          messageId: m.id,
+          queued: w.hasQueuedInput,
+        });
       }
     }
   }
@@ -1023,6 +1020,125 @@ export class ProjectManager {
     return w;
   }
 
+  // Whether the lead is barred from messaging this worker right now. Enforced
+  // server-side on message_session and shown in project_status so routing does
+  // not rely on prompt discipline alone.
+  private isUserTakenOver(w: Workspace): boolean {
+    if (!w.messagesLoaded) return w.persistedOwnershipBlocker() === "taken_over";
+    const messages = w.getMessages();
+    const lastFinish = lastFinishIndex(messages);
+    // Local commands bypass the queue. A queued user turn is still pending,
+    // even if another agent reported after the user queued it.
+    const hasQueuedUser = messages.some(
+      (m) => m.kind === "user" && !m.from && m.status === "queued",
+    );
+    return (
+      hasQueuedUser ||
+      w.lastDelivered().some((d) => {
+        if (!d.since) return false;
+        const lastUser = lastDirectUserIndex(messages);
+        return lastUser < 0 || lastUser > lastFinish;
+      })
+    );
+  }
+
+  private leadDispatchBlocker(w: Workspace): {
+    code: "unreported" | "taken_over" | "user_stopped" | "awaiting_user";
+    short: string;
+    error: string;
+  } | null {
+    if (w.projectLink?.unreported) {
+      return {
+        code: "unreported",
+        short: "user's own",
+        error: `"${w.name}" does not report to the lead: it is the user's own session, not yours to message, stop or archive`,
+      };
+    }
+    if (this.isUserTakenOver(w)) {
+      return {
+        code: "taken_over",
+        short: "user took over",
+        error: `"${w.name}" was taken over by the user: do not message it until the user finishes with it`,
+      };
+    }
+    if (!w.messagesLoaded) {
+      if (w.persistedOwnershipBlocker() === "user_stopped") {
+        return {
+          code: "user_stopped",
+          short: "stopped by user",
+          error: `"${w.name}" was stopped by the user: leave it to the user`,
+        };
+      }
+      if (w.hasPendingDialogs) {
+        return {
+          code: "awaiting_user",
+          short: "waiting for user",
+          error: `"${w.name}" is waiting for the user in its own session: do not message it for them`,
+        };
+      }
+      return null;
+    }
+    const messages = w.getMessages();
+    const lastFinish = lastFinishIndex(messages);
+    const turnStoppedByUser = (t: {
+      input: Message;
+      replies: Message[];
+      stopped?: "user" | "restart" | "lead";
+      finished?: boolean;
+    }) => {
+      if (t.stopped !== "user") return false;
+      // Handoff clears earlier stops. On restore a later stop can be stored
+      // on the delivered Lead input even if the user stopped a different turn.
+      if (t.finished) return true;
+      const end = t.replies[t.replies.length - 1] ?? t.input;
+      const idx = messages.indexOf(end);
+      return idx < 0 || idx >= lastFinish;
+    };
+    if (w.lastDelivered().some(turnStoppedByUser) || w.lastTurns().some(turnStoppedByUser)) {
+      return {
+        code: "user_stopped",
+        short: "stopped by user",
+        error: `"${w.name}" was stopped by the user: leave it to the user`,
+      };
+    }
+    if (w.hasPendingDialogs || awaitsUser(w)) {
+      return {
+        code: "awaiting_user",
+        short: "waiting for user",
+        error: `"${w.name}" is waiting for the user in its own session: do not message it for them`,
+      };
+    }
+    return null;
+  }
+
+  private sessionWork(projectId: string): Map<string, string[]> {
+    const bySession = new Map<string, string[]>();
+    const add = (sessionId: string, item: string) => {
+      const list = bySession.get(sessionId);
+      if (list) list.push(item);
+      else bySession.set(sessionId, [item]);
+    };
+    for (const o of this.objectives(projectId)) {
+      if (o.archived || isTombstone(o)) continue;
+      const tasksBySession = new Map<string, Task[]>();
+      for (const t of o.tasks) {
+        if (!t.session) continue;
+        const list = tasksBySession.get(t.session);
+        if (list) list.push(t);
+        else tasksBySession.set(t.session, [t]);
+      }
+      const ids = new Set([...o.sessions, ...tasksBySession.keys()]);
+      for (const sid of ids) {
+        const tasks = tasksBySession.get(sid);
+        add(
+          sid,
+          tasks?.length ? `${o.id} (${tasks.map((t) => `${t.id} [${t.state}]`).join(", ")})` : o.id,
+        );
+      }
+    }
+    return bySession;
+  }
+
   // `text` is what the panel shows, `prompt` what the model reads. Throws
   // when the target cannot take it, so the tool reports the failure.
   private deliver(
@@ -1078,15 +1194,24 @@ export class ProjectManager {
     }
     out.push("", "## Sessions");
     if (sessions.length === 0) out.push("(none)");
+    const workBySession = this.sessionWork(projectId);
     for (const w of sessions) {
       const last = w.messagesLoaded
         ? [...w.getMessages()].reverse().find((m) => m.kind === "agent")
         : undefined;
       const cut = last && (last.status === "error" || last.content.endsWith(INTERRUPTED));
-      const state = `${sessionState(w)}${cut ? ", its last turn did not finish" : ""}`;
+      const blocker = this.leadDispatchBlocker(w);
+      const dispatch = blocker
+        ? `not lead-dispatchable (${blocker.short})`
+        : w.isArchived && !w.messagesLoaded
+          ? "dispatchability unknown (archived; checked on load)"
+          : "lead-dispatchable";
+      const state = `${sessionState(w)}${cut ? ", its last turn did not finish" : ""}; ${dispatch}`;
+      const tasks = workBySession.get(w.id);
+      const linked = tasks?.length ? ` — tasks: ${tasks.join(", ")}` : "";
       const excerpt = last ? ` — last reply: ${oneLine(last.content, 160)}` : "";
       const own = w.projectLink?.unreported ? " (the user's own: does not report to you)" : "";
-      out.push(`- ${w.id} "${w.name}"${own} in ${w.cwd} — ${state}${excerpt}`);
+      out.push(`- ${w.id} "${w.name}"${own} in ${w.cwd} — ${state}${linked}${excerpt}`);
     }
     out.push("", "## Active objectives", this.listObjectives(projectId, { status: "active" }));
     out.push("", "## Issues", this.issueBoard(projectId).summary());
@@ -1994,6 +2119,7 @@ export class ProjectManager {
             .lastDelivered()
             .filter(({ input }) => input.from?.role === "lead" || input.from?.role === "panel")
             .map(({ input }) => input.id),
+          finishedInputIds: w.currentInputIds(),
           contextWrite,
           taskTransitions: this.objectives(id)
             .filter((o) => !o.archived)
@@ -2016,6 +2142,10 @@ export class ProjectManager {
         leadDelivery: { state: "pending" },
         createdAt: receivedAt,
       });
+      if (final) {
+        w.markFinished(frozenPlan?.finishedInputIds ?? []);
+        this.host.saveWorkspaceNow(w);
+      }
       return {
         ack:
           online && !waiting
@@ -2042,6 +2172,7 @@ export class ProjectManager {
     const worker = this.host.workspace(workerId);
     if (worker) {
       for (const inputId of plan.answeredInputIds) worker.markAnswered(inputId);
+      if (plan.finishedInputIds?.length) worker.markFinished(plan.finishedInputIds);
       this.host.saveWorkspaceNow(worker);
     }
     const board = this.board(id);
@@ -2203,6 +2334,11 @@ ${body}`,
     messageSession: (pid, sid, text) => {
       this.assertDispatchAllowed();
       const w = this.managed(pid, sid);
+      if (!w.messagesLoaded && !this.host.loadWorkspace(w)) {
+        throw new Error(`"${w.name}" cannot be loaded`);
+      }
+      const blocked = this.leadDispatchBlocker(w);
+      if (blocked) throw new Error(blocked.error);
       const delay = this.spaceStart(w);
       const outcome = this.deliver(w, text, ...this.fromLead(pid, text));
       if (delay > 0) {
@@ -2218,9 +2354,15 @@ ${body}`,
     },
     stopSession: (pid, sid) => {
       const w = this.managed(pid, sid);
+      if (!w.messagesLoaded) this.host.loadWorkspace(w);
+      if (this.isUserTakenOver(w)) {
+        throw new Error(
+          `"${w.name}" was taken over by the user: do not stop it until the user finishes with it`,
+        );
+      }
       this.dropQueuedFromLead(w);
       this.markAnswered(w);
-      w.abortAll();
+      w.abortAll("lead");
       this.host.persistWorkspace(w);
       return `Stopped "${w.name}".`;
     },
@@ -2377,21 +2519,33 @@ export function awaitsUser(w: Workspace): boolean {
   const messages = w.getMessages();
   const task = taskOf(messages);
   if (!task) return false;
-  let lastFinish = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (finishedTask(messages[i])) {
-      lastFinish = i;
-      break;
-    }
-  }
-  return w.lastTurns().some(({ input, replies, stopped }) => {
+  const lastFinish = lastFinishIndex(messages);
+  return w.lastTurns().some(({ input, replies, stopped, finished }) => {
     const from = asked(messages, input);
     if (from.from && from.id !== task.id) return false;
     const last = replies[replies.length - 1];
-    if (stopped || last?.status !== "done" || last.content.endsWith(INTERRUPTED)) return false;
+    if (stopped || finished || last?.status !== "done" || last.content.endsWith(INTERRUPTED))
+      return false;
     if (lastFinish >= 0 && messages.indexOf(last) <= lastFinish) return false;
     return !replies.some(finishedTask);
   });
+}
+
+function lastFinishIndex(messages: Message[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (finishedTask(messages[i])) return i;
+  }
+  return -1;
+}
+
+function lastDirectUserIndex(messages: Message[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.kind === "user" && !m.from && m.status !== "queued" && !messages[i + 1]?.localCommand) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 // A refused finish_task (a context too long, say) reported nothing.

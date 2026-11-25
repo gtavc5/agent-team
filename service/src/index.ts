@@ -1,5 +1,6 @@
 import * as path from "path";
 import { existsSync, realpathSync } from "node:fs";
+import { refreshUsage } from "./usage/service";
 import { Server } from "./server/server";
 import { doctor } from "./config/doctor";
 import { formatReport } from "./config/diagnostics";
@@ -51,11 +52,23 @@ function serve() {
     target,
     transaction && existsSync(transaction) ? transaction : undefined,
   );
-  void server.controlReady.catch((error: unknown) =>
-    console.error("Deploy control unavailable:", error),
-  );
+  void server.controlReady.catch((error: unknown) => {
+    void server.listening.then(
+      () => console.error("Deploy control unavailable:", error),
+      (startupError: unknown) => {
+        console.error("Service startup failed:", startupError);
+        void shutdown(1);
+      },
+    );
+  });
+
+  const collect = () =>
+    void refreshUsage(baseDir).catch(() => console.warn("[usage] ACP reader unavailable"));
+  const timer = setInterval(collect, 60_000).unref();
+  collect();
 
   async function shutdown(code = 0): Promise<void> {
+    clearInterval(timer);
     await server.close();
     process.exit(code);
   }

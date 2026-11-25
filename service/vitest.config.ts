@@ -4,7 +4,7 @@ import { configDefaults, defineConfig } from "vitest/config";
 // and webview has its own vitest setup (jsdom + browser).
 export default defineConfig({
   test: {
-    include: ["tests/**/*.test.ts"],
+    include: ["tests/**/*.test.{ts,mjs}"],
     exclude: [...configDefaults.exclude, "tests/e2e/**"],
     // Wake-up times render as local clock times in the snap transcripts.
     env: { TZ: "UTC" },

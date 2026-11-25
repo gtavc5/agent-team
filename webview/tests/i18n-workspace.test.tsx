@@ -120,7 +120,6 @@ describe("Sidebar and groups localization", () => {
     activeWsId: "lead",
     connected: false,
     groupOverrides: {},
-    finishedStatus: {},
     searchQuery: "",
     searchHits: null,
     systemStatus: {
@@ -175,10 +174,11 @@ describe("Sidebar and groups localization", () => {
     expect(screen.getByTitle("2 个已更改文件，领先 1 个提交")).toBeTruthy();
     expect(screen.getByText("隔离")).toBeTruthy();
     expect(screen.getByText("轮到你")).toBeTruthy();
-    expect(screen.getByTitle("等待你的回复")).toBeTruthy();
+    expect(screen.getByTitle("1 个等待你回复")).toBeTruthy();
+    expect(screen.queryByText("CPU")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "调试工具（服务诊断：离线）" }));
     expect(screen.getByText("CPU")).toBeTruthy();
     expect(screen.getByText("内存")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "调试工具（服务诊断：离线）" }));
     expect(screen.getByRole("link", { name: "服务诊断（离线）" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "回放演示" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "捕获调试快照" })).toBeTruthy();
@@ -191,7 +191,8 @@ describe("Sidebar and groups localization", () => {
     expect(screen.getByTitle("删除不属于任何项目的已归档工作区")).toBeTruthy();
 
     // Delete session confirm dialog
-    fireEvent.click(screen.getAllByTitle("删除会话")[0]);
+    const workerRow = screen.getByTitle("worker-one").closest<HTMLElement>(".task-item")!;
+    fireEvent.click(within(workerRow).getByTitle("删除会话"));
     const deleteDialog = within(screen.getByRole("dialog"));
     expect(deleteDialog.getByText("删除 worker-one？")).toBeTruthy();
     expect(deleteDialog.getByText("此会话及其消息历史将被删除。")).toBeTruthy();
@@ -258,6 +259,7 @@ describe("QuotaPanel and quota helper localization", () => {
       <QuotaPanel
         now={NOW}
         connected
+        refresh={vi.fn()}
         quota={{
           refreshing: false,
           acpPrepareStep: "yaat acp prepare",
@@ -291,12 +293,13 @@ describe("QuotaPanel and quota helper localization", () => {
     );
 
     expect(screen.getByText("配额使用")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "刷新" }).title).toBe("刷新配额");
+    expect(screen.queryByRole("button", { name: "刷新" })).toBeNull();
 
     const agyRow = screen.getByRole("button", { name: /Agy · Gemini/ });
-    expect(agyRow.textContent).toContain("已过期");
+    expect(agyRow.textContent).not.toContain("已过期");
     expect(agyRow.textContent).toContain("周 34%");
     fireEvent.click(agyRow);
+    expect(screen.getByRole("button", { name: "刷新" }).title).toBe("刷新配额");
     expect(screen.getByText(/每周:/)).toBeTruthy();
     expect(screen.getByText("已用 34%")).toBeTruthy();
     expect(screen.getByText(/重置于 /)).toBeTruthy();

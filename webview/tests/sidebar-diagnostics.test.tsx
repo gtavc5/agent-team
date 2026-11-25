@@ -34,7 +34,6 @@ function sidebar(connected = true, over: Partial<SidebarProps> = {}) {
     activeWsId: null,
     workspaces: [],
     groupOverrides: {},
-    finishedStatus: {},
     searchQuery: "",
     searchHits: null,
     systemStatus: null,
@@ -287,10 +286,24 @@ it("does not flash an abnormal indicator while the initial health probe is unkno
   expect(screen.queryByRole("link", { name: /Service diagnostics/ })).toBeNull();
 });
 
-it.each(["offline", "unhealthy"] as const)(
+it("keeps both diagnostics icons clear for an info-only report", async () => {
+  stubHealth([{ severity: "info" }]);
+  const { container } = sidebar();
+  await act(async () => {});
+  expect(container.querySelector(".sidebar-debug-dot")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: TRIGGER }));
+  expect(screen.getByRole("link", { name: "Service diagnostics" })).toBeTruthy();
+  expect(container.querySelector(".sidebar-debug-dot")).toBeNull();
+});
+
+it.each([
+  ["offline", []],
+  ["unhealthy", [{}]],
+  ["unhealthy", [{ severity: "info" }, { severity: "warning" }]],
+] as const)(
   "places a single abnormal dot on # when collapsed and moves it to the single Diagnostics entry when expanded (%s)",
-  async (state) => {
-    const fetch = stubHealth(state === "unhealthy" ? [{}] : []);
+  async (state, issues) => {
+    const fetch = stubHealth([...issues]);
     const { container } = sidebar(state !== "offline");
     await act(async () => {});
 

@@ -3,11 +3,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AppConfig } from "../config/config";
 import { selectDefaultModel, type ModelDiscoveryIssue } from "../config/model-diagnostics";
-import { availableModelOptions, type ModelOption } from "../config/presets";
+import { availableModelOptions, backendForModel, type ModelOption } from "../config/presets";
 import { codexProcessEnv, probeCodexAuth, type CodexAuthState } from "../session/codex";
 import { LocalHost, type Host } from "../session/host";
 import { PiModelsFilteredError } from "../session/pi";
-import type { PiAvailableModel, SessionConfig } from "../session/types";
+import type { Backend, PiAvailableModel, SessionConfig } from "../session/types";
 
 export type { ModelDiscoveryIssue } from "../config/model-diagnostics";
 
@@ -23,11 +23,12 @@ export type PiRuntimeSessionConfig = Pick<
 >;
 
 export function piSessionConfig(config: AppConfig): PiRuntimeSessionConfig {
+  const { proxy: _proxy, ...acp } = config.pi?.acp ?? {};
   return {
     piPackages: config.pi?.packages ? [...config.pi.packages] : undefined,
     piExcludePackages: config.pi?.exclude_packages ? [...config.pi.exclude_packages] : undefined,
     piOffline: config.pi?.offline,
-    piAcp: config.pi?.acp ? { ...config.pi.acp } : undefined,
+    piAcp: config.pi?.acp ? acp : undefined,
   };
 }
 
@@ -148,11 +149,28 @@ export function codexModelIssue(status: CodexAuthState["status"]): ModelDiscover
   }
 }
 
+function hasCodexCredentials(env: NodeJS.ProcessEnv): boolean {
+  if (env.OPENAI_API_KEY !== undefined || env.CODEX_API_KEY !== undefined) return true;
+  const codexHome = env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  try {
+    fs.lstatSync(path.join(codexHome, "auth.json"));
+    return true;
+  } catch (error) {
+    // An inaccessible credential path is not evidence that Codex was never set up.
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
 export function describeModelDiscovery(
   config: AppConfig,
   models: ModelOption[],
   piIssue: ModelDiscoveryIssue | undefined,
   codexStatus: CodexAuthState["status"],
+  context: {
+    liveBackends?: Iterable<Backend>;
+    codexPreviouslyAuthenticated?: boolean;
+    codexEnv?: NodeJS.ProcessEnv;
+  } = {},
 ): ModelDiscoverySnapshot {
   const configured = config.projects.model || config.pi?.default_model;
   const defaultModel =
@@ -160,10 +178,35 @@ export function describeModelDiscovery(
       models.map((model) => model.id),
       configured,
     ) ?? null;
+  const referenced = new Set(context.liveBackends);
+  for (const id of [
+    config.projects.model,
+    config.pi?.default_model,
+    ...config.presets.map((p) => p.model),
+  ]) {
+    if (id) referenced.add(models.find((m) => m.id === id)?.backend ?? backendForModel(id));
+  }
   const codexIssue = codexModelIssue(codexStatus);
-  const issues = [piIssue, codexIssue].filter((issue) => issue !== undefined);
+  const issues: ModelDiscoveryIssue[] = [];
+  if (piIssue) {
+    const optional =
+      piIssue.code === "pi_not_configured" &&
+      models.some((model) => model.backend === "codex") &&
+      !referenced.has("pi");
+    issues.push({ ...piIssue, severity: optional ? "info" : "warning" });
+  }
+  if (codexIssue) {
+    const optional =
+      (codexStatus === "unauthenticated" || codexStatus === "unavailable") &&
+      models.some((model) => model.backend === "pi") &&
+      !referenced.has("codex") &&
+      !context.codexPreviouslyAuthenticated &&
+      !hasCodexCredentials(context.codexEnv ?? codexProcessEnv());
+    issues.push({ ...codexIssue, severity: optional ? "info" : "warning" });
+  }
   if (configured && configured !== defaultModel) {
     issues.push({
+      severity: "warning",
       stage: "model-selection",
       code: "configured_model_unavailable",
       value: null,
@@ -185,12 +228,13 @@ export async function probeModelDiscovery(
 ): Promise<ModelDiscoverySnapshot> {
   const host = new LocalHost("model-catalog", "Model catalog");
   try {
+    const codexEnv = codexProcessEnv();
     const [pi, codex] = await Promise.all([
       probePiCatalog(config, dataDir, host),
-      probeCodexAuth(codexProcessEnv()),
+      probeCodexAuth(codexEnv),
     ]);
     const models = availableModelOptions(pi.models, { codexAuthenticated: codex.authenticated });
-    return describeModelDiscovery(config, models, pi.issue, codex.status);
+    return describeModelDiscovery(config, models, pi.issue, codex.status, { codexEnv });
   } finally {
     await host.close();
   }

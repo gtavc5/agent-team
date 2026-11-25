@@ -1,5 +1,6 @@
 import { usePanelT } from "../i18n/panels";
 import { Icon, type IconName } from "./Icon";
+import { telemetryTarget } from "../telemetryEvents";
 
 export interface RailItem {
   id: string;
@@ -10,6 +11,8 @@ export interface RailItem {
   badge?: number;
   // Opens a page over everything rather than a panel beside the chat.
   page?: boolean;
+  quiet?: boolean;
+  telemetry?: Parameters<typeof telemetryTarget>[0];
   onClick: () => void;
 }
 
@@ -22,10 +25,11 @@ export function Rail({ items, className }: { items: RailItem[]; className: strin
       {items.map((i) => (
         <button
           key={i.id}
-          className={`rail-btn${i.page ? " rail-page" : ""}`}
+          className={`rail-btn${i.page ? " rail-page" : ""}${i.quiet ? " rail-btn-quiet" : ""}`}
           aria-label={i.label}
           aria-pressed={i.active}
           title={i.label}
+          {...telemetryTarget(i.telemetry)}
           onClick={i.onClick}
         >
           <Icon name={i.icon} />

@@ -63,10 +63,14 @@ export function settleScroller(el: HTMLElement | null, stickToBottom: boolean): 
 
 // Toggle display on the app shell (must be full viewport height) so WebKit
 // recomputes the viewport; keep the message list's scroll position across it.
-export function healViewport(shell: HTMLElement | null, scroller: HTMLElement | null): void {
+export function healViewport(
+  shell: HTMLElement | null,
+  scroller: HTMLElement | null,
+  following = true,
+): void {
   if (!shell) return;
   const top = scroller?.scrollTop ?? 0;
-  const bottom = scroller ? scroller.clientHeight > 0 && isAtBottom(scroller) : false;
+  const bottom = following && scroller != null && scroller.clientHeight > 0 && isAtBottom(scroller);
   shell.style.display = "none";
   void shell.offsetHeight;
   shell.style.display = "";

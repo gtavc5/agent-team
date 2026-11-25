@@ -52,9 +52,10 @@ describe("summarizeAttention", () => {
       ws("quiet"),
     ];
     expect(summarizeAttention(sessions, "active", [project("p1"), project("p2", NOW)])).toEqual({
-      count: 2,
-      unread: 2,
-      yourTurn: 1,
+      count: 4,
+      unread: 1,
+      yourTurn: 3,
+      failed: 0,
     });
   });
 
@@ -68,29 +69,32 @@ describe("summarizeAttention", () => {
       count: 3,
       unread: 2,
       yourTurn: 1,
+      failed: 0,
     });
     expect(summarizeAttention(sessions, "lead", [project("p1")])).toEqual({
       count: 2,
       unread: 1,
       yourTurn: 1,
+      failed: 0,
     });
     expect(summarizeAttention(sessions, "active", [project("p1", NOW)])).toEqual({
       count: 0,
       unread: 0,
       yourTurn: 0,
+      failed: 0,
     });
   });
 });
 
 describe("describeAttention", () => {
   it("states the session count and your-turn status accessibly", () => {
-    expect(describeAttention({ count: 0, unread: 0, yourTurn: 0 }, "background session")).toBe(
-      "no background sessions need attention",
-    );
-    expect(describeAttention({ count: 1, unread: 1, yourTurn: 0 }, "background session")).toBe(
-      "1 background session needs attention",
-    );
-    expect(describeAttention({ count: 2, unread: 1, yourTurn: 1 })).toBe(
+    expect(
+      describeAttention({ count: 0, unread: 0, yourTurn: 0, failed: 0 }, "background session"),
+    ).toBe("no background sessions need attention");
+    expect(
+      describeAttention({ count: 1, unread: 1, yourTurn: 0, failed: 0 }, "background session"),
+    ).toBe("1 background session needs attention");
+    expect(describeAttention({ count: 2, unread: 1, yourTurn: 1, failed: 0 })).toBe(
       "2 sessions need attention, 1 your turn",
     );
   });

@@ -67,6 +67,18 @@ type = "local"
 # runtime_updates = "manual" # manual | notify | automatic
 # binary = "/absolute/path/to/agy_acp_server.par" # overrides AGY_ACP_BIN; restart required
 
+# Loopback proxy for Pi Antigravity ACP traffic. Changes require a restart.
+# The pool connects directly to upstream; with an outbound proxy configured,
+# it is disabled unless opted in explicitly. AGY_ACP_CCPA_BASE_URL takes precedence.
+# [pi.acp.proxy]
+# enabled = true
+# upstream_url = "https://daily-cloudcode-pa.googleapis.com" # HTTP(S) origin only
+# port = 0                   # 0 lets the OS select a free loopback port
+# ping_interval_ms = 25000
+# ping_timeout_ms = 10000
+# max_retries = 1             # 0 or 1
+# retry_budget_ms = 200000
+
 # Projects (optional): the model a new project's lead runs on, and the
 # workers it starts without naming one. Any model from the picker; effort if
 # the model has it.
@@ -85,7 +97,9 @@ type = "local"
 [user]
 # name = "You"
 # avatar = "avatars/header.jpg"
-language = "简体中文"  # user-facing project replies, questions and summaries only
+# User-facing project chat language only; omit to let agents choose chat language.
+# Repository artifacts, project-board entries, and agent-to-agent instructions stay English.
+language = "简体中文"
 
 # Repeat to replace the built-in agent presets; omitted or empty uses built-ins.
 # A project worker can use a preset by exact name, with model and effort overrides.

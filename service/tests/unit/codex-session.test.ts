@@ -116,13 +116,18 @@ class FakeServer {
     });
   }
 
-  item(phase: "started" | "completed", item: Record<string, unknown>, threadId = "thr_1"): void {
+  item(
+    phase: "started" | "completed",
+    item: Record<string, unknown>,
+    threadId = "thr_1",
+    turnId = "t",
+  ): void {
     const method = `item/${phase}`;
     const sample = codexFields(`${method}:${String(item.type)}`);
     this.notify(method, {
       ...sample,
       threadId,
-      turnId: "t",
+      turnId,
       item: { ...(sample.item as Record<string, unknown>), ...item },
     });
   }
@@ -671,9 +676,9 @@ describe("codex app-server session", () => {
     expect(server.sent("turn/start")).toEqual([]);
     expect(server.sent("thread/compact/start")).toEqual([{ threadId: "thr_1" }]);
     server.startTurn("turn_c");
-    server.item("started", { type: "contextCompaction", id: "k" });
-    server.item("completed", { type: "contextCompaction", id: "k" });
-    server.notify("thread/tokenUsage/updated", {
+    const item = { type: "contextCompaction", id: "k" };
+    server.item("started", item, "thr_1", "turn_c");
+    const usage = {
       threadId: "thr_1",
       turnId: "turn_c",
       tokenUsage: {
@@ -686,7 +691,7 @@ describe("codex app-server session", () => {
           reasoningOutputTokens: 400,
         },
         last: {
-          totalTokens: 5000,
+          totalTokens: 9999,
           inputTokens: 4500,
           cachedInputTokens: 4000,
           cacheWriteInputTokens: 0,
@@ -695,10 +700,13 @@ describe("codex app-server session", () => {
         },
         modelContextWindow: 258400,
       },
-    });
+    };
+    server.notify("thread/tokenUsage/updated", usage);
+    server.item("completed", item, "thr_1", "turn_c");
     server.completeTurn("completed", null, "turn_c");
     expect(events.map((e) => e.kind)).toEqual(["compact", "result"]);
-    expect(events[1].context).toEqual({ tokens: 4800, window: 258400 });
+    for (const e of events)
+      expect(e.context).toEqual({ tokens: 4800, window: 258400, estimated: true });
     expect(session.usage).toMatchObject({
       input_tokens: 500,
       cache_read_tokens: 4000,
@@ -706,6 +714,32 @@ describe("codex app-server session", () => {
       turns: 1,
     });
     expect(await session.getContextUsage()).toMatchObject({ totalTokens: 4800, maxTokens: 258400 });
+
+    await session.send("/compact");
+    server.startTurn("failed-compact");
+    server.completeTurn("failed", overloaded, "failed-compact");
+    expect(events.at(-1)).not.toHaveProperty("context");
+    expect(await session.getContextUsage()).toMatchObject({ totalTokens: 4800, maxTokens: 258400 });
+
+    await session.send("next");
+    server.startTurn("next");
+    server.notify("thread/tokenUsage/updated", usage); // Late update from the old turn.
+    server.completeTurn("completed", null, "next");
+    expect(events.at(-1)?.context).toBeNull();
+    expect(await session.getContextUsage()).toBeNull();
+
+    await session.send("invalid reasoning count");
+    server.startTurn("invalid");
+    server.notify("thread/tokenUsage/updated", {
+      ...usage,
+      turnId: "invalid",
+      tokenUsage: {
+        ...usage.tokenUsage,
+        last: { ...usage.tokenUsage.last, reasoningOutputTokens: 501 },
+      },
+    });
+    server.completeTurn("completed", null, "invalid");
+    expect(events.at(-1)?.context).toBeNull();
   });
 
   it("takes a turn codex starts itself as a wake-up", async () => {

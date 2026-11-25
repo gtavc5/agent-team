@@ -1,14 +1,26 @@
-import { recordTelemetry } from "../telemetry";
+import { telemetryTarget } from "../telemetryEvents";
 import type { QuotaState } from "../../../shared/quota";
-import { memo, useState, useEffect, useId, useRef } from "react";
+import {
+  memo,
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useId,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import type { Workspace, Project, SystemStatus, SearchHit } from "../state/useServer";
 import {
   groupWorkspaces,
   isGroupExpanded,
   archivedWorkspaces,
+  canFoldWorker,
+  initialIdleWorkers,
+  workspaceStatus,
+  type GroupStatus,
   type WorkspaceGroup,
 } from "./groups";
-import { isAgentActive } from "../workspace/agents";
 import { Icon } from "../panels/Icon";
 import { DEFAULT_BRANCH } from "../panels/scope";
 import { formatBytes, formatRelative } from "../format";
@@ -19,7 +31,37 @@ import { NameInput } from "../project/NameInput";
 import { ConfirmDialog } from "../workspace/dialogs";
 import { QuotaPanel } from "./QuotaPanel";
 import { formatShortDateTime, quotaTone } from "./quota";
-import { describeAttention, summarizeAttention } from "./attention";
+import { attentionBreakdown, sessionAttention, summarizeAttention } from "./attention";
+import { StreamSilence } from "./StreamSilence";
+
+interface ThemeController {
+  get: () => "light" | "dark";
+  subscribe: (listener: () => void) => () => void;
+  toggle: () => void;
+}
+
+declare global {
+  interface Window {
+    // Installed synchronously by index.html, not by isolated component mounts.
+    yaatTheme?: ThemeController;
+  }
+}
+
+function ThemeToggle({ controller }: { controller: ThemeController }) {
+  const tr = useWorkspaceT();
+  const dark = useSyncExternalStore(controller.subscribe, controller.get) === "dark";
+  return (
+    <button
+      type="button"
+      aria-label={tr("darkTheme")}
+      aria-pressed={dark}
+      title={tr("darkTheme")}
+      onClick={controller.toggle}
+    >
+      <Icon name={dark ? "moon" : "sun"} />
+    </button>
+  );
+}
 
 function gitTitle(git: { dirty: number; ahead: number; behind: number }): string {
   const parts: string[] = [];
@@ -30,6 +72,27 @@ function gitTitle(git: { dirty: number; ahead: number; behind: number }): string
   if (git.ahead) parts.push(tWorkspace("gitAhead", { count: git.ahead }));
   if (git.behind) parts.push(tWorkspace("gitBehind", { count: git.behind }));
   return parts.length ? parts.join(tWorkspace("gitListSep")) : tWorkspace("gitClean");
+}
+
+function SessionWait({ workspace }: { workspace: Workspace }) {
+  const tr = useWorkspaceT();
+  const retry = workspace.agents.find((a) => a.retryLabel)?.retryLabel;
+  if (retry) {
+    const attempt = retry.match(/\bRetrying (?:in \d+s )?\((\d+)\b/)?.[1];
+    return (
+      <span className="session-silence" title={retry}>
+        {attempt ? tr("retryingSessionAttempt", { attempt }) : tr("retryingSession")}
+      </span>
+    );
+  }
+  return <StreamSilence workspace={workspace} />;
+}
+
+function statusDotClass(state: GroupStatus): string {
+  if (state === "working") return "running";
+  if (state === "waiting") return "waiting";
+  if (state === "sleeping") return "waiting sleeping";
+  return "idle";
 }
 
 const STATUS_COLORS = { danger: "var(--error)", warn: "var(--warning)", normal: "var(--accent)" };
@@ -84,7 +147,6 @@ export interface SidebarProps {
   // Mobile keeps the drawer mounted while it is translated off screen.
   sidebarOpen?: boolean;
   groupOverrides: Record<string, boolean>;
-  finishedStatus: Record<string, "done" | "failed">;
   searchQuery: string;
   searchHits: SearchHit[] | null;
   systemStatus: SystemStatus | null;
@@ -103,10 +165,12 @@ export interface SidebarProps {
   // Create a workspace in a group's folder (the "+" on the group header).
   onCreateIn: (cwd: string) => void;
   onReplayDemo: () => void;
+  onOpenUsage?: () => void;
   // Capture synchronously, then save a layout snapshot on the server.
   onDebugSnapshot: () => void | Promise<unknown>;
   // One project's archived sessions, or (null) those in no project.
   onPurgeArchived: (projectId: string | null) => void;
+  onArchiveWorkspace?: (wsId: string) => void;
   onArchiveProject?: (projectId: string) => void;
   onRenameProject?: (projectId: string, name: string) => void;
   onRestoreProject?: (projectId: string) => void;
@@ -151,7 +215,13 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           typeof report === "object" &&
           "issues" in report &&
           Array.isArray(report.issues) &&
-          report.issues.length === 0
+          report.issues.every(
+            (issue: unknown) =>
+              !!issue &&
+              typeof issue === "object" &&
+              "severity" in issue &&
+              issue.severity === "info",
+          )
             ? "healthy"
             : "unhealthy";
       } catch {
@@ -246,6 +316,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
     const project = link?.role === "lead" && known.has(link.projectId) ? link.projectId : null;
     return (
       <button
+        type="button"
         className="task-delete"
         title={project ? tr("deleteProject") : tr("deleteSession")}
         onClick={(e) => {
@@ -258,7 +329,47 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       </button>
     );
   };
-  const groups = groupWorkspaces(p.workspaces, p.projects);
+  const groups = useMemo(
+    () => groupWorkspaces(p.workspaces, p.projects, tr("noPath")),
+    [p.workspaces, p.projects, tr],
+  );
+  const [foldedIdle, setFoldedIdle] = useState<ReadonlySet<string>>(
+    () => new Set(groups.flatMap((g) => initialIdleWorkers(g, p.activeWsId, now))),
+  );
+  const [showIdle, setShowIdle] = useState<ReadonlySet<string>>(new Set());
+  const bootstrapped = useRef(groups.length > 0);
+  const expandedDefaults = useRef(new Map<string, boolean>());
+  useLayoutEffect(() => {
+    if (!bootstrapped.current && groups.length) {
+      bootstrapped.current = true;
+      setFoldedIdle(new Set(groups.flatMap((g) => initialIdleWorkers(g, p.activeWsId, now))));
+    } else {
+      // A visible worker never folds itself after settling. Once promoted,
+      // it stays in the main list until the reader explicitly folds it.
+      setFoldedIdle((prev) => {
+        const promoted = p.workspaces.filter(
+          (w) => prev.has(w.id) && !canFoldWorker(w, p.activeWsId),
+        );
+        if (!promoted.length) return prev;
+        const next = new Set(prev);
+        for (const w of promoted) next.delete(w.id);
+        return next;
+      });
+    }
+    for (const g of groups) {
+      if (!expandedDefaults.current.has(g.key) || g.workspaces.some((w) => w.id === p.activeWsId)) {
+        expandedDefaults.current.set(
+          g.key,
+          isGroupExpanded(
+            g,
+            {},
+            now,
+            g.workspaces.some((w) => w.id === p.activeWsId),
+          ),
+        );
+      }
+    }
+  }, [groups, p.workspaces, p.activeWsId, now]);
   const archived = archivedWorkspaces(p.workspaces, p.projects);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const activeIsArchived = archived.some((w) => w.id === p.activeWsId);
@@ -274,7 +385,6 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
   // Groups whose archived sessions are unfolded.
   const [openArchives, setOpenArchives] = useState<ReadonlySet<string>>(new Set());
   const toggleArchive = (key: string) => {
-    recordTelemetry("sidebar.archive_toggle");
     setOpenArchives((prev) => {
       const next = new Set(prev);
       if (!next.delete(key)) next.add(key);
@@ -316,6 +426,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           className="ws-archive-toggle"
           role="button"
           aria-expanded={open}
+          {...telemetryTarget("sidebar.archive_toggle")}
           onClick={() => toggleArchive(g.key)}
         >
           <span className="events-toggle">{open ? "▾" : "▸"}</span>
@@ -348,12 +459,10 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
   // A folder's group or a project's (its row is its lead), with its archived
   // sessions folded under it; `shelf` for an archived project's.
   const renderGroup = (g: WorkspaceGroup, shelf = false) => {
-    const expanded = isGroupExpanded(
-      g,
-      p.groupOverrides,
-      now,
-      [...g.workspaces, ...g.archived].some((w) => w.id === p.activeWsId),
-    );
+    const current = [...g.workspaces, ...g.archived].some((w) => w.id === p.activeWsId);
+    const expanded =
+      p.groupOverrides[g.key] ??
+      (current || (expandedDefaults.current.get(g.key) ?? isGroupExpanded(g, {}, now)));
     const toggle = () => p.onToggleGroup(g.key, !expanded);
     // A project's own row is its lead, archived with it or not: it opens the
     // lead, which is not listed again under it; the arrow folds the sessions
@@ -363,14 +472,109 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       : undefined;
     const items = g.workspaces.filter((w) => w !== lead);
     const past = g.archived.filter((w) => w !== lead);
-    const leadUnread = lead?.unread ?? 0;
-    const attention = summarizeAttention(g.workspaces, p.activeWsId, g.project ? [g.project] : []);
+    const attention = summarizeAttention(g.workspaces, null, g.project ? [g.project] : []);
+    const summary = attentionBreakdown(attention);
+    const idle = items.filter((w) => foldedIdle.has(w.id) && canFoldWorker(w, p.activeWsId));
+    const visible = items.filter((w) => !idle.includes(w));
+    const foldable =
+      !shelf && g.project ? visible.filter((w) => canFoldWorker(w, p.activeWsId)) : [];
+    const idleOpen = showIdle.has(g.key);
+    const toggleIdle = () =>
+      setShowIdle((prev) => {
+        const next = new Set(prev);
+        if (!next.delete(g.key)) next.add(g.key);
+        return next;
+      });
+    const foldIdle = () => {
+      setFoldedIdle((prev) => new Set([...prev, ...foldable.map((w) => w.id)]));
+      setShowIdle((prev) => {
+        const next = new Set(prev);
+        next.delete(g.key);
+        return next;
+      });
+    };
     const hasContent = items.length > 0 || past.length > 0;
     // A project of archived sessions only (its lead archived too) has no live one.
     const git = (g.workspaces[0] ?? g.archived[0])?.git;
-    // The group of the open session: on touch only its row offers a new one.
-    const current = [...g.workspaces, ...g.archived].some((w) => w.id === p.activeWsId);
     const groupTitlePath = g.key === "(no path)" ? tr("noPath") : g.key;
+    const isRenaming = Boolean(g.project && renaming === g.project.id);
+    const canAdd = !g.project || Boolean(g.project.root && g.project.status !== "sealed");
+    const canArchiveProject =
+      !shelf && Boolean(g.project && g.project.status !== "sealed" && p.onArchiveProject);
+    const canRestoreProject =
+      shelf && Boolean(g.project && g.project.status !== "sealed" && p.onRestoreProject);
+    const leadDelete = lead ? deleteButton(lead) : null;
+    const hasActions =
+      !isRenaming && (canAdd || canArchiveProject || canRestoreProject || Boolean(leadDelete));
+    const renderWorkerItem = (ws: Workspace) => {
+      const state = workspaceStatus(ws);
+      const busy = state === "working" || state === "waiting";
+      const cue = sessionAttention(ws);
+      const owner = ws.projectLink
+        ? p.projects?.find((project) => project.id === ws.projectLink!.projectId)
+        : undefined;
+      const canArchive =
+        Boolean(p.onArchiveWorkspace) &&
+        ws.archivedAt == null &&
+        ws.projectLink?.role !== "lead" &&
+        owner?.status !== "sealed" &&
+        !busy &&
+        !ws.queued;
+      return (
+        <div
+          key={ws.id}
+          className={`task-item ${ws.id === p.activeWsId ? "active" : ""}${busy ? " task-item-active" : ""}`}
+          onClick={() => p.onSelect(ws.id)}
+        >
+          <div className={`task-status ${statusDotClass(state)}`} aria-hidden="true" />
+          <div className="task-info">
+            <div className="task-name">
+              <span className="task-name-text">
+                <RoleTag link={ws.projectLink} />
+                <span className="clip" title={ws.name}>
+                  {ws.name}
+                </span>
+              </span>
+              {cue ? (
+                <span
+                  className={`session-attention attention-${cue}${cue === "yourTurn" ? " awaits-tag" : ""}`}
+                >
+                  {tr(
+                    cue === "yourTurn"
+                      ? "yourTurnStatus"
+                      : cue === "failed"
+                        ? "failedSession"
+                        : "unreadResult",
+                  )}
+                </span>
+              ) : p.connected ? (
+                <SessionWait workspace={ws} />
+              ) : null}
+            </div>
+          </div>
+          <span className="task-hover">
+            <span className="task-time">
+              {formatRelative(ws.lastMessageAt ?? ws.createdAt, now)}
+            </span>
+            {canArchive && (
+              <button
+                type="button"
+                className="task-archive"
+                title={tr("archiveSession")}
+                aria-label={tr("archiveSession")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  p.onArchiveWorkspace!(ws.id);
+                }}
+              >
+                <Icon name="archive" />
+              </button>
+            )}
+            {deleteButton(ws)}
+          </span>
+        </div>
+      );
+    };
     return (
       <div key={g.key} className="ws-group">
         <div
@@ -389,6 +593,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             <span className="events-toggle" />
           ) : lead ? (
             <button
+              type="button"
               className="events-toggle ws-group-toggle"
               aria-label={
                 expanded ? tr("foldGroup", { name: g.label }) : tr("unfoldGroup", { name: g.label })
@@ -404,7 +609,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           ) : (
             <span className="events-toggle">{expanded ? "▾" : "▸"}</span>
           )}
-          {g.project && renaming === g.project.id ? (
+          {isRenaming ? (
             <NameInput
               name={g.label}
               label={tr("projectNameLabel")}
@@ -435,122 +640,126 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               {tr("sealed")}
             </span>
           )}
-          {expanded && leadUnread > 0 && lead!.id !== p.activeWsId && (
-            <span className="unread-badge">{leadUnread}</span>
-          )}
           {git?.branch && !DEFAULT_BRANCH.test(git.branch) && (
             <span className="ws-group-branch" title={gitTitle(git)}>
               {git.branch}
             </span>
           )}
-          {(!g.project || (g.project.root && g.project.status !== "sealed")) && (
-            <button
-              className="ws-group-add"
-              title={
-                g.project
-                  ? tr("newSessionIn", { name: g.project.name })
-                  : tr("newWorkspaceIn", { path: groupTitlePath })
-              }
-              onClick={(e) => {
-                e.stopPropagation();
-                p.onCreateIn(g.project?.root ?? g.key);
-              }}
-            >
-              <Icon name="plus" />
-            </button>
-          )}
-          {!expanded &&
-            (g.project && attention.count > 0 ? (
-              <span
-                className="ws-group-attention"
-                role="status"
-                aria-label={`${g.label}: ${describeAttention(attention)}`}
-                title={describeAttention(attention)}
-              >
+          {!isRenaming && (
+            <span className="ws-group-status">
+              {g.status !== "idle" && (
+                <span className={`task-status ${statusDotClass(g.status)}`} aria-hidden="true" />
+              )}
+              {g.project && summary ? (
                 <span
-                  className={`attention-badge${attention.yourTurn > 0 ? " attention-badge-your-turn" : ""}`}
-                  aria-hidden="true"
+                  className={`ws-group-attention attention-${attention.yourTurn ? "yourTurn" : attention.failed ? "failed" : "unread"}`}
+                  role="status"
+                  aria-label={`${g.label}: ${summary}`}
+                  title={summary}
                 >
-                  {attention.count}
+                  {summary}
                 </span>
-                {attention.yourTurn > 0 && (
-                  <span className="awaits-tag" aria-hidden="true">
-                    {tr("yourTurn")}
-                  </span>
-                )}
-              </span>
-            ) : (
-              items.length > 0 && <span className="ws-group-count">{items.length}</span>
-            ))}
-          {g.running && <span className="streaming-dot" />}
-          {!shelf && g.project && g.project.status !== "sealed" && p.onArchiveProject && (
-            <button
-              className="ws-group-pill ws-group-archive"
-              title={tr("archiveProjectWithSessions", { name: g.label })}
-              onClick={(e) => {
-                e.stopPropagation();
-                p.onArchiveProject!(g.project!.id);
-              }}
-            >
-              {tr("archive")}
-            </button>
+              ) : lead && p.connected ? (
+                <SessionWait workspace={lead} />
+              ) : null}
+              {!expanded && !summary && items.length > 0 && (
+                <span className="ws-group-count">{items.length}</span>
+              )}
+            </span>
           )}
-          {shelf && g.project && g.project.status !== "sealed" && p.onRestoreProject && (
-            <button
-              className="ws-group-pill"
-              title={tr("restoreProjectTooltip", { name: g.label })}
-              onClick={(e) => {
-                e.stopPropagation();
-                p.onRestoreProject!(g.project!.id);
-              }}
-            >
-              {tr("restore")}
-            </button>
+          {hasActions && (
+            <span className="ws-group-actions">
+              {canAdd && (
+                <button
+                  type="button"
+                  className="ws-group-add"
+                  title={
+                    g.project
+                      ? tr("newSessionIn", { name: g.project.name })
+                      : tr("newWorkspaceIn", { path: groupTitlePath })
+                  }
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    p.onCreateIn(g.project?.root ?? g.key);
+                  }}
+                >
+                  <Icon name="plus" />
+                </button>
+              )}
+              {canArchiveProject && (
+                <button
+                  type="button"
+                  className="ws-group-pill ws-group-archive"
+                  title={tr("archiveProjectWithSessions", { name: g.label })}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    p.onArchiveProject!(g.project!.id);
+                  }}
+                >
+                  {tr("archive")}
+                </button>
+              )}
+              {canRestoreProject && (
+                <button
+                  type="button"
+                  className="ws-group-pill"
+                  title={tr("restoreProjectTooltip", { name: g.label })}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    p.onRestoreProject!(g.project!.id);
+                  }}
+                >
+                  {tr("restore")}
+                </button>
+              )}
+              {leadDelete}
+            </span>
           )}
-          {lead && deleteButton(lead)}
         </div>
         {expanded && hasContent && (
           <div className="ws-group-items">
-            {items.map((ws) => {
-              const running = ws.agents.some(isAgentActive);
-              const unread = ws.unread ?? 0;
-              const awaits = ws.awaitsUser && !running && ws.id !== p.activeWsId;
-              return (
-                <div
-                  key={ws.id}
-                  className={`task-item ${ws.id === p.activeWsId ? "active" : ""}${running ? " task-item-active" : ""}`}
-                  onClick={() => p.onSelect(ws.id)}
-                >
-                  <div
-                    className={`task-status ${running ? "running" : (p.finishedStatus[ws.id] ?? "idle")}`}
-                  />
-                  <div className="task-info">
-                    <div className="task-name">
-                      <span className="task-name-text">
-                        <RoleTag link={ws.projectLink} />
-                        <span className="clip" title={ws.name}>
-                          {ws.name}
-                        </span>
-                        {awaits && (
-                          <span className="awaits-tag" title={tr("waitingForYourReply")}>
-                            {tr("yourTurn")}
-                          </span>
-                        )}
-                        {unread > 0 && ws.id !== p.activeWsId && (
-                          <span className="unread-badge">{unread}</span>
-                        )}
-                      </span>
-                    </div>
-                  </div>
-                  <span className="task-hover">
-                    <span className="task-time">
-                      {formatRelative(ws.lastMessageAt ?? ws.createdAt, now)}
+            {visible.map(renderWorkerItem)}
+            {idle.length > 0 ? (
+              <>
+                <div className="ws-idle-row">
+                  <button
+                    type="button"
+                    className="ws-idle-toggle"
+                    aria-expanded={idleOpen}
+                    onClick={toggleIdle}
+                  >
+                    <span className="events-toggle" aria-hidden="true">
+                      {idleOpen ? "▾" : "▸"}
                     </span>
-                    {deleteButton(ws)}
-                  </span>
+                    <span className="ws-idle-label">
+                      {tr("idleSessions", { count: idle.length })}
+                    </span>
+                  </button>
+                  {foldable.length > 0 && (
+                    <button
+                      type="button"
+                      className="ws-idle-fold"
+                      title={tr(foldable.length === 1 ? "foldIdleTitle" : "foldIdlePluralTitle", {
+                        count: foldable.length,
+                      })}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        foldIdle();
+                      }}
+                    >
+                      {tr("foldMoreIdle", { count: foldable.length })}
+                    </button>
+                  )}
                 </div>
-              );
-            })}
+                {idleOpen && idle.map(renderWorkerItem)}
+              </>
+            ) : foldable.length > 0 ? (
+              <div className="ws-idle-row">
+                <button type="button" className="ws-idle-toggle" onClick={foldIdle}>
+                  {tr("foldIdle", { count: foldable.length })}
+                </button>
+              </div>
+            ) : null}
             {past.length > 0 && archiveList(g, past)}
           </div>
         )}
@@ -565,6 +774,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           {tr("workspaces")} {!p.connected && <span className="disconnected">{tr("offline")}</span>}
         </span>
         <span className="sidebar-actions">
+          {window.yaatTheme && <ThemeToggle controller={window.yaatTheme} />}
           <button title={tr("newSession")} onClick={p.onCreate}>
             <Icon name="plus" />
           </button>
@@ -573,6 +783,15 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               <Icon name="board" />
             </button>
           )}
+          <button
+            type="button"
+            title={tr("openUsage")}
+            aria-label={tr("openUsage")}
+            aria-haspopup="dialog"
+            onClick={p.onOpenUsage}
+          >
+            <Icon name="usage" />
+          </button>
           <button
             ref={debugTrigger}
             type="button"
@@ -645,7 +864,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
         <input
           type="text"
           value={p.searchQuery}
-          onFocus={() => recordTelemetry("sidebar.search")}
+          {...telemetryTarget("sidebar.search")}
           onChange={(e) => p.onSearchChange(e.target.value)}
           placeholder={tr("searchMessagesPlaceholder")}
           autoComplete="off"
@@ -686,10 +905,8 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             <div className="ws-group ws-shelf">
               <div
                 className="ws-group-header ws-archived-header"
-                onClick={() => {
-                  recordTelemetry("sidebar.archive_toggle");
-                  setShelfOpen((v) => !v);
-                }}
+                {...telemetryTarget("sidebar.archive_toggle")}
+                onClick={() => setShelfOpen((v) => !v)}
                 title={tr("archivedProjectsTitle")}
               >
                 <span className="events-toggle">{showShelf ? "▾" : "▸"}</span>
@@ -703,10 +920,8 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             <div className="ws-group ws-archived">
               <div
                 className="ws-group-header ws-archived-header"
-                onClick={() => {
-                  recordTelemetry("sidebar.archive_toggle");
-                  setArchivedOpen((v) => !v);
-                }}
+                {...telemetryTarget("sidebar.archive_toggle")}
+                onClick={() => setArchivedOpen((v) => !v)}
                 title={tr("archivedWorkspacesTitle")}
               >
                 <span className="events-toggle">{showArchived ? "▾" : "▸"}</span>
@@ -737,7 +952,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       {p.quota && (
         <QuotaPanel quota={p.quota} refresh={p.onRefreshQuota} now={now} connected={p.connected} />
       )}
-      {p.systemStatus && <SystemStatusPanel status={p.systemStatus} />}
+      {debugOpen && p.systemStatus && <SystemStatusPanel status={p.systemStatus} />}
       {deleting && (
         <ConfirmDialog
           telemetryAction="confirm.delete_session"

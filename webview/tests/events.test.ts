@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { splitEvents, timelineBlocks, hasRunningSubagents } from "../src/chat/events";
+import { splitEvents, timelineBlocks, hasOutstandingSubagents } from "../src/chat/events";
 import { StreamEvent } from "../src/state/useServer";
 
 const ev = (kind: string, over: Partial<StreamEvent> = {}): StreamEvent => ({
@@ -73,10 +73,10 @@ describe("splitEvents", () => {
   });
 });
 
-describe("hasRunningSubagents", () => {
+describe("hasOutstandingSubagents", () => {
   it("is true while any subagent_start is still in the running state", () => {
     expect(
-      hasRunningSubagents([
+      hasOutstandingSubagents([
         ev("subagent_start", { subagent: { taskId: "a", description: "", status: "running" } }),
       ]),
     ).toBe(true);
@@ -84,14 +84,14 @@ describe("hasRunningSubagents", () => {
 
   it("is false for terminal states, plain events, or no events", () => {
     expect(
-      hasRunningSubagents([
+      hasOutstandingSubagents([
         ev("subagent_start", { subagent: { taskId: "a", description: "", status: "completed" } }),
         ev("subagent_start", { subagent: { taskId: "b", description: "", status: "stopped" } }),
         ev("tool_use"),
       ]),
     ).toBe(false);
-    expect(hasRunningSubagents([])).toBe(false);
-    expect(hasRunningSubagents(undefined)).toBe(false);
+    expect(hasOutstandingSubagents([])).toBe(false);
+    expect(hasOutstandingSubagents(undefined)).toBe(false);
   });
 });
 

@@ -149,10 +149,14 @@ describe("StopControl localization", () => {
     const onStop = vi.fn();
     const { rerender } = render(<StopControl busyAgents={[ALICE]} onStop={onStop} />);
     const single = screen.getByRole("button", { name: "停止 Alice" });
-    expect(single.getAttribute("title")).toBe("停止 Alice 的当前轮次；后台任务将继续运行");
+    expect(single.getAttribute("title")).toBe("停止 Alice 的当前轮次");
+    expect(single.getAttribute("aria-description")).toBe(
+      "中断当前轮次。如果无法中断，代理进程可能会停止。",
+    );
 
     rerender(<StopControl busyAgents={[ALICE, BOB]} onStop={onStop} />);
     const trigger = screen.getByRole("button", { name: "停止运行中的代理 (2)" });
+    expect(trigger.title).toBe("选择要停止的当前轮次");
     fireEvent.click(trigger);
     const group = within(screen.getByRole("group", { name: "停止运行中的轮次" }));
     expect(group.getByRole("button", { name: "停止 Alice" })).toBeTruthy();

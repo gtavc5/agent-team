@@ -10,9 +10,11 @@ import {
   createContext,
   useContext,
 } from "react";
+import { telemetryTarget } from "../telemetryEvents";
 import type { ReactNode } from "react";
 import type { Message, MessageOrigin, AgentInfo, StreamEvent } from "../state/useServer";
-import { isTerminalSubagent, timelineBlocks, type TimelineBlock } from "./events";
+import { hasOutstandingSubagents, timelineBlocks, type TimelineBlock } from "./events";
+import { isOutstandingSubagentStatus, type SubagentStatus } from "../../../shared/subagent-status";
 import { toolNameOf, toolSummary } from "../state/stream";
 import { copySelectionAsMarkdown } from "./clipboard";
 import { CodeBlock, CopyButton, FileRefCode, MdBlock, StreamingMdBlock } from "./markdown";
@@ -29,6 +31,7 @@ import {
 } from "../format";
 import { shortModel } from "../workspace/models";
 import { t, useT, type ChatKey } from "../i18n/chat";
+import { agentNameColor } from "../workspace/agents";
 
 function renderMentionContent(content: string, agents: AgentInfo[]) {
   const match = content.match(/^@(\S+)(\s+|$)/);
@@ -42,7 +45,11 @@ function renderMentionContent(content: string, agents: AgentInfo[]) {
     <>
       <span
         className="mention-pill"
-        style={mentioned ? { background: mentioned.color } : undefined}
+        style={
+          mentioned
+            ? { background: `color-mix(in srgb, ${mentioned.color} 12%, transparent)` }
+            : undefined
+        }
       >
         @{mentionName}
       </span>
@@ -297,7 +304,7 @@ export function chipLabelFor(toolName: string): string {
 // header. Thinking time and tokens show on the blocks in the steps.
 export function MessageStatus({ msg }: { msg: Message }) {
   const tr = useT();
-  if (!msg.effort && !msg.fast && !msg.context) return null;
+  if (!msg.effort && !msg.fast && msg.context === undefined) return null;
   const ctx = msg.context;
   const pct =
     ctx && ctx.window > 0 ? Math.min(100, Math.round((ctx.tokens / ctx.window) * 100)) : null;
@@ -314,10 +321,11 @@ export function MessageStatus({ msg }: { msg: Message }) {
           {tr("fastChip")}
         </span>
       )}
+      {ctx === null && <span className="status-chip ctx-chip">{tr("contextUnknown")}</span>}
       {ctx && pct != null && (
         <span
           className={`status-chip ctx-chip${tone}`}
-          title={tr("context", {
+          title={tr(ctx.estimated ? "contextEstimate" : "context", {
             tokens: ctx.tokens.toLocaleString(),
             window: ctx.window.toLocaleString(),
           })}
@@ -326,7 +334,7 @@ export function MessageStatus({ msg }: { msg: Message }) {
             <span className="ctx-bar-fill" style={{ width: `${pct}%` }} />
           </span>
           {tr("contextChip", {
-            tokens: formatTokens(ctx.tokens),
+            tokens: `${formatTokens(ctx.tokens)}`,
             window: formatTokens(ctx.window),
             pct,
           })}
@@ -517,12 +525,21 @@ export const EventItem = memo(function EventItem({
           </span>
         )}
         {hasHiddenBody && (
-          <button className="btn-inline" onClick={toggleBody}>
+          <button
+            className="btn-inline"
+            {...telemetryTarget("trace.tool_toggle")}
+            onClick={toggleBody}
+          >
             {bodyOpen ? tr("hide") : tr("details")}
           </button>
         )}
         {(isResult || hasResult) && (
-          <button className="btn-inline btn-diff" aria-expanded={resultOpen} onClick={toggleResult}>
+          <button
+            className="btn-inline btn-diff"
+            aria-expanded={resultOpen}
+            {...telemetryTarget("trace.tool_toggle")}
+            onClick={toggleResult}
+          >
             {isResult
               ? resultOpen
                 ? tr("hide")
@@ -547,6 +564,7 @@ export const EventItem = memo(function EventItem({
       {(bodyMissing || (toolBodyMissing && !bodyOpen)) && (
         <div
           className="event-content event-placeholder"
+          {...telemetryTarget("trace.tool_toggle")}
           onClick={isResult ? toggleResult : toggleBody}
         >
           {tr("tapToLoad", {
@@ -638,11 +656,25 @@ function useBottomCollapse(open: boolean, close: () => void) {
   };
 }
 
-function BottomCollapse({ onClick, label }: { onClick: () => void; label: string }) {
+function BottomCollapse({
+  onClick,
+  label,
+  action,
+}: {
+  onClick: () => void;
+  label: string;
+  action: "trace.step_toggle" | "trace.subagent_toggle";
+}) {
   const tr = useT();
   return (
     <div className="trace-collapse-footer">
-      <button type="button" className="trace-collapse" onClick={onClick} aria-label={label}>
+      <button
+        type="button"
+        className="trace-collapse"
+        {...telemetryTarget(action)}
+        onClick={onClick}
+        aria-label={label}
+      >
         <span aria-hidden="true">▴</span> {tr("collapse")}
       </button>
     </div>
@@ -652,6 +684,17 @@ function BottomCollapse({ onClick, label }: { onClick: () => void; label: string
 function hasVisibleEventBody(ev: StreamEvent): boolean {
   return ev.kind !== "thinking" || !!ev.content.trim() || (ev.contentLength ?? 0) > 0;
 }
+
+const SUBAGENT_STATUS_ICONS: Record<SubagentStatus, string> = {
+  queued: "◷",
+  running: "↻",
+  completed: "✓",
+  failed: "✗",
+  partial: "◐",
+  paused: "Ⅱ",
+  stopped: "◼",
+  rejected: "⊘",
+};
 
 export const SubAgentItem = memo(function SubAgentItem({
   ev,
@@ -671,31 +714,29 @@ export const SubAgentItem = memo(function SubAgentItem({
   // The server holds more of the transcript than the client (a summary
   // page, or a live tail that arrived after the summary).
   const needsLoad = !!sa && (sa.eventCount ?? 0) > (sa.events?.length ?? 0);
+  const transcriptRevision = sa?.transcriptRevision;
   useEffect(() => {
     if (open && needsLoad && onLoadEvents && sa?.taskId) onLoadEvents(sa.taskId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch once per open/needsLoad flip; sa and onLoadEvents change identity on every stream update
-  }, [open, needsLoad]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch once per open/needsLoad flip or transcript replacement; sa and onLoadEvents change identity on every stream update
+  }, [open, needsLoad, transcriptRevision]);
   if (!sa) return null;
 
-  const isRunning = !isTerminalSubagent(ev);
-  const statusIcon = isRunning
-    ? "↻"
-    : sa.status === "completed"
-      ? "✓"
-      : sa.status === "stopped"
-        ? "◼"
-        : "✗";
-  const statusCls = isRunning ? "running" : (sa.status ?? "failed");
-  const statusTitle =
-    statusCls === "running"
-      ? tr("subagentStatusRunning")
-      : statusCls === "completed"
-        ? tr("subagentStatusCompleted")
-        : statusCls === "stopped"
-          ? tr("subagentStatusStopped")
-          : statusCls === "failed"
-            ? tr("subagentStatusFailed")
-            : statusCls;
+  const status = sa.status ?? (ev.kind === "subagent_done" ? "failed" : "stopped");
+  const outstanding = isOutstandingSubagentStatus(status);
+  const statusTitle = tr(
+    (
+      {
+        queued: "subagentStatusQueued",
+        running: "subagentStatusRunning",
+        completed: "subagentStatusCompleted",
+        stopped: "subagentStatusStopped",
+        failed: "subagentStatusFailed",
+        partial: "subagentStatusPartial",
+        paused: "subagentStatusPaused",
+        rejected: "subagentStatusRejected",
+      } as const
+    )[status],
+  );
 
   const allInner = sa.events ?? [];
   const hasBody = !!(sa.prompt || sa.summary || sa.usage || allInner.some(hasVisibleEventBody));
@@ -709,7 +750,7 @@ export const SubAgentItem = memo(function SubAgentItem({
   // Its time is in the header, measured from this run's start: the CLI's
   // counts from the first, a resumed agent's idle time between included.
   // Records from before it was measured: the CLI's time of a finished agent.
-  const ran = sa.durationMs ?? (isRunning ? undefined : sa.usage?.durationMs);
+  const ran = sa.durationMs ?? (outstanding ? undefined : sa.usage?.durationMs);
   const usageStr = sa.usage
     ? tr("subagentUsage", {
         tokens: `${Math.round(sa.usage.totalTokens / 1000)}k`,
@@ -719,19 +760,25 @@ export const SubAgentItem = memo(function SubAgentItem({
 
   const role = sa.description || tr("subagent");
   return (
-    <div className={`subagent-item subagent-${statusCls}`}>
-      <div className="subagent-header" ref={bottom.header} onClick={handleToggle}>
+    <div className={`subagent-item subagent-${status}`}>
+      <div
+        className="subagent-header"
+        ref={bottom.header}
+        {...telemetryTarget("trace.subagent_toggle")}
+        onClick={handleToggle}
+      >
         <button
           type="button"
           className="events-toggle trace-header-toggle"
           ref={bottom.toggle}
           aria-expanded={open}
+          {...telemetryTarget("trace.subagent_toggle")}
           aria-label={open ? tr("collapseSubagent", { role }) : tr("expandSubagent", { role })}
         >
           {open ? "▾" : "▸"}
         </button>
-        <span className={`subagent-status-icon subagent-icon-${statusCls}`} title={statusTitle}>
-          {statusIcon}
+        <span className={`subagent-status-icon subagent-icon-${status}`} title={statusTitle}>
+          {SUBAGENT_STATUS_ICONS[status]}
         </span>
         <span className="subagent-desc" title={role}>
           {role}
@@ -751,8 +798,8 @@ export const SubAgentItem = memo(function SubAgentItem({
             {formatRunTime(ran)}
           </span>
         )}
-        {isRunning && <span className="streaming-dot" />}
-        {isRunning && sa.cancellable !== false && onCancel && (
+        {status === "running" && <span className="streaming-dot" />}
+        {outstanding && sa.cancellable !== false && onCancel && (
           <button
             className="btn-cancel-subagent"
             title={tr("cancelSubagent")}
@@ -801,7 +848,13 @@ export const SubAgentItem = memo(function SubAgentItem({
             </div>
           )}
           {usageStr && <div className="subagent-usage">{usageStr}</div>}
-          {hasBody && <BottomCollapse onClick={bottom.collapse} label={tr("collapseTrace")} />}
+          {hasBody && (
+            <BottomCollapse
+              onClick={bottom.collapse}
+              label={tr("collapseTrace")}
+              action="trace.subagent_toggle"
+            />
+          )}
         </div>
       )}
     </div>
@@ -951,6 +1004,7 @@ function StepBox({
       <div
         className={`step-header${hasBody ? "" : " step-header-static"}`}
         ref={bottom.header}
+        {...telemetryTarget(hasBody ? "trace.step_toggle" : undefined)}
         onClick={hasBody ? toggle : undefined}
       >
         {hasBody ? (
@@ -959,6 +1013,7 @@ function StepBox({
             className="events-toggle trace-header-toggle"
             ref={bottom.toggle}
             aria-expanded={open}
+            {...telemetryTarget("trace.step_toggle")}
             aria-label={open ? tr("collapseSteps") : tr("expandSteps")}
           >
             {open ? "▾" : "▸"}
@@ -973,7 +1028,11 @@ function StepBox({
       {open && (
         <div className="events-list">
           {items}
-          <BottomCollapse onClick={bottom.collapse} label={tr("collapseStepTrace")} />
+          <BottomCollapse
+            onClick={bottom.collapse}
+            label={tr("collapseStepTrace")}
+            action="trace.step_toggle"
+          />
         </div>
       )}
     </div>
@@ -1097,28 +1156,18 @@ function isRunningTool(e: StreamEvent): boolean {
 // A tool call still running or a subagent still working: the turn is not
 // waiting on the model.
 function workInFlight(events: StreamEvent[]): boolean {
-  return events.some(
-    (e) => isRunningTool(e) || (e.kind === "subagent_start" && e.subagent?.status === "running"),
-  );
+  return events.some(isRunningTool) || hasOutstandingSubagents(events);
 }
 
-function progressOf(msg: Message): string {
-  const events = msg.events ?? [];
-  const results = events.filter((e) => e.toolResult != null).length;
-  return `${msg.content.length}:${events.length}:${results}`;
-}
+const WAIT_SHOWN_AFTER_S = 15;
 
-const WAIT_SHOWN_AFTER_S = 5;
-
-function QuietWait({ since }: { since?: number }) {
+function QuietWait({ since }: { since: number }) {
   const tr = useT();
-  const [localSince] = useState(Date.now);
   const now = Date.now();
-  const start = since ?? localSince;
-  const elapsed = elapsedSeconds(now, start);
+  const elapsed = elapsedSeconds(now, since);
   const show = elapsed >= WAIT_SHOWN_AFTER_S;
-  useRenderAt(show ? nextSecondAt(now, start) : start + WAIT_SHOWN_AFTER_S * 1000);
-  return show ? tr("waitingModel", { seconds: elapsed }) : null;
+  useRenderAt(show ? nextSecondAt(now, since) : since + WAIT_SHOWN_AFTER_S * 1000);
+  return show ? tr("quietEvents", { seconds: elapsed }) : null;
 }
 
 function TurnFooter({
@@ -1165,11 +1214,10 @@ function TurnFooter({
         <span className="turn-activity">{label}</span>
       ) : thinkingSince != null ? (
         <LiveChip secs={elapsedSeconds(now, thinkingSince)} />
-      ) : !workInFlight(detailEvents) ? (
-        <QuietWait
-          key={msg.waitingSince == null ? progressOf(msg) : undefined}
-          since={msg.waitingSince}
-        />
+      ) : msg.waitingSince != null &&
+        !workInFlight(detailEvents) &&
+        !detailEvents.some((e) => e.kind === "retry") ? (
+        <QuietWait since={msg.waitingSince} />
       ) : null}
     </div>
   );
@@ -1210,14 +1258,18 @@ function systemAvatar(content: string): [string | null, string] {
 
 const DELIVERY_STATUS_DELAY_MS = 350;
 
-function PendingDeliveryStatus({ label }: { label: string }) {
-  const [visible, setVisible] = useState(false);
+function usePendingDeliveryStatus(pending: boolean, messageId: string): boolean {
+  const [visibleFor, setVisibleFor] = useState<string>();
   useEffect(() => {
-    const timer = setTimeout(() => setVisible(true), DELIVERY_STATUS_DELAY_MS);
+    setVisibleFor(undefined);
+    if (!pending) return;
+    const timer = setTimeout(() => setVisibleFor(messageId), DELIVERY_STATUS_DELAY_MS);
     return () => clearTimeout(timer);
-  }, []);
+  }, [pending, messageId]);
+  return pending && visibleFor === messageId;
+}
 
-  if (!visible) return null;
+function PendingDeliveryStatus({ label }: { label: string }) {
   return (
     <span className="delivery-inline" role="status">
       <span className="streaming-dot" aria-hidden="true" /> {label}
@@ -1231,6 +1283,8 @@ export const MessageItem = memo(function MessageItem({
   agents,
   compact,
   highlight,
+  hasStreamingReply,
+  onStartingRow,
   onQuote,
   onJumpToMessage,
   onLoadSubagentEvents,
@@ -1246,6 +1300,8 @@ export const MessageItem = memo(function MessageItem({
   user?: typeof DEFAULT_USER;
   compact?: boolean;
   highlight?: boolean;
+  hasStreamingReply?: boolean;
+  onStartingRow?: (row: HTMLDivElement | null) => void;
   onOpenWorkspace?: (workspaceId: string) => void;
   onQuote?: (msg: Message) => void;
   onJumpToMessage?: (messageId: string) => void;
@@ -1283,6 +1339,14 @@ export const MessageItem = memo(function MessageItem({
     [agentId, onCancelSubagent],
   );
 
+  const isUser = msg.kind === "user";
+  const starting = isUser && msg.status === "starting";
+  const sending = isUser && msg.status === "dispatching";
+  // Starting and dispatching share one delay even though they render in different rows.
+  const showDelivery = usePendingDeliveryStatus(starting || sending, msg.id);
+  const showStarting = showDelivery && starting && !hasStreamingReply;
+  const target = showStarting ? agents.find((a) => a.id === msg.queuedFor) : undefined;
+
   if (msg.kind === "system") {
     const [avatar, text] = systemAvatar(msg.content);
     return (
@@ -1293,21 +1357,11 @@ export const MessageItem = memo(function MessageItem({
     );
   }
 
-  const isUser = msg.kind === "user";
   const from = isUser ? msg.from : undefined;
   const agent = !isUser ? agents.find((a) => a.id === msg.agentId) : null;
   const streaming = msg.status === "streaming";
   const showMentionAction =
     !isUser && !streaming && !!agent && agents.length > 1 && isTurnTail && !!onMentionAgent;
-  const deliveryLabel = !isUser
-    ? null
-    : msg.status === "starting"
-      ? tr("startingAgent", {
-          name: agents.find((a) => a.id === msg.queuedFor)?.name || tr("agentFallback"),
-        })
-      : msg.status === "dispatching"
-        ? tr("sending")
-        : null;
   const deliveryClass =
     msg.status === "queued"
       ? " message-queued"
@@ -1473,7 +1527,7 @@ export const MessageItem = memo(function MessageItem({
                   </>
                 ) : agent ? (
                   <>
-                    <span className="message-author" style={{ color: agent.color }}>
+                    <span className="message-author" style={{ color: agentNameColor(agent.color) }}>
                       {agent.name}
                     </span>
                     {(() => {
@@ -1491,7 +1545,7 @@ export const MessageItem = memo(function MessageItem({
                 </span>
                 {isUser && msg.status !== "queued" && (
                   <span className="delivery-inline-slot">
-                    {deliveryLabel && <PendingDeliveryStatus key={msg.id} label={deliveryLabel} />}
+                    {sending && showDelivery && <PendingDeliveryStatus label={tr("sending")} />}
                   </span>
                 )}
                 {streaming && <span className="streaming-dot" />}
@@ -1609,6 +1663,29 @@ export const MessageItem = memo(function MessageItem({
             )}
           </div>
         </div>
+        {showStarting && (
+          <div className="message message-agent message-starting" ref={onStartingRow}>
+            <div className="message-gutter">
+              {target ? (
+                <AgentAvatar agent={target} size={32} />
+              ) : (
+                <div className="avatar-user">?</div>
+              )}
+            </div>
+            <div className="message-body">
+              <div className="message-header">
+                <span
+                  className="message-author"
+                  title={target?.name}
+                  style={target ? { color: agentNameColor(target.color) } : undefined}
+                >
+                  {target?.name ?? tr("startingAgentFallback")}
+                </span>
+                <PendingDeliveryStatus label={tr("starting")} />
+              </div>
+            </div>
+          </div>
+        )}
       </TurnRunningContext.Provider>
     </SessionLinkContext.Provider>
   );

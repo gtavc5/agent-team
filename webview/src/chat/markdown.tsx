@@ -26,7 +26,6 @@ import {
 import { codeText, copyText } from "./clipboard";
 import { useLocale } from "../i18n";
 import { t, useT } from "../i18n/chat";
-import "highlight.js/styles/github-dark.css";
 
 export function CopyButton({ text }: { text: () => string }) {
   const tr = useT();

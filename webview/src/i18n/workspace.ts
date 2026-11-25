@@ -64,6 +64,8 @@ export const workspaceMessages = {
     en: "offline",
     "zh-CN": "离线",
   },
+  darkTheme: { en: "Dark theme", "zh-CN": "深色主题" },
+  openUsage: { en: "Usage", "zh-CN": "用量统计" },
   newSession: {
     en: "New session",
     "zh-CN": "新建会话",
@@ -160,13 +162,25 @@ export const workspaceMessages = {
     en: "This session and its message history will be deleted.",
     "zh-CN": "此会话及其消息历史将被删除。",
   },
-  waitingForYourReply: {
-    en: "Waiting for your reply",
-    "zh-CN": "等待你的回复",
-  },
-  yourTurn: {
-    en: "your turn",
-    "zh-CN": "轮到你",
+  yourTurnStatus: { en: "Your turn", "zh-CN": "轮到你" },
+  failedSession: { en: "Failed", "zh-CN": "失败" },
+  unreadResult: { en: "Unread result", "zh-CN": "未读结果" },
+  needYouCount: { en: "{count} need you", "zh-CN": "{count} 个等待你回复" },
+  failedCount: { en: "{count} failed", "zh-CN": "{count} 个失败" },
+  unreadCount: { en: "{count} unread", "zh-CN": "{count} 个未读" },
+  archiveSession: { en: "Archive session", "zh-CN": "归档会话" },
+  idleSessions: { en: "Idle ({count})", "zh-CN": "空闲（{count}）" },
+  foldIdleTitle: { en: "Fold {count} idle session", "zh-CN": "折叠 {count} 个空闲会话" },
+  foldIdlePluralTitle: { en: "Fold {count} idle sessions", "zh-CN": "折叠 {count} 个空闲会话" },
+  foldMoreIdle: { en: "Fold (+{count})", "zh-CN": "折叠（+{count}）" },
+  foldIdle: { en: "Fold idle ({count})", "zh-CN": "折叠空闲会话（{count}）" },
+  queuedSession: { en: "Queued", "zh-CN": "已排队" },
+  quietSession: { en: "Quiet", "zh-CN": "暂无动静" },
+  quietSessionDetail: { en: "Quiet: {detail}", "zh-CN": "暂无动静：{detail}" },
+  retryingSession: { en: "Retrying", "zh-CN": "正在重试" },
+  retryingSessionAttempt: {
+    en: "Retrying (attempt {attempt})",
+    "zh-CN": "正在重试（第 {attempt} 次）",
   },
   archived: {
     en: "Archived",
@@ -290,6 +304,7 @@ export const workspaceMessages = {
   },
 
   // Quota panel
+  noQuotaData: { en: "No quota data", "zh-CN": "暂无配额数据" },
   quotaUsed: {
     en: "Quota used",
     "zh-CN": "配额使用",

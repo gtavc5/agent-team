@@ -26,6 +26,7 @@ import {
 } from "../workspace/state";
 import { loadConfig, AppConfig } from "../config/config";
 import { TelemetryStore } from "../storage/telemetry";
+import { recordJourney, recordUsage } from "../usage/ledger";
 import { ModelSelectionError, type ModelDiscoveryIssue } from "../config/model-diagnostics";
 import {
   MODEL_OPTIONS,
@@ -35,7 +36,7 @@ import {
   isCodexCliAvailable,
   type ModelOption,
 } from "../config/presets";
-import { CommandInfo, StreamEvent, type PiAvailableModel } from "../session/types";
+import { CommandInfo, StreamEvent, type Backend, type PiAvailableModel } from "../session/types";
 import { HostRegistry, LocalHost } from "../session/host";
 import { codexProcessEnv, probeCodexAuth, type CodexAuthState } from "../session/codex";
 import { completeDirs, resolveWorkspacePath } from "../repo/dirs";
@@ -69,7 +70,8 @@ import {
 } from "../session/quota-schema";
 import { SystemMonitor } from "./system";
 import { serviceReport } from "../config/diagnostics";
-import { applyRuntimeEnvironment, RuntimeConfigError } from "../config/runtime";
+import { applyRuntimeEnvironment, hasOutboundProxy, RuntimeConfigError } from "../config/runtime";
+import { startCcpaProxy, type CcpaProxy } from "../acp-proxy/proxy";
 
 function stripEventsInnerEvents(events: StreamEvent[]): StreamEvent[] {
   return events.map((e) => {
@@ -108,10 +110,13 @@ export class Server {
   private piCatalogIssue?: ModelDiscoveryIssue;
   private catalogRevision = 0;
   private codexAuth: CodexAuthState = initialCodexAuthState();
+  private codexPreviouslyAuthenticated = false;
   private recheckingCodexAuth: Promise<CodexAuthState> | null = null;
   private models: ModelOption[] = availableModelOptions([], { codexAuthenticated: false });
   private staleLeadToolWorkspaces = new Set<string>();
   private readonly restoring: Promise<void>;
+  private workspaceStateLoaded = false;
+  private ccpaProxy?: CcpaProxy;
   private closing = false;
   private closePromise?: Promise<void>;
   private readonly deploy?: DeployControl;
@@ -228,7 +233,6 @@ export class Server {
             if (!w.isArchived) for (const id of w.agents.keys()) w.dequeueNext(id);
         },
       );
-    this.watchConfig();
 
     this.http = new HttpHandler(
       this.auth,
@@ -243,7 +247,14 @@ export class Server {
         const project = this.workspaces.get(id)?.projectLink?.projectId;
         return project && this.projects.paths(project)?.notesDir;
       },
-      () => serviceReport(baseDir, this.config, this.modelDiscoverySnapshot()),
+      () =>
+        serviceReport(
+          baseDir,
+          this.config,
+          this.modelDiscoverySnapshot(),
+          process.env,
+          this.ccpaProxy?.health() ?? null,
+        ),
       this.telemetry,
     );
     this.httpServer = http.createServer((req, res) => this.http.handle(req, res));
@@ -258,7 +269,7 @@ export class Server {
     this.heartbeatTimer = setInterval(() => this.sweepDeadClients(), HEARTBEAT_INTERVAL_MS);
     this.checkAcpQuotaReadiness();
 
-    this.restoring = this.restoreState().finally(() => {
+    this.restoring = this.startRuntime().finally(() => {
       this.restored = true;
     });
     // The search index catches up with the history in the background.
@@ -270,8 +281,6 @@ export class Server {
     this.branchTimer = setInterval(() => {
       void this.git.scan();
     }, 3000);
-    void this.git.scan();
-    this.sweepArchives();
     this.archiveTimer = setInterval(() => this.sweepArchives(), 3600_000);
 
     const host = process.env.AGENT_TEAM_HOST || "0.0.0.0";
@@ -300,8 +309,30 @@ export class Server {
         );
       };
       fs.watchFile(bootFence, { interval: 250 }, releaseFence);
-      void this.listening.then(releaseFence);
+      void this.listening.then(releaseFence, () => undefined);
     }
+  }
+
+  private async startRuntime(): Promise<void> {
+    const proxy = this.startupPiAcp?.proxy;
+    // The CCPA pool dials upstream directly; don't silently bypass an existing forward proxy.
+    if (proxy?.enabled ?? !hasOutboundProxy()) {
+      this.ccpaProxy = await startCcpaProxy({
+        baseDir: this.baseDir,
+        upstreamUrl: proxy?.upstream_url,
+        port: proxy?.port,
+        pingIntervalMs: proxy?.ping_interval_ms,
+        pingTimeoutMs: proxy?.ping_timeout_ms,
+        maxRetries: proxy?.max_retries,
+        retryBudgetMs: proxy?.retry_budget_ms,
+      });
+    }
+    if (this.closing) return;
+    this.watchConfig();
+    const restoring = this.restoreState();
+    void this.git.scan();
+    this.sweepArchives();
+    await restoring;
   }
 
   private get dispatchAllowed(): boolean {
@@ -317,16 +348,25 @@ export class Server {
     const registry = new HostRegistry();
     for (const [id, cfg] of Object.entries(this.config.hosts)) {
       registry.register(
-        new LocalHost(id, cfg.label, {
-          pi: (s) => {
-            if (s.provider !== ACP || inspectAcpRuntime().ready) this.quota.accept(s);
+        new LocalHost(
+          id,
+          cfg.label,
+          {
+            pi: (s) => {
+              if (s.provider !== ACP || inspectAcpRuntime().ready) this.quota.accept(s);
+            },
+            piReaderReady: (providers) => this.refreshQuota({ newlyReadable: providers }),
+            codex: (limits) => {
+              if (this.codexQuota.isConfigured())
+                this.quota.accept(this.codexQuota.snapshot(limits, Date.now(), true));
+            },
           },
-          piReaderReady: (providers) => this.refreshQuota({ newlyReadable: providers }),
-          codex: (limits) => {
-            if (this.codexQuota.isConfigured())
-              this.quota.accept(this.codexQuota.snapshot(limits, Date.now(), true));
+          {
+            recordUsage: (observation) => recordUsage(this.baseDir, observation),
+            recordJourney: (event) => recordJourney(this.baseDir, event),
           },
-        }),
+          () => this.ccpaProxy?.url,
+        ),
       );
     }
     console.log(
@@ -626,6 +666,7 @@ export class Server {
             messageId: msg.messageId,
             taskId: msg.taskId,
             events: ev?.subagent?.events ?? [],
+            transcriptRevision: ev?.subagent?.transcriptRevision,
           });
         }
         return;
@@ -905,6 +946,7 @@ export class Server {
             type: "message_removed",
             workspaceId: workspace.id,
             messageId: msg.messageId,
+            queued: workspace.hasQueuedInput,
           });
           this.flushPendingLeadTools(workspace);
         }
@@ -1233,7 +1275,12 @@ export class Server {
     if (!dropped) return;
     this.persistWorkspaceNow(workspaceId);
     for (const messageId of dropped) {
-      this.broadcastUI({ type: "message_removed", workspaceId, messageId });
+      this.broadcastUI({
+        type: "message_removed",
+        workspaceId,
+        messageId,
+        queued: workspace.hasQueuedInput,
+      });
     }
     this.broadcastUI({ type: "agent_removed", workspaceId, agentId });
     this.projects.leadAgentsChanged(workspace);
@@ -1418,6 +1465,7 @@ export class Server {
       const tools = this.projects.toolsFor(workspace);
       if (tools) for (const a of workspace.agents.values()) a.session.setPanelTools?.(tools);
     }
+    this.workspaceStateLoaded = true;
     for (const workspace of this.workspaces.values()) {
       if (!workspace.messagesLoaded && !historyOf(this.baseDir).hasUnfinishedDispatch(workspace.id))
         continue;
@@ -1616,10 +1664,10 @@ export class Server {
     ws.archivedAt = null;
     this.persistWorkspaceNow(ws.id);
     this.broadcastUI({ type: "workspace_unarchived", workspaceId: ws.id });
+    // Loading history can change both backend switching and occupancy.
     for (const entry of ws.agents.values()) {
       const agent = ws.agentInfo(entry);
-      if (agent.canSwitchBackend)
-        this.broadcastUI({ type: "agent_updated", workspaceId: ws.id, agent });
+      this.broadcastUI({ type: "agent_updated", workspaceId: ws.id, agent });
     }
     try {
       this.projects.restored(ws);
@@ -1713,18 +1761,28 @@ export class Server {
   }
 
   private piConfig() {
+    const { proxy: _proxy, ...acp } = this.startupPiAcp ?? {};
     return {
       ...piSessionConfig(this.config),
-      piAcp: this.startupPiAcp ? { ...this.startupPiAcp } : undefined,
+      piAcp: this.startupPiAcp ? acp : undefined,
     };
   }
 
   modelDiscoverySnapshot(): ModelDiscoverySnapshot {
+    const liveBackends = new Set<Backend>();
+    for (const workspace of this.workspaces.values()) {
+      if (workspace.isArchived) continue;
+      for (const { session } of workspace.agents.values()) {
+        const backend = session.getState().config.backend;
+        if (backend === "pi" || backend === "codex") liveBackends.add(backend);
+      }
+    }
     return describeModelDiscovery(
       this.config,
       this.models,
       this.piCatalogIssue,
       this.codexAuth.status,
+      { liveBackends, codexPreviouslyAuthenticated: this.codexPreviouslyAuthenticated },
     );
   }
 
@@ -1790,6 +1848,7 @@ export class Server {
     this.notifyCodexRecheck = false;
     if (this.closing) return this.codexAuth;
     this.codexAuth = next;
+    if (next.status === "authenticated") this.codexPreviouslyAuthenticated = true;
     if (!this.codexQuota.isConfigured()) {
       const at = wasQuotaConfigured ? Date.now() : 0;
       this.quota.accept({ ...unavailable(NATIVE_CODEX, at), reason: "not configured" });
@@ -1893,9 +1952,17 @@ export class Server {
   private makeCallbacks(id: string): WorkspaceCallbacks {
     return {
       onNewMessage: (wsId, msg) => {
-        this.broadcastUI({ type: "new_message", workspaceId: wsId, message: toWireMessage(msg) });
+        this.broadcastUI({
+          type: "new_message",
+          workspaceId: wsId,
+          message: toWireMessage(msg),
+          ...(msg.status === "queued" && { queued: true }),
+        });
       },
-      onStreamEvent: (wsId, agentMsg, event) => {
+      onAttention: (wsId, unread, lastResult) => {
+        this.broadcastUI({ type: "workspace_attention", workspaceId: wsId, unread, lastResult });
+      },
+      onStreamEvent: (wsId, agentMsg, event, streamAt, retryLabel) => {
         if (isLoggedEvent(event)) {
           appendLog(this.baseDir, wsId, { timestamp: Date.now(), messageId: agentMsg.id, event });
         }
@@ -1904,6 +1971,9 @@ export class Server {
           workspaceId: wsId,
           messageId: agentMsg.id,
           event,
+          ...(streamAt != null && { streamAt }),
+          ...(retryLabel !== undefined && { retryLabel }),
+          ...((streamAt != null || retryLabel !== undefined) && { agentId: agentMsg.agentId }),
         });
         // A finished message changed later (a background task's end): its
         // turn will not save it.
@@ -1918,11 +1988,15 @@ export class Server {
           content,
           events: events ? stripEventsInnerEvents(events) : undefined,
           ...patch,
+          ...(patch &&
+            "queuedFor" in patch && { queued: this.workspaces.get(wsId)?.hasQueuedInput }),
         });
         this.persistWorkspace(wsId);
       },
-      onAgentBusy: (wsId, agentId) => {
-        this.broadcastUI({ type: "agent_busy", workspaceId: wsId, agentId });
+      onAgentBusy: (wsId, agentId, streamAt) => {
+        this.broadcastUI({ type: "agent_busy", workspaceId: wsId, agentId, streamAt });
+        const ws = this.workspaces.get(wsId);
+        if (ws) this.projects.showAwaiting(ws);
       },
       onAgentIdle: (wsId, agentId) => {
         this.broadcastUI({ type: "agent_idle", workspaceId: wsId, agentId });
@@ -1940,6 +2014,7 @@ export class Server {
       onAgentState: (wsId, agentId, state) => {
         this.broadcastUI({ type: "agent_state", workspaceId: wsId, agentId, state });
         const ws = this.workspaces.get(wsId);
+        if (ws) this.projects.showAwaiting(ws);
         if (ws && state === "idle") {
           this.projects.workerIdle(ws);
           this.flushPendingLeadTools(ws);
@@ -1977,7 +2052,12 @@ export class Server {
       },
       onRateLimit: (wsId, agentId, info) => this.handleRateLimit(wsId, agentId, info),
       onMessageRemoved: (wsId, messageId) =>
-        this.broadcastUI({ type: "message_removed", workspaceId: wsId, messageId }),
+        this.broadcastUI({
+          type: "message_removed",
+          workspaceId: wsId,
+          messageId,
+          queued: this.workspaces.get(wsId)?.hasQueuedInput,
+        }),
       onAgentUpdated: (wsId, agent, transient) => {
         this.broadcastUI({ type: "agent_updated", workspaceId: wsId, agent });
         if (!transient) this.persistWorkspace(wsId);
@@ -2023,11 +2103,15 @@ export class Server {
         console.error(`[close] ${ws.id}:`, e);
       }
     }
-    this.persistAll();
+    // A failed startup must not replace the on-disk index with an empty one.
+    if (this.workspaceStateLoaded) this.persistAll();
     await Promise.allSettled([...this.workspaces.values()].map((ws) => ws.dispose()));
     const hosts = await Promise.allSettled(
       this.hostRegistry.getAll().map((host) => Promise.resolve(host.close?.())),
     );
+    await this.ccpaProxy
+      ?.close()
+      .catch((error: unknown) => console.error("[close] ACP proxy shutdown failed", error));
     await this.history.close();
     closeHistory(this.baseDir);
     for (const ws of this.uiClients) ws.terminate();

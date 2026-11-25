@@ -2,7 +2,7 @@
   text "🤖 **A** joined the team"
 ## 2 user done
   text "pi-e2e-git-ready"
-## 3 agent done ctx 0/100000
+## 3 agent done ctx 7778/100000
   text "xxxxxxxxxxxx"
 ## 4 user outcome_unknown
   text "pi-e2e-launch:foreground"
@@ -16,5 +16,5 @@
   text "⚠ Delivery outcome unknown for message #4. Verify it before retrying; it will not be resent automatically."
 ## 7 user done
   text "check retained notices"
-## 8 agent done ctx 0/100000
+## 8 agent done ctx 7987/100000
   text "xxxxxxxxxxxx"

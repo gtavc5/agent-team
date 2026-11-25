@@ -1,0 +1,125 @@
+.usage-overview .usage-overview-caption {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.usage-overview-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.usage-overview-modes .btn-secondary {
+  padding: 3px 8px;
+}
+.usage-overview-modes [aria-pressed="true"],
+.usage-overview-ranking button[aria-pressed="true"] {
+  color: var(--text-strong);
+  border-color: var(--accent);
+  background: var(--bg-active);
+}
+.usage-overview .usage-legend li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.usage-overview .usage-legend i {
+  flex: none;
+}
+.usage-overview-family-0 {
+  color: var(--usage-input);
+}
+.usage-overview-family-1 {
+  color: var(--usage-cacheRead);
+}
+.usage-overview-family-2 {
+  color: var(--usage-cacheWrite);
+}
+.usage-overview-family-3 {
+  color: var(--usage-output);
+}
+.usage-overview {
+  --usage-family-4: #a2365d;
+  --usage-family-5: #17737d;
+}
+:root[data-theme="dark"] .usage-overview {
+  --usage-family-4: #ef9fbb;
+  --usage-family-5: #8dd5dc;
+}
+.usage-overview-family-4 {
+  color: var(--usage-family-4);
+}
+.usage-overview-family-5 {
+  color: var(--usage-family-5);
+}
+.usage-overview-other {
+  color: var(--text-secondary);
+}
+.usage-overview :is([class^="usage-overview-family-"], .usage-overview-other) {
+  fill: currentColor;
+}
+.usage-overview-bucket-hit {
+  fill: transparent;
+}
+.usage-overview .usage-dates {
+  gap: 8px;
+}
+.usage-overview .usage-dates time + time {
+  text-align: right;
+}
+.usage-overview-ranks {
+  position: relative;
+}
+.usage-overview-ranks > svg {
+  position: absolute;
+  inset: 0 6px;
+  height: 100%;
+  width: calc(100% - 12px);
+  fill: var(--usage-input);
+  pointer-events: none;
+  z-index: 1;
+}
+.usage-overview-ranking {
+  display: grid;
+  grid-auto-rows: 32px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.usage-overview-ranking li {
+  min-width: 0;
+}
+.usage-overview-ranking button,
+.usage-overview-rank-static {
+  display: grid;
+  align-content: start;
+  height: 100%;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11px;
+  text-align: start;
+}
+.usage-overview-ranking button:hover:not([aria-pressed="true"]) {
+  background: var(--bg-hover);
+}
+.usage-overview-rank-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.usage-overview-rank-label > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-overview-rank-label strong {
+  color: var(--text-strong);
+}

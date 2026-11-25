@@ -20,6 +20,7 @@ export interface RpcMessage {
   id?: number | string;
   method?: string;
   params?: unknown;
+  emittedAtMs?: number;
   result?: unknown;
   error?: RpcError;
 }
@@ -148,7 +149,7 @@ export class AppServerClient {
   constructor(
     private transport: Transport,
     handlers: {
-      notification(method: string, params: Record<string, unknown>): void;
+      notification(method: string, params: Record<string, unknown>, emittedAtMs?: number): void;
       request(method: string, params: Record<string, unknown>): Promise<unknown>;
       close(reason: string): void;
     },
@@ -165,7 +166,11 @@ export class AppServerClient {
             }),
         );
       } else if (msg.method) {
-        handlers.notification(msg.method, (msg.params ?? {}) as Record<string, unknown>);
+        handlers.notification(
+          msg.method,
+          (msg.params ?? {}) as Record<string, unknown>,
+          msg.emittedAtMs,
+        );
       } else if (typeof msg.id === "number") {
         const p = this.pending.get(msg.id);
         if (!p) return;

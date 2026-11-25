@@ -5,6 +5,8 @@ import type * as http from "http";
 import * as path from "path";
 import { pipeline } from "stream";
 import * as zlib from "zlib";
+import { parseUsageRequest, type UsageRequest } from "../usage/request";
+import { usageView } from "../usage/service";
 import type { Auth } from "./auth";
 import { formatReport, type RuntimeReport } from "../config/diagnostics";
 import { NotRegularFile, readFileView, resolveFilePath } from "../repo/files";
@@ -71,7 +73,9 @@ export class HttpHandler {
       const url = new URL(req.url ?? "/", "http://localhost");
       // Normalised before the auth check: "/icons/..%2findex.html" must not
       // count as a public icon.
-      const pathname = path.posix.normalize(decodeURIComponent(url.pathname));
+      const normalized = path.posix.normalize(decodeURIComponent(url.pathname));
+      // Raw previews have no HTML icon link, so browsers request the default favicon.
+      const pathname = normalized === "/favicon.ico" ? "/icons/icon-192.png" : normalized;
 
       if (this.auth.enabled) {
         if (pathname === "/login") {
@@ -99,6 +103,30 @@ export class HttpHandler {
         if (!/^\d{1,3}$/.test(raw) || days < 1 || days > 365) {
           json(res, 400, { error: "days must be an integer from 1 to 365" });
         } else json(res, 200, this.telemetry.summary(days));
+        return;
+      }
+
+      if (
+        req.method === "GET" &&
+        (pathname === "/api/usage/overview" || pathname === "/api/usage/journey")
+      ) {
+        let request: UsageRequest;
+        try {
+          request = parseUsageRequest(
+            pathname === "/api/usage/overview" ? "overview" : "journey",
+            url.searchParams,
+          );
+        } catch {
+          json(res, 400, { error: "Invalid usage filters" });
+          return;
+        }
+        void usageView(this.baseDir, request).then(
+          (view) => json(res, 200, view),
+          (error: unknown) =>
+            error instanceof RangeError
+              ? json(res, 400, { error: "Invalid usage query" })
+              : json(res, 503, { error: "Usage data unavailable" }),
+        );
         return;
       }
 
@@ -170,7 +198,7 @@ export class HttpHandler {
           res.end("Not found");
           return;
         }
-        const ext = path.extname(target);
+        const ext = path.extname(target).toLowerCase();
         res.setHeader("Content-Type", MIME[ext] ?? "application/octet-stream");
         res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
         // Uploaded .html/.svg would otherwise run script on the app's origin.
@@ -507,9 +535,12 @@ export class HttpHandler {
     const MAX_UPLOAD = 50 * 1024 * 1024;
     const chunks: Buffer[] = [];
     let size = 0;
+    let tooLarge = false;
     req.on("data", (chunk: Buffer) => {
+      if (tooLarge) return;
       size += chunk.length;
       if (size > MAX_UPLOAD) {
+        tooLarge = true;
         res.statusCode = 413;
         res.end();
         req.destroy();
@@ -518,12 +549,29 @@ export class HttpHandler {
       chunks.push(chunk);
     });
     req.on("end", () => {
+      if (tooLarge) return;
       const buffer = Buffer.concat(chunks);
-      const rawName = (req.headers["x-filename"] as string) || "image.jpg";
-      const ext = path.extname(rawName) || ".jpg";
+      const rawName = decodeUploadFilename(req.headers["x-filename"]);
+      const contentType = (req.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase();
+      // Browser compression re-encodes PNG/WebP to JPEG while keeping the original filename
+      // in X-Filename; Pi validates attachment magic bytes against the stored file extension.
+      const rawExt = path.extname(rawName).toLowerCase();
+      const ext =
+        detectImageExt(buffer) ??
+        UPLOAD_MIME_EXT.get(contentType) ??
+        (ALLOWED_UPLOAD_EXTS.has(rawExt) ? rawExt : ".jpg");
       const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
       const filePath = path.join(this.uploadsDir, filename);
-      fs.writeFileSync(filePath, buffer);
+      try {
+        fs.writeFileSync(filePath, buffer);
+      } catch (err) {
+        console.error(`[upload] failed to save ${filename}:`, err);
+        res.statusCode = 500;
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.end(JSON.stringify({ error: "Failed to save upload" }));
+        return;
+      }
       console.log(`[upload] saved ${rawName} → ${filename} (${buffer.length} bytes)`);
       res.setHeader("Content-Type", "application/json");
       res.setHeader("Access-Control-Allow-Origin", "*");
@@ -676,4 +724,44 @@ function isConfinedAvatar(fd: number, file: string, platform: NodeJS.Platform): 
   if (!samePath) return false;
   const pathStat = fs.lstatSync(file, { bigint: true, throwIfNoEntry: false });
   return Boolean(pathStat?.isFile() && pathStat.dev === fdStat.dev && pathStat.ino === fdStat.ino);
+}
+
+const UPLOAD_MIME_EXT = new Map([
+  ["image/jpeg", ".jpg"],
+  ["image/jpg", ".jpg"],
+  ["image/png", ".png"],
+  ["image/gif", ".gif"],
+  ["image/webp", ".webp"],
+]);
+
+const ALLOWED_UPLOAD_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp"]);
+
+function detectImageExt(bytes: Buffer): string | null {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) {
+    return ".png";
+  }
+  if (bytes.length >= 3 && bytes.subarray(0, 3).equals(Buffer.from("ffd8ff", "hex"))) {
+    return ".jpg";
+  }
+  if (bytes.length >= 6 && /^GIF8[79]a$/.test(bytes.toString("ascii", 0, 6))) {
+    return ".gif";
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes.toString("ascii", 0, 4) === "RIFF" &&
+    bytes.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return ".webp";
+  }
+  return null;
+}
+
+function decodeUploadFilename(header: string | string[] | undefined): string {
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (!raw) return "image.jpg";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }

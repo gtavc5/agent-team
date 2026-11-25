@@ -12,7 +12,16 @@ description: Use before committing a non-trivial change or when asked for an ind
      Do not modify the repository or the patch while the reviewer works.
 2. **Delegate with fresh context.** Enable `pi-subagents` if necessary, then call `subagent` with `agent: "reviewer"`, the explicit `cwd`, and a self-contained task. Use fresh context, not `oracle` (which forks the parent context). Give the reviewer the read-only patch path, repository `cwd`, and review scope (plus any untracked file paths in scope), applicable requirements, and project rules—never just a `git diff` command to run (the reviewer has no `bash` tool, and `watchdog_diff` cannot inspect committed ranges), and never the author's reasoning or preferred conclusion. Let Pi route the reviewer; do not pin a model.
 3. **Request read-only findings.** Ask the reviewer to inspect the diff and relevant surrounding code, without editing, committing, or starting other agents. Return findings directly to the parent, ranked by severity, each with `file:line`, the failing input or scenario, observed versus required behavior, and a minimal reproduction or test suggestion. Return “no findings” if none.
-4. **Verify in the parent.** Treat every finding as a hypothesis. Inspect the cited path, exercise the smallest reproducer or replay the relevant fixture, and compare the result to the requirement. Fix confirmed defects, add regression coverage where appropriate, and rerun affected checks. Do not automatically run a second full review for verified localized fixes; run a follow-up review on the incremental diff (plus necessary context) only when fixes introduce new risk or invalidate prior review conclusions.
+4. **Verify in the parent and stop.** Treat every finding as a hypothesis. Inspect the cited path, exercise the smallest reproducer or replay the relevant fixture, and compare the result to the requirement. Fix confirmed defects, add regression coverage, and rerun affected checks.
+
+   **Why one round is the default:** Independent review catches author blind spots, not verified fixes. Every extra review round spends user quota and delivery latency with minimal marginal catch rate once targeted tests prove the fix.
+
+   - **Good (stop after 1 round):** Fixing confirmed defects within the reviewed scope (edge cases, guards, CLI/flag regressions, localized refactors) and verifying them with targeted regression tests.
+   - **Good (follow-up allowed):** The fix changes the architecture, alters a public/wire contract, or adds a new unreviewed module—or the user/Lead explicitly requests another review.
+   - **Bad:** Starting an incremental/follow-up review “just to be safe” after fixing findings that tests already cover, or treating routine multi-line fixes as “new risk”.
+   - **Hard redline:** Default to **1** review round; never exceed **2** autonomous rounds. If residual risk cannot be proven by tests, report it under **unverified** for the user/Lead to decide instead of launching another review.
+
+Use the final verification rule in [AGENTS.md](../../../AGENTS.md) after review findings are resolved.
 
 Report all three categories (use “none” for empty sections):
 

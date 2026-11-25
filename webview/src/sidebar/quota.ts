@@ -8,6 +8,10 @@ export function quotaTone(pct: number): "danger" | "warn" | "normal" {
   return "normal";
 }
 
+export function quotaConstraintTone(pct: number, available: boolean): ReturnType<typeof quotaTone> {
+  return !available || pct < 80 ? "normal" : pct >= 100 ? "danger" : "warn";
+}
+
 const PROVIDER_SHORT_LABEL: Record<string, string> = {
   "antigravity-acp": "Agy",
   "openai-codex": "Codex",

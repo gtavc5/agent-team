@@ -201,6 +201,148 @@ describe("a real server saving histories", () => {
     }
   });
 
+  it("broadcasts enrichment of an unloaded tool owner and persists the authoritative child transcript", async () => {
+    const workspaceId = "ws-a";
+    const taskId = "child";
+    const messageId = "owner";
+    const toolUseId = "tool";
+    const { base, web } = seed([
+      ws(workspaceId, [
+        msg(messageId, "before after", 1000, {
+          events: [{ kind: "tool_use", content: "call", toolUseId, contentOffset: 6 }],
+        }),
+      ]),
+    ]);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const restore = vi.spyOn(LocalHost.prototype, "restoreSession");
+    const { live, frames, stop } = await start(base, web);
+    const session = restore.mock.results.at(-1)!.value as FakeSession;
+    const subagent = { taskId, description: "review" };
+    const events = [{ kind: "text", content: "authoritative child output" }];
+    try {
+      session.emit("event", { kind: "text_delta", content: "Unrelated current turn" });
+      session.emit("event", {
+        kind: "subagent_start",
+        content: "",
+        toolUseId,
+        subagent: { ...subagent, status: "queued" },
+      });
+      session.emit("event", {
+        kind: "subagent_progress",
+        content: "",
+        subagent: { ...subagent, status: "running" },
+      });
+      expect(live(workspaceId).messages[0].events?.[1].subagent?.status).toBe("running");
+      session.emit("event", {
+        kind: "subagent_done",
+        content: "",
+        subagent: { ...subagent, status: "partial", events: [{ kind: "text", content: "stale" }] },
+      });
+      session.emit("event", { kind: "result", content: "" });
+      session.emit("event", {
+        kind: "subagent_enrichment",
+        content: "",
+        subagent: { taskId, description: "", durationMs: 300 },
+      });
+      (live(workspaceId) as unknown as { unloadMessages(): void }).unloadMessages();
+      session.emit("event", {
+        kind: "subagent_enrichment",
+        content: "",
+        subagent: {
+          taskId,
+          description: "",
+          model: "provider/model",
+          effort: "high",
+          durationMs: 500,
+          summary: "final summary",
+          events,
+        },
+      });
+      await until(
+        () =>
+          frames.some(
+            (f) =>
+              f.type === "stream_event" &&
+              (f.event as { subagent?: { transcriptRevision?: number } }).subagent
+                ?.transcriptRevision === 2,
+          ),
+        "enrichment frame",
+      );
+      expect(
+        frames.filter(
+          (f) =>
+            f.type === "stream_event" && (f.event as { kind: string }).kind.startsWith("subagent_"),
+        ),
+      ).toMatchObject([
+        { messageId, event: { kind: "subagent_start", contentOffset: 6 } },
+        { messageId, event: { kind: "subagent_progress" } },
+        { messageId, event: { kind: "subagent_done" } },
+        {
+          messageId,
+          event: {
+            kind: "subagent_enrichment",
+            subagent: { transcriptRevision: 1, durationMs: 300 },
+          },
+        },
+        {
+          messageId,
+          event: {
+            kind: "subagent_enrichment",
+            subagent: { taskId, eventCount: 1, summary: "final summary", transcriptRevision: 2 },
+          },
+        },
+      ]);
+      const last = frames
+        .filter((f) => (f.event as { kind: string } | undefined)?.kind === "subagent_enrichment")
+        .at(-1)!;
+      expect((last.event as { subagent: unknown }).subagent).not.toHaveProperty("events");
+    } finally {
+      await stop();
+    }
+    const fresh = await start(base, web);
+    try {
+      fresh.send({ type: "open_workspace", workspaceId });
+      fresh.send({ type: "load_message_details", workspaceId, messageId });
+      fresh.send({ type: "load_subagent_events", workspaceId, messageId, taskId });
+      await until(
+        () => fresh.frames.some((f) => f.type === "subagent_events"),
+        "fresh child details",
+      );
+      const reply = (
+        fresh.frames.find((f) => f.type === "workspace_messages")!.messages as Message[]
+      ).find((m) => m.id === messageId)!;
+      expect(reply.events!.map((e) => e.kind)).toEqual([
+        "tool_use",
+        "subagent_start",
+        "subagent_done",
+      ]);
+      for (const e of reply.events!.slice(1)) {
+        expect(e.subagent).toMatchObject({
+          ...subagent,
+          status: "partial",
+          model: "provider/model",
+          effort: "high",
+          durationMs: 500,
+          summaryLength: 13,
+          eventCount: 1,
+          transcriptRevision: 2,
+        });
+      }
+      const detail = fresh.frames.find((f) => f.type === "message_details")!.events as NonNullable<
+        Message["events"]
+      >;
+      for (const e of detail.slice(1)) {
+        expect(e.subagent).toMatchObject({ summary: "final summary", transcriptRevision: 2 });
+      }
+      expect(fresh.frames.find((f) => f.type === "subagent_events")).toMatchObject({
+        events,
+        transcriptRevision: 2,
+      });
+    } finally {
+      await fresh.stop();
+    }
+  });
+
   it("the sidebar finds what was said in live and archived histories", async () => {
     const { base, web } = seed([
       ws("ws-a", [msg("u1", "the zeppelin bug again", 1000, { kind: "user", agentId: null })]),
@@ -362,7 +504,7 @@ describe("a real server saving histories", () => {
   });
 
   for (const state of ["idle", "waiting"] as const) {
-    it(`broadcasts agent_updated with context: null on clear_context (${state}) so live and fresh clients match`, async () => {
+    it(`omits context on clear_context (${state}) so live and fresh clients match`, async () => {
       const { base, web } = seed([
         ws("ws-a", [
           msg("u1", "first", 1000, { kind: "user", agentId: null }),
@@ -419,7 +561,16 @@ describe("a real server saving histories", () => {
         const liveUpdate = frames
           .slice(beforeClear)
           .find((f) => f.type === "agent_updated" && f.workspaceId === "ws-a")!;
-        expect(liveUpdate.agent).toMatchObject({ context: null, state, busy: false });
+        expect(liveUpdate.agent).toMatchObject({ state, busy: false });
+        expect(liveUpdate.agent).not.toHaveProperty("context");
+        const clearMessage = frames
+          .slice(beforeClear)
+          .find(
+            (f) =>
+              f.type === "new_message" &&
+              (f.message as Message).content.includes("context cleared"),
+          )!;
+        expect(clearMessage.message).not.toHaveProperty("context");
 
         freshWs = new WebSocket(`ws://127.0.0.1:${port}/`);
         const freshFrames: Array<Record<string, unknown>> = [];
@@ -437,4 +588,76 @@ describe("a real server saving histories", () => {
       }
     });
   }
+
+  it("omits context for fresh and archived workspaces, including loaded archived history", async () => {
+    const { base, web } = seed([
+      ws("ws-fresh", []),
+      ws("ws-archived", [msg("a1", "reply", 1001, { context: null })], 5),
+    ]);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { port, frames, send, stop } = await start(base, web);
+    let freshWs: WebSocket | undefined;
+    try {
+      const init = frames.find((f) => f.type === "init") as {
+        workspaces: Array<{ id: string; agents: Array<Record<string, unknown>> }>;
+      };
+      for (const id of ["ws-fresh", "ws-archived"]) {
+        const agent = init.workspaces.find((w) => w.id === id)!.agents[0];
+        expect(agent.context).toBeUndefined();
+        expect(agent).not.toHaveProperty("context");
+      }
+
+      send({ type: "open_workspace", workspaceId: "ws-archived" });
+      await until(
+        () =>
+          frames.some((f) => f.type === "workspace_messages" && f.workspaceId === "ws-archived"),
+        "archived history loaded",
+      );
+      freshWs = new WebSocket(`ws://127.0.0.1:${port}/`);
+      const freshFrames: Array<Record<string, unknown>> = [];
+      freshWs.on("message", (raw: Buffer) => freshFrames.push(JSON.parse(raw.toString()) as never));
+      await until(() => freshFrames.some((f) => f.type === "init"), "fresh archived client init");
+      const freshInit = freshFrames.find((f) => f.type === "init") as {
+        workspaces: Array<{ id: string; agents: Array<Record<string, unknown>> }>;
+      };
+      const archived = freshInit.workspaces.find((w) => w.id === "ws-archived")!.agents[0];
+      expect(archived.context).toBeUndefined();
+      expect(archived).not.toHaveProperty("context");
+    } finally {
+      freshWs?.close();
+      await stop();
+    }
+  });
+
+  it("re-sends context occupancy after an archived workspace is reloaded", async () => {
+    const { base, web } = seed([
+      ws("ws-a", [msg("a1", "reply", 1001, { context: { tokens: 96_000, window: 1_000_000 } })]),
+    ]);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { frames, send, stop } = await start(base, web);
+    try {
+      send({ type: "archive_workspace", workspaceId: "ws-a" });
+      await until(
+        () => frames.some((f) => f.type === "workspace_archived" && f.workspaceId === "ws-a"),
+        "archived",
+      );
+      const beforeRestore = frames.length;
+      send({ type: "unarchive_workspace", workspaceId: "ws-a" });
+      await until(
+        () =>
+          frames
+            .slice(beforeRestore)
+            .some((f) => f.type === "agent_updated" && f.workspaceId === "ws-a"),
+        "restored agent snapshot",
+      );
+      const restored = frames
+        .slice(beforeRestore)
+        .find((f) => f.type === "agent_updated" && f.workspaceId === "ws-a")!;
+      expect(restored.agent).toMatchObject({
+        context: { tokens: 96_000, window: 1_000_000 },
+      });
+    } finally {
+      await stop();
+    }
+  });
 });

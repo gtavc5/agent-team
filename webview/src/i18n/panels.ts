@@ -200,6 +200,11 @@ export const panelMessages = {
     en: "Remove {name}",
     "zh-CN": "移除 {name}",
   },
+  contextUnknown: { en: "ctx unknown", "zh-CN": "上下文占用未知" },
+  contextEstimateTitle: {
+    en: "Estimate: {used} of {total} tokens",
+    "zh-CN": "估算：已使用 {used} / {total} tokens",
+  },
   contextTokensTitle: {
     en: "{used} of {total} tokens",
     "zh-CN": "已使用 {used} / {total} tokens",
@@ -238,6 +243,7 @@ export const panelMessages = {
     en: "monitor",
     "zh-CN": "监控",
   },
+  taskQueued: { en: "Queued", "zh-CN": "已排队" },
   taskStopLabel: {
     en: "Stop {target}",
     "zh-CN": "停止 {target}",

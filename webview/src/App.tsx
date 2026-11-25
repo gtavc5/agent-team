@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { recordTelemetry } from "./telemetry";
+import { recordTelemetryEvent, telemetryTarget } from "./telemetryEvents";
 import { PHONE } from "./viewport/facts";
 import {
   AUTO_RELOAD,
@@ -47,6 +48,7 @@ import { ExtensionUi } from "./workspace/ExtensionUi";
 import { UiDialogModal } from "./workspace/UiDialogModal";
 import { selectUiDialogs, uiDialogKey } from "./state/uiDialogs";
 import { Sidebar } from "./sidebar/Sidebar";
+import { UsageDashboard } from "./usage/UsageDashboard";
 import { summarizeAttention } from "./sidebar/attention";
 import { MobileMenuButton } from "./sidebar/MobileMenuButton";
 import { GitBar } from "./workspace/GitBar";
@@ -70,6 +72,12 @@ import {
 } from "./viewport/viewportHeal";
 import { collectSnapshot, uploadSnapshot } from "./dev/debugSnapshot";
 import { t, useT } from "./i18n/chat";
+import {
+  readingAnchorElement,
+  rememberReadingPosition,
+  restoreReadingPosition,
+  type ReadingPosition,
+} from "./viewport/readingAnchor";
 
 // Re-exported for tests and for anyone importing the old single-file layout.
 export { GitBar } from "./workspace/GitBar";
@@ -122,7 +130,7 @@ function compressToBlob(file: File, maxDim = 1600, quality = 0.85): Promise<Blob
   });
 }
 
-async function uploadImage(file: File): Promise<{ name: string; url: string }> {
+export async function uploadImage(file: File): Promise<{ name: string; url: string }> {
   let blob: Blob;
   try {
     blob = await Promise.race([
@@ -134,10 +142,14 @@ async function uploadImage(file: File): Promise<{ name: string; url: string }> {
   } catch {
     blob = file;
   }
-  const contentType = blob instanceof File ? blob.type || "image/jpeg" : "image/jpeg";
+  const contentType = blob.type || "image/jpeg";
   const res = await fetch("upload", {
     method: "POST",
-    headers: { "Content-Type": contentType, "X-Filename": file.name },
+    headers: {
+      "Content-Type": contentType,
+      // Fetch headers require ISO-8859-1; encode non-ASCII names like "截图.png".
+      "X-Filename": encodeURIComponent(file.name),
+    },
     credentials: "include",
     body: blob,
   });
@@ -275,7 +287,7 @@ export function App() {
       // the viewport numbers say at this instant; the focusout heal follows.
       const keyboard = keyboardOpen(f) || isTextInput(document.activeElement);
       if (!tracker.needsHeal(window.innerHeight, keyboard)) return;
-      healViewport(appRef.current, messagesContainerRef.current);
+      healViewport(appRef.current, messagesContainerRef.current, stuckToBottomRef.current);
     };
     const scheduleHeal = () => {
       clearTimeout(healTimer);
@@ -302,19 +314,20 @@ export function App() {
       const f = facts();
       const keyboard = keyboardOpen(f);
       const scroller = messagesContainerRef.current;
+      const following = stuckToBottomRef.current;
       const focused = document.activeElement === textareaRef.current;
       // Measured before the box changes: whether to stay glued to the end.
-      const atBottom = scroller ? scroller.clientHeight > 0 && isAtBottom(scroller) : false;
+      const atBottom = following && scroller && scroller.clientHeight > 0 && isAtBottom(scroller);
       const vars = viewportVars(f);
       if (vars.height) el.style.setProperty("--app-height", vars.height);
       else el.style.removeProperty("--app-height");
       if (vars.offset) el.style.setProperty("--app-offset", vars.offset);
       else el.style.removeProperty("--app-offset");
-      if (focused && scroller) scroller.scrollTop = scroller.scrollHeight;
+      if (focused && following && scroller) scroller.scrollTop = scroller.scrollHeight;
       if (keyboard !== keyboardWasOpen) {
         // The scroller's box just changed height: see settleScroller.
         keyboardWasOpen = keyboard;
-        requestAnimationFrame(() => settleScroller(scroller, atBottom || focused));
+        requestAnimationFrame(() => settleScroller(scroller, !!atBottom || (following && focused)));
       }
     };
     apply();
@@ -375,9 +388,7 @@ export function App() {
   const [filesWidth, setFilesWidth] = useSavedWidth("filesPanelWidth");
   const togglePanel = useCallback(
     (id: PanelId) => {
-      const closing = openPanel === id;
-      recordTelemetry(closing ? "panel.close" : id === "changes" ? "panel.diff" : `panel.${id}`);
-      setOpenPanel(closing ? null : id);
+      setOpenPanel(openPanel === id ? null : id);
       setMaxFor(null);
     },
     [openPanel],
@@ -409,6 +420,7 @@ export function App() {
   }, [panelPinned]);
   // The project whose board page is open, whichever workspace is.
   const [boardProjectId, setBoardProjectId] = useState<string | null>(null);
+  const [showUsage, setShowUsage] = useState(false);
   const closeBoard = useCallback(() => {
     recordTelemetry("panel.close");
     setBoardProjectId(null);
@@ -429,7 +441,7 @@ export function App() {
   const [sidebarWidth, setSidebarWidth] = useState(260);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // The drawer's overlay outlives it a moment: the second tap of a double
-  // tap on a session lands on it, not on whatever the closing drawer uncovers.
+  // tap on a session lands on it, not on whatever the drawer just uncovered.
   const [sidebarShield, setSidebarShield] = useState(false);
   useEffect(() => {
     if (sidebarOpen) {
@@ -470,9 +482,9 @@ export function App() {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightMsgId, setHighlightMsgId] = useState<string | null>(null);
-  const prevRunningRef = useRef<Record<string, boolean>>({});
-  const [finishedStatus, setFinishedStatus] = useState<Record<string, "done" | "failed">>({});
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [following, setFollowing] = useState(true);
+  const readingPositions = useRef(new Map<string, ReadingPosition>());
+  const readingSession = useRef<string | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -567,10 +579,8 @@ export function App() {
             icon: "board" as const,
             page: true,
             active: boardProjectId === activeProject.id,
-            onClick: () => {
-              recordTelemetry("panel.board");
-              setBoardProjectId(activeProject.id);
-            },
+            telemetry: "panel.board" as const,
+            onClick: () => setBoardProjectId(activeProject.id),
           },
         ]
       : []),
@@ -582,6 +592,7 @@ export function App() {
       badge:
         panelSessions.filter((w) => sessionState(w) === "working").length +
         workCount(panelSessions),
+      telemetry: openPanel === "agents" ? "panel.close" : "panel.agents",
       onClick: () => togglePanel("agents"),
     },
     {
@@ -589,13 +600,16 @@ export function App() {
       label: tr("files"),
       icon: "files" as const,
       active: openPanel === "files",
+      telemetry: openPanel === "files" ? "panel.close" : "panel.files",
       onClick: () => togglePanel("files"),
     },
     {
       id: "changes",
       label: tr("changes"),
+      quiet: true,
       icon: "changes" as const,
       active: openPanel === "changes",
+      telemetry: openPanel === "changes" ? "panel.close" : "panel.diff",
       onClick: () => togglePanel("changes"),
     },
   ];
@@ -686,7 +700,6 @@ export function App() {
   );
   const stopTask = useCallback(
     (wsId: string, agentId: string, taskId: string) => {
-      recordTelemetry("chat.stop");
       cancelSubagent(wsId, agentId, taskId);
     },
     [cancelSubagent],
@@ -721,10 +734,26 @@ export function App() {
     [agentsLook],
   );
 
-  const selectWorkspace = useCallback((id: string) => {
-    if (id !== activeWsRef.current?.id) recordTelemetry("workspace.switch");
-    setActiveWsId(id);
+  const saveReadingPosition = useCallback(() => {
+    const ws = activeWsRef.current;
+    const el = messagesContainerRef.current;
+    if (!el || !ws?.messagesLoaded || readingSession.current !== ws.id) return;
+    const position = rememberReadingPosition(el, stuckToBottomRef.current);
+    if (!position.following && position.id) {
+      position.timestamp = ws.messages.find((m) => `msg-${m.id}` === position.id)?.timestamp;
+    }
+    readingPositions.current.set(ws.id, position);
   }, []);
+  const selectWorkspace = useCallback(
+    (id: string) => {
+      if (id !== activeWsRef.current?.id) {
+        recordTelemetry("workspace.switch");
+        saveReadingPosition();
+      }
+      setActiveWsId(id);
+    },
+    [saveReadingPosition],
+  );
   const onSelectWorkspace = useCallback(
     (id: string) => {
       selectWorkspace(id);
@@ -743,17 +772,7 @@ export function App() {
     },
     [onSelectWorkspace],
   );
-  const stopTurns = useCallback(
-    (wsId: string, agentIds?: string[]) => {
-      recordTelemetry("chat.stop");
-      if (agentIds) {
-        for (const id of agentIds) interrupt(wsId, id);
-      } else {
-        interrupt(wsId);
-      }
-    },
-    [interrupt],
-  );
+
   const agentActions = useMemo<AgentsPanelActions>(
     () => ({
       onOpen: (id) => {
@@ -761,7 +780,7 @@ export function App() {
         if (window.matchMedia?.(PHONE).matches) setOpenPanel(null);
         openWorkspace(id);
       },
-      onStop: stopTurns,
+      onStop: interrupt,
       onArchive: (id) => archiveWorkspace(id),
       onRestore: (id) => unarchiveWorkspace(id),
       onSetReporting: (id, reports) => setReporting(id, reports),
@@ -776,14 +795,11 @@ export function App() {
       onSetEffort: (id, agentId, effort) => void sendMessage(id, `/effort ${effort}`, agentId),
       onStopTask: stopTask,
       onCancelWake: (id, agentId) => cancelWakeup(id, agentId),
-      onStopAll: (id) => {
-        recordTelemetry("chat.stop");
-        abort(id);
-      },
+      onStopAll: (id) => abort(id),
     }),
     [
       openWorkspace,
-      stopTurns,
+      interrupt,
       archiveWorkspace,
       unarchiveWorkspace,
       setReporting,
@@ -798,6 +814,7 @@ export function App() {
 
   const onDeleteWorkspace = useCallback(
     (id: string) => {
+      readingPositions.current.delete(id);
       deleteWorkspace(id);
       setActiveWsId((cur) => (cur === id ? null : cur));
     },
@@ -812,18 +829,11 @@ export function App() {
     recordTelemetry("dialog.add_project", "open");
     setShowCreateProject(true);
   }, []);
-  const onRefreshQuota = useCallback<typeof refreshQuota>(
-    (force, providers) => {
-      if (force) recordTelemetry("quota.refresh");
-      return refreshQuota(force, providers);
-    },
-    [refreshQuota],
-  );
   const onReplayDemo = useCallback(() => {
     const wsId = startReplayDemo();
-    setActiveWsId(wsId);
+    selectWorkspace(wsId);
     setSidebarOpen(false);
-  }, [startReplayDemo]);
+  }, [startReplayDemo, selectWorkspace]);
   const onPurgeArchived = useCallback(
     (projectId: string | null) => setPurgeScope({ projectId }),
     [],
@@ -847,74 +857,34 @@ export function App() {
     if (boardProjectId) setSealingProjectId(boardProjectId);
   }, [boardProjectId]);
 
-  // The session on screen is read on every device, also when a turn of it
-  // ends; a page in the background or out of focus reads nothing.
+  // Merely having the session open does not read a result below the reader.
   const attended = usePageAttended();
-  const hasActive = !!activeWs;
-  const activeBusy = activeWs?.agents.some((a) => a.busy) ?? false;
-  const needsMark = (activeWs?.unread ?? 0) > 0;
-  // What was last marked: the session and whether it ran. Marked again when
-  // it has unread messages (a mark lost with a dead socket comes back after
-  // the reconnect), when a turn of it starts or ends, and on coming back.
-  const marked = useRef("");
+  const activeUnread = activeWs?.unread ?? 0;
+  const activeLoaded = activeWs?.messagesLoaded ?? true;
   useEffect(() => {
-    // The board covers the session.
-    if (!activeWsId || !hasActive || !attended || !connected || boardProjectId) {
-      marked.current = "";
-      return;
+    if (
+      activeWsId &&
+      activeLoaded &&
+      activeUnread > 0 &&
+      attended &&
+      connected &&
+      !boardProjectId &&
+      !showUsage &&
+      stuckToBottomRef.current
+    ) {
+      markSeen(activeWsId);
     }
-    const key = `${activeWsId} ${activeBusy}`;
-    if (!needsMark && key === marked.current) return;
-    marked.current = key;
-    markSeen(activeWsId);
-    setFinishedStatus((prev) => {
-      if (!(activeWsId in prev)) return prev;
-      const next = { ...prev };
-      delete next[activeWsId];
-      return next;
-    });
-  }, [activeWsId, hasActive, needsMark, activeBusy, attended, connected, boardProjectId, markSeen]);
-
-  // A session another device showed is no longer "finished" here either.
-  const seenTicks = useRef<Record<string, number>>({});
-  useEffect(() => {
-    const seen: string[] = [];
-    for (const ws of workspaces) {
-      const tick = ws.seenTick ?? 0;
-      if (tick !== (seenTicks.current[ws.id] ?? 0)) seen.push(ws.id);
-      seenTicks.current[ws.id] = tick;
-    }
-    if (seen.length === 0) return;
-    setFinishedStatus((prev) => {
-      if (!seen.some((id) => id in prev)) return prev;
-      const next = { ...prev };
-      for (const id of seen) delete next[id];
-      return next;
-    });
-  }, [workspaces]);
-
-  const runningSnapshot = useMemo(
-    () =>
-      Object.fromEntries(workspaces.map((ws) => [ws.id, ws.agents.some((a) => a.busy)] as const)),
-    [workspaces],
-  );
-
-  useEffect(() => {
-    const updates: Record<string, "done" | "failed"> = {};
-    for (const ws of workspaces) {
-      const isRunning = runningSnapshot[ws.id];
-      const wasRunning = prevRunningRef.current[ws.id];
-      // Nothing unread: another device was showing it.
-      if (wasRunning && !isRunning && ws.id !== activeWsId && (ws.unread ?? 0) > 0) {
-        const lastAgent = [...ws.messages].reverse().find((m) => m.kind === "agent");
-        updates[ws.id] = lastAgent?.status === "error" ? "failed" : "done";
-      }
-      prevRunningRef.current[ws.id] = isRunning;
-    }
-    if (Object.keys(updates).length > 0) {
-      setFinishedStatus((prev) => ({ ...prev, ...updates }));
-    }
-  }, [runningSnapshot, activeWsId, workspaces]);
+  }, [
+    activeWsId,
+    activeLoaded,
+    activeUnread,
+    attended,
+    connected,
+    boardProjectId,
+    showUsage,
+    following,
+    markSeen,
+  ]);
 
   // Search runs server-side over the full message history — the client only
   // holds lazily-loaded windows, so local filtering missed almost everything.
@@ -1003,14 +973,6 @@ export function App() {
     }
     setHasInput(restored.trim().length > 0);
     setMentionTarget(extractMentionName(restored));
-    userScrolledUpRef.current = false;
-    stuckToBottomRef.current = true;
-    prevMsgCountRef.current = 0;
-    jumpScrollTopRef.current = null;
-    anchorRef.current = null;
-    requestAnimationFrame(() => {
-      messagesEndRef.current?.scrollIntoView();
-    });
   }, [activeWsId]);
 
   // Also on every reconnect: the newest page resyncs in place, without
@@ -1021,7 +983,6 @@ export function App() {
 
   // The open workspace dropped its history (archived while in view, e.g. by
   // a project's lead): fetch it again rather than spin until a switch.
-  const activeLoaded = activeWs?.messagesLoaded ?? true;
   const loadedRef = useRef({ id: activeWsId, loaded: activeLoaded });
   useEffect(() => {
     const prev = loadedRef.current;
@@ -1067,7 +1028,7 @@ export function App() {
   );
   const onMessagesScroll = useCallback(() => {
     const el = messagesContainerRef.current;
-    if (!el || !activeWs || activeWs.loadingOlder) return;
+    if (!el || !activeWs || readingSession.current !== activeWs.id || activeWs.loadingOlder) return;
     if (el.scrollTop < 80 && activeWs.hasMore) {
       const oldest = activeWs.messages[0];
       if (oldest) {
@@ -1078,7 +1039,6 @@ export function App() {
   }, [activeWs, loadMessages, rememberHistoryAnchor]);
 
   const prevMsgCountRef = useRef(0);
-  const userScrolledUpRef = useRef(false);
   // Whether a growing reply keeps the view pinned to its end. Any upward
   // scroll lets go (a finger dragging back to reread moves a few pixels per
   // frame, far less than "scrolled up"); the very bottom takes hold again.
@@ -1100,16 +1060,19 @@ export function App() {
     // A jump is not a request to reattach to the bottom or load another page.
     const jumpTop = jumpScrollTopRef.current;
     jumpScrollTopRef.current = null;
-    if (jumpTop === el.scrollTop) return;
+    if (jumpTop === el.scrollTop || readingSession.current !== activeWsIdRef.current) return;
+    const moved = el.scrollTop !== lastScrollTopRef.current;
+    const wasFollowing = stuckToBottomRef.current;
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    userScrolledUpRef.current = distFromBottom > 150;
     if (distFromBottom <= 8) stuckToBottomRef.current = true;
-    else if (el.scrollTop < lastScrollTopRef.current || userScrolledUpRef.current) {
+    else if (el.scrollTop < lastScrollTopRef.current || distFromBottom > 150) {
       stuckToBottomRef.current = false;
     }
     lastScrollTopRef.current = el.scrollTop;
+    setFollowing(stuckToBottomRef.current);
+    if (moved || wasFollowing !== stuckToBottomRef.current) saveReadingPosition();
     onMessagesScroll();
-  }, [measureAnchorOffset, onMessagesScroll]);
+  }, [measureAnchorOffset, onMessagesScroll, saveReadingPosition]);
 
   // The composer growing (a long draft, the command list) takes the
   // transcript's room from below: a reader at the end stays there. Keyed on
@@ -1119,19 +1082,35 @@ export function App() {
     const el = messagesContainerRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     let height = el.clientHeight;
+    let range = el.scrollHeight - height;
     const ro = new ResizeObserver(() => {
-      // At the end in the old box (content that grew meanwhile, a box the
-      // reader opened, says not); a pixel short is settleScroller's nudge.
-      const wasAtEnd = el.scrollHeight - el.scrollTop - height <= 8;
-      const shrank = el.clientHeight < height;
-      height = el.clientHeight;
-      if (shrank && wasAtEnd && el.scrollHeight - el.scrollTop - el.clientHeight > 1) {
-        el.scrollTop = el.scrollHeight;
+      const nextHeight = el.clientHeight;
+      const nextRange = el.scrollHeight - nextHeight;
+      const gap = nextRange - el.scrollTop;
+      if (readingSession.current === activeWsIdRef.current) {
+        // A collapse or taller viewport can reach the end without a scroll
+        // event. Never reattach a historical reader because content grew.
+        if (!stuckToBottomRef.current && nextRange < range && gap <= 8) {
+          stuckToBottomRef.current = true;
+          lastScrollTopRef.current = el.scrollTop;
+          setFollowing(true);
+          saveReadingPosition();
+        } else if (
+          stuckToBottomRef.current &&
+          nextHeight < height &&
+          el.scrollHeight - el.scrollTop - height <= 8 &&
+          gap > 1
+        ) {
+          el.scrollTop = el.scrollHeight;
+        }
       }
+      height = nextHeight;
+      range = nextRange;
     });
     ro.observe(el);
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
     return () => ro.disconnect();
-  }, [activeWs?.id]);
+  }, [activeWs?.id, saveReadingPosition]);
 
   // Follow the conversation while the reader is at the bottom: a new
   // message scrolls into view, a streaming one keeps the end pinned. Only
@@ -1139,13 +1118,47 @@ export function App() {
   // reader opened a box must stay where they tapped.
   useLayoutEffect(() => {
     const msgs = activeWs?.messages ?? [];
+    const el = messagesContainerRef.current;
+    if (!el || !activeWs || !activeWs.messagesLoaded) {
+      readingSession.current = null;
+      return;
+    }
+    const saved = readingPositions.current.get(activeWs.id) ?? { following: true };
+    const oldest = msgs[0];
+    // The newest page can be disjoint even if cached history let us restore first.
+    if (
+      !saved.following &&
+      saved.timestamp != null &&
+      activeWs.hasMore &&
+      oldest &&
+      oldest.timestamp >= saved.timestamp &&
+      !readingAnchorElement(el, saved.id)
+    ) {
+      readingSession.current = null;
+      stuckToBottomRef.current = false;
+      setFollowing(false);
+      if (connected && !activeWs.loadingOlder)
+        loadMessages(activeWs.id, oldest.timestamp, JUMP_PAGE);
+      return;
+    }
+    if (readingSession.current !== activeWs.id) {
+      stuckToBottomRef.current = saved.following;
+      setFollowing(saved.following);
+      readingSession.current = activeWs.id;
+      anchorRef.current = null;
+      prevMsgCountRef.current = msgs.length;
+      wasStreamingRef.current = msgs.some((m) => m.status === "streaming");
+      restoreReadingPosition(el, saved);
+      jumpScrollTopRef.current = el.scrollTop;
+      lastScrollTopRef.current = el.scrollTop;
+      return;
+    }
     const prevCount = prevMsgCountRef.current;
     prevMsgCountRef.current = msgs.length;
     const streaming = msgs.some((m) => m.status === "streaming");
     const wasStreaming = wasStreamingRef.current;
     wasStreamingRef.current = streaming;
     const anchor = anchorRef.current;
-    const el = messagesContainerRef.current;
     if (anchor && el && anchor.wsId === activeWs?.id && msgs[0]?.id !== anchor.firstId) {
       anchorRef.current = null;
       const nowOffset = measureAnchorOffset(el, anchor.firstId);
@@ -1156,16 +1169,27 @@ export function App() {
       el.scrollTop = anchor.top + delta;
       return;
     }
-    if (prevCount === 0 && msgs.length > 0) {
-      messagesEndRef.current?.scrollIntoView();
-    } else if (msgs.length > prevCount) {
-      if (!userScrolledUpRef.current) {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-      }
-    } else if (stuckToBottomRef.current && (streaming || wasStreaming)) {
-      if (el) el.scrollTop = el.scrollHeight;
+    if (el && stuckToBottomRef.current && (msgs.length > prevCount || streaming || wasStreaming)) {
+      el.scrollTop = el.scrollHeight;
     }
-  }, [activeWs?.id, activeWs?.messages, measureAnchorOffset]);
+  }, [activeWs, connected, loadMessages, measureAnchorOffset]);
+
+  // A delayed starting row can grow the transcript without a server update.
+  const onStartingRow = useCallback((row: HTMLDivElement | null) => {
+    const el = messagesContainerRef.current;
+    if (row && el && stuckToBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, []);
+
+  const jumpToLatest = () => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    anchorRef.current = null;
+    el.scrollTop = el.scrollHeight;
+    stuckToBottomRef.current = true;
+    lastScrollTopRef.current = el.scrollTop;
+    if (activeWsId) readingPositions.current.set(activeWsId, { following: true });
+    setFollowing(true);
+  };
 
   useEffect(() => {
     const jump = pendingJump;
@@ -1183,13 +1207,14 @@ export function App() {
         const target = document.getElementById(`msg-${jump.msgId}`);
         const scroller = messagesContainerRef.current;
         if (!target || !scroller?.contains(target)) return;
-        userScrolledUpRef.current = true;
         stuckToBottomRef.current = false;
+        setFollowing(false);
         const before = scroller.scrollTop;
         if (!jump.fromSearch) target.focus({ preventScroll: true });
         target.scrollIntoView({ behavior: "instant", block: "center" });
         const after = scroller.scrollTop;
         lastScrollTopRef.current = after;
+        saveReadingPosition();
         if (after !== before) jumpScrollTopRef.current = after;
       }, 100);
       jumpHighlightTimerRef.current = setTimeout(() => setHighlightMsgId(null), 2000);
@@ -1206,7 +1231,7 @@ export function App() {
       setPendingJump(null);
       if (jump.fromSearch) setNotice(t("messageGone"));
     }
-  }, [pendingJump, activeWsId, activeWs, loadMessages, rememberHistoryAnchor]);
+  }, [pendingJump, activeWsId, activeWs, loadMessages, rememberHistoryAnchor, saveReadingPosition]);
 
   const isAnyRunning = activeWs?.agents.some(isAgentActive) ?? false;
   const hasAgents = (activeWs?.agents.length ?? 0) > 0;
@@ -1232,7 +1257,9 @@ export function App() {
   );
   const targetAgent = targetState.effectiveAgent;
   const targetBusy = !!targetAgent && agentQueues(targetAgent);
-  const busyAgents = activeWs?.agents.filter(agentQueues) ?? [];
+  const busyAgents = connected
+    ? (activeWs?.agents.filter((a) => agentQueues(a) || (a.busy && a.lastStreamAt != null)) ?? [])
+    : [];
 
   useEffect(() => {
     selectCommandAgent(activeWs?.id ?? null, targetAgent?.id ?? null);
@@ -1447,7 +1474,6 @@ export function App() {
       return;
     }
     sendingRef.current = true;
-    recordTelemetry("chat.send");
     setSending(true);
     let outcome: Awaited<ReturnType<typeof sendMessage>>;
     try {
@@ -1477,6 +1503,7 @@ export function App() {
         quotedMsg
           ? { messageId: quotedMsg.id, agentId: quotedMsg.agentId, content: quotedMsg.content }
           : undefined,
+        "composer",
       );
     } finally {
       sendingRef.current = false;
@@ -1601,7 +1628,12 @@ export function App() {
 
   return (
     <SessionLinkContext.Provider value={sessionLinks}>
-      <div className="app" ref={appRef}>
+      <div
+        className="app"
+        ref={appRef}
+        onClickCapture={recordTelemetryEvent}
+        onFocusCapture={recordTelemetryEvent}
+      >
         {notice && (
           <div
             className="info-toast"
@@ -1647,11 +1679,10 @@ export function App() {
             connected={connected}
             sidebarOpen={sidebarOpen}
             groupOverrides={groupOverrides}
-            finishedStatus={finishedStatus}
             searchQuery={searchQuery}
             searchHits={searchHits}
             quota={quota}
-            onRefreshQuota={onRefreshQuota}
+            onRefreshQuota={refreshQuota}
             systemStatus={systemStatus}
             onSelect={onSelectWorkspace}
             onDelete={onDeleteWorkspace}
@@ -1664,10 +1695,12 @@ export function App() {
             onCreateIn={onCreateWorkspace}
             onReplayDemo={onReplayDemo}
             onPurgeArchived={onPurgeArchived}
+            onArchiveWorkspace={archiveWorkspace}
             onArchiveProject={onArchiveProject}
             onRenameProject={renameProject}
             onRestoreProject={onRestoreProject}
             onDebugSnapshot={takeSnapshot}
+            onOpenUsage={() => setShowUsage(true)}
           />
         </div>
 
@@ -1689,6 +1722,7 @@ export function App() {
                     className="agents-chip"
                     aria-pressed={openPanel === "agents"}
                     title={tr("agentsAndSessions")}
+                    {...telemetryTarget(openPanel === "agents" ? "panel.close" : "panel.agents")}
                     onClick={() => togglePanel("agents")}
                   >
                     <span className="agents-chip-avatars">
@@ -1704,7 +1738,7 @@ export function App() {
                 </div>
                 <div className="workspace-info-bar">
                   <span className="ws-info-item" title={activeWs.cwd}>
-                    <span className="ws-info-icon">&#128193;</span>
+                    <Icon name="folder" />
                     <span className="ws-info-path">
                       <bdi>{activeWs.cwd}</bdi>
                     </span>
@@ -1768,92 +1802,120 @@ export function App() {
                 )}
               </div>
 
-              <div className="messages" ref={messagesContainerRef} onScroll={onMessagesScrollTrack}>
-                <FileOpenContext.Provider value={fileOpener(activeWs.id)}>
-                  <LocalDayProvider>
-                    {(() => {
-                      const msgs = activeWs.messages;
-                      const total = msgs.length;
-                      if (!activeWs.messagesLoaded) {
-                        return (
-                          <HistoryHint hasMore={false} loading={false} loaded={false} count={0} />
+              <div
+                key={activeWs.id}
+                className="messages"
+                ref={messagesContainerRef}
+                onScroll={onMessagesScrollTrack}
+              >
+                <div className="messages-content">
+                  <FileOpenContext.Provider value={fileOpener(activeWs.id)}>
+                    <LocalDayProvider>
+                      {(() => {
+                        const msgs = activeWs.messages;
+                        const total = msgs.length;
+                        if (!activeWs.messagesLoaded) {
+                          return (
+                            <HistoryHint hasMore={false} loading={false} loaded={false} count={0} />
+                          );
+                        }
+                        if (total === 0) {
+                          return (
+                            <div className="empty-state">
+                              {activeWs.agents.length === 0
+                                ? tr("addAgentStart")
+                                : tr("sendMessageStart")}
+                            </div>
+                          );
+                        }
+                        const streamingAgentIds = new Set(
+                          msgs
+                            .filter((msg) => msg.kind === "agent" && msg.status === "streaming")
+                            .map((msg) => msg.agentId),
                         );
-                      }
-                      if (total === 0) {
                         return (
-                          <div className="empty-state">
-                            {activeWs.agents.length === 0
-                              ? tr("addAgentStart")
-                              : tr("sendMessageStart")}
-                          </div>
+                          <>
+                            <HistoryHint
+                              hasMore={!!activeWs.hasMore}
+                              loading={!!activeWs.loadingOlder}
+                              loaded
+                              count={total}
+                            />
+                            {msgs.map((msg, i) => {
+                              const prev = i > 0 ? msgs[i - 1] : null;
+                              const compact =
+                                !!prev &&
+                                msg.kind === "agent" &&
+                                prev.kind === "agent" &&
+                                !!msg.turnId &&
+                                msg.turnId === prev.turnId;
+                              const next = msgs[i + 1];
+                              const isTurnTail = !(
+                                next &&
+                                msg.kind === "agent" &&
+                                next.kind === "agent" &&
+                                msg.turnId &&
+                                next.turnId === msg.turnId
+                              );
+                              const item = (
+                                <MessageItem
+                                  user={user}
+                                  msg={msg}
+                                  agents={
+                                    msg.status === "streaming" ? activeWs.agents : settledAgents
+                                  }
+                                  compact={compact}
+                                  highlight={msg.id === highlightMsgId}
+                                  hasStreamingReply={
+                                    msg.status === "starting" &&
+                                    !!msg.queuedFor &&
+                                    streamingAgentIds.has(msg.queuedFor)
+                                  }
+                                  onStartingRow={onStartingRow}
+                                  onQuote={handleQuote}
+                                  onJumpToMessage={jumpToMessageInActiveWs}
+                                  onLoadSubagentEvents={onLoadSubagentEvents}
+                                  onCancelSubagent={onCancelSubagent}
+                                  onCancelQueued={onCancelQueued}
+                                  onLoadDetails={onLoadDetails}
+                                  onOpenWorkspace={openWorkspace}
+                                  onMentionAgent={projectSealed ? undefined : handleMentionAgent}
+                                  isTurnTail={isTurnTail}
+                                />
+                              );
+                              const from = msg.from?.workspaceId;
+                              return (
+                                <MessageBoundary key={msg.id} messageId={msg.id}>
+                                  {from && from !== activeWs.id && workspaceIds.has(from) ? (
+                                    <FileOpenContext.Provider value={fileOpener(from)}>
+                                      {item}
+                                    </FileOpenContext.Provider>
+                                  ) : (
+                                    item
+                                  )}
+                                </MessageBoundary>
+                              );
+                            })}
+                          </>
                         );
-                      }
-                      return (
-                        <>
-                          <HistoryHint
-                            hasMore={!!activeWs.hasMore}
-                            loading={!!activeWs.loadingOlder}
-                            loaded
-                            count={total}
-                          />
-                          {msgs.map((msg, i) => {
-                            const prev = i > 0 ? msgs[i - 1] : null;
-                            const compact =
-                              !!prev &&
-                              msg.kind === "agent" &&
-                              prev.kind === "agent" &&
-                              !!msg.turnId &&
-                              msg.turnId === prev.turnId;
-                            const next = i + 1 < total ? msgs[i + 1] : null;
-                            const isTurnTail = !(
-                              !!next &&
-                              msg.kind === "agent" &&
-                              next.kind === "agent" &&
-                              !!msg.turnId &&
-                              next.turnId === msg.turnId
-                            );
-                            const item = (
-                              <MessageItem
-                                user={user}
-                                msg={msg}
-                                agents={
-                                  msg.status === "streaming" ? activeWs.agents : settledAgents
-                                }
-                                compact={compact}
-                                highlight={msg.id === highlightMsgId}
-                                onQuote={handleQuote}
-                                onJumpToMessage={jumpToMessageInActiveWs}
-                                onLoadSubagentEvents={onLoadSubagentEvents}
-                                onCancelSubagent={onCancelSubagent}
-                                onCancelQueued={onCancelQueued}
-                                onLoadDetails={onLoadDetails}
-                                onOpenWorkspace={openWorkspace}
-                                onMentionAgent={projectSealed ? undefined : handleMentionAgent}
-                                isTurnTail={isTurnTail}
-                              />
-                            );
-                            const from = msg.from?.workspaceId;
-                            return (
-                              <MessageBoundary key={msg.id} messageId={msg.id}>
-                                {from && from !== activeWs.id && workspaceIds.has(from) ? (
-                                  <FileOpenContext.Provider value={fileOpener(from)}>
-                                    {item}
-                                  </FileOpenContext.Provider>
-                                ) : (
-                                  item
-                                )}
-                              </MessageBoundary>
-                            );
-                          })}
-                        </>
-                      );
-                    })()}
-                  </LocalDayProvider>
-                </FileOpenContext.Provider>
-                <div ref={messagesEndRef} />
+                      })()}
+                    </LocalDayProvider>
+                  </FileOpenContext.Provider>
+                </div>
+                <div aria-hidden="true" />
               </div>
 
               <div className="input-area">
+                {!following && activeWs.messagesLoaded && (
+                  <button
+                    type="button"
+                    className="jump-latest"
+                    {...telemetryTarget("chat.jump_latest")}
+                    onClick={jumpToLatest}
+                  >
+                    Jump to latest ↓
+                  </button>
+                )}
                 {quotedMsg &&
                   (() => {
                     const canJump = quotedMsg.wsId === activeWs.id;
@@ -1884,7 +1946,7 @@ export function App() {
                             ) : quotedMsg.from ? (
                               "◆"
                             ) : (
-                              "👤"
+                              <Icon name="agents" />
                             )}{" "}
                             {author}
                           </span>
@@ -2032,7 +2094,7 @@ export function App() {
                     <StopControl
                       key={activeWs.id}
                       busyAgents={busyAgents}
-                      onStop={(agentIds) => stopTurns(activeWs.id, agentIds)}
+                      onStop={(agentIds) => interrupt(activeWs.id, agentIds)}
                     />
                   )}
                   {showPrimary && (
@@ -2200,6 +2262,10 @@ export function App() {
             onConfirm={() => purgeArchived(purgeScope.projectId)}
             onClose={closePurge}
           />
+        )}
+
+        {showUsage && (
+          <UsageDashboard workspaces={workspaces} onClose={() => setShowUsage(false)} />
         )}
 
         {boardProject && (

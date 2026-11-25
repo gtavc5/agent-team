@@ -138,7 +138,7 @@ type = "local"
     agents: [],
     createdAt: 1,
     messages: HISTORY,
-    unread: 3,
+    attention: { unread: 3, lastResult: "done", awaitsUser: false },
   };
   saveWorkspace(base, state);
   saveIndex(base, ["ws-h"]);
@@ -514,7 +514,7 @@ describe("server websocket", () => {
       cwd: root,
       projectLink: { projectId: project.id, role: "lead" },
     });
-    expect(agent).toMatchObject({ name: "Lead", model: "gpt-6-astra" });
+    expect(agent).toMatchObject({ name: "Lead", model: "gpt-6.2-astra" });
     expect(project).toMatchObject({ name: "demo", root, leadWorkspaceId: created.id });
     expect(
       fs.existsSync(path.join(base, ".agent-team", "projects", String(project.id), "notes")),

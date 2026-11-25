@@ -125,8 +125,21 @@ export const chatCatalog = {
   // Stop control
   stopAgent: { en: "Stop {name}", "zh-CN": "停止 {name}" },
   stopAgentTitle: {
-    en: "Stop {name}'s turn; background tasks keep going",
-    "zh-CN": "停止 {name} 的当前轮次；后台任务将继续运行",
+    en: "Stop {name}'s current turn",
+    "zh-CN": "停止 {name} 的当前轮次",
+  },
+  stopAgentDescription: {
+    en: "Interrupts this turn. If interruption is unavailable, the agent process may stop.",
+    "zh-CN": "中断当前轮次。如果无法中断，代理进程可能会停止。",
+  },
+  chooseTurnsToStop: { en: "Choose current turns to stop", "zh-CN": "选择要停止的当前轮次" },
+  chooseTurnsToStopDescription: {
+    en: "Choose which turns to interrupt. If interruption is unavailable, the affected agent process may stop.",
+    "zh-CN": "选择要中断的轮次。如果无法中断，对应的代理进程可能会停止。",
+  },
+  stopAllTurnsTitle: {
+    en: "Stop all current turns in this session only",
+    "zh-CN": "仅停止此会话的所有当前轮次",
   },
   stopRunningAgents: {
     en: "Stop running agents ({count})",
@@ -164,6 +177,11 @@ export const chatCatalog = {
     en: "Context: {tokens} / {window} tokens",
     "zh-CN": "上下文：{tokens} / {window} tokens",
   },
+  contextUnknown: { en: "ctx unknown", "zh-CN": "上下文占用未知" },
+  contextEstimate: {
+    en: "Context estimate: {tokens} / {window} tokens",
+    "zh-CN": "上下文估算：{tokens} / {window} tokens",
+  },
   contextChip: {
     en: "ctx {tokens} / {window} · {pct}%",
     "zh-CN": "上下文 {tokens} / {window} · {pct}%",
@@ -188,9 +206,13 @@ export const chatCatalog = {
     "zh-CN": "{tokens} tokens · {tools} 次工具调用",
   },
   subagentStatusRunning: { en: "running", "zh-CN": "运行中" },
+  subagentStatusQueued: { en: "queued", "zh-CN": "已排队" },
   subagentStatusCompleted: { en: "completed", "zh-CN": "已完成" },
   subagentStatusStopped: { en: "stopped", "zh-CN": "已停止" },
   subagentStatusFailed: { en: "failed", "zh-CN": "已失败" },
+  subagentStatusPartial: { en: "partial", "zh-CN": "部分完成" },
+  subagentStatusPaused: { en: "paused", "zh-CN": "已暂停" },
+  subagentStatusRejected: { en: "rejected", "zh-CN": "已拒绝" },
   expandSubagent: { en: "Expand subagent: {role}", "zh-CN": "展开子代理：{role}" },
   collapseSubagent: { en: "Collapse subagent: {role}", "zh-CN": "收起子代理：{role}" },
   howLongRan: { en: "How long it ran", "zh-CN": "运行时长" },
@@ -208,14 +230,11 @@ export const chatCatalog = {
   collapseSteps: { en: "Collapse steps", "zh-CN": "收起步骤" },
   expandSteps: { en: "Expand steps", "zh-CN": "展开步骤" },
   thinkingTime: { en: "Thinking · {seconds}s", "zh-CN": "思考中 · {seconds}秒" },
-  waitingModel: {
-    en: "Waiting for the model · {seconds}s",
-    "zh-CN": "等待模型响应 · {seconds}秒",
-  },
+  quietEvents: { en: "No new events for {seconds}s", "zh-CN": "已 {seconds} 秒没有新事件" },
   toolFallback: { en: "tool", "zh-CN": "工具" },
   renderError: { en: "This message could not be rendered.", "zh-CN": "无法渲染此消息。" },
-  startingAgent: { en: "Starting {name}…", "zh-CN": "正在启动 {name}…" },
-  agentFallback: { en: "agent", "zh-CN": "代理" },
+  starting: { en: "Starting…", "zh-CN": "正在启动…" },
+  startingAgentFallback: { en: "Agent", "zh-CN": "代理" },
   sending: { en: "Sending…", "zh-CN": "发送中…" },
   quoteMessage: { en: "Quote this message", "zh-CN": "引用此消息" },
   replyToAgent: { en: "Reply to @{name}", "zh-CN": "回复 @{name}" },

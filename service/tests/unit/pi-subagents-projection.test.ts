@@ -24,7 +24,7 @@ const outputMarker = "priority-gate-a-inner-output";
 const writeJsonl = (file: string, records: unknown[]) =>
   fs.writeFileSync(file, records.map((x) => JSON.stringify(x)).join("\n") + "\n");
 
-function scenario(base: string) {
+function scenario(base: string, nested = false) {
   fs.writeFileSync(path.join(base, "config.toml"), "");
   const workspaceId = "ws-siblings";
   const agentId = "agent-siblings";
@@ -96,6 +96,16 @@ function scenario(base: string) {
       subagent: { taskId: id, description: id, status: "running", events: [] },
     })),
   };
+  if (nested) {
+    activeRun.children[0].tree = { ownerTaskId: childA, nodes: { leaf: { status: "running" } } };
+    parent.events![0].subagent!.events = [
+      {
+        kind: "subagent_start",
+        content: "",
+        subagent: { taskId: "leaf", description: "nested", status: "running" },
+      },
+    ];
+  }
   const state: WorkspaceState = {
     id: workspaceId,
     name: "parallel",
@@ -159,6 +169,27 @@ function scenario(base: string) {
 }
 
 describe("Pi subagent projection", () => {
+  it("keeps checkpointed nested work running when loading archived history", async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "yaat-tree-restore-"));
+    const { workspaceId } = scenario(base, true);
+    const server = new Server(0, base, base);
+    try {
+      await server.listening;
+      const live = (server as unknown as { workspaces: Map<string, Workspace> }).workspaces.get(
+        workspaceId,
+      )!;
+      live.setMessages(loadWorkspaceMessages(base, workspaceId));
+      expect(
+        live.messages.find((m) => m.id === "owner")?.events?.[0].subagent?.events?.[0].subagent
+          ?.status,
+      ).toBe("running");
+    } finally {
+      await server.close();
+      closeHistory(base);
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it("loads an archived owner's history on terminal reconciliation and indexes sibling attribution offline", async () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), "yaat-sibling-projection-"));
     const { workspaceId, agentId, finishWithoutNotify } = scenario(base);

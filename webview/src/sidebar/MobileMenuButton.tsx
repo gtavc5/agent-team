@@ -1,3 +1,4 @@
+import { Icon } from "../panels/Icon";
 import { useWorkspaceT } from "../i18n/workspace";
 import { describeAttention, type AttentionSummary } from "./attention";
 
@@ -18,7 +19,7 @@ export function MobileMenuButton({
       })}
       onClick={onClick}
     >
-      <span aria-hidden="true">&#9776;</span>
+      <Icon name="menu" />
       {attention.count > 0 && (
         <span
           className={`attention-badge${attention.yourTurn > 0 ? " attention-badge-your-turn" : ""}`}

@@ -21,8 +21,14 @@ import { HistoryService } from "../../src/workspace/history-service";
 import { CodexSession } from "../../src/session/codex";
 import type { RpcMessage, Transport } from "../../src/session/codex-rpc";
 import { LocalHost, HostRegistry, type HostSessionHandle } from "../../src/session/host";
+import type { UsageRecorder } from "../../src/session/usage-observation";
 import type { PanelToolset } from "../../src/project/tools";
-import { Workspace, type Message, type WorkspaceCallbacks } from "../../src/workspace/workspace";
+import {
+  Workspace,
+  type Message,
+  type WorkspaceCallbacks,
+  type WorkspaceState,
+} from "../../src/workspace/workspace";
 import { applyEventsToMessage } from "../../../webview/src/state/stream";
 
 import {
@@ -78,6 +84,7 @@ export async function loadFixture(backend: Backend, name: string): Promise<Fixtu
 
 export interface Replay extends BaseReplay {
   sessions: HostSessionHandle[];
+  workspaceState: WorkspaceState;
 }
 
 async function flush(): Promise<void> {
@@ -186,8 +193,9 @@ function makeWorkspace(
     onStreamEvent: () => {},
     onMessageDone: () => {},
   },
+  usageRecorder?: UsageRecorder,
 ) {
-  const host = new SnapHost("local", "Local");
+  const host = new SnapHost("local", "Local", undefined, usageRecorder);
   const registry = new HostRegistry();
   registry.register(host);
   const ws = new Workspace("ws", "t", "p", "local", RECORD_CWD, registry, cb);
@@ -215,10 +223,11 @@ export async function replay(
   rec: Recording,
   fixture: Fixture,
   cb?: WorkspaceCallbacks,
+  usageRecorder?: UsageRecorder,
 ): Promise<Replay> {
-  if (backend === "pi") return replayPi(rec, fixture, cb);
+  if (backend === "pi") return replayPi(rec, fixture, cb, usageRecorder);
   const model = rec.header.model || DEFAULT_MODEL[backend];
-  const { ws, host } = makeWorkspace(model, fixture.effort, cb);
+  const { ws, host } = makeWorkspace(model, fixture.effort, cb, usageRecorder);
   const tools = fixture.tools ? panelTools(fixture.tools, fixture.instructions) : null;
   for (const entry of ws.agents.values()) entry.session.setPanelTools?.(tools);
   const events: StreamEvent[] = [];
@@ -281,6 +290,7 @@ export async function replay(
 
   return {
     messages: ws.messages,
+    workspaceState: ws.getState(),
     events,
     states,
     limits,
@@ -521,6 +531,7 @@ async function replayPi(
   rec: Recording,
   fixture: Fixture,
   cb?: WorkspaceCallbacks,
+  usageRecorder?: UsageRecorder,
 ): Promise<Replay> {
   const base = Date.parse(rec.header.recordedAt) - (rec.entries.at(-1)?.t ?? 0);
   if (vi.isFakeTimers()) vi.setSystemTime(base);
@@ -562,6 +573,7 @@ async function replayPi(
           { ...config, agentId, piAgentDir: dir, uploadsDir },
           {
             panelHttp: panel,
+            recordUsage: this.workspaceUsageRecorder(config.workspaceId)?.recordUsage,
             rpcFactory: player.connect,
             readyTimeoutMs: 1500,
             // RPC is replayed; readiness needs an executable but never launches it.
@@ -573,7 +585,7 @@ async function replayPi(
         session.on("runState", (state: string) => states.push(state));
         return session;
       }
-    })("local", "Local"),
+    })("local", "Local", undefined, usageRecorder),
   );
   const callbacks: WorkspaceCallbacks = {
     onNewMessage: () => {},
@@ -684,7 +696,16 @@ async function replayPi(
     await player.finish();
     await Promise.all(running);
     project?.verify();
-    return { messages: ws.messages, events, states, sessions, limits: [], sent: [], pi };
+    return {
+      messages: ws.messages,
+      workspaceState: ws.getState(),
+      events,
+      states,
+      sessions,
+      limits: [],
+      sent: [],
+      pi,
+    };
   } finally {
     try {
       await Promise.all(sessions.map((s) => s.dispose(1000)));
@@ -808,6 +829,7 @@ function renderEvents(
     switch (e.kind) {
       case "subagent_progress":
       case "subagent_done":
+      case "subagent_enrichment":
         // Folded into their start by the aggregation.
         continue;
       case "subagent_start": {
@@ -888,7 +910,10 @@ export function clientView(events: StreamEvent[], backend: Backend = "codex"): M
   // The reply an error finished; the turn's result has nothing left to end.
   let failed = false;
   for (const raw of events) {
-    const e = backend === "pi" && raw.kind === "subagent_done" ? stripChildTranscript(raw) : raw;
+    const e =
+      backend === "pi" && (raw.kind === "subagent_done" || raw.kind === "subagent_enrichment")
+        ? stripChildTranscript(raw)
+        : raw;
     if (e.kind === "text") continue;
     if (e.kind === "result" && !cur && failed) {
       failed = false;
@@ -906,18 +931,28 @@ export function clientView(events: StreamEvent[], backend: Backend = "codex"): M
     // workspace routes it; a resumed agent has a card in an older one too.
     const taskId = e.subagent?.taskId;
     const holds = (m: ClientMessage) =>
-      m.events!.some((x) => x.kind === "subagent_start" && x.subagent?.taskId === taskId);
+      m.events!.some(
+        (x) =>
+          (x.kind === "subagent_start" ||
+            (e.kind === "subagent_enrichment" && x.kind === "subagent_done")) &&
+          x.subagent?.taskId === taskId,
+      );
     const owner =
-      taskId && (e.kind === "subagent_progress" || e.kind === "subagent_done")
+      taskId &&
+      (e.kind === "subagent_progress" ||
+        e.kind === "subagent_done" ||
+        e.kind === "subagent_enrichment")
         ? [...msgs].reverse().find(holds)
         : undefined;
+    if (e.kind === "subagent_enrichment" && !owner) continue;
     if (owner && owner !== cur) {
       msgs[msgs.indexOf(owner)] = applyEventsToMessage(owner, [e]);
       continue;
     }
-    // A result for a call an earlier reply made, as the workspace routes it.
+    // A result or card for a tool call an earlier reply made.
     const caller =
-      e.kind === "tool_result" &&
+      (e.kind === "tool_result" || e.kind === "subagent_start") &&
+      e.toolUseId &&
       !cur?.events!.some((x) => x.kind === "tool_use" && x.toolUseId === e.toolUseId)
         ? [...msgs]
             .reverse()
@@ -969,7 +1004,11 @@ export function clientView(events: StreamEvent[], backend: Backend = "codex"): M
 export const strip = (m: Message): unknown =>
   JSON.parse(
     JSON.stringify(m.events, (k: string, v: unknown) =>
-      k === "_innerEvent" || k === "contentOffset" || k === "step" || k === "toolInput"
+      k === "_innerEvent" ||
+      k === "contentOffset" ||
+      k === "step" ||
+      k === "toolInput" ||
+      k === "transcriptRevision"
         ? undefined
         : v,
     ),
@@ -982,6 +1021,11 @@ export function stripChildTranscript(event: StreamEvent): StreamEvent {
   const count = Math.max(summary.eventCount ?? 0, events.length);
   return {
     ...event,
-    subagent: { ...summary, eventCount: count || (event.kind === "subagent_done" ? 0 : undefined) },
+    subagent: {
+      ...summary,
+      eventCount:
+        count ||
+        (event.kind === "subagent_done" || event.kind === "subagent_enrichment" ? 0 : undefined),
+    },
   };
 }

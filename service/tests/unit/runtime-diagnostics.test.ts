@@ -20,6 +20,54 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+describe("[pi.acp.proxy] config", () => {
+  it("reads every supported field, including zero and disabled", () => {
+    const dir = base(`[pi.acp.proxy]
+      enabled = false
+      upstream_url = "http://[::1]:9876/"
+      port = 0
+      ping_interval_ms = 1
+      ping_timeout_ms = 2147483647
+      max_retries = 0
+      retry_budget_ms = 500
+    `);
+    expect(loadConfig(dir).pi?.acp?.proxy).toEqual({
+      enabled: false,
+      upstream_url: "http://[::1]:9876",
+      port: 0,
+      ping_interval_ms: 1,
+      ping_timeout_ms: 2147483647,
+      max_retries: 0,
+      retry_budget_ms: 500,
+    });
+  });
+
+  it.each([
+    ["[pi.acp]\nproxy = []", "[pi.acp.proxy] table"],
+    ["[pi.acp]\nproxy = 2026-01-01", "[pi.acp.proxy] table"],
+    ...[
+      ['enabled = "false"', "enabled"],
+      ["port = 65536", "port"],
+      ["port = 0.5", "port"],
+      ["port = -1", "port"],
+      ["max_retries = 2", "max_retries"],
+      ["ping_interval_ms = 0", "ping_interval_ms"],
+      ["ping_timeout_ms = 2147483648", "ping_timeout_ms"],
+      ["retry_budget_ms = -1", "retry_budget_ms"],
+      ['upstream_url = "ftp://example.test"', "upstream_url"],
+      ['upstream_url = "https://user:supersecret@example.test"', "upstream_url"],
+      ['upstream_url = "https://example.test/?"', "upstream_url"],
+      ['upstream_url = "https://example.test/#"', "upstream_url"],
+      ['upstream_url = "https://example.test/.."', "upstream_url"],
+      ["unexpected = 0", "Unsupported key"],
+    ].map(([line, field]) => [`[pi.acp.proxy]\n${line}`, field]),
+  ])("rejects malformed proxy config (%s)", (toml, field) => {
+    const dir = base(toml);
+    expect(() => loadConfig(dir)).toThrow(field);
+    expect(() => loadConfig(dir)).not.toThrow("supersecret");
+  });
+});
+
 describe("service diagnostics", () => {
   it("reports missing and invalid config without echoing TOML source", async () => {
     for (const [dir, code] of [

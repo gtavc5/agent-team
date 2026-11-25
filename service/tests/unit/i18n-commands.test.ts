@@ -157,6 +157,7 @@ describe("service i18n helpers and commands", () => {
     expect(lastReply(messages)).toContain("## Session Usage");
     await ws.sendMessage("/context");
     expect(lastReply(messages)).toContain("## Context Usage");
+    expect(lastReply(messages)).toContain("**Occupancy:** Empty");
 
     // Switch dynamically to Simplified Chinese
     state.lang = "简体中文";
@@ -192,7 +193,9 @@ describe("service i18n helpers and commands", () => {
     expect(lastReply(messages)).toContain("**会话费用：** $0.1234");
     await ws.sendMessage("/context");
     expect(lastReply(messages)).toContain("## 上下文占用");
-    expect(lastReply(messages)).toContain("### API 用量（本会话）");
+    // Cumulative API usage does not create a context observation in a fresh workspace.
+    expect(lastReply(messages)).toContain("**占用：** 空");
+    expect(lastReply(messages)).not.toContain("### API 用量（本会话）");
 
     host.richSession!.usageData = null;
     await ws.sendMessage("/usage");

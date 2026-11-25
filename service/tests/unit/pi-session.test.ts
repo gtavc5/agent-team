@@ -63,6 +63,7 @@ function harness(
     delayedQuota?: boolean;
     retire?: { trailing?: object };
     holdPromptReply?: boolean;
+    contextUsage?: { tokens: number | null; contextWindow: number };
     enabledModels?: string[];
     startupModel?: { provider: string; id: string };
     models?: Array<{
@@ -203,7 +204,7 @@ function harness(
             respond(frame, {
               tokens: { input: 99, output: 7 },
               cost: 3,
-              contextUsage: { tokens: null, contextWindow: 100 },
+              contextUsage: override.contextUsage ?? { tokens: null, contextWindow: 100 },
             });
             break;
           default:
@@ -838,9 +839,10 @@ describe("PiSession dispatch and stream state", () => {
 
   it("updates live and restored workspace context occupancy after manual /compact with estimatedTokensAfter", async () => {
     const h = harness({
+      contextUsage: { tokens: 312_900, contextWindow: 1_048_576 },
       models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
     });
-    const updated: Array<{ context: { tokens: number; window: number } | null }> = [];
+    const updated: Array<{ context: { tokens: number; window: number } | null | undefined }> = [];
     const { ws, registry } = workspaceFor(h, {
       onAgentUpdated: (_wsId, agent) => updated.push({ context: agent.context }),
     });
@@ -863,7 +865,13 @@ describe("PiSession dispatch and stream state", () => {
     c.event({ type: "agent_end", messages: [] });
     c.event({ type: "agent_settled", aborted: false });
     await first;
-    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 312_760, window: 1_048_576 });
+    await vi.waitFor(() =>
+      expect(ws.getInfo().agents[0].context).toEqual({
+        tokens: 312_900,
+        window: 1_048_576,
+        estimated: true,
+      }),
+    );
 
     // Manual /compact reports estimatedTokensAfter; both live and restored state must drop to it.
     updated.length = 0;
@@ -887,9 +895,17 @@ describe("PiSession dispatch and stream state", () => {
     c.respond(compactFrame, compactResult);
     await compacting;
 
-    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 33_812, window: 1_048_576 });
-    expect(updated.at(-1)?.context).toEqual({ tokens: 33_812, window: 1_048_576 });
-    expect(ws.getMessages().at(-1)?.context).toEqual({ tokens: 33_812, window: 1_048_576 });
+    expect(ws.getInfo().agents[0].context).toEqual({
+      tokens: 33_812,
+      window: 1_048_576,
+      estimated: true,
+    });
+    expect(updated.at(-1)?.context).toEqual({ tokens: 33_812, window: 1_048_576, estimated: true });
+    expect(ws.getMessages().at(-1)?.context).toEqual({
+      tokens: 33_812,
+      window: 1_048_576,
+      estimated: true,
+    });
 
     const restored = Workspace.fromState(ws.getState(), registry, {
       onNewMessage: () => {},
@@ -897,14 +913,19 @@ describe("PiSession dispatch and stream state", () => {
       onMessageDone: () => {},
     });
     restored.setMessages(structuredClone(ws.getMessages()));
-    expect(restored.getInfo().agents[0].context).toEqual({ tokens: 33_812, window: 1_048_576 });
+    expect(restored.getInfo().agents[0].context).toEqual({
+      tokens: 33_812,
+      window: 1_048_576,
+      estimated: true,
+    });
   });
 
   it("clears stale pre-compaction context when /compact has no token estimate and stops pre-compaction fallback on reload", async () => {
     const h = harness({
+      contextUsage: { tokens: 312_900, contextWindow: 1_048_576 },
       models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
     });
-    const updated: Array<{ context: { tokens: number; window: number } | null }> = [];
+    const updated: Array<{ context: { tokens: number; window: number } | null | undefined }> = [];
     const { ws, registry } = workspaceFor(h, {
       onAgentUpdated: (_wsId, agent) => updated.push({ context: agent.context }),
     });
@@ -926,7 +947,13 @@ describe("PiSession dispatch and stream state", () => {
     c.event({ type: "agent_end", messages: [] });
     c.event({ type: "agent_settled", aborted: false });
     await first;
-    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 312_760, window: 1_048_576 });
+    await vi.waitFor(() =>
+      expect(ws.getInfo().agents[0].context).toEqual({
+        tokens: 312_900,
+        window: 1_048_576,
+        estimated: true,
+      }),
+    );
 
     // A failed compact keeps the existing context intact.
     const failed = ws.sendMessage("/compact", agent.id);
@@ -942,7 +969,11 @@ describe("PiSession dispatch and stream state", () => {
     });
     c.respond(failFrame, undefined, false);
     await failed;
-    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 312_760, window: 1_048_576 });
+    expect(ws.getInfo().agents[0].context).toEqual({
+      tokens: 312_900,
+      window: 1_048_576,
+      estimated: true,
+    });
 
     // A successful compact without estimatedTokensAfter clears stale context both live and after reload.
     updated.length = 0;
@@ -975,6 +1006,44 @@ describe("PiSession dispatch and stream state", () => {
     });
     restored.setMessages(structuredClone(ws.getMessages()));
     expect(restored.getInfo().agents[0].context).toBeNull();
+  });
+
+  it("keeps missing terminal context unknown when earlier Pi stats arrive late", async () => {
+    const h = harness();
+    const { ws, registry } = workspaceFor(h, {});
+    const agent = ws.addAgent("Pi", "mock/test", "", "", { backend: "pi" });
+    await ws.sendMessage("first", agent.id);
+    const c = h.clients[0];
+    let resolveFirst!: (stats: Record<string, unknown>) => void;
+    vi.spyOn(c.rpc, "getSessionStats")
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ tokens: { input: 123, output: 45, total: 168 } });
+    c.event(piFrame("message_end", { role: "assistant" }));
+    c.event(piFrame("agent_settled"));
+    const firstReply = ws.getMessages().at(-1)!;
+    expect(firstReply.context).toBeNull();
+
+    await ws.sendMessage("second", agent.id);
+    c.event(piFrame("message_end", { role: "assistant" }));
+    c.event(piFrame("agent_settled"));
+    const secondReply = ws.getMessages().at(-1)!;
+    resolveFirst({ contextUsage: { tokens: 17, contextWindow: 100 } });
+    await vi.waitFor(() =>
+      expect(firstReply.context).toEqual({ tokens: 17, window: 100, estimated: true }),
+    );
+    expect(secondReply.context).toBeNull();
+    expect(ws.getInfo().agents[0].context).toBeNull();
+    expect(await h.session.getContextUsage()).toBeNull();
+    await ws.sendMessage("/context", agent.id);
+    expect(ws.getMessages().at(-1)?.content).toContain("**Occupancy:** Unknown");
+    expect(
+      Workspace.fromState(structuredClone(ws.getState()), registry).getInfo().agents[0].context,
+    ).toBeNull();
   });
 
   it("does not restore pre-compaction context at turn settlement after threshold auto-compaction", async () => {
@@ -1011,16 +1080,17 @@ describe("PiSession dispatch and stream state", () => {
         aborted: false,
         willRetry: false,
       });
+      expect(ws.getInfo().agents[0].context).toEqual(
+        estimatedTokensAfter === undefined
+          ? null
+          : { tokens: estimatedTokensAfter, window: 1_048_576, estimated: true },
+      );
       c.event({ type: "agent_end", messages: [] });
       c.event({ type: "agent_settled", aborted: false });
       await turn;
 
-      const expected =
-        estimatedTokensAfter !== undefined
-          ? { tokens: estimatedTokensAfter, window: 1_048_576 }
-          : null;
-      expect(ws.getInfo().agents[0].context).toEqual(expected);
-      expect(ws.getMessages().at(-1)?.context).toEqual(expected ?? undefined);
+      expect(ws.getInfo().agents[0].context).toBeNull();
+      expect(ws.getMessages().at(-1)?.context).toBeNull();
 
       const restored = Workspace.fromState(ws.getState(), registry, {
         onNewMessage: () => {},
@@ -1028,13 +1098,14 @@ describe("PiSession dispatch and stream state", () => {
         onMessageDone: () => {},
       });
       restored.setMessages(structuredClone(ws.getMessages()));
-      expect(restored.getInfo().agents[0].context).toEqual(expected);
+      expect(restored.getInfo().agents[0].context).toBeNull();
     }
   });
 
   it("preserves out-of-turn compaction estimates and clears across workspace reload", async () => {
     for (const estimatedTokensAfter of [22_500, undefined]) {
       const h = harness({
+        contextUsage: { tokens: 201_500, contextWindow: 1_048_576 },
         models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
       });
       const { ws, registry } = workspaceFor(h, {});
@@ -1056,7 +1127,13 @@ describe("PiSession dispatch and stream state", () => {
       c.event({ type: "agent_end", messages: [] });
       c.event({ type: "agent_settled", aborted: false });
       await first;
-      expect(ws.getInfo().agents[0].context).toEqual({ tokens: 201_000, window: 1_048_576 });
+      await vi.waitFor(() =>
+        expect(ws.getInfo().agents[0].context).toEqual({
+          tokens: 201_500,
+          window: 1_048_576,
+          estimated: true,
+        }),
+      );
 
       // Idle out-of-turn compaction (no active turn).
       c.event({ type: "compaction_start", reason: "threshold" });
@@ -1075,7 +1152,7 @@ describe("PiSession dispatch and stream state", () => {
 
       const expected =
         estimatedTokensAfter !== undefined
-          ? { tokens: estimatedTokensAfter, window: 1_048_576 }
+          ? { tokens: estimatedTokensAfter, window: 1_048_576, estimated: true }
           : null;
       expect(ws.getInfo().agents[0].context).toEqual(expected);
       expect(ws.lastTurns()[0]?.replies.every((m) => m.kind === "agent")).toBe(true);
@@ -1115,7 +1192,11 @@ describe("PiSession dispatch and stream state", () => {
       aborted: false,
       willRetry: false,
     });
-    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 40_000, window: 1_048_576 });
+    expect(ws.getInfo().agents[0].context).toEqual({
+      tokens: 40_000,
+      window: 1_048_576,
+      estimated: true,
+    });
 
     // Second compaction lacks an estimate: must clear live context immediately.
     c.event({ type: "compaction_start", reason: "overflow" });
@@ -1127,7 +1208,7 @@ describe("PiSession dispatch and stream state", () => {
       willRetry: false,
     });
     expect(ws.getInfo().agents[0].context).toBeNull();
-    expect(ws.getMessages().at(-1)?.context).toBeUndefined();
+    expect(ws.getMessages().at(-1)?.context).toBeNull();
 
     // Error settlement and reload must keep context cleared.
     c.event({
@@ -1139,7 +1220,7 @@ describe("PiSession dispatch and stream state", () => {
     await turn;
 
     expect(ws.getInfo().agents[0].context).toBeNull();
-    expect(ws.getMessages().at(-1)?.context).toBeUndefined();
+    expect(ws.getMessages().at(-1)?.context).toBeNull();
 
     const restored = Workspace.fromState(ws.getState(), registry, {
       onNewMessage: () => {},
@@ -1422,7 +1503,7 @@ describe("PiSession dispatch and stream state", () => {
     expect(h.events.filter((e) => e.level === "warning")).toEqual([]);
   });
 
-  it("canonicalizes bare model IDs so context window, thinking levels, and optionsPending stay accurate", async () => {
+  it("canonicalizes bare model IDs so thinking levels and optionsPending stay accurate", async () => {
     const h = harness({
       config: { model: "mock/large" },
       startupModel: { provider: "mock", id: "large" },
@@ -1449,17 +1530,9 @@ describe("PiSession dispatch and stream state", () => {
     expect(h.session.getAvailableThinkingLevels("mock/small")).toEqual(["low", "high"]);
     expect(h.session.getAvailableThinkingLevels("mock/large")).toBeUndefined();
 
-    // Next turn emits the switched model's contextWindow without re-sending set_model.
+    // A subsequent turn does not redundantly re-send set_model.
     await h.session.send("check context");
     expect(h.clients[0].wire.filter((f) => f.type === "set_model")).toHaveLength(1);
-    const { event } = h.clients[0];
-    event({ type: "agent_start" });
-    event(piFrame("message_end", { role: "assistant" }));
-    event(piFrame("agent_settled"));
-    expect(h.events.at(-1)).toMatchObject({
-      kind: "result",
-      context: { tokens: 412, window: 272_000 },
-    });
   });
 
   it.each(["startup", "idle"])(
@@ -1587,10 +1660,30 @@ describe("PiSession dispatch and stream state", () => {
       { kind: "retry", content: "Retrying (1/2 in 1s): 503 fixture service unavailable" },
       { kind: "retry", content: "Retrying (2/2 in 2s): 503 fixture service unavailable" },
       { kind: "retry", content: "" },
-      { kind: "error", content: "503 final failure" },
+      { kind: "error", content: "503 final failure", context: null },
     ]);
     expect(h.done).toHaveBeenCalledTimes(1);
   });
+
+  it.each([undefined, "https://override.test", ""])(
+    "sets the CCPA proxy only for the Pi child when the endpoint override is %s",
+    async (override) => {
+      const endpoint = "http://127.0.0.1:12345";
+      vi.stubEnv("AGY_ACP_CCPA_BASE_URL", override);
+      vi.stubEnv("NO_PROXY", "upper.test,localhost");
+      vi.stubEnv("no_proxy", "lower.test, 127.0.0.1");
+      const { session, factory } = harness({ options: { ccpaProxyUrl: endpoint } });
+      await session.ensureStarted();
+      expect(factory.mock.calls[0][0].env).toMatchObject({
+        AGY_ACP_CCPA_BASE_URL: override ?? endpoint,
+        NO_PROXY: "upper.test,localhost,127.0.0.1",
+        no_proxy: "lower.test,127.0.0.1,localhost",
+      });
+      expect(process.env.AGY_ACP_CCPA_BASE_URL).toBe(override);
+      expect(process.env.NO_PROXY).toBe("upper.test,localhost");
+      expect(process.env.no_proxy).toBe("lower.test, 127.0.0.1");
+    },
+  );
 
   it("starts a top-level session with no Panel tools even from a nested Pi shell", async () => {
     const nested = [
@@ -1774,6 +1867,177 @@ describe("PiSession dispatch and stream state", () => {
     });
     await vi.waitFor(() => expect(session.deployBusy).toBe(false));
   });
+
+  it("keeps sparse workflow identities separate from later roster indices and sparse RPC responses", async () => {
+    const h = harness({ options: { livePollIntervalMs: 10 } });
+    await h.session.send("workflow");
+    const event = h.clients[0].event;
+    const node = (state: string) => ({
+      kind: "pi-subagents.async-status-snapshot",
+      version: 1,
+      runs: [
+        {
+          kind: "workflow",
+          id: "wf",
+          label: "workflow",
+          state: "running",
+          children: [{ kind: "step", id: "review", label: "review", state }],
+        },
+      ],
+    });
+    event({
+      type: "tool_execution_start",
+      toolName: "subagent",
+      toolCallId: "call",
+      args: { workflow: "workflow", async: true },
+    });
+    event({
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "subagent-async",
+      widgetLines: ["PI_SUBAGENT_ASYNC_JSON:" + JSON.stringify(node("running"))],
+    });
+    event({ type: "extension_ui_request", method: "setWidget", widgetKey: "subagent-async" });
+    event({
+      type: "tool_execution_end",
+      toolName: "subagent",
+      toolCallId: "call",
+      result: { details: { mode: "workflow", runId: "wf", asyncDir: h.dir } },
+    });
+    fs.writeFileSync(
+      path.join(h.dir, "status.json"),
+      JSON.stringify({
+        state: "running",
+        sessionId: h.session.sessionId,
+        runId: "wf",
+        steps: ["build", "review"].map((workflowKey) => ({ workflowKey, status: "running" })),
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(h.session.backgroundTaskList.map((t) => t.id)).toEqual(["call:0", "call:key:build"]),
+    );
+    vi.spyOn(h.panel, "isControlConnected").mockReturnValue(true);
+    const status = vi
+      .spyOn(h.panel, "sendSubagentsRpc")
+      .mockResolvedValue({ asyncSnapshot: node("failed") });
+    await h.session.reconcileAsyncRuns();
+    expect(status).toHaveBeenCalled();
+    expect(h.session.backgroundTaskList.map((t) => t.id)).toEqual(["call:key:build"]);
+    expect(
+      h.events.filter((e) => e.kind === "subagent_done").map((e) => e.subagent?.taskId),
+    ).toEqual(["call:0"]);
+    event({
+      type: "message_end",
+      message: {
+        role: "custom",
+        customType: "subagent-notify",
+        details: { runId: "wf", status: "completed" },
+      },
+    });
+    event({ type: "agent_settled" });
+  });
+
+  it("binds recorded workflow widget lanes without local files while the parent is busy", async () => {
+    const { session, clients, events, dir } = harness();
+    await session.send("launch");
+    const { event } = clients[0];
+    const frames = piFrames("messages/subagents-widgets");
+    const asyncWidgets = frames.filter((f) => f.widgetKey === "subagent-async");
+    event(asyncWidgets[0]);
+    event({
+      type: "tool_execution_start",
+      toolName: "subagent",
+      toolCallId: "workflow",
+      args: { workflow: "example", async: true },
+    });
+    event({
+      type: "tool_execution_end",
+      toolName: "subagent",
+      toolCallId: "workflow",
+      result: { details: { mode: "workflow", runId: "fixture-run", asyncDir: dir } },
+    });
+    for (const frame of asyncWidgets.slice(1)) event(frame);
+    expect(events.filter((e) => e.kind === "subagent_done").map((e) => e.subagent)).toMatchObject([
+      { taskId: "workflow:0", status: "completed", durationMs: 269, model: "pi-e2e/scenario" },
+      {
+        taskId: "workflow:key:child-2",
+        status: "completed",
+        durationMs: 246,
+        model: "pi-e2e/scenario",
+      },
+    ]);
+    expect(session.backgroundTaskList).toEqual([]);
+    expect(session.runState).toBe("working");
+    event({ type: "agent_settled" });
+  });
+
+  it.each(["complete", "partial", "failed", "rejected", "paused", "stopped"])(
+    "settles pushed %s during the parent turn, then enriches the original card",
+    async (terminal) => {
+      const { session, clients, events, dir } = harness();
+      await session.send("background");
+      const { event } = clients[0];
+      const widget = (state: string) =>
+        event({
+          type: "extension_ui_request",
+          method: "setWidget",
+          widgetKey: "subagent-async",
+          widgetLines: [
+            `PI_SUBAGENT_ASYNC_JSON:${JSON.stringify({ kind: "pi-subagents.async-status-snapshot", version: 1, runs: [{ id: "owned", kind: "subagent", label: "Agent", state, startedAt: 101, ...(state === terminal ? { endedAt: 122 } : {}) }] })}`,
+          ],
+        });
+      const ui = vi.fn();
+      session.on("extension_ui", ui);
+      widget("queued");
+      event({
+        type: "tool_execution_start",
+        toolName: "subagent",
+        toolCallId: "call",
+        args: { agent: "Agent", async: true },
+      });
+      event({
+        type: "tool_execution_end",
+        toolName: "subagent",
+        toolCallId: "call",
+        result: { details: { asyncDir: dir, runId: "owned" } },
+      });
+      expect(session.backgroundTaskList.map((t) => t.id)).toEqual(["call:0"]);
+      expect(events.at(-1)?.subagent?.status).toBe("queued");
+      widget("running");
+      event({ type: "extension_ui_request", method: "setWidget", widgetKey: "subagent-async" });
+      expect(session.backgroundTaskList).toHaveLength(1);
+      widget(terminal);
+      widget(terminal);
+      widget("running");
+      expect(session.runState).toBe("working");
+      expect(session.backgroundTaskList).toEqual([]);
+      expect(ui).not.toHaveBeenCalled();
+      expect(events.filter((e) => e.kind === "subagent_done").map((e) => e.subagent)).toMatchObject(
+        [
+          {
+            taskId: "call:0",
+            status: terminal === "complete" ? "completed" : terminal,
+            durationMs: 21,
+          },
+        ],
+      );
+      event({
+        type: "message_end",
+        message: {
+          role: "custom",
+          customType: "subagent-notify",
+          details: { runId: "owned", status: terminal, children: [{ summary: "late output" }] },
+        },
+      });
+      expect(events.filter((e) => e.kind === "subagent_done")).toHaveLength(1);
+      expect(events.find((e) => e.kind === "subagent_enrichment")?.subagent).toMatchObject({
+        taskId: "call:0",
+        summary: "late output",
+      });
+      event({ type: "agent_settled" });
+      expect(session.runState).toBe("idle");
+    },
+  );
 
   it("uses observed wire execution without status files and ignores queued siblings' candidates", async () => {
     const { session, clients, events, dir } = harness();
@@ -2070,7 +2334,7 @@ describe("PiSession dispatch and stream state", () => {
     expect(events.at(-1)).toMatchObject({
       kind: "result",
       content: "xxxxx",
-      context: { tokens: 412, window: 100 },
+      context: null,
     });
     expect(session.usage.input_tokens).toBe(412);
     await vi.waitFor(() => expect(session.usage.input_tokens).toBe(99));
@@ -3020,7 +3284,10 @@ describe("PiSession interrupt recovery", () => {
     const asyncDir = temp();
     const file = path.join(asyncDir, "status.json");
     const stopFile = path.join(asyncDir, "control", "stop-request.json");
-    const h = harness({ config: { piSubagentsRoot: pkg }, options: { reconcileIntervalMs: 20 } });
+    const h = harness({
+      config: { piSubagentsRoot: pkg },
+      options: { reconcileIntervalMs: 60_000 },
+    });
     await h.session.send("background");
     const status = {
       runId: "run",
@@ -3114,6 +3381,7 @@ describe("PiSession interrupt recovery", () => {
     ).toEqual(["stopped"]);
     fs.writeFileSync(finishB, "");
     await expect(exited).resolves.toEqual([0, null]);
+    await h.session.reconcileAsyncRuns();
     await vi.waitFor(() => expect(h.session.runState).toBe("idle"));
     expect(
       h.events
