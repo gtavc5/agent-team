@@ -1,3 +1,4 @@
+import { lifecycleWriter } from "../usage/lifecycle";
 import { estimatedContext } from "../../../shared/context-usage";
 import { EventEmitter } from "events";
 import * as os from "os";
@@ -11,6 +12,7 @@ import {
   SessionConfig,
   SessionState,
   PromptEnvelope,
+  InputTrigger,
   SendHooks,
   SendReceipt,
   fenced,
@@ -47,6 +49,12 @@ import {
 // snap fixture codex/resume) and answered here. A subagent's thread does not
 // get them (codex/tools), so nothing needs refusing to subagents.
 const PANEL_NAMESPACE = "panel";
+
+type ModelLifecycle = {
+  trigger: InputTrigger | "continuation" | "subagent";
+  step?: { turnId: string; id: string; itemIds: Set<string>; firstDelta: boolean };
+};
+type ChildLifecycle = ModelLifecycle & { turnId?: string };
 
 type UsageThreadModel = { model?: string; modelProvider?: string };
 type OpenThreadResponse = UsageThreadModel & { thread: CodexThread };
@@ -140,6 +148,12 @@ export class CodexSession extends EventEmitter {
     { description: string; startedAt: number; lastText: string; done: boolean }
   >();
 
+  private readonly lifecycle: ReturnType<typeof lifecycleWriter>;
+  private inputTrigger: InputTrigger = "auto";
+  private rootLifecycle: ModelLifecycle = { trigger: "auto" };
+  private readonly childLifecycles = new Map<string, ChildLifecycle>();
+  private readonly steerTriggers = new Map<string, InputTrigger>();
+
   private readonly usageThreads = new Map<string, UsageThreadModel>();
   private readonly recordedUsageIds = new Set<string>();
 
@@ -149,6 +163,7 @@ export class CodexSession extends EventEmitter {
   ) {
     super();
     this.config = config;
+    this.lifecycle = lifecycleWriter(config, "codex", () => this.sessionId);
   }
 
   get isRunning(): boolean {
@@ -245,8 +260,11 @@ export class CodexSession extends EventEmitter {
       const opened = await this.openThread(client);
       const { threadId } = opened;
       if (client !== this.client) throw new Error("The app-server was replaced while starting.");
-      if (this.usageRecorder) {
-        if (this.sessionId !== threadId) this.usageThreads.clear();
+      if (this.usageRecorder || this.lifecycle) {
+        if (this.sessionId !== threadId) {
+          this.usageThreads.clear();
+          this.childLifecycles.clear();
+        }
         this.usageThreads.set(threadId, {
           model: opened.model,
           modelProvider: opened.modelProvider,
@@ -340,6 +358,8 @@ export class CodexSession extends EventEmitter {
     const message = typeof input === "string" ? input : input.text;
     const compact = message.trim() === "/compact";
     this.beginTurn(!compact);
+    this.inputTrigger = typeof input === "string" ? "user" : (input.trigger ?? "user");
+    this.rootLifecycle.trigger = this.inputTrigger;
     this.compacting = compact;
     // A turn stopped and replaced meanwhile: what this one's requests do
     // later is not the new turn's.
@@ -406,6 +426,8 @@ export class CodexSession extends EventEmitter {
     this.turnStarted = false;
     this.interruptSent = false;
     this.turnError = null;
+    this.inputTrigger = "auto";
+    this.rootLifecycle = { trigger: "auto" };
     // Dropped with the failed turn, like a stopped one's: the queue runs them.
     const unread = this.steers.splice(0);
     if (unread.length) this.emit("unread", unread);
@@ -422,6 +444,8 @@ export class CodexSession extends EventEmitter {
       const client = await this.connect();
       // Not when codex carried on by itself meanwhile.
       if (generation === this.generation && !this.turnId) {
+        this.inputTrigger = "retry";
+        this.rootLifecycle.trigger = "retry";
         await this.startTurn(client, CAPACITY_CONTINUE, generation);
       }
     } catch (e) {
@@ -436,7 +460,7 @@ export class CodexSession extends EventEmitter {
   // caller sends it as a turn of its own. Taken, it is the model's at its
   // next request: `steered` says when, `unread` at the turn's end that it
   // never came.
-  async steer(message: string, inputId: string): Promise<boolean> {
+  async steer(message: string, inputId: string, trigger: InputTrigger = "user"): Promise<boolean> {
     if (!this.busy || this.interruptRequested || message.trim() === "/compact") return false;
     // No turn to take it for minutes: it waits in the queue instead.
     if (this.capacityRetry) return false;
@@ -449,6 +473,7 @@ export class CodexSession extends EventEmitter {
     }
     // Before the request: its userMessage item can come before the answer.
     this.steers.push(inputId);
+    this.steerTriggers.set(inputId, trigger);
     try {
       await client.request("turn/steer", {
         threadId: this.sessionId,
@@ -459,6 +484,7 @@ export class CodexSession extends EventEmitter {
     } catch {
       const i = this.steers.indexOf(inputId);
       if (i >= 0) this.steers.splice(i, 1);
+      this.steerTriggers.delete(inputId);
       return false;
     }
     return true;
@@ -564,6 +590,9 @@ export class CodexSession extends EventEmitter {
     this.compacting = false;
     this.awaitingPrompt = withPrompt;
     this.steers = [];
+    this.steerTriggers.clear();
+    this.inputTrigger = "auto";
+    this.rootLifecycle = { trigger: "auto" };
     this.textEmitted = false;
     this.itemText.clear();
     this.itemStartedAt.clear();
@@ -710,13 +739,34 @@ export class CodexSession extends EventEmitter {
     emittedAtMs?: number,
   ): void {
     const threadId = params.threadId as string | undefined;
+    const root = threadId === this.sessionId;
+    const child = threadId && !root ? this.childLifecycles.get(threadId) : undefined;
+    const lifecycle = this.lifecycle ? (root ? this.rootLifecycle : child) : undefined;
     const item = params.item as ThreadItem | undefined;
+    const isDelta =
+      method === "item/agentMessage/delta" || method === "item/reasoning/summaryTextDelta";
+    const step = lifecycle?.step;
+    if (isDelta && step && !step.firstDelta && threadId) {
+      this.noteLifecycleDelta(threadId, step, params);
+    }
+    const lifecycleAt =
+      lifecycle && method === "thread/tokenUsage/updated" ? Date.now() : undefined;
+    if (
+      lifecycle &&
+      threadId &&
+      (method === "turn/started" ||
+        method === "turn/completed" ||
+        method === "item/started" ||
+        method === "item/completed")
+    ) {
+      this.noteLifecycleBoundary(threadId, lifecycle, method, params, item, child);
+    }
     if (item?.type === "commandExecution") {
       if (method === "item/started") this.commandsInFlight.add(item.id);
       if (method === "item/completed") this.commandsInFlight.delete(item.id);
     }
     if (method === "turn/started" || method === "item/started") this.emit("deploy_activity");
-    if (threadId && this.usageRecorder && this.usageThreads.has(threadId)) {
+    if (threadId && (this.usageRecorder || this.lifecycle) && this.usageThreads.has(threadId)) {
       if (
         (method === "item/started" || method === "item/completed") &&
         item?.type === "subAgentActivity" &&
@@ -725,16 +775,25 @@ export class CodexSession extends EventEmitter {
         !this.usageThreads.has(item.agentThreadId)
       ) {
         this.usageThreads.set(item.agentThreadId, {});
+        if (this.lifecycle) this.childLifecycles.set(item.agentThreadId, { trigger: "subagent" });
       } else if (method === "thread/settings/updated") {
         const settings = params.threadSettings as UsageThreadModel | undefined;
         if (settings) this.usageThreads.set(threadId, settings);
       } else if (method === "thread/tokenUsage/updated") {
-        this.recordTokenUsage(threadId, params.turnId, params.tokenUsage, emittedAtMs);
+        this.recordTokenUsage(
+          threadId,
+          params.turnId,
+          params.tokenUsage,
+          emittedAtMs,
+          lifecycleAt,
+          lifecycle,
+          child,
+        );
       } else if (item && (method === "item/started" || method === "item/completed")) {
         this.recordUsageItem(threadId, params, item, method, emittedAtMs);
       }
     }
-    if (threadId && threadId !== this.sessionId) {
+    if (threadId && !root) {
       this.onSubagentNotification(threadId, method, params);
       return;
     }
@@ -822,6 +881,143 @@ export class CodexSession extends EventEmitter {
     }
   }
 
+  private noteLifecycleBoundary(
+    threadId: string,
+    lifecycle: ModelLifecycle,
+    method: string,
+    params: Record<string, unknown>,
+    item: ThreadItem | undefined,
+    child: ChildLifecycle | undefined,
+  ): void {
+    const write = this.lifecycle!;
+    if (method === "turn/started") {
+      const turnId = (params.turn as CodexTurn).id;
+      if (lifecycle.step?.turnId !== turnId) lifecycle.step = undefined;
+      if (child && child.turnId !== turnId) {
+        child.turnId = turnId;
+        child.trigger = "subagent";
+      }
+      return;
+    }
+    if (method === "turn/completed") {
+      const turnId = (params.turn as CodexTurn).id;
+      if (lifecycle.step?.turnId === turnId) {
+        write(
+          { turnId, stepId: lifecycle.step.id, kind: "model", marker: "stepEnd", at: Date.now() },
+          threadId,
+        );
+        lifecycle.step = undefined;
+      }
+      if (child?.turnId === turnId) child.turnId = undefined;
+      return;
+    }
+    const turnId = params.turnId;
+    if (!item || typeof turnId !== "string" || !turnId) return;
+    const stepId = item.id;
+    const started = method === "item/started";
+    switch (item.type) {
+      case "userMessage":
+        if (started && this.matchesLifecycleTurn(turnId, child)) {
+          const trigger = child
+            ? "subagent"
+            : this.awaitingPrompt
+              ? this.inputTrigger
+              : (item.clientId && this.steerTriggers.get(item.clientId)) || "system";
+          lifecycle.trigger = trigger;
+          write(
+            { turnId, stepId, kind: "user", marker: "stepEnd", trigger, at: Date.now() },
+            threadId,
+          );
+        }
+        return;
+      case "contextCompaction":
+        if (!started)
+          write(
+            {
+              turnId,
+              stepId,
+              kind: "compaction",
+              marker: "compaction",
+              at: Date.now(),
+              ...(child
+                ? { trigger: "subagent" }
+                : this.compacting && this.matchesTurn(turnId)
+                  ? { trigger: this.inputTrigger }
+                  : {}),
+            },
+            threadId,
+          );
+        return;
+      case "commandExecution":
+      case "fileChange":
+      case "mcpToolCall":
+      case "dynamicToolCall":
+      case "webSearch":
+      case "imageView":
+      case "collabAgentToolCall":
+        // A command may complete after the next turn starts. Keep its native turn ID.
+        write(
+          {
+            turnId,
+            stepId,
+            toolCallId: stepId,
+            kind: "tool",
+            marker: started ? "toolStart" : "toolResult",
+            at: Date.now(),
+          },
+          threadId,
+        );
+        return;
+      case "agentMessage":
+      case "reasoning":
+        if (started && this.matchesLifecycleTurn(turnId, child)) {
+          if (lifecycle.step?.turnId === turnId) {
+            lifecycle.step.itemIds.add(stepId);
+          } else {
+            lifecycle.step = { turnId, id: stepId, itemIds: new Set([stepId]), firstDelta: false };
+            write(
+              {
+                turnId,
+                stepId,
+                kind: "model",
+                marker: "stepStart",
+                at: Date.now(),
+                trigger: lifecycle.trigger,
+              },
+              threadId,
+            );
+          }
+        }
+        return;
+    }
+  }
+
+  private matchesLifecycleTurn(turnId: string, child: ChildLifecycle | undefined): boolean {
+    return child ? child.turnId === turnId : this.matchesTurn(turnId);
+  }
+
+  private noteLifecycleDelta(
+    threadId: string,
+    step: NonNullable<ModelLifecycle["step"]>,
+    params: Record<string, unknown>,
+  ): void {
+    const { turnId, itemId, delta } = params;
+    // A delta for an old output item cannot open a step or start its timer.
+    if (
+      turnId !== step.turnId ||
+      typeof itemId !== "string" ||
+      !step.itemIds.has(itemId) ||
+      typeof delta !== "string" ||
+      !delta
+    )
+      return;
+    step.firstDelta = true;
+    this.lifecycle?.(
+      { turnId, stepId: step.id, kind: "model", marker: "firstDelta", at: Date.now() },
+      threadId,
+    );
+  }
+
   // Several agent messages in a turn are paragraphs of one reply.
   private text(itemId: string, delta: string): void {
     if (!delta) return;
@@ -867,6 +1063,7 @@ export class CodexSession extends EventEmitter {
         const i = item.clientId ? this.steers.indexOf(item.clientId) : 0;
         const [inputId] = i >= 0 ? this.steers.splice(i, 1) : [];
         if (!inputId) break;
+        this.steerTriggers.delete(inputId);
         // What follows answers the steered message: a reply of its own.
         this.textEmitted = false;
         this.emit("steered", inputId);
@@ -1077,6 +1274,9 @@ export class CodexSession extends EventEmitter {
     turnId: unknown,
     rawUsage: unknown,
     emittedAtMs: number | undefined,
+    lifecycleAt: number | undefined,
+    lifecycle: ModelLifecycle | undefined,
+    child: ChildLifecycle | undefined,
   ): void {
     const usage = rawUsage as Partial<ThreadTokenUsage> | undefined;
     const last = usage?.last;
@@ -1115,6 +1315,27 @@ export class CodexSession extends EventEmitter {
       price: { kind: "unpriced", usd: null },
     });
     this.recordedUsageIds.add(id);
+    if (this.lifecycle && lifecycle && lifecycleAt !== undefined) {
+      const active = this.matchesLifecycleTurn(turnId, child);
+      const step = lifecycle.step?.turnId === turnId ? lifecycle.step : undefined;
+      // A sample can close an inference that has no observable model output item.
+      this.lifecycle(
+        {
+          turnId,
+          stepId: step?.id ?? id,
+          kind: "model",
+          marker: "stepEnd",
+          at: lifecycleAt,
+          inferenceId: id,
+          ...(!step && { trigger: active ? lifecycle.trigger : child && "subagent" }),
+          promptTokens: inputTokens,
+          ...(typeof model === "string" && { model }),
+        },
+        threadId,
+      );
+      if (step) lifecycle.step = undefined;
+      if (active) lifecycle.trigger = "continuation";
+    }
   }
 
   private matchesTurn(turnId: unknown): boolean {

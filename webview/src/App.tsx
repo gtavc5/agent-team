@@ -19,6 +19,7 @@ import { Icon } from "./panels/Icon";
 import { SidePanel } from "./panels/SidePanel";
 import { Rail, type RailItem } from "./panels/Rail";
 import { AgentsPanel, type AgentsPanelActions } from "./panels/AgentsPanel";
+import { SessionStats } from "./panels/SessionStats";
 import { workCount } from "./panels/SessionTasks";
 import { FilesPanel, type CodeQuote } from "./panels/FilesPanel";
 import { fileRoots, scopeSessions, scopeSummary, sessionState, stateSummary } from "./panels/scope";
@@ -622,6 +623,14 @@ export function App() {
       active: openPanel === "changes",
       telemetry: openPanel === "changes" ? "panel.close" : "panel.diff",
       onClick: () => togglePanel("changes"),
+    },
+    {
+      id: "stats",
+      label: "Session stats",
+      icon: "usage",
+      active: openPanel === "stats",
+      telemetry: openPanel === "stats" ? "panel.close" : "panel.stats",
+      onClick: () => togglePanel("stats"),
     },
   ];
   const fileScope = activeWsId ?? "";
@@ -2151,6 +2160,27 @@ export function App() {
             />
           </SidePanel>
         )}
+        {activeWs && openPanel === "stats" && (
+          <SidePanel
+            key={activeWs.id}
+            title="Session stats"
+            subtitle={activeWs.name}
+            pinned={panelPinned}
+            maximized={panelMax}
+            inset={sidebarWidth}
+            width={listWidth}
+            onPin={togglePin}
+            onMaximize={toggleMax}
+            onClose={closePanel}
+            onWidth={setListWidth}
+          >
+            <SessionStats
+              workspaceId={activeWs.id}
+              connected={connected}
+              agents={activeWs.agents}
+            />
+          </SidePanel>
+        )}
         {activeWs && <Rail className="side-rail" items={railItems} />}
 
         {showCreateProject && (
@@ -2302,7 +2332,7 @@ function purgeBody(workspaces: Workspace[], projects: Project[], projectId: stri
   return `Permanently delete the ${doomed.length} archived session(s)${whose}, with their message history and logs.`;
 }
 
-type PanelId = "agents" | "files" | "changes";
+type PanelId = "agents" | "files" | "changes" | "stats";
 const WORKSPACE_ROOT: FileRef = { path: "." };
 
 // The page is in front of the user: visible, focused, and touched in the

@@ -166,7 +166,10 @@ export interface BackgroundTask {
 export type MessageStatus =
   "done" | "streaming" | "error" | "queued" | "starting" | "dispatching" | "outcome_unknown";
 
+export type InputTrigger = "user" | "lead" | "worker" | "peer" | "system" | "auto" | "retry";
+
 export interface PromptEnvelope {
+  trigger?: InputTrigger;
   inputId: string;
   text: string;
   attachmentIds?: string[];

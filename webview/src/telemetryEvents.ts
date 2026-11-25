@@ -6,6 +6,7 @@ const clickActions = [
   "panel.files",
   "panel.diff",
   "panel.agents",
+  "panel.stats",
   "panel.board",
   "panel.notes",
   "panel.issues",
@@ -15,6 +16,9 @@ const clickActions = [
   "trace.step_toggle",
   "trace.subagent_toggle",
   "trace.tool_toggle",
+  "stats.turn_toggle",
+  "stats.step_toggle",
+  "stats.load_more",
 ] as const satisfies readonly TelemetryAction[];
 const focusActions = ["sidebar.search"] as const satisfies readonly TelemetryAction[];
 type DelegatedAction = (typeof clickActions)[number] | (typeof focusActions)[number];

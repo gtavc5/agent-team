@@ -6,7 +6,8 @@ import * as path from "path";
 import { pipeline } from "stream";
 import * as zlib from "zlib";
 import { parseUsageRequest, type UsageRequest } from "../usage/request";
-import { usageView } from "../usage/service";
+import { sessionStatsView, usageView } from "../usage/service";
+import { statsRequest } from "../usage/session-stats";
 import type { Auth } from "./auth";
 import { formatReport, type RuntimeReport } from "../config/diagnostics";
 import { NotRegularFile, readFileView, resolveFilePath } from "../repo/files";
@@ -125,6 +126,22 @@ export class HttpHandler {
               ? json(res, 400, { error: "Invalid usage query" })
               : json(res, 503, { error: "Usage data unavailable" }),
         );
+        return;
+      }
+
+      const stats = /^\/api\/workspaces\/([^/]+)\/stats$/.exec(pathname);
+      if (req.method === "GET" && stats) {
+        if (this.cwdOf(stats[1]) === undefined)
+          return json(res, 404, { error: "No such workspace" });
+        try {
+          const request = statsRequest(stats[1], url.searchParams);
+          void sessionStatsView(this.baseDir, request).then(
+            (page) => json(res, 200, page),
+            () => json(res, 503, { error: "Session stats unavailable" }),
+          );
+        } catch {
+          json(res, 400, { error: "Invalid stats page" });
+        }
         return;
       }
 

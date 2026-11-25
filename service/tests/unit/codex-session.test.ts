@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { z } from "zod";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { readLifecycle } from "../../src/usage/lifecycle";
 import { codexFields, withId } from "./fixtures/codex-wire";
 import { CodexSession } from "../../src/session/codex";
 import type { RpcMessage, ThreadItem, Transport } from "../../src/session/codex-rpc";
@@ -622,6 +626,26 @@ describe("codex app-server session", () => {
     await flush();
     expect(server.sent("turn/start")).toHaveLength(2);
     expect(server.sent("turn/steer")).toHaveLength(1);
+  });
+
+  it("attributes an autonomous model turn during capacity backoff to auto", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-capacity-"));
+    const { session } = makeSession({ dataDir: dir, workspaceId: "ws" });
+    try {
+      CodexSession.hooks = { ...CodexSession.hooks, capacityRetryDelaysMs: [60_000] };
+      await session.send("hi");
+      server.startTurn();
+      server.completeTurn("failed", overloaded);
+      server.startTurn("turn_goal");
+      server.item("started", { type: "agentMessage", id: "output" }, "thr_1", "turn_goal");
+      expect(
+        readLifecycle(dir, "ws").find((m) => m.turnId === "turn_goal" && m.marker === "stepStart")
+          ?.trigger,
+      ).toBe("auto");
+    } finally {
+      session.abort();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("retries no compaction, and no turn when codex carried on by itself meanwhile", async () => {

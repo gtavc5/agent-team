@@ -194,12 +194,13 @@ function makeWorkspace(
     onMessageDone: () => {},
   },
   usageRecorder?: UsageRecorder,
+  lifecycleDir?: string,
 ) {
   const host = new SnapHost("local", "Local", undefined, usageRecorder);
   const registry = new HostRegistry();
   registry.register(host);
   const ws = new Workspace("ws", "t", "p", "local", RECORD_CWD, registry, cb);
-  ws.addAgent("A", model, "🤖", "#888", { backend: "codex", effort });
+  ws.addAgent("A", model, "🤖", "#888", { backend: "codex", effort, dataDir: lifecycleDir });
   return { ws, host };
 }
 
@@ -224,10 +225,11 @@ export async function replay(
   fixture: Fixture,
   cb?: WorkspaceCallbacks,
   usageRecorder?: UsageRecorder,
+  lifecycleDir?: string,
 ): Promise<Replay> {
-  if (backend === "pi") return replayPi(rec, fixture, cb, usageRecorder);
+  if (backend === "pi") return replayPi(rec, fixture, cb, usageRecorder, lifecycleDir);
   const model = rec.header.model || DEFAULT_MODEL[backend];
-  const { ws, host } = makeWorkspace(model, fixture.effort, cb, usageRecorder);
+  const { ws, host } = makeWorkspace(model, fixture.effort, cb, usageRecorder, lifecycleDir);
   const tools = fixture.tools ? panelTools(fixture.tools, fixture.instructions) : null;
   for (const entry of ws.agents.values()) entry.session.setPanelTools?.(tools);
   const events: StreamEvent[] = [];
@@ -532,6 +534,7 @@ async function replayPi(
   fixture: Fixture,
   cb?: WorkspaceCallbacks,
   usageRecorder?: UsageRecorder,
+  lifecycleDir?: string,
 ): Promise<Replay> {
   const base = Date.parse(rec.header.recordedAt) - (rec.entries.at(-1)?.t ?? 0);
   if (vi.isFakeTimers()) vi.setSystemTime(base);
@@ -605,6 +608,7 @@ async function replayPi(
   const agent = ws.addAgent("A", rec.header.model || DEFAULT_MODEL.pi, "🤖", "#888", {
     backend: "pi",
     workspaceId: ws.id,
+    dataDir: lifecycleDir,
   });
   const session = sessions[0];
   const running: Promise<unknown>[] = [];

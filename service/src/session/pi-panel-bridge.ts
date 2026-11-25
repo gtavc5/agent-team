@@ -1,5 +1,5 @@
 import { CONFIGURED_EVENT, piSnapshotSchema, REFRESH_EVENT, SNAPSHOT_EVENT } from "./quota-schema";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,6 +12,9 @@ interface SessionEntry {
   type: string;
   id: string;
   parentId: string | null;
+  firstKeptEntryId?: string;
+  tokensBefore?: number;
+  summary?: string;
   message?: {
     role?: string;
     content?: unknown;
@@ -238,9 +241,28 @@ function boundedProof(ctx: ExtensionContext, expectedAnchorId: string | null): B
 }
 
 function checkpoint(ctx: ExtensionContext): JsonObject {
+  const entries = ctx.sessionManager.getEntries();
+  // Already in Pi's memory. Do not scan/parse a large transcript on the service event loop.
+  const branch = ctx.sessionManager.getBranch();
+  let i = branch.length - 1;
+  while (i >= 0 && branch[i].type !== "compaction") i--;
+  const compact = branch[i];
+  let index = compact ? entries.length - 1 : -1;
+  while (index >= 0 && entries[index].id !== compact.id) index--;
   return {
+    ...(compact &&
+      index >= 0 &&
+      typeof compact.summary === "string" && {
+        compaction: {
+          id: compact.id,
+          index,
+          firstKeptEntryId: compact.firstKeptEntryId,
+          tokensBefore: compact.tokensBefore,
+          summaryKey: createHash("sha256").update(compact.summary).digest("hex"),
+        },
+      }),
     leafId: ctx.sessionManager.getLeafId(),
-    entryCount: ctx.sessionManager.getEntries().length,
+    entryCount: entries.length,
     sessionId: ctx.sessionManager.getSessionId() || null,
     sessionFile: ctx.sessionManager.getSessionFile() ?? null,
   };

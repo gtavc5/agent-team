@@ -15,6 +15,7 @@ import {
   ThinkingStats,
   MessageStatus,
   PromptEnvelope,
+  InputTrigger,
   DispatchAttempt,
   ExtensionUiEvent,
   ExtensionUiSnapshot,
@@ -152,6 +153,11 @@ export interface MessageOrigin {
   role: "lead" | "worker" | "peer" | "panel";
   // The sender's project, for a peer.
   projectId?: string;
+}
+
+function inputTrigger(input?: Message): InputTrigger {
+  const role = input?.from?.role;
+  return !input || role === "panel" ? "system" : (role ?? "user");
 }
 
 // How the panel names a message's sender (the client's label matches).
@@ -1937,7 +1943,7 @@ export class Workspace {
     const envelope = msg?.queuedEnvelope;
     if (!msg || !envelope || envelope.reportId || envelope.text.trimStart().startsWith("/")) return;
     return {
-      envelope,
+      envelope: { ...envelope, trigger: inputTrigger(msg) },
       claim: () => {
         if (
           !available() ||
@@ -1972,9 +1978,11 @@ export class Workspace {
   // A message handed to the running turn stays queued until the model reads
   // it (steered); not taken, it waits like any other.
   private async steer(agent: AgentEntry, msg: Message): Promise<void> {
-    const taken = await agent.session.steer!(msg.queuedEnvelope?.text ?? msg.content, msg.id).catch(
-      () => false,
-    );
+    const taken = await agent.session.steer!(
+      msg.queuedEnvelope?.text ?? msg.content,
+      msg.id,
+      inputTrigger(msg),
+    ).catch(() => false);
     // Given back meanwhile (unread) when the turn ended under the request.
     if (taken || !msg.steering) return;
     delete msg.steering;
@@ -2081,6 +2089,7 @@ export class Workspace {
     prompt: PromptEnvelope | string,
     input?: Message,
     banner?: StreamEvent,
+    trigger: InputTrigger = inputTrigger(input),
   ): Promise<void> {
     const envelope =
       typeof prompt === "string" ? { inputId: genId("input"), text: prompt } : prompt;
@@ -2109,7 +2118,7 @@ export class Workspace {
       }
       const backend = agent.session.getState().config.backend;
       const receipt = await agent.session.send(
-        backend === "pi" || backend === "codex" ? envelope : envelope.text,
+        backend === "pi" || backend === "codex" ? { ...envelope, trigger } : envelope.text,
         {
           onBeforeWrite: (attempt) => {
             this.assertWritable();
@@ -2515,12 +2524,18 @@ export class Workspace {
       // After the queue, as the CLI orders its own wake-ups.
       const wake = entry.session.wakeDue ? entry.session.takeWake?.() : null;
       if (wake) {
-        void this.dispatchPrompt(entry, wake.prompt, undefined, {
-          kind: "notice",
-          level: "wakeup",
-          content:
-            "Scheduled wake-up fired — sent by the panel: the CLI process that held it is gone.",
-        });
+        void this.dispatchPrompt(
+          entry,
+          wake.prompt,
+          undefined,
+          {
+            kind: "notice",
+            level: "wakeup",
+            content:
+              "Scheduled wake-up fired — sent by the panel: the CLI process that held it is gone.",
+          },
+          "auto",
+        );
       }
       return;
     }
@@ -2575,7 +2590,7 @@ export class Workspace {
     entry.pausedUntil = undefined;
     entry.retryPending = false;
     if (entry.lastEnvelope) {
-      void this.dispatchPrompt(entry, entry.lastEnvelope);
+      void this.dispatchPrompt(entry, entry.lastEnvelope, undefined, undefined, "retry");
       return true;
     }
     // A message waiting for the agent resumes it as well as a carry-on.
@@ -2586,6 +2601,9 @@ export class Workspace {
     void this.dispatchPrompt(
       entry,
       "[From the panel] A usage limit cut your turn off. Carry on where you left off.",
+      undefined,
+      undefined,
+      "retry",
     );
     // Cut off again, it is told to carry on again, not as a prompt of ours.
     entry.lastEnvelope = undefined;

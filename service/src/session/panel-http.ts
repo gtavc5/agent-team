@@ -48,6 +48,13 @@ export interface PanelReadyReport {
 }
 
 export interface SessionCheckpoint {
+  compaction?: {
+    id: string;
+    index: number;
+    firstKeptEntryId?: string;
+    tokensBefore?: number;
+    summaryKey: string;
+  };
   leafId: string | null;
   entryCount: number;
   sessionId: string | null;
