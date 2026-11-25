@@ -1,5 +1,6 @@
 import { ChildProcess, execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+import * as path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 
@@ -271,10 +272,25 @@ export class PiRpcClient extends EventEmitter {
   }
 
   static spawn(options: PiRpcSpawnOptions = {}): PiRpcClient {
-    const child = spawn(options.binary ?? "pi", options.args ?? ["--mode", "rpc"], {
+    const binary = options.binary ?? "pi";
+    const args = options.args ?? ["--mode", "rpc"];
+    let command = binary;
+    let spawnArgs = args;
+    let useShell = false;
+    if (process.platform === "win32") {
+      if (/\.(?:c|m)?js$/i.test(binary)) {
+        command = process.execPath;
+        spawnArgs = [binary, ...args];
+      } else if (/\.(?:cmd|bat)$/i.test(binary) || !path.extname(binary)) {
+        useShell = true;
+      }
+    }
+    const child = spawn(command, spawnArgs, {
       cwd: options.cwd,
       env: options.env ?? process.env,
-      detached: options.detached ?? true,
+      detached: process.platform === "win32" ? false : (options.detached ?? true),
+      windowsHide: true,
+      ...(useShell && { shell: true }),
       stdio: ["pipe", "pipe", "pipe"],
     });
     return new PiRpcClient(

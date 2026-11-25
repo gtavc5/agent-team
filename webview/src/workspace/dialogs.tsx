@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import type { TelemetryConfirmation } from "../../../shared/telemetry";
 import { recordTelemetry } from "../telemetry";
+import { useWorkspaceT } from "../i18n/workspace";
 import { EffortSelect, effortOf } from "./EffortSelect";
 import type { AgentPreset, CodexAuthState, ModelOption, HostInfo } from "../state/useServer";
 import { isImageAvatar } from "./avatar";
@@ -15,7 +16,7 @@ export const CODEX_LOGIN_COMMAND = "npx codex login";
 export function ConfirmDialog({
   title,
   body,
-  confirmLabel = "Confirm",
+  confirmLabel,
   danger = false,
   telemetryAction,
   onConfirm,
@@ -29,6 +30,8 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  const tr = useWorkspaceT();
+  const resolvedConfirmLabel = confirmLabel ?? tr("confirm");
   const opened = useRef<TelemetryConfirmation>(undefined);
   useEffect(() => {
     if (telemetryAction && opened.current !== telemetryAction)
@@ -49,7 +52,7 @@ export function ConfirmDialog({
           className="btn-secondary"
           onClick={cancel}
         >
-          Cancel
+          {tr("cancel")}
         </button>
         <button
           data-dialog-focus={danger ? undefined : ""}
@@ -61,7 +64,7 @@ export function ConfirmDialog({
             onClose();
           }}
         >
-          {confirmLabel}
+          {resolvedConfirmLabel}
         </button>
       </div>
     </DialogFrame>
@@ -106,6 +109,7 @@ export function AddAgentDialog({
   onClose: () => void;
   onAdd: (name: string, model: string, avatar: string, color: string, effort?: string) => void;
 }) {
+  const tr = useWorkspaceT();
   const showCodexHint = needsCodexSetup(codexAuth);
   const selectableModels = useMemo(() => usableModels(models, codexAuth), [codexAuth, models]);
 
@@ -141,7 +145,7 @@ export function AddAgentDialog({
   const finalName = customName || preset?.name || "Agent";
 
   return (
-    <DialogFrame title="Add Agent" onClose={onClose} suspended={suspended}>
+    <DialogFrame title={tr("addAgentTitle")} onClose={onClose} suspended={suspended}>
       <div className="preset-grid">
         {presets.map((p, i) => (
           <div
@@ -182,7 +186,7 @@ export function AddAgentDialog({
       </div>
 
       <label className="dialog-field">
-        <span>Name (or use preset)</span>
+        <span>{tr("nameOrUsePreset")}</span>
         <input
           data-dialog-focus
           value={customName}
@@ -193,12 +197,12 @@ export function AddAgentDialog({
 
       <div className="dialog-field">
         <label className="dialog-field-label" htmlFor="add-agent-model">
-          Model
+          {tr("modelLabel")}
         </label>
         <select id="add-agent-model" value={model} onChange={(e) => chooseModel(e.target.value)}>
           {selectableModels.length === 0 && (
             <option value="" disabled>
-              No models available
+              {tr("noModelsAvailable")}
             </option>
           )}
           {BACKEND_GROUPS.map(([backend, label]) => {
@@ -218,7 +222,7 @@ export function AddAgentDialog({
               return (
                 <optgroup key={backend} label={label}>
                   <option value={CODEX_SETUP_VALUE} className="codex-unauth-option">
-                    Codex (not signed in)
+                    {tr("codexNotSignedIn")}
                   </option>
                 </optgroup>
               );
@@ -228,19 +232,19 @@ export function AddAgentDialog({
         </select>
         {showCodexHint && onOpenCodexSetup && (
           <button type="button" className="codex-auth-hint" onClick={onOpenCodexSetup}>
-            Sign in to Codex…
+            {tr("signInToCodexEllipsis")}
           </button>
         )}
       </div>
 
       {effortOf(selectableModels, model).levels.length > 0 && (
         <label className="dialog-field">
-          <span>Effort</span>
+          <span>{tr("effortLabel")}</span>
           <EffortSelect
             {...effortOf(selectableModels, model)}
             value={effort}
             onChange={setEffort}
-            label="Reasoning effort"
+            label={tr("reasoningEffort")}
             fresh
           />
         </label>
@@ -248,7 +252,7 @@ export function AddAgentDialog({
 
       <div className="dialog-actions">
         <button type="button" className="btn-secondary" onClick={onClose}>
-          Cancel
+          {tr("cancel")}
         </button>
         <button
           type="button"
@@ -266,7 +270,7 @@ export function AddAgentDialog({
             onClose();
           }}
         >
-          Add
+          {tr("add")}
         </button>
       </div>
     </DialogFrame>
@@ -284,6 +288,7 @@ export function CodexSetupDialog({
   onRecheck: () => void;
   onClose: () => void;
 }) {
+  const tr = useWorkspaceT();
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [checkRequested, setCheckRequested] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -318,29 +323,26 @@ export function CodexSetupDialog({
 
   const statusNote = (() => {
     if (rechecking) return null;
-    if (codexAuth?.authenticated) return "Codex is signed in.";
+    if (codexAuth?.authenticated) return tr("codexSignedIn");
     if (!checkRequested) return null;
     if (codexAuth?.status === "error" && codexAuth.error) {
-      return `Check failed: ${codexAuth.error}`;
+      return tr("checkFailed", { error: codexAuth.error });
     }
     if (codexAuth?.status === "unavailable") {
-      return "Codex CLI binary is unavailable on the server.";
+      return tr("codexCliUnavailable");
     }
-    return "Still not signed in. Finish running the command above, then click Re-check.";
+    return tr("codexStillNotSignedIn");
   })();
 
   return (
     <DialogFrame
-      title="Sign in to Codex"
+      title={tr("signInToCodex")}
       className="dialog-codex-setup"
       overlayClass="dialog-codex-setup-overlay"
       priority={1}
       onClose={onClose}
     >
-      <p className="dialog-body">
-        Run this command in your terminal to sign in with your Codex account, then re-check to
-        unlock Codex models and quota:
-      </p>
+      <p className="dialog-body">{tr("codexSetupBody")}</p>
       <div className="codex-cmd-box">
         <code className="codex-cmd-code">{CODEX_LOGIN_COMMAND}</code>
         <button
@@ -348,7 +350,11 @@ export function CodexSetupDialog({
           className="btn-secondary codex-copy-btn"
           onClick={() => void handleCopy()}
         >
-          {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy"}
+          {copyState === "copied"
+            ? tr("copied")
+            : copyState === "failed"
+              ? tr("copyFailed")
+              : tr("copy")}
         </button>
       </div>
       {statusNote && (
@@ -361,7 +367,7 @@ export function CodexSetupDialog({
       )}
       <div className="dialog-actions">
         <button type="button" className="btn-secondary" onClick={onClose}>
-          Close
+          {tr("close")}
         </button>
         <button
           data-dialog-focus
@@ -370,7 +376,7 @@ export function CodexSetupDialog({
           disabled={rechecking}
           onClick={handleRecheck}
         >
-          {rechecking ? "Checking…" : "Re-check"}
+          {rechecking ? tr("checking") : tr("recheck")}
         </button>
       </div>
     </DialogFrame>
@@ -389,6 +395,7 @@ export function CreateProjectDialog({
   onClose: () => void;
   onCreate: (name: string, root: string | null) => void;
 } & DirectorySource) {
+  const tr = useWorkspaceT();
   const [name, setName] = useState("");
   const [withoutGit, setWithoutGit] = useState(false);
   const local = hosts.find((host) => host.type === "local");
@@ -400,8 +407,8 @@ export function CreateProjectDialog({
     onListDirs: local?.connected === false ? undefined : onListDirs,
     dirSuggestions,
     disabled: withoutGit,
-    label: "Repository path",
-    placeholder: withoutGit ? "No repository" : "/path/to/repository",
+    label: tr("repositoryPath"),
+    placeholder: withoutGit ? tr("noRepository") : "/path/to/repository",
   });
   const onEscape = () => {
     if (!dismiss()) onClose();
@@ -409,7 +416,7 @@ export function CreateProjectDialog({
   const canSubmit = name.trim().length > 0 && (withoutGit || root.trim().length > 0);
   return (
     <DialogFrame
-      title="New Project"
+      title={tr("newProjectTitle")}
       onClose={onClose}
       onEscape={onEscape}
       onSubmit={(e) => {
@@ -420,11 +427,11 @@ export function CreateProjectDialog({
       }}
     >
       <label className="dialog-field">
-        <span>Name</span>
+        <span>{tr("nameLabel")}</span>
         <input
           data-dialog-focus
           value={name}
-          placeholder="Project name…"
+          placeholder={tr("projectNamePlaceholder")}
           onChange={(e) => setName(e.target.value)}
         />
       </label>
@@ -435,17 +442,15 @@ export function CreateProjectDialog({
           checked={withoutGit}
           onChange={(e) => setWithoutGit(e.target.checked)}
         />
-        <span>Create without a Git repository</span>
+        <span>{tr("createWithoutGit")}</span>
       </label>
-      <p className="dialog-help">
-        A project without Git still has objectives, issues, notes and a lead session.
-      </p>
+      <p className="dialog-help">{tr("createWithoutGitHelp")}</p>
       <div className="dialog-actions">
         <button type="button" className="btn-secondary" onClick={onClose}>
-          Cancel
+          {tr("cancel")}
         </button>
         <button type="submit" className="btn-primary" disabled={!canSubmit}>
-          Create project
+          {tr("createProject")}
         </button>
       </div>
     </DialogFrame>
@@ -599,6 +604,7 @@ export function CreateWorkspaceDialog({
   // outside them all starts a project, which can be named here.
   projectFolders?: string[];
 }) {
+  const tr = useWorkspaceT();
   const [name, setName] = useState("");
   const [projectName, setProjectName] = useState("");
   const [hostId, setHostId] = useState(hosts[0]?.id ?? "local");
@@ -610,7 +616,7 @@ export function CreateWorkspaceDialog({
     onListDirs,
     dirSuggestions,
     initialPath: initialPath ?? "~/",
-    label: "Directory path",
+    label: tr("directoryPath"),
     placeholder: "~/workspace/...",
   });
   const onEscape = () => {
@@ -635,20 +641,25 @@ export function CreateWorkspaceDialog({
   };
 
   return (
-    <DialogFrame title="New Session" onClose={onClose} onEscape={onEscape} onSubmit={handleSubmit}>
+    <DialogFrame
+      title={tr("newSessionTitle")}
+      onClose={onClose}
+      onEscape={onEscape}
+      onSubmit={handleSubmit}
+    >
       <label className="dialog-field">
-        <span>Name</span>
+        <span>{tr("nameLabel")}</span>
         <input
           data-dialog-focus
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder={defaultName || "Session name…"}
+          placeholder={defaultName || tr("sessionNamePlaceholder")}
         />
       </label>
       {field}
       {newProject && (
         <label className="dialog-field">
-          <span>Project</span>
+          <span>{tr("projectLabel")}</span>
           <input
             value={projectName}
             onChange={(e) => setProjectName(e.target.value)}
@@ -658,7 +669,7 @@ export function CreateWorkspaceDialog({
       )}
       {hosts.length > 1 && (
         <label className="dialog-field">
-          <span>Host</span>
+          <span>{tr("hostLabel")}</span>
           <select value={hostId} onChange={(e) => setHostId(e.target.value)}>
             {hosts.map((h) => (
               <option key={h.id} value={h.id}>
@@ -670,10 +681,10 @@ export function CreateWorkspaceDialog({
       )}
       <div className="dialog-actions">
         <button type="button" className="btn-secondary" onClick={onClose}>
-          Cancel
+          {tr("cancel")}
         </button>
         <button type="submit" className="btn-primary" disabled={!canSubmit}>
-          Create session
+          {tr("createSession")}
         </button>
       </div>
     </DialogFrame>

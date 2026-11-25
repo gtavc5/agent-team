@@ -28,6 +28,7 @@ import {
   formatFullDateTime,
 } from "../format";
 import { shortModel } from "../workspace/models";
+import { t, useT, type ChatKey } from "../i18n/chat";
 
 function renderMentionContent(content: string, agents: AgentInfo[]) {
   const match = content.match(/^@(\S+)(\s+|$)/);
@@ -60,20 +61,20 @@ const ORIGIN_GLYPH: Record<MessageOrigin["role"], string> = {
 };
 
 export function originLabel(from: MessageOrigin): string {
-  if (from.role === "lead") return "Lead";
-  if (from.role === "panel") return `Panel · ${from.name}`;
-  return from.role === "peer" ? `${from.name} · lead` : from.name;
+  if (from.role === "lead") return t("originLead");
+  if (from.role === "panel") return t("originPanel", { name: from.name });
+  return from.role === "peer" ? t("originPeer", { name: from.name }) : from.name;
 }
 
 // Banners that carry a whole prompt (a wake-up's text, a scheduled
 // wake-up's instructions, a skill's body) start folded to their first line.
 const FOLDING_LEVELS = new Set(["wakeup", "schedule", "skill"]);
 const FOLD_OVER_CHARS = 160;
-const BANNER_LABEL: Record<string, string> = {
-  wakeup: "Woke up",
-  schedule: "Scheduled",
-  skill: "Skill",
-  error: "Error",
+const BANNER_LABEL_KEY: Record<string, ChatKey> = {
+  wakeup: "wokeUp",
+  schedule: "scheduled",
+  skill: "skill",
+  error: "error",
 };
 
 export function bannerFirstLine(content: string): string {
@@ -98,6 +99,7 @@ export const BannerItem = memo(function BannerItem({
   // Summary pages cap banner bodies; opening one fetches the full message.
   onLoadDetails?: () => void;
 }) {
+  const tr = useT();
   const [open, setOpen] = useState(false);
   const level =
     ev.kind === "compact"
@@ -121,7 +123,8 @@ export const BannerItem = memo(function BannerItem({
               ? "!"
               : "i";
   const folds = bannerFolds(level, ev.content);
-  const label = BANNER_LABEL[level];
+  const labelKey = BANNER_LABEL_KEY[level];
+  const label = labelKey ? tr(labelKey) : undefined;
   return (
     <div
       className={`banner banner-${level}${folds && !open ? " banner-folded" : ""}`}
@@ -146,7 +149,7 @@ export const BannerItem = memo(function BannerItem({
             setOpen((v) => !v);
           }}
         >
-          {open ? "less" : "more"}
+          {open ? tr("less") : tr("more")}
         </button>
       )}
     </div>
@@ -165,14 +168,14 @@ export const SessionLinkContext = createContext<SessionLinks>({});
 // stopped one (a restart) is not counted up for ever.
 const TurnRunningContext = createContext(false);
 
-const ACTION_LABEL: Record<string, string> = {
-  start_session: "New session",
-  message_session: "Message",
-  message_project: "Message to project",
-  stop_session: "Stopped",
-  archive_session: "Archived",
-  report_progress: "Progress to lead",
-  finish_task: "Task finished",
+const ACTION_LABEL_KEY: Record<string, ChatKey> = {
+  start_session: "newSession",
+  message_session: "message",
+  message_project: "messageProject",
+  stop_session: "stopped",
+  archive_session: "archivedLabel",
+  report_progress: "progressLead",
+  finish_task: "taskFinished",
 };
 
 // A panel call as the panel renders it (claude.ts formatPanelTool): the
@@ -203,6 +206,7 @@ export const PanelActionItem = memo(function PanelActionItem({
   action: string;
   onLoadDetails?: () => void;
 }) {
+  const tr = useT();
   const [open, setOpen] = useState(false);
   const links = useContext(SessionLinkContext);
   const { head, quote } = actionParts(ev.content);
@@ -222,6 +226,7 @@ export const PanelActionItem = memo(function PanelActionItem({
     ((!failed && /"([^"]+)"/.exec(result)?.[1]) ||
       (action === "start_session" && cut > 0 ? head.slice(0, cut) : head));
   const preview = bannerFirstLine(quote);
+  const actionKey = ACTION_LABEL_KEY[action];
   return (
     <div
       className={`banner banner-action${open ? "" : " banner-folded"}${failed ? " banner-failed" : ""}${pending ? " banner-pending" : ""}`}
@@ -229,12 +234,12 @@ export const PanelActionItem = memo(function PanelActionItem({
     >
       <span className="banner-icon">{failed ? "!" : "◆"}</span>
       <div className="banner-text">
-        <span className="banner-label">{ACTION_LABEL[action] ?? action}</span>
+        <span className="banner-label">{actionKey ? tr(actionKey) : action}</span>
         {target &&
           (session && links.open ? (
             <button
               className="action-target"
-              title="Open that session"
+              title={tr("openThatSession")}
               onClick={() => links.open!(session)}
             >
               {target}
@@ -262,7 +267,7 @@ export const PanelActionItem = memo(function PanelActionItem({
             setOpen((v) => !v);
           }}
         >
-          {open ? "less" : "more"}
+          {open ? tr("less") : tr("more")}
         </button>
       )}
     </div>
@@ -282,7 +287,7 @@ function chipClassFor(toolName: string | null, kind: string): string {
 // MCP tools arrive as mcp__<server>__<tool>; the panel's own read as plain
 // names.
 export function chipLabelFor(toolName: string): string {
-  if (toolName === "ScheduleWakeup") return "⏰ Wake-up";
+  if (toolName === "ScheduleWakeup") return t("wakeupChip");
   const mcp = toolName.match(/^mcp__(.+?)__(.+)$/);
   if (mcp) return mcp[1] === "panel" ? mcp[2] : `${mcp[1]} · ${mcp[2]}`;
   return toolName;
@@ -291,6 +296,7 @@ export function chipLabelFor(toolName: string): string {
 // Effort, fast mode and context occupancy line under an agent message
 // header. Thinking time and tokens show on the blocks in the steps.
 export function MessageStatus({ msg }: { msg: Message }) {
+  const tr = useT();
   if (!msg.effort && !msg.fast && !msg.context) return null;
   const ctx = msg.context;
   const pct =
@@ -299,42 +305,52 @@ export function MessageStatus({ msg }: { msg: Message }) {
   return (
     <div className="message-status">
       {msg.effort && (
-        <span className="status-chip" title="Reasoning effort">
-          effort {msg.effort}
+        <span className="status-chip" title={tr("reasoningEffort")}>
+          {tr("effortChip", { effort: msg.effort })}
         </span>
       )}
       {msg.fast && (
-        <span className="status-chip fast-chip" title="Fast mode">
-          ⚡ fast
+        <span className="status-chip fast-chip" title={tr("fastMode")}>
+          {tr("fastChip")}
         </span>
       )}
       {ctx && pct != null && (
         <span
           className={`status-chip ctx-chip${tone}`}
-          title={`Context: ${ctx.tokens.toLocaleString()} / ${ctx.window.toLocaleString()} tokens`}
+          title={tr("context", {
+            tokens: ctx.tokens.toLocaleString(),
+            window: ctx.window.toLocaleString(),
+          })}
         >
           <span className="ctx-bar">
             <span className="ctx-bar-fill" style={{ width: `${pct}%` }} />
           </span>
-          ctx {formatTokens(ctx.tokens)} / {formatTokens(ctx.window)} · {pct}%
+          {tr("contextChip", {
+            tokens: formatTokens(ctx.tokens),
+            window: formatTokens(ctx.window),
+            pct,
+          })}
         </span>
       )}
     </div>
   );
 }
 
-function thinkingLabel(ev: StreamEvent): string {
-  const head = ev.durationMs != null ? `Thought for ${formatDuration(ev.durationMs)}` : "Thinking";
+function thinkingLabel(ev: StreamEvent, tr: ReturnType<typeof useT>): string {
+  const head =
+    ev.durationMs != null
+      ? tr("thoughtFor", { duration: formatDuration(ev.durationMs) })
+      : tr("thinking");
   if (!ev.tokens) return head;
   const tokens = ev.tokens < 1000 ? String(ev.tokens) : `${(ev.tokens / 1000).toFixed(1)}k`;
-  return `${head} · ${tokens} tokens`;
+  return tr("thinkingTokens", { head, tokens });
 }
 
-const KIND_LABEL: Record<string, string> = {
-  thinking: "Thinking",
-  tool_result: "Result",
-  text: "Text",
-  error: "Error",
+const KIND_LABEL_KEY: Record<string, ChatKey> = {
+  thinking: "thinking",
+  tool_result: "result",
+  text: "text",
+  error: "error",
 };
 
 // A tool body under its row: the row already shows the first line.
@@ -343,12 +359,14 @@ function afterFirstLine(content: string, singleLine = content): string {
   return nl < 0 ? singleLine : content.slice(nl + 1);
 }
 
-function resultLabel(len: number): string {
-  return len > 1000 ? `${Math.round(len / 1000)}k chars` : `${len} chars`;
+function resultLabel(len: number, tr: ReturnType<typeof useT>): string {
+  return tr("chars", { count: len > 1000 ? `${Math.round(len / 1000)}k` : len });
 }
 
-function formatSize(len: number): string {
-  return len > 1000 ? `${(len / 1000).toFixed(len < 10000 ? 1 : 0)}k chars` : `${len} chars`;
+function formatSize(len: number, tr: ReturnType<typeof useT>): string {
+  return tr("chars", {
+    count: len > 1000 ? `${(len / 1000).toFixed(len < 10000 ? 1 : 0)}k` : len,
+  });
 }
 
 // Strip Codex's outer Markdown delimiters only. toolSummary also removes
@@ -369,6 +387,7 @@ function ViewImagePath({
   truncated: boolean;
   onLoadDetails?: () => void;
 }) {
+  const tr = useT();
   const openFile = useContext(FileOpenContext);
   const pending = useRef(false);
   const open = useCallback(
@@ -393,7 +412,7 @@ function ViewImagePath({
 
   if (!openFile || !path) return <code>{path}</code>;
   return (
-    <FileRefCode target={path} title="Open image in Files" onOpen={open}>
+    <FileRefCode target={path} title={tr("openImageFiles")} onOpen={open}>
       {path}
     </FileRefCode>
   );
@@ -410,6 +429,7 @@ export const EventItem = memo(function EventItem({
   // bodies get fetched.
   onLoadDetails?: () => void;
 }) {
+  const tr = useT();
   const [resultOpen, setResultOpen] = useState(false);
   const [bodyOpen, setBodyOpen] = useState(false);
   const summarized = !!onLoadDetails;
@@ -429,11 +449,14 @@ export const EventItem = memo(function EventItem({
       ? viewImagePathOf(ev)
       : toolSummary(ev)
     : "";
+  const kindKey = KIND_LABEL_KEY[ev.kind];
   const label = toolName
     ? chipLabelFor(toolName)
     : isThinking
-      ? thinkingLabel(ev)
-      : (KIND_LABEL[ev.kind] ?? ev.kind);
+      ? thinkingLabel(ev, tr)
+      : kindKey
+        ? tr(kindKey)
+        : ev.kind;
   const chipClass = chipClassFor(toolName, ev.kind);
   const [firstLine, nextLine] = isToolUse && !summary ? ev.content.split("\n", 2) : [];
   const duplicateHeading =
@@ -484,24 +507,30 @@ export const EventItem = memo(function EventItem({
       <div className="event-row" aria-hidden={liveThinking || undefined}>
         {!liveThinking && <span className={`event-chip ${chipClass}`}>{label}</span>}
         {isToolUse && ev.durationMs != null && (
-          <span className="event-time" title="From the call to its result">
+          <span className="event-time" title={tr("fromCallResult")}>
             {formatRunTime(ev.durationMs)}
           </span>
         )}
         {running && ev.startedAt != null && (
-          <span className="event-time event-time-live" title="Running for">
+          <span className="event-time event-time-live" title={tr("runningFor")}>
             {formatDuration(runningSecs * 1000)}
           </span>
         )}
         {hasHiddenBody && (
           <button className="btn-inline" onClick={toggleBody}>
-            {bodyOpen ? "Hide" : "Details"}
+            {bodyOpen ? tr("hide") : tr("details")}
           </button>
         )}
         {(isResult || hasResult) && (
           <button className="btn-inline btn-diff" aria-expanded={resultOpen} onClick={toggleResult}>
-            {isResult ? (resultOpen ? "Hide" : "Show") : resultOpen ? "Hide result" : "Result"} ·{" "}
-            {resultLabel(resultLen)}
+            {isResult
+              ? resultOpen
+                ? tr("hide")
+                : tr("show")
+              : resultOpen
+                ? tr("hideResult")
+                : tr("result")}{" "}
+            · {resultLabel(resultLen, tr)}
           </button>
         )}
       </div>
@@ -520,7 +549,9 @@ export const EventItem = memo(function EventItem({
           className="event-content event-placeholder"
           onClick={isResult ? toggleResult : toggleBody}
         >
-          {formatSize(bodyMissing ? (ev.contentLength ?? 0) : bodyLen)} · tap to load
+          {tr("tapToLoad", {
+            size: formatSize(bodyMissing ? (ev.contentLength ?? 0) : bodyLen, tr),
+          })}
         </div>
       )}
       {isResult ? (
@@ -608,10 +639,11 @@ function useBottomCollapse(open: boolean, close: () => void) {
 }
 
 function BottomCollapse({ onClick, label }: { onClick: () => void; label: string }) {
+  const tr = useT();
   return (
     <div className="trace-collapse-footer">
       <button type="button" className="trace-collapse" onClick={onClick} aria-label={label}>
-        <span aria-hidden="true">▴</span> Collapse
+        <span aria-hidden="true">▴</span> {tr("collapse")}
       </button>
     </div>
   );
@@ -632,6 +664,7 @@ export const SubAgentItem = memo(function SubAgentItem({
   onCancel?: (taskId: string) => void;
   onLoadDetails?: () => void;
 }) {
+  const tr = useT();
   const [open, setOpen] = useState(false);
   const bottom = useBottomCollapse(open, () => setOpen(false));
   const sa = ev.subagent;
@@ -653,6 +686,16 @@ export const SubAgentItem = memo(function SubAgentItem({
         ? "◼"
         : "✗";
   const statusCls = isRunning ? "running" : (sa.status ?? "failed");
+  const statusTitle =
+    statusCls === "running"
+      ? tr("subagentStatusRunning")
+      : statusCls === "completed"
+        ? tr("subagentStatusCompleted")
+        : statusCls === "stopped"
+          ? tr("subagentStatusStopped")
+          : statusCls === "failed"
+            ? tr("subagentStatusFailed")
+            : statusCls;
 
   const allInner = sa.events ?? [];
   const hasBody = !!(sa.prompt || sa.summary || sa.usage || allInner.some(hasVisibleEventBody));
@@ -668,10 +711,13 @@ export const SubAgentItem = memo(function SubAgentItem({
   // Records from before it was measured: the CLI's time of a finished agent.
   const ran = sa.durationMs ?? (isRunning ? undefined : sa.usage?.durationMs);
   const usageStr = sa.usage
-    ? `${Math.round(sa.usage.totalTokens / 1000)}k tokens · ${sa.usage.toolUses} tools`
+    ? tr("subagentUsage", {
+        tokens: `${Math.round(sa.usage.totalTokens / 1000)}k`,
+        tools: sa.usage.toolUses,
+      })
     : null;
 
-  const role = sa.description || "Subagent";
+  const role = sa.description || tr("subagent");
   return (
     <div className={`subagent-item subagent-${statusCls}`}>
       <div className="subagent-header" ref={bottom.header} onClick={handleToggle}>
@@ -680,11 +726,11 @@ export const SubAgentItem = memo(function SubAgentItem({
           className="events-toggle trace-header-toggle"
           ref={bottom.toggle}
           aria-expanded={open}
-          aria-label={`${open ? "Collapse" : "Expand"} subagent: ${role}`}
+          aria-label={open ? tr("collapseSubagent", { role }) : tr("expandSubagent", { role })}
         >
           {open ? "▾" : "▸"}
         </button>
-        <span className={`subagent-status-icon subagent-icon-${statusCls}`} title={statusCls}>
+        <span className={`subagent-status-icon subagent-icon-${statusCls}`} title={statusTitle}>
           {statusIcon}
         </span>
         <span className="subagent-desc" title={role}>
@@ -696,12 +742,12 @@ export const SubAgentItem = memo(function SubAgentItem({
           </span>
         )}
         {sa.effort && (
-          <span className="subagent-effort" title={`Effort: ${sa.effort}`}>
+          <span className="subagent-effort" title={tr("effortTitle", { effort: sa.effort })}>
             {sa.effort}
           </span>
         )}
         {ran != null && (
-          <span className="subagent-time" title="How long it ran">
+          <span className="subagent-time" title={tr("howLongRan")}>
             {formatRunTime(ran)}
           </span>
         )}
@@ -709,13 +755,13 @@ export const SubAgentItem = memo(function SubAgentItem({
         {isRunning && sa.cancellable !== false && onCancel && (
           <button
             className="btn-cancel-subagent"
-            title="Cancel this subagent"
+            title={tr("cancelSubagent")}
             onClick={(e) => {
               e.stopPropagation();
               onCancel(sa.taskId);
             }}
           >
-            Cancel
+            {tr("cancel")}
           </button>
         )}
       </div>
@@ -727,7 +773,7 @@ export const SubAgentItem = memo(function SubAgentItem({
             </div>
           )}
           {(needsLoad || (!sa.prompt && sa.hasPrompt) || (!sa.summary && sa.summaryLength)) && (
-            <div className="subagent-loading">Loading…</div>
+            <div className="subagent-loading">{tr("loading")}</div>
           )}
           {allInner.length > 0 && (
             <div className="subagent-events">
@@ -755,27 +801,37 @@ export const SubAgentItem = memo(function SubAgentItem({
             </div>
           )}
           {usageStr && <div className="subagent-usage">{usageStr}</div>}
-          {hasBody && <BottomCollapse onClick={bottom.collapse} label="Collapse subagent trace" />}
+          {hasBody && <BottomCollapse onClick={bottom.collapse} label={tr("collapseTrace")} />}
         </div>
       )}
     </div>
   );
 });
 
-function stepSummary(regular: StreamEvent[]): string {
+function stepSummary(regular: StreamEvent[], tr: ReturnType<typeof useT>): string {
   const count = (kind: string) => regular.filter((e) => e.kind === kind).length;
   const thinkingCount = count("thinking");
   const toolCount = count("tool_use");
   const errorCount = count("error");
   const resultCount = count("tool_result");
   const parts: string[] = [];
-  if (thinkingCount > 0) parts.push(`${thinkingCount} thinking`);
-  if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount === 1 ? "" : "s"}`);
-  if (resultCount > 0) parts.push(`${resultCount} result${resultCount === 1 ? "" : "s"}`);
-  if (errorCount > 0) parts.push(`${errorCount} error${errorCount === 1 ? "" : "s"}`);
+  if (thinkingCount > 0) parts.push(tr("thinkingCount", { count: thinkingCount }));
+  if (toolCount > 0) {
+    parts.push(tr("toolCallCount", { count: toolCount, plural: toolCount === 1 ? "" : "s" }));
+  }
+  if (resultCount > 0) {
+    parts.push(tr("resultCount", { count: resultCount, plural: resultCount === 1 ? "" : "s" }));
+  }
+  if (errorCount > 0) {
+    parts.push(tr("errorCount", { count: errorCount, plural: errorCount === 1 ? "" : "s" }));
+  }
   const other = regular.length - thinkingCount - toolCount - resultCount - errorCount;
-  if (other > 0) parts.push(`${other} other`);
-  if (parts.length === 0) parts.push(`${regular.length} event${regular.length === 1 ? "" : "s"}`);
+  if (other > 0) parts.push(tr("otherCount", { count: other }));
+  if (parts.length === 0) {
+    parts.push(
+      tr("eventCount", { count: regular.length, plural: regular.length === 1 ? "" : "s" }),
+    );
+  }
   return parts.join(" · ");
 }
 
@@ -870,6 +926,7 @@ function StepBox({
   onLoadDetails?: () => void;
   defaultOpen?: boolean;
 }) {
+  const tr = useT();
   const [toggled, setToggled] = useState<boolean | null>(null);
   const hasBody = !!live?.trim() || events.some(hasVisibleEventBody);
   const open = hasBody && (toggled ?? defaultOpen);
@@ -902,21 +959,21 @@ function StepBox({
             className="events-toggle trace-header-toggle"
             ref={bottom.toggle}
             aria-expanded={open}
-            aria-label={open ? "Collapse steps" : "Expand steps"}
+            aria-label={open ? tr("collapseSteps") : tr("expandSteps")}
           >
             {open ? "▾" : "▸"}
           </button>
         ) : (
           <span className="trace-header-placeholder" aria-hidden="true" />
         )}
-        {events.length > 0 && <span className="step-summary">{stepSummary(events)}</span>}
+        {events.length > 0 && <span className="step-summary">{stepSummary(events, tr)}</span>}
         {standaloneSince != null && <StepThinkingStatus since={standaloneSince} />}
         {!open && tools.length > 0 && <StepTools tools={tools} />}
       </div>
       {open && (
         <div className="events-list">
           {items}
-          <BottomCollapse onClick={bottom.collapse} label="Collapse step trace" />
+          <BottomCollapse onClick={bottom.collapse} label={tr("collapseStepTrace")} />
         </div>
       )}
     </div>
@@ -1016,10 +1073,11 @@ function TimelineBlockItem({
 }
 
 function LiveChip({ secs }: { secs: number }) {
+  const tr = useT();
   return (
     <span className="event-chip chip-thinking chip-live">
       <span className="streaming-dot" />
-      Thinking · {secs}s
+      {tr("thinkingTime", { seconds: secs })}
     </span>
   );
 }
@@ -1053,13 +1111,14 @@ function progressOf(msg: Message): string {
 const WAIT_SHOWN_AFTER_S = 5;
 
 function QuietWait({ since }: { since?: number }) {
+  const tr = useT();
   const [localSince] = useState(Date.now);
   const now = Date.now();
   const start = since ?? localSince;
   const elapsed = elapsedSeconds(now, start);
   const show = elapsed >= WAIT_SHOWN_AFTER_S;
   useRenderAt(show ? nextSecondAt(now, start) : start + WAIT_SHOWN_AFTER_S * 1000);
-  return show ? `Waiting for the model · ${elapsed}s` : null;
+  return show ? tr("waitingModel", { seconds: elapsed }) : null;
 }
 
 function TurnFooter({
@@ -1073,6 +1132,7 @@ function TurnFooter({
   detailEvents: StreamEvent[];
   thinkingInHeader: boolean;
 }) {
+  const tr = useT();
   const now = Date.now();
   const thinkingSince = msg.liveThinkingSince;
   let call: StreamEvent | undefined;
@@ -1096,7 +1156,7 @@ function TurnFooter({
   const label =
     activity ||
     (call
-      ? `${chipLabelFor(toolNameOf(call) ?? "tool")} · ${formatDuration(elapsedSeconds(now, call.startedAt!) * 1000)}`
+      ? `${chipLabelFor(toolNameOf(call) ?? tr("toolFallback"))} · ${formatDuration(elapsedSeconds(now, call.startedAt!) * 1000)}`
       : null);
 
   return (
@@ -1115,6 +1175,11 @@ function TurnFooter({
   );
 }
 
+function MessageRenderError() {
+  const tr = useT();
+  return <div className="message-render-error">{tr("renderError")}</div>;
+}
+
 // One broken message (an old persisted event missing a field, an unexpected
 // shape) must not blank the whole transcript.
 export class MessageBoundary extends Component<
@@ -1130,7 +1195,7 @@ export class MessageBoundary extends Component<
   }
   render(): ReactNode {
     if (this.state.failed) {
-      return <div className="message-render-error">This message could not be rendered.</div>;
+      return <MessageRenderError />;
     }
     return this.props.children;
   }
@@ -1187,6 +1252,7 @@ export const MessageItem = memo(function MessageItem({
   onCancelQueued?: (messageId: string) => void;
   onLoadDetails?: (messageId: string) => void;
 }) {
+  const tr = useT();
   const handleLoadEvents = useCallback(
     (taskId: string) => onLoadSubagentEvents?.(msg.id, taskId),
     [msg.id, onLoadSubagentEvents],
@@ -1230,9 +1296,11 @@ export const MessageItem = memo(function MessageItem({
   const deliveryLabel = !isUser
     ? null
     : msg.status === "starting"
-      ? `Starting ${agents.find((a) => a.id === msg.queuedFor)?.name || "agent"}…`
+      ? tr("startingAgent", {
+          name: agents.find((a) => a.id === msg.queuedFor)?.name || tr("agentFallback"),
+        })
       : msg.status === "dispatching"
-        ? "Sending…"
+        ? tr("sending")
         : null;
   const deliveryClass =
     msg.status === "queued"
@@ -1318,7 +1386,7 @@ export const MessageItem = memo(function MessageItem({
 
   const quoteButton =
     !isUser && onQuote && segments.length > 0 ? (
-      <button className="btn-quote" title="Quote this message" onClick={() => onQuote(msg)}>
+      <button className="btn-quote" title={tr("quoteMessage")} onClick={() => onQuote(msg)}>
         ↩
       </button>
     ) : null;
@@ -1369,7 +1437,7 @@ export const MessageItem = memo(function MessageItem({
                     {from ? (
                       <button
                         className="message-author from-author"
-                        title="Open that session"
+                        title={tr("openThatSession")}
                         onClick={() => onOpenWorkspace?.(from.workspaceId)}
                       >
                         {originLabel(from)}
@@ -1382,13 +1450,13 @@ export const MessageItem = memo(function MessageItem({
                     {msg.status === "queued" && (
                       <span
                         className="queued-badge"
-                        title={msg.steering ? "Sent into the running turn" : undefined}
+                        title={msg.steering ? tr("sentRunning") : undefined}
                       >
-                        queued
+                        {tr("queuedBadge")}
                         {onCancelQueued && !msg.steering && (
                           <button
                             className="queued-cancel"
-                            title="Remove from queue"
+                            title={tr("removeQueue")}
                             onClick={() => onCancelQueued(msg.id)}
                           >
                             ✕
@@ -1437,8 +1505,7 @@ export const MessageItem = memo(function MessageItem({
 
             {msg.status === "outcome_unknown" && (
               <div className="delivery-status delivery-outcome-unknown" role="alert">
-                <strong>Delivery outcome unknown.</strong> The agent may still process this message.
-                The panel will not resend it automatically. Verify what happened before retrying.
+                <strong>{tr("deliveryUnknown")}</strong> {tr("deliveryUnknownBody")}
               </div>
             )}
 
@@ -1447,8 +1514,11 @@ export const MessageItem = memo(function MessageItem({
                 className="forward-ref"
                 {...(jump && {
                   type: "button" as const,
-                  title: "Jump to quoted message",
-                  "aria-label": `Jump to quoted message from ${forward.fromAgent}: ${forward.preview}`,
+                  title: tr("jumpQuoted"),
+                  "aria-label": tr("jumpQuotedFrom", {
+                    author: forward.fromAgent,
+                    preview: forward.preview,
+                  }),
                   onClick: () => jump(forward.messageId),
                 })}
               >

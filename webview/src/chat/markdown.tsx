@@ -24,9 +24,12 @@ import {
   splitFileRef,
 } from "./fileRef";
 import { codeText, copyText } from "./clipboard";
+import { useLocale } from "../i18n";
+import { t, useT } from "../i18n/chat";
 import "highlight.js/styles/github-dark.css";
 
 export function CopyButton({ text }: { text: () => string }) {
+  const tr = useT();
   const [copied, setCopied] = useState(false);
   return (
     <button
@@ -39,7 +42,7 @@ export function CopyButton({ text }: { text: () => string }) {
         });
       }}
     >
-      {copied ? "Copied" : "Copy"}
+      {copied ? tr("copied") : tr("copy")}
     </button>
   );
 }
@@ -213,12 +216,13 @@ function issueOf(href: string | undefined): string | null {
 }
 
 function IssueLink({ id, children }: { id: string; children: ReactNode }) {
+  const tr = useT();
   const refs = useContext(IssueRefContext);
   return (
     <button
       type="button"
       className="issue-ref"
-      title={`Issue ${id}`}
+      title={tr("issue", { id })}
       onClick={() => refs?.open(id)}
     >
       {children}
@@ -378,14 +382,14 @@ function remarkDetails() {
           const details: MdNode = {
             type: "details",
             data: { hName: "details", hProperties: m[1] ? { open: true } : {} },
-            children: [summary("Details")],
+            children: [summary(t("details"))],
           };
           into.push(details);
           outer.push(into);
           into = untitled = details.children!;
           continue;
         } else if (into === untitled && into.length === 1) {
-          into[0] = summary(m[2].trim() || "Details");
+          into[0] = summary(m[2].trim() || t("details"));
         } else {
           into.push(...prose(m[0]));
         }
@@ -469,6 +473,7 @@ function useMathPlugins(needed: boolean): MathPlugins | null {
 // Memoized so a re-render only re-parses blocks whose text actually changed
 // (inline plugin arrays would defeat react-markdown's own memoization).
 export const MdBlock = memo(function MdBlock({ children }: { children: string }) {
+  useLocale();
   const { text, hasMath } = useMemo(() => prepareSource(children), [children]);
   const math = useMathPlugins(hasMath);
   const refs = useContext(IssueRefContext);

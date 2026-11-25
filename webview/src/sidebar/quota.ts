@@ -1,4 +1,6 @@
 import { QUOTA_STALE_AFTER, type QuotaRow, type QuotaWindow } from "../../../shared/quota";
+import { isZh } from "../i18n";
+import { tWorkspace } from "../i18n/workspace";
 
 export function quotaTone(pct: number): "danger" | "warn" | "normal" {
   if (pct >= 80) return "danger";
@@ -52,7 +54,7 @@ export function quotaRowLabels(rows: QuotaRow[]): string[] {
   return rows.map((row, i) => {
     const base = bases[i];
     if ((providersByBase.get(base)?.size ?? 0) <= 1) return base;
-    if (row.provider === "native-codex") return `${base} · native`;
+    if (row.provider === "native-codex") return tWorkspace("quotaNativeLabel", { base });
     if (row.provider === "openai-codex") return `${base} · Pi`;
     return `${base} · ${row.provider}`;
   });
@@ -61,18 +63,35 @@ export function quotaRowLabels(rows: QuotaRow[]): string[] {
 export function shortWindowLabel(label: string): string {
   const trimmed = label.trim();
   const lower = trimmed.toLowerCase();
-  if (lower === "weekly" || lower === "week" || lower === "7d") return "wk";
-  if (lower === "daily" || lower === "day" || lower === "1d") return "1d";
+  if (lower === "weekly" || lower === "week" || lower === "7d")
+    return tWorkspace("quotaShortWeekly");
+  if (lower === "daily" || lower === "day" || lower === "1d") return tWorkspace("quotaShortDaily");
   if (lower === "monthly" || lower === "month" || lower === "30d" || lower === "monthly total")
-    return "mo";
-  if (lower === "monthly code") return "code";
-  if (lower === "primary") return "1st";
-  if (lower === "secondary") return "2nd";
+    return tWorkspace("quotaShortMonthly");
+  if (lower === "monthly code") return tWorkspace("quotaShortCode");
+  if (lower === "primary") return tWorkspace("quotaShortPrimary");
+  if (lower === "secondary") return tWorkspace("quotaShortSecondary");
   return trimmed;
 }
 
 export function detailWindowLabel(label: string): string {
   const trimmed = label.trim();
+  if (isZh()) {
+    const lower = trimmed.toLowerCase();
+    if (lower === "weekly" || lower === "week") return tWorkspace("quotaDetailWeekly");
+    if (lower === "daily" || lower === "day") return tWorkspace("quotaDetailDaily");
+    if (lower === "monthly" || lower === "month") return tWorkspace("quotaDetailMonthly");
+    if (lower === "monthly total") return tWorkspace("quotaDetailMonthlyTotal");
+    if (lower === "monthly code") return tWorkspace("quotaDetailMonthlyCode");
+    if (lower === "primary") return tWorkspace("quotaDetailPrimary");
+    if (lower === "secondary") return tWorkspace("quotaDetailSecondary");
+    const hours = trimmed.match(/^(\d+)h$/i);
+    if (hours) return tWorkspace("quotaDetailHours", { n: hours[1] });
+    const days = trimmed.match(/^(\d+)d$/i);
+    if (days) return tWorkspace("quotaDetailDays", { n: days[1] });
+    const minutes = trimmed.match(/^(\d+)m$/i);
+    if (minutes) return tWorkspace("quotaDetailMinutes", { n: minutes[1] });
+  }
   if (/^[a-z]/.test(trimmed)) return trimmed[0].toUpperCase() + trimmed.slice(1);
   return trimmed;
 }
@@ -88,17 +107,45 @@ export function selectSummaryWindows(windows: QuotaWindow[]): QuotaWindow[] {
 
 export { formatShortDateTime } from "../format";
 
+export function quotaAvailabilityLabel(availability: QuotaRow["availability"]): string {
+  switch (availability) {
+    case "available":
+      return tWorkspace("quotaAvailabilityAvailable");
+    case "unavailable":
+      return tWorkspace("quotaAvailabilityUnavailable");
+    case "unsupported":
+      return tWorkspace("quotaAvailabilityUnsupported");
+  }
+}
+
+export function quotaReasonLabel(reason: NonNullable<QuotaRow["reason"]>): string {
+  switch (reason) {
+    case "not configured":
+      return tWorkspace("quotaNotConfigured");
+    case "waiting for ACP setup":
+      return tWorkspace("quotaReasonWaitingAcpSetup");
+    case "waiting for Pi session":
+      return tWorkspace("quotaReasonWaitingPiSession");
+    case "checking usage":
+      return tWorkspace("quotaReasonCheckingUsage");
+    case "usage unavailable":
+      return tWorkspace("quotaReasonUsageUnavailable");
+    case "no quota adapter":
+      return tWorkspace("quotaReasonNoQuotaAdapter");
+  }
+}
+
 export function quotaWaitingHint(row: QuotaRow): string | undefined {
   switch (row.reason) {
     case "not configured":
-      return "not configured";
+      return tWorkspace("quotaNotConfigured");
     case "waiting for ACP setup":
-      return "waiting for setup";
+      return tWorkspace("quotaWaitingSetup");
     case "waiting for Pi session":
     case "checking usage":
-      return "warming up";
+      return tWorkspace("quotaWarmingUp");
     default:
-      return row.observedAt === 0 && !row.reason ? "warming up" : undefined;
+      return row.observedAt === 0 && !row.reason ? tWorkspace("quotaWarmingUp") : undefined;
   }
 }
 

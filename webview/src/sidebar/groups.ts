@@ -1,4 +1,5 @@
 import type { Project, Workspace } from "../state/useServer";
+import { tWorkspace } from "../i18n/workspace";
 import { isAgentActive } from "../workspace/agents";
 
 // Groups older than this default to collapsed in the sidebar.
@@ -60,9 +61,11 @@ export function groupWorkspaces(
     const isLead = (w: Workspace) => (w.projectLink?.role === "lead" ? 1 : 0);
     live.sort((a, b) => isLead(b) - isLead(a) || lastActive(b) - lastActive(a));
     archived.sort((a, b) => lastActive(b) - lastActive(a));
+    const folderLabel =
+      key === "(no path)" ? tWorkspace("noPath") : (key.split("/").filter(Boolean).pop() ?? key);
     groups.push({
       key,
-      label: project?.name ?? key.split("/").filter(Boolean).pop() ?? key,
+      label: project?.name ?? folderLabel,
       ...(project && { project }),
       workspaces: live,
       archived,

@@ -30,10 +30,14 @@ export function executable(file: string): boolean {
 }
 
 export function findExecutable(name: string, env: NodeJS.ProcessEnv): string | undefined {
+  const candidates =
+    process.platform === "win32" && !path.extname(name)
+      ? [name, `${name}.exe`, `${name}.cmd`, `${name}.bat`]
+      : [name];
   return (env.PATH ?? "")
     .split(path.delimiter)
     .filter(path.isAbsolute)
-    .map((dir) => path.join(dir, name))
+    .flatMap((dir) => candidates.map((candidate) => path.join(dir, candidate)))
     .find(executable);
 }
 

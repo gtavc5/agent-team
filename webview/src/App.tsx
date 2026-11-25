@@ -62,6 +62,7 @@ import {
   settleScroller,
 } from "./viewport/viewportHeal";
 import { collectSnapshot, uploadSnapshot } from "./dev/debugSnapshot";
+import { t, useT } from "./i18n/chat";
 
 // Re-exported for tests and for anyone importing the old single-file layout.
 export { GitBar } from "./workspace/GitBar";
@@ -144,6 +145,7 @@ const NO_ISSUES: IssueModules = [];
 const JUMP_MAX_PAGES = 10;
 
 export function App() {
+  const tr = useT();
   const {
     workspaces,
     projects,
@@ -217,14 +219,14 @@ export function App() {
   }, [notice]);
   const takeSnapshot = useCallback(() => {
     const snapshot = collectSnapshot();
-    setNotice("Saving debug snapshot…");
+    setNotice(t("snapshotSaving"));
     return uploadSnapshot(snapshot).then(
       (p) => {
-        setNotice(`Snapshot saved: ${p}`);
+        setNotice(t("snapshotSaved", { path: p }));
         return p;
       },
       (e) => {
-        setNotice(`Snapshot failed: ${e instanceof Error ? e.message : e}`);
+        setNotice(t("snapshotFailed", { error: e instanceof Error ? e.message : String(e) }));
         throw e;
       },
     );
@@ -554,7 +556,7 @@ export function App() {
       ? [
           {
             id: "board",
-            label: `Objectives of ${activeProject.name}`,
+            label: tr("objectivesOf", { name: activeProject.name }),
             icon: "board" as const,
             page: true,
             active: boardProjectId === activeProject.id,
@@ -567,7 +569,7 @@ export function App() {
       : []),
     {
       id: "agents",
-      label: "Agents and sessions",
+      label: tr("agentsAndSessions"),
       icon: "agents" as const,
       active: openPanel === "agents",
       badge:
@@ -577,14 +579,14 @@ export function App() {
     },
     {
       id: "files",
-      label: "Files",
+      label: tr("files"),
       icon: "files" as const,
       active: openPanel === "files",
       onClick: () => togglePanel("files"),
     },
     {
       id: "changes",
-      label: "Changes",
+      label: tr("changes"),
       icon: "changes" as const,
       active: openPanel === "changes",
       onClick: () => togglePanel("changes"),
@@ -730,7 +732,7 @@ export function App() {
   const openWorkspace = useCallback(
     (id: string) => {
       if (workspacesRef.current.some((w) => w.id === id)) onSelectWorkspace(id);
-      else setNotice("That session no longer exists.");
+      else setNotice(t("sessionGone"));
     },
     [onSelectWorkspace],
   );
@@ -1195,7 +1197,7 @@ export function App() {
       setPendingJump({ ...jump, pages: jump.pages + 1 });
     } else {
       setPendingJump(null);
-      if (jump.fromSearch) setNotice("That message is no longer in the history.");
+      if (jump.fromSearch) setNotice(t("messageGone"));
     }
   }, [pendingJump, activeWsId, activeWs, loadMessages, rememberHistoryAnchor]);
 
@@ -1312,9 +1314,8 @@ export function App() {
       const draft = onLead
         ? (textareaRef.current?.value ?? "")
         : (inputMapRef.current.get(leadId) ?? "");
-      const text = draft.trim()
-        ? `${draft.trimEnd()}\nAbout ${objectiveId}: `
-        : `About ${objectiveId}: `;
+      const prefix = t("aboutObjective", { id: objectiveId });
+      const text = draft.trim() ? `${draft.trimEnd()}\n${prefix}` : prefix;
       setBoardProjectId(null);
       if (onLead) {
         setDivText(text);
@@ -1401,7 +1402,7 @@ export function App() {
           images = await Promise.all(pendingImages.map(({ file }) => uploadImage(file)));
         } catch (e) {
           console.error("Image upload failed:", e);
-          showError(`Image upload failed: ${e instanceof Error ? e.message : String(e)}`);
+          showError(t("imageUploadFailed", { error: e instanceof Error ? e.message : String(e) }));
           return;
         } finally {
           setUploading(false);
@@ -1539,23 +1540,30 @@ export function App() {
     <SessionLinkContext.Provider value={sessionLinks}>
       <div className="app" ref={appRef}>
         {notice && (
-          <div className="info-toast" role="status" onClick={() => setNotice(null)} title="Dismiss">
+          <div
+            className="info-toast"
+            role="status"
+            onClick={() => setNotice(null)}
+            title={tr("dismiss")}
+          >
             {notice}
           </div>
         )}
         {lastError && (
-          <div className="error-toast" onClick={clearError} title="Dismiss">
+          <div className="error-toast" onClick={clearError} title={tr("dismiss")}>
             ⚠ {lastError}
           </div>
         )}
         {otherDialog && (
           <div className="ui-dialog-alert" role="alert">
             <span>
-              {otherDialogCount} other session{otherDialogCount === 1 ? "" : "s"} waiting for your
-              response
+              {tr("otherSessionsWaiting", {
+                count: otherDialogCount,
+                plural: otherDialogCount === 1 ? "" : "s",
+              })}
             </span>
             <button type="button" onClick={() => onSelectWorkspace(otherDialog.workspaceId)}>
-              Open session
+              {tr("openSession")}
             </button>
           </div>
         )}
@@ -1617,7 +1625,7 @@ export function App() {
                   <button
                     className="agents-chip"
                     aria-pressed={openPanel === "agents"}
-                    title="Agents and sessions"
+                    title={tr("agentsAndSessions")}
                     onClick={() => togglePanel("agents")}
                   >
                     <span className="agents-chip-avatars">
@@ -1628,7 +1636,7 @@ export function App() {
                     <span
                       className={`agent-status-dot agent-status-${chipDot(activeWs, connected)}`}
                     />
-                    <span className="agents-chip-label">{chipLabel(activeWs, connected)}</span>
+                    <span className="agents-chip-label">{chipLabel(activeWs, connected, tr)}</span>
                   </button>
                 </div>
                 <div className="workspace-info-bar">
@@ -1641,7 +1649,7 @@ export function App() {
                   <GitBar git={activeWs.git ?? null} pr={activeWs.pr ?? null} />
                   {projectSealed && (
                     <span className="sealed-badge" title={activeProject?.sealedReason ?? undefined}>
-                      Sealed · read-only
+                      {tr("sealedReadOnly")}
                     </span>
                   )}
                   <span className="ws-info-spacer" />
@@ -1659,33 +1667,38 @@ export function App() {
                   activeWs.projectLink?.role !== "lead" ? (
                     <button
                       className="btn-ghost ws-archive-btn"
-                      title="Archive: unload history from memory and stop idle sessions"
+                      title={tr("archiveTitle")}
                       disabled={isAnyRunning}
                       onClick={() => archiveWorkspace(activeWs.id)}
                     >
-                      Archive
+                      {tr("archive")}
                     </button>
                   ) : null}
                 </div>
                 {projectSealed && (
                   <div className="sealed-banner" role="status">
-                    This project is sealed. History, objectives, issues and notes are read-only.
-                    {activeProject?.sealedReason ? ` Reason: ${activeProject.sealedReason}` : ""}
+                    {tr("sealedBanner")}
+                    {activeProject?.sealedReason
+                      ? tr("reason", { reason: activeProject.sealedReason })
+                      : ""}
                   </div>
                 )}
                 {activeWs.archivedAt != null && (
                   <div className="archived-banner">
                     <span>
-                      Archived {formatRelative(activeWs.archivedAt)}
-                      {archiveAfterDays > 0 ? ` · idle for over ${archiveAfterDays} days` : ""}.
-                      Sending a message restores it.
+                      {archiveAfterDays > 0
+                        ? tr("archivedNoticeIdle", {
+                            time: formatRelative(activeWs.archivedAt),
+                            days: archiveAfterDays,
+                          })
+                        : tr("archivedNotice", { time: formatRelative(activeWs.archivedAt) })}
                     </span>
                     {!projectSealed && (
                       <button
                         className="btn-inline"
                         onClick={() => unarchiveWorkspace(activeWs.id)}
                       >
-                        Restore
+                        {tr("restore")}
                       </button>
                     )}
                   </div>
@@ -1707,8 +1720,8 @@ export function App() {
                         return (
                           <div className="empty-state">
                             {activeWs.agents.length === 0
-                              ? "Add an agent to get started."
-                              : "Send a message to start working."}
+                              ? tr("addAgentStart")
+                              : tr("sendMessageStart")}
                           </div>
                         );
                       }
@@ -1776,7 +1789,8 @@ export function App() {
                       .find((ws) => ws.id === quotedMsg.wsId)
                       ?.agents.find((a) => a.id === quotedMsg.agentId);
                     const author =
-                      qa?.name ?? (quotedMsg.from ? originLabel(quotedMsg.from) : "User");
+                      qa?.name ??
+                      (quotedMsg.from ? originLabel(quotedMsg.from) : tr("userFallback"));
                     const preview =
                       quotedMsg.content.slice(0, 100) +
                       (quotedMsg.content.length > 100 ? "..." : "");
@@ -1786,8 +1800,8 @@ export function App() {
                           className="quote-bar-content"
                           {...(canJump && {
                             type: "button" as const,
-                            title: "Jump to quoted message",
-                            "aria-label": `Jump to quoted message from ${author}: ${preview}`,
+                            title: tr("jumpQuoted"),
+                            "aria-label": tr("jumpQuotedFrom", { author, preview }),
                             onClick: () => jumpToMessageInActiveWs(quotedMsg.id),
                           })}
                         >
@@ -1806,7 +1820,7 @@ export function App() {
                         <button
                           type="button"
                           className="quote-bar-close"
-                          title="Remove quote"
+                          title={tr("removeQuote")}
                           onClick={() => setQuotedMsg(null)}
                         >
                           ✕
@@ -1887,8 +1901,8 @@ export function App() {
                     className="btn-attach"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={!hasAgents || projectSealed}
-                    title="Attach image"
-                    aria-label="Attach image"
+                    title={tr("attachImage")}
+                    aria-label={tr("attachImage")}
                   >
                     <Icon name="plus" />
                   </button>
@@ -1921,14 +1935,14 @@ export function App() {
                     disabled={!hasAgents || projectSealed}
                     placeholder={
                       projectSealed
-                        ? "Project sealed · read-only"
+                        ? tr("projectSealed")
                         : window.matchMedia?.(PHONE).matches
                           ? activeWs.agents.length > 1
-                            ? "Message, or @ an agent"
-                            : "Message, or / for commands"
+                            ? tr("messageOrMention")
+                            : tr("messageOrCommands")
                           : activeWs.agents.length > 1
-                            ? "Type / for commands, @ to mention an agent..."
-                            : "Type / for commands, or send a message..."
+                            ? tr("typeCommandsMention")
+                            : tr("typeCommandsSend")
                     }
                     rows={1}
                   />
@@ -1947,17 +1961,19 @@ export function App() {
                       }}
                       disabled={!hasDraft || !hasAgents || sending || uploading || projectSealed}
                       aria-busy={sending || uploading || undefined}
-                      aria-label={uploading ? "Uploading..." : targetBusy ? "Queue" : "Send"}
+                      aria-label={
+                        uploading ? tr("uploading") : targetBusy ? tr("queue") : tr("send")
+                      }
                       title={
                         targetBusy
-                          ? `${targetAgent.name} is busy — message will run next`
+                          ? tr("busyNext", { name: targetAgent.name })
                           : targetAgent && activeWs.agents.length > 1
-                            ? `Send to ${targetAgent.name}`
-                            : "Send"
+                            ? tr("sendTo", { name: targetAgent.name })
+                            : tr("send")
                       }
                     >
                       <span className="btn-text">
-                        {uploading ? "Uploading..." : targetBusy ? "Queue" : "Send"}
+                        {uploading ? tr("uploading") : targetBusy ? tr("queue") : tr("send")}
                       </span>
                       <span className="btn-icon" aria-hidden="true">
                         <Icon name={uploading ? "pending" : targetBusy ? "queue" : "up"} />
@@ -1983,9 +1999,7 @@ export function App() {
                 <span>Agent Team</span>
               </div>
               <div className="empty-state">
-                {workspaces.length === 0
-                  ? "No workspaces yet. Click + to create one."
-                  : "Select a workspace."}
+                {workspaces.length === 0 ? tr("noWorkspaces") : tr("selectWorkspace")}
               </div>
             </>
           )}
@@ -1993,7 +2007,7 @@ export function App() {
 
         {activeWs && openPanel === "agents" && (
           <SidePanel
-            title="Agents"
+            title={tr("agents")}
             subtitle={scopeSummary(panelSessions, overview ? activeProject : undefined)}
             pinned={panelPinned}
             maximized={panelMax}
@@ -2019,7 +2033,7 @@ export function App() {
         )}
         {files && openPanel === "files" && (
           <SidePanel
-            title="Files"
+            title={tr("files")}
             subtitle={activeProject?.name ?? activeWs?.name}
             kind="wide"
             pinned={panelPinned}
@@ -2044,7 +2058,7 @@ export function App() {
         )}
         {activeWs && openPanel === "changes" && (
           <SidePanel
-            title="Changes"
+            title={tr("changes")}
             subtitle={activeWs.name}
             kind="wide"
             pinned={panelPinned}
@@ -2097,9 +2111,9 @@ export function App() {
 
         {purgeScope && (
           <ConfirmDialog
-            title="Delete archived sessions"
-            body={purgeBody(workspaces, projects, purgeScope.projectId)}
-            confirmLabel="Delete all"
+            title={tr("deleteArchived")}
+            body={purgeBody(workspaces, projects, purgeScope.projectId, tr)}
+            confirmLabel={tr("deleteAll")}
             danger
             onConfirm={() => purgeArchived(purgeScope.projectId)}
             onClose={closePurge}
@@ -2131,9 +2145,9 @@ export function App() {
 
         {sealingProjectId && (
           <ConfirmDialog
-            title="Seal project"
-            body="Sealing stops its sessions and makes its history, board and notes permanently read-only."
-            confirmLabel="Seal project"
+            title={tr("sealProject")}
+            body={tr("sealBody")}
+            confirmLabel={tr("sealProject")}
             danger
             onConfirm={() => sealProject(sealingProjectId)}
             onClose={() => setSealingProjectId(null)}
@@ -2151,13 +2165,13 @@ export function App() {
               sessions === 0
                 ? ""
                 : sessions === 1
-                  ? " The session it started stays as a plain workspace."
-                  : ` The ${sessions} sessions it started stay as plain workspaces.`;
+                  ? tr("keptOne")
+                  : tr("keptMany", { count: sessions });
             return (
               <ConfirmDialog
-                title={`Delete project ${project.name}`}
-                body={`Deletes its lead session, objectives and notes.${kept}`}
-                confirmLabel="Delete project"
+                title={tr("deleteProjectTitle", { name: project.name })}
+                body={tr("deleteProjectBody", { kept })}
+                confirmLabel={tr("deleteProject")}
                 danger
                 onConfirm={() => deleteProject(project.id)}
                 onClose={closeDeleteProject}
@@ -2209,7 +2223,12 @@ function headerTitle(ws: Workspace): string {
     : `${ws.name} — ${ws.project}`;
 }
 
-function purgeBody(workspaces: Workspace[], projects: Project[], projectId: string | null): string {
+function purgeBody(
+  workspaces: Workspace[],
+  projects: Project[],
+  projectId: string | null,
+  tr: ReturnType<typeof useT>,
+): string {
   const known = new Set(projects.map((p) => p.id));
   const project = projects.find((p) => p.id === projectId);
   // A project's lead is never purged: the project goes with it.
@@ -2218,8 +2237,9 @@ function purgeBody(workspaces: Workspace[], projects: Project[], projectId: stri
     if (w.archivedAt == null || link?.role === "lead") return false;
     return projectId === null ? !link : link?.projectId === projectId;
   });
-  const whose = project ? ` of ${project.name}` : " that belong to no project";
-  return `Permanently delete the ${doomed.length} archived session(s)${whose}, with their message history and logs.`;
+  return project
+    ? tr("purgeBodyProject", { count: doomed.length, name: project.name })
+    : tr("purgeBodyNoProject", { count: doomed.length });
 }
 
 type PanelId = "agents" | "files" | "changes";
@@ -2308,17 +2328,17 @@ function useSavedWidth(key: string): [number | null, (width: number | null) => v
 
 // The header chip for the open workspace's agents: one agent's own state, or
 // the counts for several.
-function chipLabel(ws: Workspace, connected: boolean): string {
-  if (ws.agents.length === 0) return "No agents";
+function chipLabel(ws: Workspace, connected: boolean, tr: ReturnType<typeof useT>): string {
+  if (ws.agents.length === 0) return tr("noAgents");
   if (ws.agents.length === 1) return pillLabel(ws.agents[0], connected);
-  if (!connected) return `${ws.agents.length} agents · offline`;
+  if (!connected) return tr("agentsOffline", { count: ws.agents.length });
   const busy = stateSummary(
     ws.agents.map((a) => {
       const s = agentState(a);
       return s === "working" || s === "waiting" || s === "sleeping" ? s : "idle";
     }),
   );
-  return `${ws.agents.length} agents · ${busy}`;
+  return tr("agentsBusy", { count: ws.agents.length, busy });
 }
 
 function chipDot(ws: Workspace, connected: boolean): string {

@@ -1,6 +1,13 @@
+import { tPanel, type PanelMessageKey } from "../i18n/panels";
 import type { Objective, ObjectiveTask, Project, Workspace } from "../state/useServer";
 import { agentState } from "../workspace/agents";
 import type { FileRoot } from "./FilesPanel";
+
+const STATE_COUNT_KEY: Record<"working" | "waiting" | "sleeping", PanelMessageKey> = {
+  working: "stateCountWorking",
+  waiting: "stateCountWaiting",
+  sleeping: "stateCountSleeping",
+};
 
 // What the side panels cover: every session of the active workspace's
 // project (lead first, then the most recently active), or the workspace on
@@ -50,12 +57,12 @@ export function sessionWork(
 // "2 working · 1 waiting", or "idle": the counts of sessions (or agents, for
 // a single workspace) by state, busiest first.
 export function stateSummary(states: SessionState[]): string {
-  const order: SessionState[] = ["working", "waiting", "sleeping"];
+  const order: Array<"working" | "waiting" | "sleeping"> = ["working", "waiting", "sleeping"];
   const parts = order
     .map((s) => [s, states.filter((x) => x === s).length] as const)
     .filter(([, n]) => n > 0)
-    .map(([s, n]) => `${n} ${s}`);
-  return parts.length ? parts.join(" · ") : "idle";
+    .map(([s, n]) => tPanel(STATE_COUNT_KEY[s], { count: n }));
+  return parts.length ? parts.join(" · ") : tPanel("stateIdle");
 }
 
 // Under a panel's title: whose sessions, how many, and what they do; for a
@@ -64,12 +71,15 @@ export function scopeSummary(sessions: Workspace[], project: Project | undefined
   if (!project) {
     const w = sessions[0];
     if (!w) return "";
-    if (w.archivedAt != null) return `${w.name} · archived`;
+    if (w.archivedAt != null) return tPanel("scopeWorkspaceArchived", { name: w.name });
     const n = w.agents.length;
-    return `${w.name} · ${n} agent${n === 1 ? "" : "s"} · ${stateSummary(w.agents.map(agentState))}`;
+    const agents = tPanel(n === 1 ? "scopeAgentCountOne" : "scopeAgentCountMany", { count: n });
+    return `${w.name} · ${agents} · ${stateSummary(w.agents.map(agentState))}`;
   }
   const live = sessions.filter((w) => w.archivedAt == null);
-  const count = `${live.length} session${live.length === 1 ? "" : "s"}`;
+  const count = tPanel(live.length === 1 ? "scopeSessionCountOne" : "scopeSessionCountMany", {
+    count: live.length,
+  });
   return `${project.name} · ${count} · ${stateSummary(live.map(sessionState))}`;
 }
 

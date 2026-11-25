@@ -1,3 +1,4 @@
+import { usePanelT } from "../i18n/panels";
 import { Icon, type IconName } from "./Icon";
 
 export interface RailItem {
@@ -15,8 +16,9 @@ export interface RailItem {
 // The panel buttons: a column at the window's right edge on desktop, a row
 // in the chat header on phones (the same items, two placements).
 export function Rail({ items, className }: { items: RailItem[]; className: string }) {
+  const t = usePanelT();
   return (
-    <nav className={className} aria-label="Panels">
+    <nav className={className} aria-label={t("panelsNavLabel")}>
       {items.map((i) => (
         <button
           key={i.id}

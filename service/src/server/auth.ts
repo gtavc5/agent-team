@@ -1,11 +1,15 @@
 import * as crypto from "crypto";
 import type * as http from "http";
 import type { AuthConfig } from "../config/config";
+import { isChineseLanguage } from "../i18n";
 
 // Cookie sessions for the one configured user. The config is read on every
 // call: config.toml hot-reloads.
 export class Auth {
-  constructor(private config: () => AuthConfig | null) {}
+  constructor(
+    private config: () => AuthConfig | null,
+    private userLanguage?: () => string | undefined,
+  ) {}
 
   get enabled(): boolean {
     return !!this.config();
@@ -18,9 +22,10 @@ export class Auth {
   }
 
   handleLogin(req: http.IncomingMessage, res: http.ServerResponse): void {
+    const page = isChineseLanguage(this.userLanguage?.()) ? LOGIN_PAGE_ZH : LOGIN_PAGE_EN;
     if (req.method === "GET") {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.end(LOGIN_PAGE);
+      res.end(page);
       return;
     }
 
@@ -57,7 +62,7 @@ export class Auth {
         } else {
           res.setHeader("Content-Type", "text/html; charset=utf-8");
           res.end(
-            LOGIN_PAGE.replace(
+            page.replace(
               "<!--ERROR-->",
               '<p style="color:#ff6b6b;margin:0 0 16px">用户名或密码错误</p>',
             ),
@@ -111,15 +116,22 @@ function parseCookies(header: string | undefined): Record<string, string> {
   return result;
 }
 
-const LOGIN_PAGE = `<!DOCTYPE html>
-<html><head>
+function buildLoginPage(strings: {
+  lang: string;
+  title: string;
+  username: string;
+  password: string;
+  submit: string;
+}): string {
+  return `<!DOCTYPE html>
+<html lang="${strings.lang}"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Agents">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<title>Login — Agent Team</title>
+<title>${strings.title}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
@@ -135,8 +147,25 @@ button:active{background:#2ea043}
 <form method="POST" action="login">
 <h2>Agent Team</h2>
 <!--ERROR-->
-<label>Username</label><input name="username" autocomplete="username" required>
-<label>Password</label><input name="password" type="password" autocomplete="current-password" required>
-<button type="submit">Login</button>
+<label>${strings.username}</label><input name="username" autocomplete="username" required>
+<label>${strings.password}</label><input name="password" type="password" autocomplete="current-password" required>
+<button type="submit">${strings.submit}</button>
 </form>
 </body></html>`;
+}
+
+const LOGIN_PAGE_EN = buildLoginPage({
+  lang: "en",
+  title: "Login — Agent Team",
+  username: "Username",
+  password: "Password",
+  submit: "Login",
+});
+
+const LOGIN_PAGE_ZH = buildLoginPage({
+  lang: "zh-CN",
+  title: "登录 — Agent Team",
+  username: "用户名",
+  password: "密码",
+  submit: "登录",
+});

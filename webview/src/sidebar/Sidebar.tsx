@@ -12,6 +12,8 @@ import { isAgentActive } from "../workspace/agents";
 import { Icon } from "../panels/Icon";
 import { DEFAULT_BRANCH } from "../panels/scope";
 import { formatBytes, formatRelative } from "../format";
+import { t } from "../i18n/chat";
+import { tWorkspace, useWorkspaceT } from "../i18n/workspace";
 import { RoleTag } from "../workspace/RoleTag";
 import { NameInput } from "../project/NameInput";
 import { ConfirmDialog } from "../workspace/dialogs";
@@ -21,10 +23,13 @@ import { describeAttention, summarizeAttention } from "./attention";
 
 function gitTitle(git: { dirty: number; ahead: number; behind: number }): string {
   const parts: string[] = [];
-  if (git.dirty) parts.push(`${git.dirty} changed file${git.dirty === 1 ? "" : "s"}`);
-  if (git.ahead) parts.push(`${git.ahead} ahead`);
-  if (git.behind) parts.push(`${git.behind} behind`);
-  return parts.length ? parts.join(", ") : "clean";
+  if (git.dirty)
+    parts.push(
+      tWorkspace(git.dirty === 1 ? "gitDirtyFile" : "gitDirtyFiles", { count: git.dirty }),
+    );
+  if (git.ahead) parts.push(tWorkspace("gitAhead", { count: git.ahead }));
+  if (git.behind) parts.push(tWorkspace("gitBehind", { count: git.behind }));
+  return parts.length ? parts.join(tWorkspace("gitListSep")) : tWorkspace("gitClean");
 }
 
 const STATUS_COLORS = { danger: "var(--error)", warn: "var(--warning)", normal: "var(--accent)" };
@@ -54,14 +59,15 @@ function StatusBar({ label, pct, extra }: { label: string; pct: number; extra?: 
 }
 
 export function SystemStatusPanel({ status }: { status: SystemStatus }) {
+  const tr = useWorkspaceT();
   const memPct = Math.round((status.memUsed / status.memTotal) * 100);
 
   return (
     <div className="system-status-panel">
       <div className="system-status-grid">
-        <StatusBar label="CPU" pct={status.cpuUsage} />
+        <StatusBar label={tr("cpuLabel")} pct={status.cpuUsage} />
         <StatusBar
-          label="Mem"
+          label={tr("memLabel")}
           pct={memPct}
           extra={`${formatBytes(status.memUsed)} / ${formatBytes(status.memTotal)}`}
         />
@@ -107,6 +113,7 @@ export interface SidebarProps {
 }
 
 export const Sidebar = memo(function Sidebar(p: SidebarProps) {
+  const tr = useWorkspaceT();
   const now = p.now ?? Date.now();
   const debug = new URLSearchParams(window.location.search).get("debug") === "1";
   const [debugOpen, setDebugOpen] = useState(debug);
@@ -215,19 +222,19 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
   const diagnosticsState = !p.connected ? "offline" : health === "unhealthy" ? "unhealthy" : null;
   const triggerAbnormal = diagnosticsState !== null && !debugOpen;
   const triggerLabel = triggerAbnormal
-    ? `Debug tools (service diagnostics ${diagnosticsState})`
-    : "Debug tools";
+    ? tr("debugToolsStatus", { state: tr(diagnosticsState) })
+    : tr("debugTools");
   const diagnosticsLabel = diagnosticsState
-    ? `Service diagnostics (${diagnosticsState})`
-    : "Service diagnostics";
+    ? tr("diagnosticsStatus", { state: tr(diagnosticsState) })
+    : tr("serviceDiagnostics");
   const snapshotBusy = snapshotStatus === "saving";
   const snapshotStatusText =
     snapshotStatus === "saving"
-      ? "Saving snapshot…"
+      ? tr("savingSnapshot")
       : snapshotStatus === "saved"
-        ? "Snapshot saved"
+        ? tr("savedSnapshot")
         : snapshotStatus === "error"
-          ? "Snapshot failed"
+          ? tr("failedSnapshot")
           : null;
   const known = new Set((p.projects ?? []).map((pr) => pr.id));
   // A lead takes its project with it; one whose project is unknown (its
@@ -240,7 +247,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
     return (
       <button
         className="task-delete"
-        title={project ? "Delete project" : "Delete session"}
+        title={project ? tr("deleteProject") : tr("deleteSession")}
         onClick={(e) => {
           e.stopPropagation();
           if (project && p.onDeleteProject) p.onDeleteProject(project);
@@ -312,18 +319,18 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           onClick={() => toggleArchive(g.key)}
         >
           <span className="events-toggle">{open ? "▾" : "▸"}</span>
-          <span>Archived</span>
+          <span>{tr("archived")}</span>
           {open && <span className="ws-group-count">{list.length}</span>}
           {open && g.project && g.project.status !== "sealed" && (
             <button
               className="ws-archived-purge"
-              title={`Delete the archived sessions of ${g.label}`}
+              title={tr("deleteArchivedProjectSessions", { name: g.label })}
               onClick={(e) => {
                 e.stopPropagation();
                 p.onPurgeArchived(g.project!.id);
               }}
             >
-              Clear
+              {tr("clear")}
             </button>
           )}
         </div>
@@ -363,16 +370,17 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
     const git = (g.workspaces[0] ?? g.archived[0])?.git;
     // The group of the open session: on touch only its row offers a new one.
     const current = [...g.workspaces, ...g.archived].some((w) => w.id === p.activeWsId);
+    const groupTitlePath = g.key === "(no path)" ? tr("noPath") : g.key;
     return (
       <div key={g.key} className="ws-group">
         <div
           className={`ws-group-header${g.project ? " ws-group-project" : ""}${lead && lead.id === p.activeWsId ? " active" : ""}${current ? " current" : ""}`}
           title={
             lead
-              ? `Open the lead of ${g.label}`
+              ? tr("openProjectLead", { name: g.label })
               : g.project
-                ? (g.project.root ?? "No repository")
-                : g.key
+                ? (g.project.root ?? tr("noRepository"))
+                : groupTitlePath
           }
           onClick={() => (lead ? p.onSelect(lead.id) : toggle())}
         >
@@ -382,7 +390,9 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           ) : lead ? (
             <button
               className="events-toggle ws-group-toggle"
-              aria-label={expanded ? `Fold ${g.label}` : `Unfold ${g.label}`}
+              aria-label={
+                expanded ? tr("foldGroup", { name: g.label }) : tr("unfoldGroup", { name: g.label })
+              }
               aria-expanded={expanded}
               onClick={(e) => {
                 e.stopPropagation();
@@ -397,7 +407,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           {g.project && renaming === g.project.id ? (
             <NameInput
               name={g.label}
-              label="Project name"
+              label={tr("projectNameLabel")}
               className="ws-group-rename"
               onDone={(name) => {
                 setRenaming(null);
@@ -410,7 +420,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               {...(g.project &&
                 g.project.status !== "sealed" &&
                 p.onRenameProject && {
-                  title: "Double-click to rename",
+                  title: tr("doubleClickRename"),
                   onDoubleClick: (e: React.MouseEvent) => {
                     e.stopPropagation();
                     setRenaming(g.project!.id);
@@ -422,7 +432,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           )}
           {g.project?.status === "sealed" && (
             <span className="ws-group-sealed" title={g.project.sealedReason ?? undefined}>
-              Sealed
+              {tr("sealed")}
             </span>
           )}
           {expanded && leadUnread > 0 && lead!.id !== p.activeWsId && (
@@ -436,7 +446,11 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           {(!g.project || (g.project.root && g.project.status !== "sealed")) && (
             <button
               className="ws-group-add"
-              title={g.project ? `New session in ${g.project.name}` : `New workspace in ${g.key}`}
+              title={
+                g.project
+                  ? tr("newSessionIn", { name: g.project.name })
+                  : tr("newWorkspaceIn", { path: groupTitlePath })
+              }
               onClick={(e) => {
                 e.stopPropagation();
                 p.onCreateIn(g.project?.root ?? g.key);
@@ -461,7 +475,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
                 </span>
                 {attention.yourTurn > 0 && (
                   <span className="awaits-tag" aria-hidden="true">
-                    your turn
+                    {tr("yourTurn")}
                   </span>
                 )}
               </span>
@@ -472,25 +486,25 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           {!shelf && g.project && g.project.status !== "sealed" && p.onArchiveProject && (
             <button
               className="ws-group-pill ws-group-archive"
-              title={`Archive ${g.label} with its sessions`}
+              title={tr("archiveProjectWithSessions", { name: g.label })}
               onClick={(e) => {
                 e.stopPropagation();
                 p.onArchiveProject!(g.project!.id);
               }}
             >
-              Archive
+              {tr("archive")}
             </button>
           )}
           {shelf && g.project && g.project.status !== "sealed" && p.onRestoreProject && (
             <button
               className="ws-group-pill"
-              title={`Bring ${g.label} back among the projects`}
+              title={tr("restoreProjectTooltip", { name: g.label })}
               onClick={(e) => {
                 e.stopPropagation();
                 p.onRestoreProject!(g.project!.id);
               }}
             >
-              Restore
+              {tr("restore")}
             </button>
           )}
           {lead && deleteButton(lead)}
@@ -518,8 +532,8 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
                           {ws.name}
                         </span>
                         {awaits && (
-                          <span className="awaits-tag" title="Waiting for your reply">
-                            your turn
+                          <span className="awaits-tag" title={tr("waitingForYourReply")}>
+                            {tr("yourTurn")}
                           </span>
                         )}
                         {unread > 0 && ws.id !== p.activeWsId && (
@@ -548,14 +562,14 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
     <>
       <div className="sidebar-header">
         <span className="sidebar-title">
-          Workspaces {!p.connected && <span className="disconnected">offline</span>}
+          {tr("workspaces")} {!p.connected && <span className="disconnected">{tr("offline")}</span>}
         </span>
         <span className="sidebar-actions">
-          <button title="New session" onClick={p.onCreate}>
+          <button title={tr("newSession")} onClick={p.onCreate}>
             <Icon name="plus" />
           </button>
           {p.onCreateProject && (
-            <button title="New project" onClick={p.onCreateProject}>
+            <button title={tr("newProject")} onClick={p.onCreateProject}>
               <Icon name="board" />
             </button>
           )}
@@ -582,7 +596,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           id={debugId}
           className="sidebar-debug-strip"
           role="group"
-          aria-label="Debug tools"
+          aria-label={tr("debugTools")}
         >
           {snapshotStatusText && (
             <span
@@ -607,8 +621,8 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           <button
             type="button"
             className="sidebar-debug-action"
-            aria-label="Replay demo"
-            title="Replay demo"
+            aria-label={tr("replayDemoTitle")}
+            title={tr("replayDemoTitle")}
             onClick={p.onReplayDemo}
           >
             <Icon name="play" />
@@ -616,9 +630,9 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           <button
             type="button"
             className="sidebar-debug-action"
-            aria-label="Capture debug snapshot"
+            aria-label={tr("saveDebugSnapshotTitle")}
             aria-busy={snapshotBusy}
-            title={snapshotBusy ? "Saving debug snapshot…" : "Capture debug snapshot"}
+            title={snapshotBusy ? t("snapshotSaving") : tr("saveDebugSnapshotTitle")}
             disabled={snapshotBusy}
             onMouseDown={(e) => e.preventDefault()}
             onClick={saveSnapshot}
@@ -633,7 +647,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           value={p.searchQuery}
           onFocus={() => recordTelemetry("sidebar.search")}
           onChange={(e) => p.onSearchChange(e.target.value)}
-          placeholder="Search messages…"
+          placeholder={tr("searchMessagesPlaceholder")}
           autoComplete="off"
         />
         {p.searchQuery && (
@@ -645,9 +659,9 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       {p.searchQuery.trim() ? (
         <div className="search-results">
           {p.searchHits === null ? (
-            <div className="search-empty">Searching…</div>
+            <div className="search-empty">{tr("searching")}</div>
           ) : p.searchHits.length === 0 ? (
-            <div className="search-empty">No results</div>
+            <div className="search-empty">{tr("noResults")}</div>
           ) : (
             p.searchHits.map((r, i) => (
               <div
@@ -665,7 +679,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       ) : (
         <div className="task-list">
           {groups.length === 0 && archived.length === 0 && (
-            <div className="sidebar-empty">No workspaces yet</div>
+            <div className="sidebar-empty">{tr("noWorkspacesYet")}</div>
           )}
           {live.map((g) => renderGroup(g))}
           {shelved.length > 0 && (
@@ -676,10 +690,10 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
                   recordTelemetry("sidebar.archive_toggle");
                   setShelfOpen((v) => !v);
                 }}
-                title="Projects filed away. Their leads and history are still there."
+                title={tr("archivedProjectsTitle")}
               >
                 <span className="events-toggle">{showShelf ? "▾" : "▸"}</span>
-                <span className="ws-group-label">Archived projects</span>
+                <span className="ws-group-label">{tr("archivedProjects")}</span>
                 <span className="ws-group-count">{shelved.length}</span>
               </div>
               {showShelf && shelved.map((g) => renderGroup(g, true))}
@@ -693,21 +707,21 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
                   recordTelemetry("sidebar.archive_toggle");
                   setArchivedOpen((v) => !v);
                 }}
-                title="Idle workspaces. History stays on disk; sending a message restores one."
+                title={tr("archivedWorkspacesTitle")}
               >
                 <span className="events-toggle">{showArchived ? "▾" : "▸"}</span>
-                <span className="ws-group-label">Archived</span>
+                <span className="ws-group-label">{tr("archived")}</span>
                 {showArchived && <span className="ws-group-count">{archived.length}</span>}
                 {showArchived && (
                   <button
                     className="ws-archived-purge"
-                    title="Delete the archived workspaces that belong to no project"
+                    title={tr("deleteLooseArchivedTitle")}
                     onClick={(e) => {
                       e.stopPropagation();
                       p.onPurgeArchived(null);
                     }}
                   >
-                    Clear
+                    {tr("clear")}
                   </button>
                 )}
               </div>
@@ -727,9 +741,9 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       {deleting && (
         <ConfirmDialog
           telemetryAction="confirm.delete_session"
-          title={`Delete ${deleting.name}?`}
-          body="This session and its message history will be deleted."
-          confirmLabel="Delete session"
+          title={tr("deleteSessionTitle", { name: deleting.name })}
+          body={tr("deleteSessionBody")}
+          confirmLabel={tr("deleteSession")}
           danger
           onConfirm={() => p.onDelete(deleting.id)}
           onClose={() => setDeleteId(null)}

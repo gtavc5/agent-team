@@ -714,9 +714,23 @@ function copyCredential(source: string, destination: string): void {
 function linkIfPresent(source: string, destination: string): void {
   if (!fs.existsSync(source)) return;
   try {
-    fs.rmSync(destination, { force: true });
+    fs.rmSync(destination, { force: true, recursive: true });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (process.platform === "win32") {
+    const isDir = fs.statSync(source).isDirectory();
+    try {
+      fs.symlinkSync(source, destination, isDir ? "junction" : "file");
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!isDir && (code === "EPERM" || code === "EACCES")) {
+        fs.copyFileSync(source, destination);
+        return;
+      }
+      throw error;
+    }
   }
   fs.symlinkSync(source, destination);
 }

@@ -1,6 +1,7 @@
 import { act, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
+import { setLocaleOverride } from "../src/i18n";
 import { MobileMenuButton } from "../src/sidebar/MobileMenuButton";
 import type { Project, Workspace } from "../src/state/useServer";
 import { FakeSocket } from "./fakeSocket";
@@ -97,6 +98,14 @@ describe("MobileMenuButton", () => {
     expect(button().getAttribute("aria-label")).toBe(
       "Open workspace menu: 2 background sessions need attention, 1 your turn",
     );
+    act(() => setLocaleOverride("zh-CN"));
+    try {
+      expect(button().getAttribute("aria-label")).toBe(
+        "打开工作区菜单：2 个后台会话需要关注，其中 1 个等待你回复",
+      );
+    } finally {
+      act(() => setLocaleOverride(null));
+    }
     expect(badge()!.classList).toContain("attention-badge-your-turn");
     fireEvent.click(button());
     expect(onClick).toHaveBeenCalledTimes(1);

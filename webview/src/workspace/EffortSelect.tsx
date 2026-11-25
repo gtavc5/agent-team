@@ -1,3 +1,5 @@
+import { isZh } from "../i18n";
+import { useWorkspaceT } from "../i18n/workspace";
 import type { ModelOption } from "../state/useServer";
 
 export function selectableLevels(levels?: string[]): levels is string[] {
@@ -14,6 +16,28 @@ export function effortOf(
     levels: selectableLevels(opt?.effortLevels) ? opt.effortLevels : [],
     fallback: opt?.effort ?? opt?.defaultEffort,
   };
+}
+
+function effortLabel(level: string, tr: ReturnType<typeof useWorkspaceT>): string {
+  if (!isZh()) return level;
+  switch (level) {
+    case "off":
+      return tr("effortOff");
+    case "minimal":
+      return tr("effortMinimal");
+    case "low":
+      return tr("effortLow");
+    case "medium":
+      return tr("effortMedium");
+    case "high":
+      return tr("effortHigh");
+    case "xhigh":
+      return tr("effortXhigh");
+    case "max":
+      return tr("effortMax");
+    default:
+      return level;
+  }
 }
 
 // Effort levels, "" for the model's default (`fallback`, when known): always
@@ -36,6 +60,7 @@ export function EffortSelect({
   label: string;
   fresh?: boolean;
 }) {
+  const tr = useWorkspaceT();
   if (levels.length === 0) return null;
   return (
     <select
@@ -46,12 +71,16 @@ export function EffortSelect({
       onChange={(e) => onChange(e.target.value)}
     >
       {(fresh || !value) && (
-        <option value="">{fallback ? `default (${fallback})` : "default"}</option>
+        <option value="">
+          {fallback
+            ? tr("effortDefaultFallback", { level: effortLabel(fallback, tr) })
+            : tr("effortDefault")}
+        </option>
       )}
       {/* A level saved before the model's list lost it still shows as it is. */}
       {[...(value && !levels.includes(value) ? [value] : []), ...levels].map((l) => (
         <option key={l} value={l}>
-          {l}
+          {effortLabel(l, tr)}
         </option>
       ))}
     </select>

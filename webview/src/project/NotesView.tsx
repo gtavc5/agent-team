@@ -4,6 +4,7 @@ import { FileOpenContext, splitFileRef, WIN_DRIVE, type FileRef } from "../chat/
 import { CodeView, languageFor, type FileView } from "../panels/FilesPanel";
 import { FileIcon, Icon } from "../panels/Icon";
 import { formatSize, utf8Length } from "../format";
+import { tProject, useProjectT } from "../i18n/project";
 import { inVSCode } from "../vscode";
 
 // The project's notes on the board page: their folders as a tree on the
@@ -123,6 +124,7 @@ function NotesTree({
   selected: string | null;
   onSelect: (path: string) => void;
 }) {
+  const tr = useProjectT();
   const [listings, setListings] = useState<Map<string, Listing>>(new Map());
   const [open, setOpen] = useState<Set<string>>(new Set(["notes"]));
 
@@ -135,7 +137,7 @@ function NotesTree({
           const listing: Listing =
             res.ok && body.kind === "dir"
               ? { entries: body.entries }
-              : { error: body.error ?? "Not a folder", missing: res.status === 404 };
+              : { error: body.error ?? tProject("notAFolder"), missing: res.status === 404 };
           setListings((m) => new Map(m).set(dir, listing));
           // A folder's subfolders open with it, the archive aside.
           if (dir === "notes" && "entries" in listing) {
@@ -177,16 +179,16 @@ function NotesTree({
 
   const branch = (dir: string, depth: number): ReactNode => {
     const listing = listings.get(dir);
-    if (!listing) return depth === 0 ? <div className="bn-note">Loading…</div> : null;
+    if (!listing) return depth === 0 ? <div className="bn-note">{tr("loading")}</div> : null;
     if ("error" in listing) {
       return (
         <div className="bn-note">
-          {depth === 0 && listing.missing ? "No notes yet." : listing.error}
+          {depth === 0 && listing.missing ? tr("noNotes") : listing.error}
         </div>
       );
     }
     if (depth === 0 && listing.entries.length === 0) {
-      return <div className="bn-note">No notes yet.</div>;
+      return <div className="bn-note">{tr("noNotes")}</div>;
     }
     return listing.entries.map((e) => {
       const path = `${dir}/${e.name}`;
@@ -219,7 +221,7 @@ function NotesTree({
   };
 
   return (
-    <div className="bn-tree" role="tree" aria-label="Notes">
+    <div className="bn-tree" role="tree" aria-label={tr("notesTreeLabel")}>
       {branch("notes", 0)}
     </div>
   );
@@ -246,6 +248,7 @@ export function FilePreview({
   // Offered inside VS Code: the file in the editor.
   editor: boolean;
 }) {
+  const tr = useProjectT();
   const result = useJson<FileView & { ref?: string }>(fileUrl(project, file.path));
   const view = result && "value" in result ? result.value : null;
   const found = view?.ref;
@@ -274,7 +277,7 @@ export function FilePreview({
   return (
     <section className="bn-preview" aria-label={name}>
       <div className="bn-bar">
-        <button className="bp-back bn-back" aria-label="Back" onClick={onClose}>
+        <button className="bp-back bn-back" aria-label={tr("backLabel")} onClick={onClose}>
           ‹
         </button>
         <span className="bn-path" title={view?.path ?? file.path}>
@@ -286,29 +289,33 @@ export function FilePreview({
             onClick={() =>
               void openInEditor(project, file).then((why) =>
                 setFailed(
-                  why === null ? null : `VS Code could not open it: ${why || "not a file"}.`,
+                  why === null ? null : tr("vscodeOpenFailed", { why: why || tr("notAFile") }),
                 ),
               )
             }
-            title="Open it in VS Code"
+            title={tr("openInVscodeTitle")}
           >
             VS Code
           </button>
         )}
-        <button className="side-panel-btn bn-close" aria-label="Close the file" onClick={onClose}>
+        <button
+          className="side-panel-btn bn-close"
+          aria-label={tr("closeFileLabel")}
+          onClick={onClose}
+        >
           <Icon name="close" />
         </button>
       </div>
       {notice && <div className="bn-notice">{notice}</div>}
       <div className="bn-body">
         {!result ? (
-          <div className="file-note">Loading…</div>
+          <div className="file-note">{tr("loading")}</div>
         ) : "error" in result ? (
           <>
             <div className="file-note file-error">{result.error}</div>
             {result.candidates && (
-              <div className="dir-view" aria-label="Did you mean">
-                <div className="file-note">Did you mean</div>
+              <div className="dir-view" aria-label={tr("didYouMean")}>
+                <div className="file-note">{tr("didYouMean")}</div>
                 {result.candidates.map((c) => (
                   <button key={c} className="dir-entry" onClick={() => onRef(c)}>
                     <FileIcon name={c.split("/").pop() ?? c} dir={false} />
@@ -348,15 +355,18 @@ export function FilePreview({
             <img src={fileUrl(project, file.path, true)} alt={name} />
           </div>
         ) : (
-          <div className="file-note">A binary file: nothing to show.</div>
+          <div className="file-note">{tr("binaryFileNote")}</div>
         )}
         {view?.kind === "text" && view.truncated && (
           <div className="file-note">
-            Showing the first {formatSize(utf8Length(view.content))} of {formatSize(view.size)}.
+            {tr("truncatedTextNote", {
+              shown: formatSize(utf8Length(view.content)),
+              total: formatSize(view.size),
+            })}
           </div>
         )}
         {view?.kind === "dir" && view.truncated && (
-          <div className="file-note">Only the first entries are listed.</div>
+          <div className="file-note">{tr("truncatedDirNote")}</div>
         )}
       </div>
     </section>
@@ -378,10 +388,11 @@ export function NotesView({
   onResolve: (path: string) => void;
   onClose: () => void;
 }) {
+  const tr = useProjectT();
   const editor = useMemo(() => inVSCode(), []);
   return (
     <div className={`bp-body bn-page${file ? " has-file" : ""}`}>
-      <nav className="bp-nav bn-nav" aria-label="Notes">
+      <nav className="bp-nav bn-nav" aria-label={tr("notesTreeLabel")}>
         <NotesTree project={project} selected={file?.path ?? null} onSelect={onOpen} />
       </nav>
       <main className="bp-main bn-main">
@@ -396,9 +407,7 @@ export function NotesView({
             editor={editor}
           />
         ) : (
-          <div className="bp-empty">
-            The lead&apos;s notes: rules, ideas, what each objective found out. Pick one to read it.
-          </div>
+          <div className="bp-empty">{tr("notesEmptyPrompt")}</div>
         )}
       </main>
     </div>

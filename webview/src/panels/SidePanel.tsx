@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { usePanelT } from "../i18n/panels";
 import { Icon } from "./Icon";
 
 export const PANEL_MIN_WIDTH = 300;
@@ -61,6 +62,7 @@ export function SidePanel({
   flush?: boolean;
   children: ReactNode;
 }) {
+  const t = usePanelT();
   const drag = useRef<{ x: number; w: number } | null>(null);
   const self = useRef<HTMLElement>(null);
   // A width saved on a wide screen must not bury the chat on a narrow one.
@@ -89,7 +91,7 @@ export function SidePanel({
       {!maximized && (
         <div
           className="side-panel-resize"
-          title="Drag to resize · double-click for the automatic width"
+          title={t("panelResizeTitle")}
           onDoubleClick={() => onWidth(null)}
           onPointerDown={(e) => {
             e.currentTarget.setPointerCapture?.(e.pointerId);
@@ -112,7 +114,7 @@ export function SidePanel({
         <button
           className="side-panel-btn side-panel-max"
           aria-pressed={maximized}
-          title={maximized ? "Back beside the chat" : "Maximise over the chat"}
+          title={maximized ? t("panelRestoreTitle") : t("panelMaximizeTitle")}
           onClick={onMaximize}
         >
           <Icon name={maximized ? "restore" : "maximize"} />
@@ -122,7 +124,7 @@ export function SidePanel({
             className="side-panel-btn side-panel-pin"
             aria-pressed={docked}
             disabled={!canDock}
-            title={canDock ? "Pin beside the chat" : "Too narrow to pin beside the chat"}
+            title={canDock ? t("panelPinTitle") : t("panelPinTooNarrowTitle")}
             onClick={onPin}
           >
             <Icon name="pin" />
@@ -130,7 +132,7 @@ export function SidePanel({
         )}
         <button
           className="side-panel-btn side-panel-close"
-          aria-label={`Close ${title}`}
+          aria-label={t("panelCloseLabel", { title })}
           onClick={onClose}
         >
           <Icon name="close" />

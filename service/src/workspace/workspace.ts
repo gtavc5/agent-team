@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { applyExtensionUi } from "../../../shared/extension-ui";
+import { isChineseLanguage } from "../i18n";
 import { hasPersistedPiReport, validatePiAttachments } from "../session/pi";
 import {
   SessionConfig,
@@ -295,6 +296,7 @@ export interface WorkspaceCallbacks {
   onUnhandled?: (wsId: string, agentId: string, msg: unknown) => void;
   modelOptions?(): ModelOption[];
   piConfig?: () => Partial<SessionConfig>;
+  userLanguage?: () => string | undefined;
   onSessionReplaced?: (workspace: Workspace, session: HostSessionHandle) => void;
 }
 
@@ -1343,22 +1345,28 @@ export class Workspace {
     return first.done ? null : first.value;
   }
 
+  private isZh(): boolean {
+    return isChineseLanguage(this.cb?.userLanguage?.());
+  }
+
   // A slash command handled here answers locally (string), rewrites the
   // prompt that goes to the agent ({ forward }), or is not ours (null).
   private tryHandleCommand(text: string, agent: AgentEntry): CommandOutcome | Promise<string> {
+    const zh = this.isZh();
     if (text === "/usage" || text === "/cost") {
       return (
         agent.session
           .getUsageInfo?.()
-          .then((data) => (data ? formatUsageInfo(data) : NO_ACTIVE_SESSION)) ?? NO_ACTIVE_SESSION
+          .then((data) => (data ? formatUsageInfo(data, zh) : noActiveSession(zh))) ??
+        noActiveSession(zh)
       );
     }
     if (text === "/context") {
       return (
         agent.session
           .getContextUsage?.()
-          .then((data) => (data ? formatContextUsage(data) : NO_ACTIVE_SESSION)) ??
-        NO_ACTIVE_SESSION
+          .then((data) => (data ? formatContextUsage(data, zh) : noActiveSession(zh))) ??
+        noActiveSession(zh)
       );
     }
     if (text === "/effort" || text.startsWith("/effort ")) {
@@ -1377,28 +1385,39 @@ export class Workspace {
   }
 
   private handleFastCommand(arg: string, agent: AgentEntry): string {
+    const zh = this.isZh();
     const model = agent.info.model;
     const name = agent.info.name;
     if (!supportsFastMode(model) || !agent.session.setFastMode) {
-      return `**${name}** (${model}) does not support fast mode.`;
+      return zh
+        ? `**${name}**（${model}）不支持快速模式。`
+        : `**${name}** (${model}) does not support fast mode.`;
     }
     const current = Boolean(agent.session.getState().config.fast);
     const want = arg === "" ? !current : arg.toLowerCase();
     if (want !== true && want !== false && want !== "on" && want !== "off") {
-      return `Usage: \`/fast [on|off]\` — fast mode for **${name}** is currently **${current ? "on" : "off"}**.`;
+      return zh
+        ? `用法：\`/fast [on|off]\` —— **${name}** 当前的快速模式为 **${current ? "开启" : "关闭"}**。`
+        : `Usage: \`/fast [on|off]\` — fast mode for **${name}** is currently **${current ? "on" : "off"}**.`;
     }
     const on = want === true || want === "on";
     if (on === current) {
-      return `Fast mode for **${name}** is already **${on ? "on" : "off"}**.`;
+      return zh
+        ? `**${name}** 的快速模式已是 **${on ? "开启" : "关闭"}** 状态。`
+        : `Fast mode for **${name}** is already **${on ? "on" : "off"}**.`;
     }
     agent.session.setFastMode(on);
     this.cb?.onAgentUpdated?.(this.id, this.agentInfo(agent));
+    if (zh) {
+      const cost = on ? "响应更快，消耗更高。" : "";
+      return `**${name}** 的快速模式已 **${on ? "开启" : "关闭"}**。${cost}${this.appliesWhen(agent)}`;
+    }
     const cost = on ? " Faster responses at higher usage." : "";
     return `Fast mode for **${name}** turned **${on ? "on" : "off"}**.${cost} ${this.appliesWhen(agent)}`;
   }
 
   private handleGoalCommand(_arg: string, _agent: AgentEntry): CommandOutcome {
-    return "/goal is disabled.";
+    return this.isZh() ? "/goal 已停用。" : "/goal is disabled.";
   }
 
   private canSwitchBackend(agent: AgentEntry, state: SessionState): boolean {
@@ -1430,6 +1449,7 @@ export class Workspace {
   }
 
   private handleModelCommand(arg: string, agent: AgentEntry): string {
+    const zh = this.isZh();
     const { name, model: current } = agent.info;
     const state = agent.session.getState();
     const backend =
@@ -1446,9 +1466,22 @@ export class Workspace {
     const choices = canSwitchBackend ? catalog : catalog.filter((m) => m.backend === backend);
     const label = (id: string) => choices.find((m) => m.id === id)?.label ?? id;
     if (!arg) {
+      const choiceList = choices
+        .map((m) => (m.id === current ? `**${m.id}**` : `\`${m.id}\``))
+        .join(" · ");
+      if (zh) {
+        return [
+          `**${name}** 当前使用 **${label(current)}**（\`${current}\`）。`,
+          `可用模型：${choiceList}`,
+          "",
+          canSwitchBackend
+            ? "使用 `/model <id>` 切换模型（首轮对话前也支持跨后端切换）。"
+            : "使用 `/model <id>` 切换模型，对话上下文会保留。",
+        ].join("\n");
+      }
       return [
         `**${name}** runs on **${label(current)}** (\`${current}\`).`,
-        `Available: ${choices.map((m) => (m.id === current ? `**${m.id}**` : `\`${m.id}\``)).join(" · ")}`,
+        `Available: ${choiceList}`,
         "",
         canSwitchBackend
           ? "Use `/model <id>` to switch, including to another backend before the first turn."
@@ -1456,20 +1489,35 @@ export class Workspace {
       ].join("\n");
     }
     const next = arg;
-    if (next === current) return `**${name}** already runs on **${label(current)}**.`;
+    if (next === current) {
+      return zh
+        ? `**${name}** 当前已在使用 **${label(current)}**。`
+        : `**${name}** already runs on **${label(current)}**.`;
+    }
     const target = catalog.find((m) => m.id === next);
     const nextBackend = target?.backend ?? backendForModel(next);
     const crossesBackend = backend !== nextBackend;
     if (crossesBackend && !canSwitchBackend) {
+      if (zh) {
+        const [kind, of] = {
+          pi: ["Pi 会话", "Pi"],
+          codex: ["Codex 对话", "Codex"],
+        }[backend];
+        return `**${name}** 无法切换到 \`${next}\`：${kind}只能继续使用 ${of} 模型。`;
+      }
       const [kind, of] = {
         pi: ["Pi session", "Pi"],
         codex: ["Codex thread", "Codex"],
       }[backend];
       return `**${name}** cannot move to \`${next}\`: a ${kind} continues only on a ${of} model.`;
     }
-    if (crossesBackend && !target) return `\`${next}\` is not in the model list.`;
+    if (crossesBackend && !target) {
+      return zh ? `\`${next}\` 不在模型列表中。` : `\`${next}\` is not in the model list.`;
+    }
     if (!crossesBackend && !agent.session.setModel) {
-      return `**${name}** cannot switch models; add an agent on \`${next}\` instead.`;
+      return zh
+        ? `**${name}** 不支持切换模型；请改用添加使用 \`${next}\` 的新 Agent。`
+        : `**${name}** cannot switch models; add an agent on \`${next}\` instead.`;
     }
 
     const declared = crossesBackend
@@ -1486,7 +1534,9 @@ export class Workspace {
     const fast = Boolean(state.config.fast) && supportsFastMode(next);
     if (crossesBackend) {
       const host = this.hostRegistry.get(this.hostId);
-      if (!host?.connected || !host.replaceSession) return `Host not connected: ${this.hostId}`;
+      if (!host?.connected || !host.replaceSession) {
+        return zh ? `主机未连接：${this.hostId}` : `Host not connected: ${this.hostId}`;
+      }
       const session = host.replaceSession(agent.info.id, {
         ...state.config,
         ...(nextBackend === "pi" && this.cb?.piConfig?.()),
@@ -1508,6 +1558,14 @@ export class Workspace {
     agent.info.model = next;
     this.cb?.onAgentUpdated?.(this.id, this.agentInfo(agent));
     const known = choices.some((m) => m.id === next);
+    if (zh) {
+      return [
+        `**${name}** 已从 ${label(current)} 切换到 **${label(next)}**${crossesBackend ? "。" : "（对话上下文保留）。"}${this.appliesWhen(agent)}`,
+        ...(known
+          ? []
+          : ["", `\`${next}\` 不在模型列表中：若 CLI 无法识别该模型，下一轮对话将失败。`]),
+      ].join("\n");
+    }
     return [
       `**${name}** moves from ${label(current)} to **${label(next)}**${crossesBackend ? "." : "; the conversation carries over."} ${this.appliesWhen(agent)}`,
       ...(known
@@ -1527,17 +1585,33 @@ export class Workspace {
   }
 
   private handleEffortCommand(arg: string, agent: AgentEntry): string {
+    const zh = this.isZh();
     const model = agent.info.model;
     const levels = this.effortLevels(agent, model);
-    if (!levels) return `Effort levels for ${model} are not yet known.`;
+    if (!levels) {
+      return zh
+        ? `${model} 的推理强度档位尚未就绪。`
+        : `Effort levels for ${model} are not yet known.`;
+    }
     if (levels.length === 0) {
-      return `**${agent.info.name}** (${model}) does not support effort levels.`;
+      return zh
+        ? `**${agent.info.name}**（${model}）不支持调节推理强度。`
+        : `**${agent.info.name}** (${model}) does not support effort levels.`;
     }
 
     const current = agent.session.getState().config.effort;
     const levelList = levels.map((l) => (l === current ? `**${l}**` : `\`${l}\``)).join(" · ");
 
     if (!arg) {
+      if (zh) {
+        return [
+          `**${agent.info.name}**（${model}）`,
+          `当前推理强度：${current ?? "*（默认）*"}`,
+          `可用档位：${levelList}`,
+          "",
+          "使用 `/effort <level>` 修改推理强度。",
+        ].join("\n");
+      }
       return [
         `**${agent.info.name}** (${model})`,
         `Effort: ${current ?? "*(default)*"}`,
@@ -1549,25 +1623,38 @@ export class Workspace {
 
     const level = arg.toLowerCase();
     if (!levels.includes(level)) {
-      return `Invalid effort level \`${arg}\` for ${model}. Available: ${levelList}`;
+      return zh
+        ? `${model} 不支持推理强度 \`${arg}\`。可用档位：${levelList}`
+        : `Invalid effort level \`${arg}\` for ${model}. Available: ${levelList}`;
     }
     if (level === current) {
-      return `Effort for **${agent.info.name}** is already **${level}**.`;
+      return zh
+        ? `**${agent.info.name}** 的推理强度已是 **${level}**。`
+        : `Effort for **${agent.info.name}** is already **${level}**.`;
     }
     if (!agent.session.setEffort) {
-      return `**${agent.info.name}** does not support changing the effort level.`;
+      return zh
+        ? `**${agent.info.name}** 不支持修改推理强度。`
+        : `**${agent.info.name}** does not support changing the effort level.`;
     }
 
     agent.session.setEffort(level);
     this.cb?.onAgentUpdated?.(this.id, this.agentInfo(agent));
+    if (zh) {
+      return `**${agent.info.name}** 的推理强度已设为 **${level}**${current ? `（原为 ${current}）` : ""}。${this.appliesWhen(agent)}`;
+    }
     return `Effort for **${agent.info.name}** set to **${level}**${current ? ` (was ${current})` : ""}. ${this.appliesWhen(agent)}`;
   }
 
   private appliesWhen(agent: AgentEntry): string {
+    const zh = this.isZh();
     const state = this.agentState(agent);
-    return agent.session.optionsPending && (state === "waiting" || state === "sleeping")
-      ? `Applies once **${agent.info.name}** has no background work or pending wake-up.`
-      : "Applies from the next message.";
+    if (agent.session.optionsPending && (state === "waiting" || state === "sleeping")) {
+      return zh
+        ? `将在 **${agent.info.name}** 完成当前后台任务且无待处理唤醒后生效。`
+        : `Applies once **${agent.info.name}** has no background work or pending wake-up.`;
+    }
+    return zh ? "从下一条消息开始生效。" : "Applies from the next message.";
   }
 
   async sendMessage(
@@ -2777,6 +2864,11 @@ function genId(prefix: string): string {
 }
 
 const NO_ACTIVE_SESSION = "No active session — send a message first to start a session.";
+const NO_ACTIVE_SESSION_ZH = "当前没有活跃会话——请先发送一条消息以启动会话。";
+
+function noActiveSession(zh: boolean): string {
+  return zh ? NO_ACTIVE_SESSION_ZH : NO_ACTIVE_SESSION;
+}
 
 function isLegacyLocalCommandReply(input: Message | undefined, reply: Message): boolean {
   if (
@@ -2810,60 +2902,87 @@ function isLegacyLocalCommandReply(input: Message | undefined, reply: Message): 
   return hasArgs("/goal") && reply.content === "/goal is disabled.";
 }
 
-function formatUsageInfo(data: Record<string, unknown>): string {
-  const lines: string[] = ["## Session Usage"];
+function formatUsageInfo(data: Record<string, unknown>, zh = false): string {
+  const lines: string[] = [zh ? "## 会话用量" : "## Session Usage"];
 
   const session = data.session as Record<string, unknown> | undefined;
   if (session) {
     const cost = session.total_cost_usd as number | undefined;
-    if (cost != null) lines.push(`**Session cost:** $${cost.toFixed(4)}`);
+    if (cost != null) {
+      lines.push(
+        zh ? `**会话费用：** $${cost.toFixed(4)}` : `**Session cost:** $${cost.toFixed(4)}`,
+      );
+    }
     const dur = session.total_duration_ms as number | undefined;
-    if (dur != null) lines.push(`**Duration:** ${Math.round(dur / 1000)}s`);
+    if (dur != null) {
+      lines.push(
+        zh ? `**耗时：** ${Math.round(dur / 1000)} 秒` : `**Duration:** ${Math.round(dur / 1000)}s`,
+      );
+    }
     const added = session.total_lines_added as number | undefined;
     const removed = session.total_lines_removed as number | undefined;
-    if (added != null || removed != null)
-      lines.push(`**Lines:** +${added ?? 0} / -${removed ?? 0}`);
+    if (added != null || removed != null) {
+      lines.push(
+        zh
+          ? `**代码行数：** +${added ?? 0} / -${removed ?? 0}`
+          : `**Lines:** +${added ?? 0} / -${removed ?? 0}`,
+      );
+    }
   }
 
   const sub = data.subscription_type as string | undefined;
-  if (sub) lines.push(`**Plan:** ${sub}`);
+  if (sub) lines.push(zh ? `**订阅计划：** ${sub}` : `**Plan:** ${sub}`);
 
   const rl = data.rate_limits as Record<string, unknown> | undefined;
   if (rl) {
-    lines.push("", "### Rate Limits");
+    lines.push("", zh ? "### 速率限制" : "### Rate Limits");
     for (const key of ["five_hour", "seven_day"] as const) {
       const w = rl[key] as Record<string, unknown> | undefined;
       if (!w) continue;
       const util = w.utilization as number;
       const resets = w.resets_at as string | undefined;
-      const label = key === "five_hour" ? "5-hour" : "7-day";
+      const label = key === "five_hour" ? (zh ? "5 小时" : "5-hour") : zh ? "7 天" : "7-day";
       const bar = renderBar(util);
-      const resetStr = resets ? ` (resets ${new Date(resets).toLocaleTimeString()})` : "";
-      lines.push(`**${label}:** ${bar} ${util.toFixed(1)}%${resetStr}`);
+      const resetStr = resets
+        ? zh
+          ? `（${new Date(resets).toLocaleTimeString()} 重置）`
+          : ` (resets ${new Date(resets).toLocaleTimeString()})`
+        : "";
+      lines.push(
+        zh
+          ? `**${label}：** ${bar} ${util.toFixed(1)}%${resetStr}`
+          : `**${label}:** ${bar} ${util.toFixed(1)}%${resetStr}`,
+      );
     }
   }
 
   return lines.join("\n");
 }
 
-function formatContextUsage(data: Record<string, unknown>): string {
+function formatContextUsage(data: Record<string, unknown>, zh = false): string {
   const total = data.totalTokens as number | undefined;
   const max = data.maxTokens as number | undefined;
   const pct = data.percentage as number | undefined;
   const model = data.model as string | undefined;
   const categories = data.categories as Array<Record<string, unknown>> | undefined;
 
-  const lines: string[] = ["## Context Usage"];
-  if (model) lines.push(`**Model:** ${model}`);
+  const lines: string[] = [zh ? "## 上下文占用" : "## Context Usage"];
+  if (model) lines.push(zh ? `**模型：** ${model}` : `**Model:** ${model}`);
   if (total != null && max != null) {
     const bar = renderBar(pct ?? (total / max) * 100);
     lines.push(
-      `**Tokens:** ${(total / 1000).toFixed(1)}k / ${(max / 1000).toFixed(1)}k ${bar} ${(pct ?? 0).toFixed(1)}%`,
+      zh
+        ? `**Tokens：** ${(total / 1000).toFixed(1)}k / ${(max / 1000).toFixed(1)}k ${bar} ${(pct ?? 0).toFixed(1)}%`
+        : `**Tokens:** ${(total / 1000).toFixed(1)}k / ${(max / 1000).toFixed(1)}k ${bar} ${(pct ?? 0).toFixed(1)}%`,
     );
   }
 
   if (categories?.length) {
-    lines.push("", "| Category | Tokens | % |", "|---|---:|---:|");
+    lines.push(
+      "",
+      zh ? "| 类别 | Tokens | 占比 |" : "| Category | Tokens | % |",
+      "|---|---:|---:|",
+    );
     for (const c of categories) {
       const name = c.name as string;
       const tokens = c.tokens as number;
@@ -2874,13 +2993,31 @@ function formatContextUsage(data: Record<string, unknown>): string {
 
   const api = data.apiUsage as Record<string, number> | undefined;
   if (api) {
-    lines.push("", "### API Usage (this session)");
-    lines.push(`- **Input:** ${(api.input_tokens / 1000).toFixed(1)}k`);
-    lines.push(`- **Output:** ${(api.output_tokens / 1000).toFixed(1)}k`);
-    if (api.cache_read_input_tokens)
-      lines.push(`- **Cache read:** ${(api.cache_read_input_tokens / 1000).toFixed(1)}k`);
-    if (api.cache_creation_input_tokens)
-      lines.push(`- **Cache write:** ${(api.cache_creation_input_tokens / 1000).toFixed(1)}k`);
+    lines.push("", zh ? "### API 用量（本会话）" : "### API Usage (this session)");
+    lines.push(
+      zh
+        ? `- **输入：** ${(api.input_tokens / 1000).toFixed(1)}k`
+        : `- **Input:** ${(api.input_tokens / 1000).toFixed(1)}k`,
+    );
+    lines.push(
+      zh
+        ? `- **输出：** ${(api.output_tokens / 1000).toFixed(1)}k`
+        : `- **Output:** ${(api.output_tokens / 1000).toFixed(1)}k`,
+    );
+    if (api.cache_read_input_tokens) {
+      lines.push(
+        zh
+          ? `- **缓存读取：** ${(api.cache_read_input_tokens / 1000).toFixed(1)}k`
+          : `- **Cache read:** ${(api.cache_read_input_tokens / 1000).toFixed(1)}k`,
+      );
+    }
+    if (api.cache_creation_input_tokens) {
+      lines.push(
+        zh
+          ? `- **缓存写入：** ${(api.cache_creation_input_tokens / 1000).toFixed(1)}k`
+          : `- **Cache write:** ${(api.cache_creation_input_tokens / 1000).toFixed(1)}k`,
+      );
+    }
   }
 
   return lines.join("\n");

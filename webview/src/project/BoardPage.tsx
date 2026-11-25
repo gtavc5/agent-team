@@ -6,6 +6,7 @@ import type {
   IssueModules,
   Objective,
   ObjectiveStatus,
+  Priority,
   Project,
   TaskState,
 } from "../state/useServer";
@@ -19,6 +20,7 @@ import {
 } from "../chat/markdown";
 import { FileOpenContext, splitFileRef } from "../chat/fileRef";
 import { formatRelative } from "../format";
+import { useProjectT, type ProjectMessageKey } from "../i18n/project";
 import { Icon } from "../panels/Icon";
 import {
   areaCounts,
@@ -33,6 +35,7 @@ import {
   stage,
   type BoardFilter,
   type Relations,
+  type Stage,
 } from "./board";
 import {
   DEFAULT_ISSUE_FILTER,
@@ -60,11 +63,29 @@ export interface SessionInfo {
 }
 
 const STATUSES: ObjectiveStatus[] = ["active", "later", "done", "dropped"];
-const STATUS_LABEL: Record<ObjectiveStatus, string> = {
-  active: "Active",
-  later: "Later",
-  done: "Done",
-  dropped: "Dropped",
+const STATUS_KEY: Record<ObjectiveStatus, ProjectMessageKey> = {
+  active: "statusActive",
+  later: "statusLater",
+  done: "statusDone",
+  dropped: "statusDropped",
+};
+const PRIORITY_KEY: Record<Priority, ProjectMessageKey> = {
+  high: "priorityHigh",
+  normal: "priorityNormal",
+  low: "priorityLow",
+};
+const STAGE_KEY: Record<Stage, ProjectMessageKey> = {
+  blocked: "stageBlocked",
+  ready: "stageReady",
+  "in progress": "stageInProgress",
+  review: "stageReview",
+};
+const TASK_STATE_KEY: Record<TaskState, ProjectMessageKey> = {
+  todo: "taskTodo",
+  doing: "taskDoing",
+  review: "taskReview",
+  done: "taskDone",
+  dropped: "taskDropped",
 };
 const TASK_MARK: Record<TaskState, string> = {
   todo: "○",
@@ -115,6 +136,7 @@ export const BoardPage = memo(function BoardPage({
   onSeal?: () => void;
   onDelete: () => void;
 }) {
+  const tr = useProjectT();
   const [mode, setMode] = useState<"objectives" | "issues" | "notes">("objectives");
   const [noteFile, setNoteFile] = useState<BoardFile | null>(null);
   // Where the open file was opened from: closing it goes back there.
@@ -230,10 +252,10 @@ export const BoardPage = memo(function BoardPage({
       if (!editor) return showFile(ref);
       void openInEditor(project.id, splitFileRef(ref)).then((why) => {
         if (why === null || n !== opening.current) return;
-        showFile(ref, why && `${why}: the file is shown here instead.`);
+        showFile(ref, why && tr("openFallbackNotice", { why }));
       });
     },
-    [editor, project.id, showFile],
+    [editor, project.id, showFile, tr],
   );
   const closeFile = () => {
     setNoteFile(null);
@@ -357,7 +379,7 @@ export const BoardPage = memo(function BoardPage({
         className={`board-page${detail ? " has-detail" : ""}`}
         role="dialog"
         aria-modal="true"
-        aria-label={`${project.name} objectives`}
+        aria-label={tr("boardDialogLabel", { name: project.name })}
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
@@ -365,25 +387,34 @@ export const BoardPage = memo(function BoardPage({
           <ProjectName name={project.name} onRename={onRename} readOnly={sealed} />
           {sealed && (
             <span className="bp-sealed" title={project.sealedReason ?? undefined}>
-              Sealed · read-only
+              {tr("sealedBadge")}
             </span>
           )}
-          <div className="bp-views bp-modes" role="group" aria-label="Show">
+          <div className="bp-views bp-modes" role="group" aria-label={tr("showGroupLabel")}>
             <button aria-pressed={mode === "objectives"} onClick={() => choose("objectives")}>
-              Objectives
+              {tr("tabObjectives")}
             </button>
             <button aria-pressed={showIssues} onClick={() => choose("issues")}>
-              Issues{openIssues > 0 && <span className="bp-count">{openIssues}</span>}
+              {tr("tabIssues")}
+              {openIssues > 0 && <span className="bp-count">{openIssues}</span>}
             </button>
             <button aria-pressed={showNotes} onClick={() => choose("notes")}>
-              Notes
+              {tr("tabNotes")}
             </button>
           </div>
           {!showNotes && (
             <span className="bp-summary">
               {showIssues
-                ? `${entries.filter((e) => e.issue.state === "open").length} open · ${entries.filter((e) => e.issue.state === "decision").length} to decide · ${entries.filter((e) => e.issue.state === "accepted").length} accepted`
-                : `${counts.active} active · ${counts.later} later · ${counts.done} done`}
+                ? tr("issuesSummary", {
+                    open: entries.filter((e) => e.issue.state === "open").length,
+                    decision: entries.filter((e) => e.issue.state === "decision").length,
+                    accepted: entries.filter((e) => e.issue.state === "accepted").length,
+                  })
+                : tr("objectivesSummary", {
+                    active: counts.active,
+                    later: counts.later,
+                    done: counts.done,
+                  })}
             </span>
           )}
           {!showNotes && (
@@ -391,7 +422,9 @@ export const BoardPage = memo(function BoardPage({
               ref={searchRef}
               className="bp-search"
               type="search"
-              placeholder={showIssues ? "Search issues…" : "Search objectives…"}
+              placeholder={
+                showIssues ? tr("searchIssuesPlaceholder") : tr("searchObjectivesPlaceholder")
+              }
               value={showIssues ? issueFilter.search : filter.search}
               onChange={(e) =>
                 showIssues
@@ -401,16 +434,20 @@ export const BoardPage = memo(function BoardPage({
             />
           )}
           {mode === "objectives" && (
-            <div className="bp-views" role="group" aria-label="View">
+            <div className="bp-views" role="group" aria-label={tr("viewGroupLabel")}>
               <button aria-pressed={view === "list"} onClick={() => setView("list")}>
-                List
+                {tr("viewList")}
               </button>
               <button aria-pressed={view === "graph"} onClick={() => setView("graph")}>
-                Dependencies
+                {tr("viewDependencies")}
               </button>
             </div>
           )}
-          <button className="side-panel-btn bp-close" aria-label="Close" onClick={onClose}>
+          <button
+            className="side-panel-btn bp-close"
+            aria-label={tr("closeLabel")}
+            onClick={onClose}
+          >
             <Icon name="close" />
           </button>
         </header>
@@ -441,25 +478,21 @@ export const BoardPage = memo(function BoardPage({
             <main className="bp-main" ref={mainRef}>
               {brokenModules.map((b) => (
                 <div key={b.id} className="bp-broken">
-                  <strong>{b.id}.toml</strong> cannot be read: {b.error}
+                  <strong>{b.id}.toml</strong> {tr("brokenFileSuffix", { error: b.error })}
                 </div>
               ))}
               {duplicates.map((d) => (
                 <div key={d.id} className="bp-broken">
-                  <strong>{d.id}</strong> is in {d.modules.join(" and ")}
-                  {d.modules.length === 1 ? " twice" : ""}: only the first is shown, and the agents
-                  cannot change it until one is renamed.
+                  <strong>{d.id}</strong>{" "}
+                  {tr(d.modules.length === 1 ? "duplicateIssueTwice" : "duplicateIssueMultiple", {
+                    modules: d.modules.join(tr("listAnd")),
+                  })}
                 </div>
               ))}
               {entries.length === 0 ? (
-                brokenModules.length === 0 && (
-                  <div className="bp-empty">
-                    No issues yet. The agents record the known defects here, each with its evidence
-                    and the objectives that work on it, and delete one once its fix is merged.
-                  </div>
-                )
+                brokenModules.length === 0 && <div className="bp-empty">{tr("emptyIssues")}</div>
               ) : shownIssues.length === 0 ? (
-                <div className="bp-empty">Nothing matches.</div>
+                <div className="bp-empty">{tr("nothingMatches")}</div>
               ) : (
                 links(
                   <IssueList
@@ -484,13 +517,13 @@ export const BoardPage = memo(function BoardPage({
           </div>
         ) : (
           <div className="bp-body">
-            <nav className="bp-nav" aria-label="Filters">
+            <nav className="bp-nav" aria-label={tr("filtersLabel")}>
               <div className="bp-areas">
                 <button
                   className={`bp-area${filter.area === null ? " active" : ""}`}
                   onClick={() => setFilter((f) => ({ ...f, area: null }))}
                 >
-                  <span className="bp-area-name">All areas</span>
+                  <span className="bp-area-name">{tr("allAreas")}</span>
                   <span className="bp-count">{inView}</span>
                 </button>
                 {areaCounts(objectives, filter).map((a) => (
@@ -505,11 +538,11 @@ export const BoardPage = memo(function BoardPage({
                 ))}
               </div>
               <div className="bp-filters">
-                <div className="bp-statuses" role="group" aria-label="Status">
+                <div className="bp-statuses" role="group" aria-label={tr("statusGroupLabel")}>
                   {STATUSES.map((s) => (
                     <FilterChip
                       key={s}
-                      label={STATUS_LABEL[s]}
+                      label={tr(STATUS_KEY[s])}
                       count={counts[s]}
                       pressed={!filter.archive && filter.statuses.includes(s)}
                       disabled={filter.archive}
@@ -519,7 +552,7 @@ export const BoardPage = memo(function BoardPage({
                   {archivedCount > 0 && (
                     <FilterChip
                       className="bp-archive-toggle"
-                      label="Archive"
+                      label={tr("archiveFilterLabel")}
                       count={archivedCount}
                       pressed={filter.archive}
                       onClick={() => {
@@ -532,17 +565,17 @@ export const BoardPage = memo(function BoardPage({
               </div>
               {onArchive && !sealed && (
                 <button className="bp-archive" onClick={() => onArchive(!project.archivedAt)}>
-                  {project.archivedAt ? "Restore project" : "Archive project"}
+                  {project.archivedAt ? tr("restoreProject") : tr("archiveProject")}
                 </button>
               )}
               {onSeal && !sealed && (
                 <button className="bp-archive bp-seal" onClick={onSeal}>
-                  Seal project
+                  {tr("sealProject")}
                 </button>
               )}
               {!sealed && (
                 <button className="bp-delete" onClick={onDelete}>
-                  Delete project
+                  {tr("deleteProject")}
                 </button>
               )}
             </nav>
@@ -551,21 +584,16 @@ export const BoardPage = memo(function BoardPage({
               {!filter.archive &&
                 broken.map((b) => (
                   <div key={b.id} className="bp-broken">
-                    <strong>{b.id}.toml</strong> cannot be read: {b.error}
+                    <strong>{b.id}.toml</strong> {tr("brokenFileSuffix", { error: b.error })}
                   </div>
                 ))}
               {objectives.length === 0 ? (
-                broken.length === 0 && (
-                  <div className="bp-empty">
-                    No objectives yet. Tell the lead what you want done, put off or dropped; it
-                    keeps the board.
-                  </div>
-                )
+                broken.length === 0 && <div className="bp-empty">{tr("emptyObjectives")}</div>
               ) : shown.length === 0 ? (
                 <div className="bp-empty">
                   {filter.archive && !filter.search && !filter.area
-                    ? "Nothing archived."
-                    : "Nothing matches."}
+                    ? tr("nothingArchived")
+                    : tr("nothingMatches")}
                 </div>
               ) : view === "list" || filter.archive ? (
                 <ObjectiveList
@@ -673,6 +701,7 @@ function ObjectiveCard({
   openIssues: number;
   onSelect: (id: string) => void;
 }) {
+  const tr = useProjectT();
   const { done, total } = progress(o);
   const toDecide = openDecisions(o);
   const st = o.archived ? null : stage(o, rel);
@@ -687,10 +716,10 @@ function ObjectiveCard({
       <span className="bp-card-top">
         <span className="bp-id">{o.id}</span>
         {o.priority !== "normal" && (
-          <span className={`bp-prio prio-${o.priority}`}>{o.priority}</span>
+          <span className={`bp-prio prio-${o.priority}`}>{tr(PRIORITY_KEY[o.priority])}</span>
         )}
         {o.status !== "active" && (
-          <span className={`bp-pill st-${o.status}`}>{STATUS_LABEL[o.status]}</span>
+          <span className={`bp-pill st-${o.status}`}>{tr(STATUS_KEY[o.status])}</span>
         )}
       </span>
       <span className="bp-card-title">
@@ -704,25 +733,33 @@ function ObjectiveCard({
       {o.reason && o.status !== "active" && <span className="bp-card-reason">{o.reason}</span>}
       <span className="bp-card-foot">
         {total > 0 && (
-          <span className="bp-progress" title={`${done} of ${total} tasks done`}>
+          <span className="bp-progress" title={tr("tasksProgressTitle", { done, total })}>
             <span className="bp-bar">
               <span style={{ width: `${(done / total) * 100}%` }} />
             </span>
             {done}/{total}
           </span>
         )}
-        {toDecide > 0 && !o.archived && <span className="bp-decide">{toDecide} to decide</span>}
+        {toDecide > 0 && !o.archived && (
+          <span className="bp-decide">{tr("toDecideCount", { count: toDecide })}</span>
+        )}
         {openIssues > 0 && !o.archived && (
           <span className="bi-count">
-            {openIssues} issue{openIssues === 1 ? "" : "s"}
+            {tr(openIssues === 1 ? "issueCountOne" : "issueCountMany", { count: openIssues })}
           </span>
         )}
         {st && (
           <span className={`bp-stage stage-${st.replace(" ", "-")}`}>
-            {st === "blocked" ? `blocked by ${rel.blockedBy.length}` : st}
+            {st === "blocked"
+              ? tr("stageBlockedBy", { count: rel.blockedBy.length })
+              : tr(STAGE_KEY[st])}
           </span>
         )}
-        {o.archived && <span className="bp-updated">archived {formatRelative(o.updatedAt)}</span>}
+        {o.archived && (
+          <span className="bp-updated">
+            {tr("archivedRelative", { time: formatRelative(o.updatedAt) })}
+          </span>
+        )}
         {live.length > 0 && (
           <span className="bp-live" title={live.map((s) => sessions.get(s)!.name).join(", ")}>
             <span className="streaming-dot" /> {live.length}
@@ -750,6 +787,7 @@ function DependencyGraph({
   selected: string | null;
   onSelect: (id: string) => void;
 }) {
+  const tr = useProjectT();
   const { columns, independent } = useMemo(() => layout(objectives), [objectives]);
   const shownIds = useMemo(() => new Set(objectives.map((o) => o.id)), [objectives]);
   const [focus, setFocus] = useState<string | null>(null);
@@ -839,13 +877,15 @@ function DependencyGraph({
         </span>
         <span className="bp-node-meta">
           {o.id}
-          {st && <span className={`bp-stage stage-${st.replace(" ", "-")}`}>{st}</span>}
+          {st && (
+            <span className={`bp-stage stage-${st.replace(" ", "-")}`}>{tr(STAGE_KEY[st])}</span>
+          )}
           {o.status !== "active" && (
-            <span className={`bp-pill st-${o.status}`}>{STATUS_LABEL[o.status]}</span>
+            <span className={`bp-pill st-${o.status}`}>{tr(STATUS_KEY[o.status])}</span>
           )}
           {hidden.length > 0 && (
-            <span className="bp-hidden" title={`Not shown: ${hidden.join(", ")}`}>
-              +{hidden.length} not shown
+            <span className="bp-hidden" title={tr("notShownTitle", { ids: hidden.join(", ") })}>
+              {tr("notShownBadge", { count: hidden.length })}
             </span>
           )}
         </span>
@@ -867,13 +907,13 @@ function DependencyGraph({
       {lines("under")}
       {columns.map((col, i) => (
         <div key={i} className="bp-column">
-          <div className="bp-column-title">Step {i + 1}</div>
+          <div className="bp-column-title">{tr("graphStepColumn", { step: i + 1 })}</div>
           {col.map(node)}
         </div>
       ))}
       {independent.length > 0 && (
         <div className="bp-column bp-independent">
-          <div className="bp-column-title">Independent</div>
+          <div className="bp-column-title">{tr("graphIndependentColumn")}</div>
           {independent.map(node)}
         </div>
       )}
@@ -906,6 +946,7 @@ function ObjectiveDetail({
   onOpenIssue: (id: string) => void;
   onAskLead: ((objectiveId: string) => void) | null;
 }) {
+  const tr = useProjectT();
   const self = useRef<HTMLElement>(null);
   // Opened from one of its own links, the details replace the button that
   // had focus: the keyboard goes on from the new details, not the page.
@@ -923,18 +964,22 @@ function ObjectiveDetail({
     const target = byId.get(id);
     if (!target) {
       return (
-        <span key={id} className="bp-ref missing" title="Not an objective">
+        <span key={id} className="bp-ref missing" title={tr("notAnObjective")}>
           <span className="clip">{id}</span>
         </span>
       );
     }
-    const note = target.archived ? " (archived)" : "";
+    const note = target.archived ? tr("archivedParen") : "";
     return (
       <button
         key={id}
         className={`bp-ref st-${target.status}${rel.blockedBy.includes(id) ? " blocking" : ""}`}
         onClick={() => onSelect(id)}
-        title={`${STATUS_LABEL[target.status]}${note}: ${target.goal || target.reason || ""}`}
+        title={tr("objectiveRefTitle", {
+          status: tr(STATUS_KEY[target.status]),
+          note,
+          detail: target.goal || target.reason || "",
+        })}
       >
         {/* A button holds no links of its own. */}
         <NoLinks>
@@ -966,18 +1011,18 @@ function ObjectiveDetail({
   return (
     <aside ref={self} tabIndex={-1} className="bp-detail" aria-label={o.title}>
       <div className="bp-detail-head">
-        <button className="bp-back" aria-label="Back" onClick={onClose}>
+        <button className="bp-back" aria-label={tr("backLabel")} onClick={onClose}>
           ‹
         </button>
         <span className="bp-id">{o.id}</span>
         {onAskLead && (
           <button className="bp-ask" onClick={() => onAskLead(o.id)}>
-            Ask the lead
+            {tr("askLead")}
           </button>
         )}
         <button
           className="side-panel-btn bp-close bp-detail-close"
-          aria-label="Close details"
+          aria-label={tr("closeDetailsLabel")}
           onClick={onClose}
         >
           <Icon name="close" />
@@ -987,10 +1032,14 @@ function ObjectiveDetail({
         <InlineMd>{o.title}</InlineMd>
       </h2>
       <div className="bp-meta">
-        <span className={`bp-pill st-${o.status}`}>{STATUS_LABEL[o.status]}</span>
-        {o.archived && <span className="bp-pill">Archived</span>}
-        <span className={`bp-prio prio-${o.priority}`}>{o.priority} priority</span>
-        <span className="bp-updated">updated {formatRelative(o.updatedAt)}</span>
+        <span className={`bp-pill st-${o.status}`}>{tr(STATUS_KEY[o.status])}</span>
+        {o.archived && <span className="bp-pill">{tr("archivedPill")}</span>}
+        <span className={`bp-prio prio-${o.priority}`}>
+          {tr("priorityDetail", { priority: tr(PRIORITY_KEY[o.priority]) })}
+        </span>
+        <span className="bp-updated">
+          {tr("updatedRelative", { time: formatRelative(o.updatedAt) })}
+        </span>
       </div>
       {o.reason && (
         <p className="bp-reason">
@@ -999,7 +1048,7 @@ function ObjectiveDetail({
       )}
 
       {o.goal && (
-        <DetailSection title="Goal">
+        <DetailSection title={tr("sectionGoal")}>
           <p className="bp-goal">
             <InlineMd>{o.goal}</InlineMd>
           </p>
@@ -1007,41 +1056,47 @@ function ObjectiveDetail({
       )}
 
       {!kept && (
-        <DetailSection title="Depends on">
+        <DetailSection title={tr("sectionDependsOn")}>
           {o.dependsOn.length ? (
             <div className="bp-refs">{o.dependsOn.map(ref)}</div>
           ) : (
-            <p className="bp-none">Nothing: it can start any time.</p>
+            <p className="bp-none">{tr("noDependencies")}</p>
           )}
         </DetailSection>
       )}
       {rel.unblocks.length > 0 && (
-        <DetailSection title="Needed by">
+        <DetailSection title={tr("sectionNeededBy")}>
           <div className="bp-refs">{rel.unblocks.map(ref)}</div>
         </DetailSection>
       )}
 
       {o.context && (
-        <DetailSection title="Where it stands">
+        <DetailSection title={tr("sectionWhereItStands")}>
           <div className="message-content bp-md">
             <MdBlock>{o.context}</MdBlock>
           </div>
           {o.contextWritten !== undefined && (
             <p className="bp-updated bp-written">
-              written {formatRelative(o.contextWritten)}
-              {o.contextCommit && ` at ${o.contextCommit}`}
+              {o.contextCommit
+                ? tr("writtenRelativeAt", {
+                    time: formatRelative(o.contextWritten),
+                    commit: o.contextCommit,
+                  })
+                : tr("writtenRelative", { time: formatRelative(o.contextWritten) })}
             </p>
           )}
         </DetailSection>
       )}
 
       {!kept && (
-        <DetailSection title={total ? `Tasks · ${done}/${total}` : "Tasks"}>
+        <DetailSection
+          title={total ? tr("sectionTasksProgress", { done, total }) : tr("sectionTasks")}
+        >
           {o.tasks.length ? (
             <ul className="bp-tasks">
               {o.tasks.map((t) => (
                 <li key={t.id} className={`task-${t.state}`}>
-                  <span className="bp-task-mark" title={t.state}>
+                  <span className="bp-task-mark" title={tr(TASK_STATE_KEY[t.state])}>
                     {TASK_MARK[t.state]}
                   </span>
                   <span className="bp-task-text">
@@ -1052,13 +1107,13 @@ function ObjectiveDetail({
               ))}
             </ul>
           ) : (
-            <p className="bp-none">No tasks yet.</p>
+            <p className="bp-none">{tr("noTasks")}</p>
           )}
         </DetailSection>
       )}
 
       {open.length > 0 && (
-        <DetailSection title={`To decide · ${open.length}`}>
+        <DetailSection title={tr("sectionToDecide", { count: open.length })}>
           <ul className="bp-decisions open">
             {open.map((d) => (
               <li key={d.id}>
@@ -1069,7 +1124,7 @@ function ObjectiveDetail({
         </DetailSection>
       )}
       {settled.length > 0 && (
-        <DetailSection title="Settled">
+        <DetailSection title={tr("sectionSettled")}>
           <ul className="bp-decisions">
             {settled.map((d) => (
               <li key={d.id}>
@@ -1086,7 +1141,7 @@ function ObjectiveDetail({
       )}
 
       {issues.length > 0 && (
-        <DetailSection title={`Issues · ${openIssues.length} open`}>
+        <DetailSection title={tr("sectionIssuesOpen", { count: openIssues.length })}>
           {openIssues.length > 0 && (
             <ul className="bi-linked">
               {openIssues.map((e) => (
@@ -1106,17 +1161,19 @@ function ObjectiveDetail({
               ))}
             </ul>
           )}
-          {accepted > 0 && <p className="bp-none">{accepted} accepted, not to be fixed.</p>}
+          {accepted > 0 && (
+            <p className="bp-none">{tr("acceptedIssuesNote", { count: accepted })}</p>
+          )}
         </DetailSection>
       )}
 
       {o.sessions.some((s) => sessions.has(s)) && (
-        <DetailSection title="Sessions">
+        <DetailSection title={tr("sectionSessions")}>
           <div className="bp-refs">{o.sessions.map(session)}</div>
         </DetailSection>
       )}
       {o.notes && (
-        <DetailSection title="Notes">
+        <DetailSection title={tr("sectionNotes")}>
           <div className="message-content bp-md">
             <MdBlock>{o.notes}</MdBlock>
           </div>
@@ -1135,11 +1192,12 @@ function ProjectName({
   onRename: (name: string) => void;
   readOnly?: boolean;
 }) {
+  const tr = useProjectT();
   const [editing, setEditing] = useState(false);
   if (readOnly) return <span className="bp-name">{name}</span>;
   if (!editing) {
     return (
-      <button className="bp-name" title="Rename" onClick={() => setEditing(true)}>
+      <button className="bp-name" title={tr("renameTitle")} onClick={() => setEditing(true)}>
         {name}
       </button>
     );
@@ -1147,7 +1205,7 @@ function ProjectName({
   return (
     <NameInput
       name={name}
-      label="Project name"
+      label={tr("projectNameLabel")}
       className="bp-name-input"
       onDone={(renamed) => {
         setEditing(false);

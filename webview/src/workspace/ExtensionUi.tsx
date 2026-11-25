@@ -1,4 +1,5 @@
 import type { Placement } from "../../../shared/extension-ui";
+import { useWorkspaceT } from "../i18n/workspace";
 import type { LiveUi, LiveNotice } from "../state/extensionUi";
 import type { Workspace } from "../state/useServer";
 
@@ -15,6 +16,7 @@ export function ExtensionUi({
   placement: Placement;
   dismiss: (n: LiveNotice) => void;
 }) {
+  const tr = useWorkspaceT();
   const above = placement === "aboveEditor";
   const nodes = workspace.agents.flatMap((agent) => {
     const state = ui.agents.find((a) => a.workspaceId === workspace.id && a.agentId === agent.id);
@@ -31,12 +33,12 @@ export function ExtensionUi({
     const widgets = state.widgets.filter((w) => w.placement === placement && w.lines.length);
     if (!notices.length && !statuses.length && !widgets.length) return [];
     return (
-      <section key={agent.id} aria-label={`${agent.name} extension UI`}>
+      <section key={agent.id} aria-label={tr("agentExtensionUi", { name: agent.name })}>
         <strong>{agent.name}</strong>
         {notices.map((n) => (
           <div role="status" key={n.id} className={`extension-notice ${n.level}`}>
             <span>{n.message}</span>
-            <button type="button" aria-label="Dismiss notification" onClick={() => dismiss(n)}>
+            <button type="button" aria-label={tr("dismissNotification")} onClick={() => dismiss(n)}>
               ×
             </button>
           </div>

@@ -1,3 +1,4 @@
+import { isZh } from "../i18n";
 import type { Project, Workspace } from "../state/useServer";
 import { isAgentActive } from "../workspace/agents";
 
@@ -37,6 +38,12 @@ export function summarizeAttention(
 }
 
 export function describeAttention(summary: AttentionSummary, singularNoun = "session"): string {
+  if (isZh()) {
+    const noun = singularNoun === "background session" ? "后台会话" : "会话";
+    if (summary.count === 0) return `没有需要关注的${noun}`;
+    const needs = `${summary.count} 个${noun}需要关注`;
+    return summary.yourTurn > 0 ? `${needs}，其中 ${summary.yourTurn} 个等待你回复` : needs;
+  }
   if (summary.count === 0) return `no ${singularNoun}s need attention`;
   const sessions = `${summary.count} ${singularNoun}${summary.count === 1 ? "" : "s"}`;
   const needs = `${sessions} ${summary.count === 1 ? "needs" : "need"} attention`;

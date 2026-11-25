@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useWorkspaceT } from "../i18n/workspace";
 import type { UiDialogAnswer, UiDialogRequest } from "../state/useServer";
 
 import { DialogFrame } from "./DialogFrame";
@@ -13,6 +14,7 @@ export function UiDialogModal({
   dialog: UiDialogRequest;
   onRespond: (dialog: UiDialogRequest, answer: UiDialogAnswer) => boolean;
 }) {
+  const tr = useWorkspaceT();
   const [value, setValue] = useState(dialog.prefill ?? "");
   const [answered, setAnswered] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -34,7 +36,7 @@ export function UiDialogModal({
       disabled={answered}
       onClick={() => respond({ cancelled: true })}
     >
-      Cancel
+      {tr("cancel")}
     </button>
   );
 
@@ -44,9 +46,9 @@ export function UiDialogModal({
       titleAside={
         <span
           className={`ui-dialog-countdown${remainingMs === 0 ? " expired" : ""}`}
-          aria-label="Time remaining"
+          aria-label={tr("timeRemainingLabel")}
         >
-          {remainingMs > 0 ? `${remaining}s remaining` : "expired"}
+          {remainingMs > 0 ? tr("secondsRemaining", { seconds: remaining }) : tr("expired")}
         </span>
       }
       className={`ui-dialog ui-dialog-${dialog.method}`}
@@ -59,7 +61,7 @@ export function UiDialogModal({
       {dialog.message && <p className="dialog-body ui-dialog-message">{dialog.message}</p>}
 
       {dialog.method === "select" && (
-        <div className="ui-dialog-options" role="group" aria-label="Choices">
+        <div className="ui-dialog-options" role="group" aria-label={tr("choicesLabel")}>
           {(dialog.options ?? []).map((option, index) => (
             <button
               key={`${index}:${option}`}
@@ -85,7 +87,7 @@ export function UiDialogModal({
             disabled={answered}
             onClick={() => respond({ confirmed: true })}
           >
-            Confirm
+            {tr("confirm")}
           </button>
         </div>
       )}
@@ -98,7 +100,7 @@ export function UiDialogModal({
           }}
         >
           <label className="dialog-field">
-            <span>Response</span>
+            <span>{tr("responseLabel")}</span>
             {dialog.method === "input" ? (
               <input
                 value={value}
@@ -120,7 +122,7 @@ export function UiDialogModal({
           <div className="dialog-actions">
             {cancel}
             <button type="submit" className="btn-primary" disabled={answered}>
-              Submit
+              {tr("submit")}
             </button>
           </div>
         </form>
@@ -129,7 +131,7 @@ export function UiDialogModal({
       {dialog.method === "select" && <div className="dialog-actions">{cancel}</div>}
       {answered && (
         <div className="ui-dialog-sent" role="status">
-          Answer sent; waiting for the session…
+          {tr("answerSentWaiting")}
         </div>
       )}
     </DialogFrame>

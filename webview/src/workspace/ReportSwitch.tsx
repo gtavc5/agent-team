@@ -1,3 +1,4 @@
+import { useWorkspaceT } from "../i18n/workspace";
 import type { ProjectLink } from "../state/useServer";
 
 // Whether a project session reports to the lead, as the user switches it.
@@ -11,20 +12,17 @@ export function ReportSwitch({
   onSet: (reports: boolean) => void;
   className?: string;
 }) {
+  const tr = useWorkspaceT();
   if (link?.role !== "worker") return null;
   const reports = !link.unreported;
   return (
     <button
       className={`${className} report-switch${reports ? " on" : ""}`}
       aria-pressed={reports}
-      title={
-        reports
-          ? "Reports to the project's lead, which may send it work. Click to stop: it keeps reading the board and history"
-          : "Your own session: the lead neither hears from it nor sends it work. Click to report to the lead"
-      }
+      title={reports ? tr("reportsToLeadTitle") : tr("notReportingTitle")}
       onClick={() => onSet(!reports)}
     >
-      {reports ? "Reports to lead" : "Not reporting"}
+      {reports ? tr("reportsToLead") : tr("notReporting")}
     </button>
   );
 }

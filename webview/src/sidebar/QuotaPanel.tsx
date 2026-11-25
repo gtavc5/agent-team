@@ -1,10 +1,13 @@
 import { useEffect, useId, useState } from "react";
 import type { QuotaState } from "../../../shared/quota";
 import { formatRelative } from "../format";
+import { useWorkspaceT } from "../i18n/workspace";
 import {
   detailWindowLabel,
   formatShortDateTime,
   isQuotaStale,
+  quotaAvailabilityLabel,
+  quotaReasonLabel,
   quotaRowLabels,
   quotaTone,
   quotaWaitingHint,
@@ -23,6 +26,7 @@ export function QuotaPanel({
   refresh?: (force?: boolean, providers?: readonly string[]) => void;
   connected: boolean;
 }) {
+  const tr = useWorkspaceT();
   const panelId = useId();
   const [clock, setClock] = useState(now);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
@@ -43,16 +47,16 @@ export function QuotaPanel({
   };
 
   return (
-    <section className="quota-panel system-status-panel" aria-label="Quota used">
+    <section className="quota-panel system-status-panel" aria-label={tr("quotaUsed")}>
       <header className="quota-header">
-        <span className="quota-heading">Quota used</span>
+        <span className="quota-heading">{tr("quotaUsed")}</span>
         <button
           type="button"
           className={`quota-refresh${quota.refreshing ? " refreshing" : ""}`}
           disabled={!connected || quota.refreshing}
           onClick={() => refresh?.(true)}
-          aria-label={quota.refreshing ? "Refreshing…" : "Refresh"}
-          title={quota.refreshing ? "Refreshing…" : "Refresh quota"}
+          aria-label={quota.refreshing ? tr("refreshing") : tr("refresh")}
+          title={quota.refreshing ? tr("refreshing") : tr("refreshQuota")}
         >
           <svg
             className="icon"
@@ -82,11 +86,14 @@ export function QuotaPanel({
             const needsSetup = row.reason === "waiting for ACP setup";
             const isStale = isQuotaStale(row, displayTime);
             const summaryWindows = selectSummaryWindows(row.windows);
+            const localizedReason = row.reason ? quotaReasonLabel(row.reason) : undefined;
             const statusText = needsSetup
-              ? "Waiting for explicit ACP setup"
+              ? tr("quotaWaitingExplicitAcpSetup")
               : waitingHint
-                ? (row.reason ?? waitingHint)
-                : [row.availability, row.reason].filter(Boolean).join(" · ");
+                ? (localizedReason ?? waitingHint)
+                : [quotaAvailabilityLabel(row.availability), localizedReason]
+                    .filter(Boolean)
+                    .join(" · ");
             const rowLabel = labels[index];
             return (
               <div
@@ -116,10 +123,13 @@ export function QuotaPanel({
                         >
                           !
                         </span>
-                        {!row.windows.length && (row.reason ?? row.availability)}
+                        {!row.windows.length &&
+                          (localizedReason ?? quotaAvailabilityLabel(row.availability))}
                       </span>
                     )}
-                    {isStale && <span className="quota-badge quota-badge-stale">stale</span>}
+                    {isStale && (
+                      <span className="quota-badge quota-badge-stale">{tr("quotaStale")}</span>
+                    )}
                     {summaryWindows.map((w, wi) => {
                       const pct = Math.round(w.usedPct);
                       return (
@@ -155,12 +165,12 @@ export function QuotaPanel({
                         <div className="quota-detail-window" key={w.label}>
                           <span className="quota-detail-label">{detailWindowLabel(w.label)}:</span>{" "}
                           <span className={`quota-pct quota-pct-${quotaTone(pct)}`}>
-                            {pct}% used
+                            {tr("quotaPctUsed", { pct })}
                           </span>
                           {w.resetsAt && (
                             <span className="quota-detail-reset">
                               {" "}
-                              · Resets {formatShortDateTime(w.resetsAt)}
+                              · {tr("quotaResetsAt", { time: formatShortDateTime(w.resetsAt) })}
                             </span>
                           )}
                         </div>
@@ -168,8 +178,8 @@ export function QuotaPanel({
                     })}
                     <div className="quota-detail-meta">
                       {row.windows.length > 0 && row.observedAt > 0
-                        ? `${isStale ? "stale · " : ""}Updated ${formatRelative(row.observedAt, displayTime)}`
-                        : "Not yet observed"}
+                        ? `${isStale ? `${tr("quotaStale")} · ` : ""}${tr("quotaUpdatedAt", { time: formatRelative(row.observedAt, displayTime) })}`
+                        : tr("quotaNotYetObserved")}
                     </div>
                   </div>
                 )}

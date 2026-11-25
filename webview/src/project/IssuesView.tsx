@@ -3,6 +3,7 @@ import type { Evidence, IssueModule, IssueState, Objective } from "../state/useS
 import { InlineMd, MdBlock, NoLinks } from "../chat/markdown";
 import { Icon } from "../panels/Icon";
 import { formatRelative } from "../format";
+import { tProject, useProjectT, type ProjectMessageKey } from "../i18n/project";
 import {
   issueMatches,
   issueSummary,
@@ -19,18 +20,23 @@ import { DetailSection, FilterChip } from "./parts";
 // the right. Read-only, like the objectives.
 
 export const ISSUE_STATES: IssueState[] = ["open", "decision", "accepted"];
+const ISSUE_STATE_KEY: Record<IssueState, ProjectMessageKey> = {
+  open: "issueStateOpen",
+  decision: "issueStateDecision",
+  accepted: "issueStateAccepted",
+};
 export const ISSUE_STATE_LABEL: Record<IssueState, string> = {
-  open: "Open",
-  decision: "To decide",
-  accepted: "Accepted",
+  open: tProject("issueStateOpen", undefined, "en"),
+  decision: tProject("issueStateDecision", undefined, "en"),
+  accepted: tProject("issueStateAccepted", undefined, "en"),
 };
 const EVIDENCE: Evidence[] = ["R", "V", "H", "S", "C"];
-const EVIDENCE_LABEL: Record<Evidence, string> = {
-  R: "Reproduced by a script",
-  V: "Confirmed by a probe",
-  H: "Read from the code only",
-  S: "Still there on an earlier re-test",
-  C: "Another agent's probe, not checked here",
+const EVIDENCE_KEY: Record<Evidence, ProjectMessageKey> = {
+  R: "evidenceR",
+  V: "evidenceV",
+  H: "evidenceH",
+  S: "evidenceS",
+  C: "evidenceC",
 };
 
 // A module's title up to its parenthesised scope: "Hosting (hosting.cpp)".
@@ -53,18 +59,19 @@ export function IssueNav({
   filter: IssueFilter;
   onFilter: (f: IssueFilter) => void;
 }) {
+  const tr = useProjectT();
   // Each number is the rows the filter it stands on gives with the others.
   const count = (f: IssueFilter) => entries.filter((e) => issueMatches(e, f)).length;
   const inView = count({ ...filter, module: null });
   const tags = tagCounts(entries, filter);
   return (
-    <nav className="bp-nav" aria-label="Issue filters">
+    <nav className="bp-nav" aria-label={tr("issueFiltersLabel")}>
       <div className="bp-areas">
         <button
           className={`bp-area${filter.module === null ? " active" : ""}`}
           onClick={() => onFilter({ ...filter, module: null })}
         >
-          <span className="bp-area-name">All modules</span>
+          <span className="bp-area-name">{tr("allModules")}</span>
           <span className="bp-count">{inView}</span>
         </button>
         {moduleCounts(modules, entries, filter).map(({ module: m, count: n }) => (
@@ -80,31 +87,31 @@ export function IssueNav({
         ))}
       </div>
       <div className="bp-filters">
-        <div className="bp-statuses" role="group" aria-label="State">
+        <div className="bp-statuses" role="group" aria-label={tr("issueStateGroupLabel")}>
           {ISSUE_STATES.map((s) => (
             <FilterChip
               key={s}
-              label={ISSUE_STATE_LABEL[s]}
+              label={tr(ISSUE_STATE_KEY[s])}
               count={count({ ...filter, states: [s] })}
               pressed={filter.states.includes(s)}
               onClick={() => onFilter({ ...filter, states: toggle(filter.states, s) })}
             />
           ))}
         </div>
-        <div className="bp-chips" role="group" aria-label="Evidence">
+        <div className="bp-chips" role="group" aria-label={tr("issueEvidenceGroupLabel")}>
           {EVIDENCE.map((ev) => (
             <FilterChip
               key={ev}
               label={<span className={`bi-ev ev-${ev}`}>{ev}</span>}
               count={count({ ...filter, evidence: [ev] })}
               pressed={filter.evidence.includes(ev)}
-              title={EVIDENCE_LABEL[ev]}
+              title={tr(EVIDENCE_KEY[ev])}
               onClick={() => onFilter({ ...filter, evidence: toggle(filter.evidence, ev) })}
             />
           ))}
         </div>
         {tags.length > 0 && (
-          <div className="bp-chips" role="group" aria-label="Tags">
+          <div className="bp-chips" role="group" aria-label={tr("issueTagsGroupLabel")}>
             {tags.map(({ tag, count: n }) => (
               <FilterChip
                 key={tag}
@@ -201,6 +208,7 @@ function IssueRow({
   selected: boolean;
   onSelect: (id: string) => void;
 }) {
+  const tr = useProjectT();
   return (
     <button
       data-issue={x.id}
@@ -211,12 +219,12 @@ function IssueRow({
       <span className="bi-row-top">
         <span className="bp-id">{x.id}</span>
         {x.evidence && (
-          <span className={`bi-evidence ev-${x.evidence}`} title={EVIDENCE_LABEL[x.evidence]}>
+          <span className={`bi-evidence ev-${x.evidence}`} title={tr(EVIDENCE_KEY[x.evidence])}>
             {x.evidence}
           </span>
         )}
         {x.state !== "open" && (
-          <span className={`bp-pill is-${x.state}`}>{ISSUE_STATE_LABEL[x.state]}</span>
+          <span className={`bp-pill is-${x.state}`}>{tr(ISSUE_STATE_KEY[x.state])}</span>
         )}
         {x.tags.map((t) => (
           <span key={t} className="bi-tag">
@@ -244,6 +252,7 @@ export function IssueDetail({
   onSelectObjective: (id: string) => void;
   onClose: () => void;
 }) {
+  const tr = useProjectT();
   const self = useRef<HTMLElement>(null);
   useEffect(() => {
     if (document.activeElement === document.body) self.current?.focus({ preventScroll: true });
@@ -252,25 +261,30 @@ export function IssueDetail({
   const byId = new Map(objectives.map((o) => [o.id, o]));
   const linked = linkedObjectives(e);
   return (
-    <aside ref={self} tabIndex={-1} className="bp-detail" aria-label={`Issue ${x.id}`}>
+    <aside
+      ref={self}
+      tabIndex={-1}
+      className="bp-detail"
+      aria-label={tr("issueDetailLabel", { id: x.id })}
+    >
       <div className="bp-detail-head">
-        <button className="bp-back" aria-label="Back" onClick={onClose}>
+        <button className="bp-back" aria-label={tr("backLabel")} onClick={onClose}>
           ‹
         </button>
         <span className="bp-id">{x.id}</span>
         <button
           className="side-panel-btn bp-close bp-detail-close"
-          aria-label="Close details"
+          aria-label={tr("closeDetailsLabel")}
           onClick={onClose}
         >
           <Icon name="close" />
         </button>
       </div>
       <div className="bp-meta bi-meta">
-        <span className={`bp-pill is-${x.state}`}>{ISSUE_STATE_LABEL[x.state]}</span>
+        <span className={`bp-pill is-${x.state}`}>{tr(ISSUE_STATE_KEY[x.state])}</span>
         {x.evidence && (
           <span className={`bi-evidence ev-${x.evidence}`}>
-            {x.evidence} · {EVIDENCE_LABEL[x.evidence]}
+            {x.evidence} · {tr(EVIDENCE_KEY[x.evidence])}
           </span>
         )}
         {x.tags.map((t) => (
@@ -280,8 +294,9 @@ export function IssueDetail({
         ))}
         {x.written !== undefined && (
           <span className="bp-updated">
-            written {formatRelative(x.written)}
-            {x.commit && ` at ${x.commit}`}
+            {x.commit
+              ? tr("writtenRelativeAt", { time: formatRelative(x.written), commit: x.commit })
+              : tr("writtenRelative", { time: formatRelative(x.written) })}
           </span>
         )}
       </div>
@@ -293,20 +308,20 @@ export function IssueDetail({
         <MdBlock>{x.text}</MdBlock>
       </div>
       {e.group?.notes && (
-        <DetailSection title="In common with its group">
+        <DetailSection title={tr("sectionIssueGroupNotes")}>
           <div className="message-content bp-md">
             <MdBlock>{e.group.notes}</MdBlock>
           </div>
         </DetailSection>
       )}
       {e.module.notes && (
-        <DetailSection title="About the module">
+        <DetailSection title={tr("sectionIssueModuleNotes")}>
           <div className="message-content bp-md">
             <MdBlock>{e.module.notes}</MdBlock>
           </div>
         </DetailSection>
       )}
-      <DetailSection title="Objectives">
+      <DetailSection title={tr("sectionObjectives")}>
         {linked.length ? (
           <div className="bp-refs">
             {linked.map((id) => {
@@ -326,14 +341,14 @@ export function IssueDetail({
                   </NoLinks>
                 </button>
               ) : (
-                <span key={id} className="bp-ref missing" title="Not an objective">
+                <span key={id} className="bp-ref missing" title={tr("notAnObjective")}>
                   <span className="clip">{id}</span>
                 </span>
               );
             })}
           </div>
         ) : (
-          <p className="bp-none">No objective works on it yet.</p>
+          <p className="bp-none">{tr("noLinkedObjectives")}</p>
         )}
       </DetailSection>
     </aside>

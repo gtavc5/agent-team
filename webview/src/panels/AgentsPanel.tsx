@@ -19,6 +19,7 @@ import {
 import { EffortSelect, effortOf, selectableLevels } from "../workspace/EffortSelect";
 import { agentState, stateLabel } from "../workspace/agents";
 import { formatRelative, formatTokens } from "../format";
+import { usePanelT, type PanelMessageKey } from "../i18n/panels";
 import { DEFAULT_BRANCH, sessionName, sessionState, sessionWork } from "./scope";
 import { AgentTasks, hasWork, soon, workCount, type TaskActions } from "./SessionTasks";
 import { Icon } from "./Icon";
@@ -39,13 +40,34 @@ export interface AgentsPanelActions extends TaskActions {
   onSetEffort: (workspaceId: string, agentId: string, effort: string) => void;
 }
 
-const STATE_LABEL = {
-  working: "working",
-  waiting: "waiting on background work",
-  sleeping: "sleeping",
-  idle: "idle",
-  archived: "archived",
+const STATE_LABEL_KEY: Record<
+  "working" | "waiting" | "sleeping" | "idle" | "archived",
+  PanelMessageKey
+> = {
+  working: "stateWorking",
+  waiting: "stateWaitingFull",
+  sleeping: "stateSleeping",
+  idle: "stateIdle",
+  archived: "stateArchived",
 };
+
+const FALLBACK_AGENT_STATE_KEY: Record<string, PanelMessageKey> = {
+  working: "stateWorking",
+  "waiting on background work": "stateWaitingFull",
+  sleeping: "stateSleeping",
+  online: "stateOnline",
+  offline: "stateOffline",
+};
+
+function localizedAgentState(
+  a: AgentInfo,
+  connected: boolean,
+  t: ReturnType<typeof usePanelT>,
+): string {
+  const raw = stateLabel(a, connected);
+  const key = FALLBACK_AGENT_STATE_KEY[raw];
+  return key ? t(key) : raw;
+}
 
 // The sessions in scope with what their agents are doing. In a project's
 // overview (from its lead) every session is a card of two lines, unfolded
@@ -74,6 +96,7 @@ export const AgentsPanel = memo(function AgentsPanel({
   actions: AgentsPanelActions;
   overview?: boolean;
 }) {
+  const t = usePanelT();
   const live = sessions.filter((w) => w.archivedAt == null);
   const archived = sessions.filter((w) => w.archivedAt != null);
   // Keyed by the view too: a card folded in the overview comes unfolded
@@ -97,7 +120,7 @@ export const AgentsPanel = memo(function AgentsPanel({
       {live.map(card)}
       {archived.length > 0 && (
         <details className="ap-archived">
-          <summary>Archived · {archived.length}</summary>
+          <summary>{t("archivedCount", { count: archived.length })}</summary>
           {archived.map(card)}
         </details>
       )}
@@ -126,6 +149,7 @@ function SessionCard({
   actions: AgentsPanelActions;
   defaultOpen: boolean;
 }) {
+  const t = usePanelT();
   const [open, setOpen] = useState(defaultOpen);
   const state = sessionState(w);
   const readOnly = project?.status === "sealed";
@@ -141,7 +165,7 @@ function SessionCard({
     !!project && (w.cwd !== project.root || (!!branch && !DEFAULT_BRANCH.test(branch)));
   const stop = readOnly ? null : (
     <button className="panel-btn danger" onClick={() => actions.onStop(w.id)}>
-      Stop
+      {t("stop")}
     </button>
   );
   return (
@@ -153,15 +177,15 @@ function SessionCard({
         <button
           className="ap-toggle"
           aria-expanded={open}
-          aria-label={open ? `Fold ${name}` : `Unfold ${name}`}
+          aria-label={open ? t("foldSessionLabel", { name }) : t("unfoldSessionLabel", { name })}
           onClick={() => setOpen(!open)}
         >
           {open ? "▾" : "▸"}
         </button>
-        <span className={`ap-dot ss-${state}`} title={STATE_LABEL[state]} />
+        <span className={`ap-dot ss-${state}`} title={t(STATE_LABEL_KEY[state])} />
         <button
           className="ap-session-name"
-          title="Open this session"
+          title={t("openThisSessionTitle")}
           onClick={() => actions.onOpen(w.id)}
         >
           <RoleTag link={w.projectLink} name={name} />
@@ -169,8 +193,8 @@ function SessionCard({
             {name}
           </span>
           {w.awaitsUser && state === "idle" && (
-            <span className="awaits-tag" title="Waiting for your reply">
-              your turn
+            <span className="awaits-tag" title={t("waitingForReplyTitle")}>
+              {t("yourTurnTag")}
             </span>
           )}
         </button>
@@ -184,10 +208,10 @@ function SessionCard({
               <span className="clip" style={{ color: a.color }}>
                 {a.name}
               </span>
-              <span className={`ap-brief-meta as-${agentState(a)}`}>{brief(a, connected)}</span>
+              <span className={`ap-brief-meta as-${agentState(a)}`}>{brief(a, connected, t)}</span>
             </span>
           ))}
-          {tasks > 0 && <span className="ap-brief-tasks">{tasksTag(w)}</span>}
+          {tasks > 0 && <span className="ap-brief-tasks">{tasksTag(w, t)}</span>}
           {state === "working" && <span className="ap-actions">{stop}</span>}
         </div>
       )}
@@ -199,7 +223,7 @@ function SessionCard({
                 <div className="ap-where" title={w.cwd}>
                   {branch && <span className="ap-branch">{branch}</span>}
                   {w.git && w.git.dirty > 0 && (
-                    <span className="ap-dirty">{w.git.dirty} changed</span>
+                    <span className="ap-dirty">{t("gitDirtyCount", { count: w.git.dirty })}</span>
                   )}
                   <span className="ap-cwd">{shortPath(w.cwd)}</span>
                 </div>
@@ -219,7 +243,7 @@ function SessionCard({
             </div>
           )}
           <div className="ap-agents">
-            {w.agents.length === 0 && <div className="ap-none">No agents.</div>}
+            {w.agents.length === 0 && <div className="ap-none">{t("noAgents")}</div>}
             {w.agents.map((a) => (
               <Fragment key={a.id}>
                 <AgentRow
@@ -243,22 +267,22 @@ function SessionCard({
           </div>
           <footer className="ap-session-foot">
             {readOnly ? (
-              <span className="ap-readonly">Sealed · read-only</span>
+              <span className="ap-readonly">{t("sealedReadOnly")}</span>
             ) : (
               <>
                 {state !== "archived" && (
                   <button className="panel-btn ap-add" onClick={() => actions.onAddAgent(w.id)}>
-                    + Agent
+                    {t("addAgent")}
                   </button>
                 )}
                 <span className="ap-actions">
                   {tasks > 0 && (
                     <button
                       className="panel-btn danger"
-                      title="Stop the turn, every background task and the wake-ups of this session"
+                      title={t("stopEverythingTitle")}
                       onClick={() => actions.onStopAll(w.id)}
                     >
-                      Stop everything
+                      {t("stopEverything")}
                     </button>
                   )}
                   <ReportSwitch
@@ -268,7 +292,7 @@ function SessionCard({
                   />
                   {state === "archived" ? (
                     <button className="panel-btn" onClick={() => actions.onRestore(w.id)}>
-                      Restore
+                      {t("restore")}
                     </button>
                   ) : state === "working" ? (
                     stop
@@ -276,7 +300,7 @@ function SessionCard({
                     !busy &&
                     w.projectLink?.role !== "lead" && (
                       <button className="panel-btn" onClick={() => actions.onArchive(w.id)}>
-                        Archive
+                        {t("archive")}
                       </button>
                     )
                   )}
@@ -291,18 +315,18 @@ function SessionCard({
 }
 
 // An agent in a folded card: what it is doing, or how full its context is.
-function brief(a: AgentInfo, connected: boolean): string {
-  if (agentState(a) !== "idle") return stateLabel(a, connected);
+function brief(a: AgentInfo, connected: boolean, t: ReturnType<typeof usePanelT>): string {
+  if (agentState(a) !== "idle") return localizedAgentState(a, connected, t);
   return a.context ? formatTokens(a.context.tokens) : "";
 }
 
 // A folded card's background work: how much runs, and the next wake-up.
-function tasksTag(w: Workspace): string {
+function tasksTag(w: Workspace, t: ReturnType<typeof usePanelT>): string {
   const running = w.agents.reduce((n, a) => n + (a.backgroundTasks?.length ?? 0), 0);
   const wakes = w.agents.flatMap((a) => (a.wake ? [a.wake.at] : []));
   const parts: string[] = [];
-  if (running > 0) parts.push(`${running} in background`);
-  if (wakes.length > 0) parts.push(`wake in ${soon(Math.min(...wakes) - Date.now())}`);
+  if (running > 0) parts.push(t("inBackgroundCount", { count: running }));
+  if (wakes.length > 0) parts.push(t("wakeIn", { time: soon(Math.min(...wakes) - Date.now()) }));
   return parts.join(" · ");
 }
 
@@ -331,6 +355,7 @@ function AgentRow({
   onModel: (model: string) => void;
   onEffort: (effort: string) => void;
 }) {
+  const t = usePanelT();
   const state = agentState(a);
   const ctx = a.context;
   const pct = ctx && ctx.window ? Math.min(100, Math.round((ctx.tokens / ctx.window) * 100)) : null;
@@ -366,8 +391,8 @@ function AgentRow({
               {hasModelSelect ? (
                 <select
                   className="ap-model"
-                  aria-label={`${a.name}'s model`}
-                  title="Switch model; the conversation carries over"
+                  aria-label={t("agentModelLabel", { name: a.name })}
+                  title={t("switchModelTitle")}
                   value={a.model}
                   onChange={(e) => {
                     if (isCodexSetup(e.target.value)) {
@@ -384,7 +409,7 @@ function AgentRow({
                   ))}
                   {showCodexSetup && (
                     <option value={CODEX_SETUP_VALUE} className="codex-unauth-option">
-                      Codex (not signed in)
+                      {t("codexNotSignedIn")}
                     </option>
                   )}
                 </select>
@@ -404,7 +429,7 @@ function AgentRow({
                     fallback={effortOf(models, a.model).fallback}
                     value={a.effort ?? ""}
                     onChange={(level) => level && onEffort(level)}
-                    label={`${a.name}'s reasoning effort`}
+                    label={t("agentReasoningEffortLabel", { name: a.name })}
                   />
                 </>
               ) : (
@@ -420,15 +445,15 @@ function AgentRow({
             {!archived && !readOnly && (
               <div className="ap-agent-actions">
                 <button
-                  title="Clear context"
-                  aria-label={`Clear ${a.name}'s context`}
+                  title={t("clearContext")}
+                  aria-label={t("clearAgentContextLabel", { name: a.name })}
                   onClick={() => setConfirmation("clear")}
                 >
                   <Icon name="clear" />
                 </button>
                 <button
-                  title="Remove"
-                  aria-label={`Remove ${a.name}`}
+                  title={t("remove")}
+                  aria-label={t("removeAgentLabel", { name: a.name })}
                   onClick={() => setConfirmation("remove")}
                 >
                   <Icon name="close" />
@@ -438,14 +463,19 @@ function AgentRow({
           </div>
           {(archived || state !== "idle" || !connected || bg.length > 0) && (
             <div className="ap-agent-state">
-              {archived ? "archived" : stateLabel(a, connected)}
-              {bg.length > 0 && state !== "waiting" && ` · ${bg.length} in background`}
+              {archived ? t("stateArchived") : localizedAgentState(a, connected, t)}
+              {bg.length > 0 &&
+                state !== "waiting" &&
+                ` · ${t("inBackgroundCount", { count: bg.length })}`}
             </div>
           )}
           {ctx && pct !== null && (
             <div
               className="ap-context"
-              title={`${ctx.tokens.toLocaleString()} of ${ctx.window.toLocaleString()} tokens`}
+              title={t("contextTokensTitle", {
+                used: ctx.tokens.toLocaleString(),
+                total: ctx.window.toLocaleString(),
+              })}
             >
               <span className="ap-context-bar">
                 <span style={{ width: `${pct}%` }} className={pct >= 80 ? "high" : ""} />
@@ -460,13 +490,13 @@ function AgentRow({
           telemetryAction={
             confirmation === "clear" ? "confirm.clear_context" : "confirm.remove_agent"
           }
-          title={confirmation === "clear" ? `Clear ${a.name}'s context?` : `Remove ${a.name}?`}
-          body={
+          title={
             confirmation === "clear"
-              ? "The agent will start with a fresh context."
-              : "This agent will be removed from the session."
+              ? t("clearAgentContextTitle", { name: a.name })
+              : t("removeAgentTitle", { name: a.name })
           }
-          confirmLabel={confirmation === "clear" ? "Clear context" : "Remove agent"}
+          body={confirmation === "clear" ? t("clearAgentContextBody") : t("removeAgentBody")}
+          confirmLabel={confirmation === "clear" ? t("clearContext") : t("removeAgent")}
           danger
           onConfirm={confirmation === "clear" ? onClear : onRemove}
           onClose={() => setConfirmation(null)}

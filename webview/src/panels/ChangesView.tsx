@@ -2,6 +2,7 @@ import { useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from
 import { toJsxRuntime } from "hast-util-to-jsx-runtime";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import { highlightTree } from "../chat/highlight";
+import { usePanelT, type PanelMessageKey } from "../i18n/panels";
 import { FileIcon } from "./Icon";
 import { textOffset, useSelectedLines, type PickedLines } from "./selection";
 
@@ -124,12 +125,21 @@ export function changeTree(files: ChangedFile[]): ChangeDir {
   return tidy(root);
 }
 
+const STATUS_KEY: Record<ChangeStatus, PanelMessageKey> = {
+  added: "changeStatusAdded",
+  modified: "changeStatusModified",
+  deleted: "changeStatusDeleted",
+  renamed: "changeStatusRenamed",
+  untracked: "changeStatusUntracked",
+};
+
 // Lines added and removed, "binary" when git cannot count them.
 export function ChangeCount({ added, removed }: { added: number | null; removed: number | null }) {
+  const t = usePanelT();
   return (
     <span className="change-count">
       {added === null ? (
-        "binary"
+        t("binary")
       ) : (
         <>
           {added > 0 && <span className="diff-plus">+{added}</span>}{" "}
@@ -152,6 +162,7 @@ export function ChangesList({
   closed: ReadonlySet<string>;
   toggle: (folder: string) => void;
 }) {
+  const t = usePanelT();
   const n = changes.files.length;
   const tree = useMemo(() => changeTree(changes.files), [changes.files]);
   const rows: ReactNode[] = [];
@@ -185,7 +196,7 @@ export function ChangesList({
           title={f.oldPath ? `${f.oldPath} → ${f.path}` : f.path}
           onClick={() => open(f)}
         >
-          <span className={`change-status cs-${f.status}`} title={f.status}>
+          <span className={`change-status cs-${f.status}`} title={t(STATUS_KEY[f.status])}>
             {LETTER[f.status]}
           </span>
           <FileIcon name={changeName(f.path).replace(/\/$/, "")} dir={f.path.endsWith("/")} />
@@ -201,17 +212,18 @@ export function ChangesList({
       <div className="changes-head">
         {changes.base ? (
           <>
-            against <span className="changes-base">{changes.base}</span>
+            {t("changesAgainstPrefix")}
+            <span className="changes-base">{changes.base}</span>
           </>
         ) : (
-          "not committed"
+          t("changesNotCommitted")
         )}
         {" · "}
-        {n} {n === 1 ? "file" : "files"}
+        {t(n === 1 ? "fileCountOne" : "fileCountMany", { count: n })}
       </div>
       {rows}
-      {n === 0 && <div className="file-note">No changes</div>}
-      {changes.truncated && <div className="file-note">Only the first files are listed.</div>}
+      {n === 0 && <div className="file-note">{t("noChanges")}</div>}
+      {changes.truncated && <div className="file-note">{t("changesTruncated")}</div>}
     </div>
   );
 }
@@ -254,6 +266,7 @@ export function DiffView({
   lang: string | null;
   onPick?: (lines: PickedLines | null) => void;
 }) {
+  const t = usePanelT();
   const rows = useMemo(() => parseDiff(diff.diff), [diff.diff]);
   const inner = useRef<HTMLDivElement>(null);
   const read = useCallback(
@@ -287,8 +300,8 @@ export function DiffView({
   );
   // The number columns as wide as the largest number.
   const digits = String(rows.reduce((m, r) => Math.max(m, r.old ?? 0, r.new ?? 0), 0)).length;
-  if (diff.binary) return <div className="file-note">Binary file changed</div>;
-  if (rows.length === 0) return <div className="file-note">No changes in its text</div>;
+  if (diff.binary) return <div className="file-note">{t("binaryFileChanged")}</div>;
+  if (rows.length === 0) return <div className="file-note">{t("noTextChanges")}</div>;
   return (
     <div className="diff-view">
       <div
@@ -316,7 +329,7 @@ export function DiffView({
           ),
         )}
       </div>
-      {diff.truncated && <div className="file-note">Only the first part of the diff is shown.</div>}
+      {diff.truncated && <div className="file-note">{t("diffTruncated")}</div>}
     </div>
   );
 }

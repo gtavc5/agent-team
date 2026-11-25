@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { isZh } from "../i18n";
+import { tPanel, usePanelT, type PanelMessageKey } from "../i18n/panels";
 import type { AgentInfo, Workspace } from "../state/useServer";
 import { agentState } from "../workspace/agents";
 import { formatDuration } from "../format";
@@ -9,10 +11,10 @@ export interface TaskActions {
   onStopAll: (workspaceId: string) => void;
 }
 
-const TYPE_LABEL: Record<string, string> = {
-  local_bash: "shell",
-  local_agent: "agent",
-  monitor: "monitor",
+const TYPE_LABEL_KEY: Record<string, PanelMessageKey> = {
+  local_bash: "taskTypeShell",
+  local_agent: "taskTypeAgent",
+  monitor: "taskTypeMonitor",
 };
 
 // Work an agent has going on outside its turns: background commands and
@@ -27,43 +29,48 @@ export function AgentTasks({
   agent: AgentInfo;
   actions: TaskActions;
 }) {
+  const t = usePanelT();
   const now = useNow(1000);
   return (
     <div className="tp-tasks">
-      {(a.backgroundTasks ?? []).map((t) => (
-        <div key={t.id} className="tp-task">
-          <span className={`tp-type t-${t.type}`}>{TYPE_LABEL[t.type] ?? t.type}</span>
-          <span className="tp-desc" title={t.description}>
-            {t.description || t.id}
-          </span>
-          {t.since > 0 && <span className="tp-when">{elapsed(now - t.since)}</span>}
-          {t.cancellable !== false && (
-            <button
-              className="panel-btn danger tp-stop"
-              aria-label={`Stop ${t.description || t.id}`}
-              onClick={() => actions.onStopTask(w.id, a.id, t.id)}
-            >
-              Stop
-            </button>
-          )}
-        </div>
-      ))}
+      {(a.backgroundTasks ?? []).map((task) => {
+        const typeKey = TYPE_LABEL_KEY[task.type];
+        return (
+          <div key={task.id} className="tp-task">
+            <span className={`tp-type t-${task.type}`}>{typeKey ? t(typeKey) : task.type}</span>
+            <span className="tp-desc" title={task.description}>
+              {task.description || task.id}
+            </span>
+            {task.since > 0 && <span className="tp-when">{elapsed(now - task.since)}</span>}
+            {task.cancellable !== false && (
+              <button
+                className="panel-btn danger tp-stop"
+                aria-label={t("taskStopLabel", { target: task.description || task.id })}
+                onClick={() => actions.onStopTask(w.id, a.id, task.id)}
+              >
+                {t("stop")}
+              </button>
+            )}
+          </div>
+        );
+      })}
       {a.wake && (
         <div className="tp-task tp-wake">
-          <span className="tp-type t-wake">wake-up</span>
+          <span className="tp-type t-wake">{t("taskTypeWakeUp")}</span>
           <span className="tp-desc" title={a.wake.reason}>
-            {a.wake.reason || "scheduled wake-up"}
+            {a.wake.reason || t("taskScheduledWakeUp")}
           </span>
           <span className="tp-when">
-            {clock(a.wake.at)} · {a.wake.at > now ? `in ${soon(a.wake.at - now)}` : "due"}
+            {clock(a.wake.at)} ·{" "}
+            {a.wake.at > now ? t("taskWakeIn", { time: soon(a.wake.at - now) }) : t("taskWakeDue")}
           </span>
           {canCancelWake(a) && (
             <button
               className="panel-btn danger tp-stop"
-              title="A wake-up lives in the session's CLI process: cancelling closes it, and the session resumes on the next message"
+              title={t("taskCancelWakeTitle")}
               onClick={() => actions.onCancelWake(w.id, a.id)}
             >
-              Cancel
+              {t("cancel")}
             </button>
           )}
         </div>
@@ -98,9 +105,15 @@ function elapsed(ms: number): string {
 
 // A countdown to the minute; seconds only in the last one.
 export function soon(ms: number): string {
-  if (ms < 60_000) return elapsed(ms);
+  if (ms < 60_000) {
+    if (!isZh()) return elapsed(ms);
+    const secs = Math.max(0, Math.round(ms / 1000));
+    return secs < 60 ? tPanel("durationSeconds", { secs }) : tPanel("durationMinutes", { mins: 1 });
+  }
   const mins = Math.ceil(ms / 60_000);
-  return mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  return mins < 60
+    ? tPanel("durationMinutes", { mins })
+    : tPanel("durationHoursMinutes", { hours: Math.floor(mins / 60), mins: mins % 60 });
 }
 
 function clock(at: number): string {

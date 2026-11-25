@@ -1,3 +1,4 @@
+import { setServerLanguage } from "../i18n";
 import { configureTelemetry } from "../telemetry";
 import { emptyUi, receiveUi, withoutOwner, type LiveNotice } from "./extensionUi";
 import {
@@ -386,7 +387,13 @@ export interface SystemStatus {
   hostname: string;
 }
 
-export const DEFAULT_USER = { name: "You", avatar: "avatars/header.jpg" };
+export interface UserIdentity {
+  name: string;
+  avatar: string;
+  language?: string;
+}
+
+export const DEFAULT_USER: UserIdentity = { name: "You", avatar: "avatars/header.jpg" };
 
 export interface AgentPreset {
   model?: string;
@@ -640,7 +647,9 @@ export function useServer() {
             hosts: Record<string, HostConfig>;
           };
           configureTelemetry(config.telemetryEnabled === true);
-          setUser(config.user ?? DEFAULT_USER);
+          const nextUser = config.user ?? DEFAULT_USER;
+          setUser(nextUser);
+          setServerLanguage(nextUser.language);
           setPresets(config.presets ?? []);
           setModels(config.models);
           setCodexAuth((msg.codexAuth as CodexAuthState | undefined) ?? config.codexAuth ?? null);
@@ -737,10 +746,13 @@ export function useServer() {
         case "telemetry_config":
           configureTelemetry(msg.telemetryEnabled === true);
           break;
-        case "identities_update":
-          setUser(msg.user as typeof DEFAULT_USER);
+        case "identities_update": {
+          const nextUser = msg.user as UserIdentity;
+          setUser(nextUser);
+          setServerLanguage(nextUser?.language);
           setPresets(msg.presets as AgentPreset[]);
           break;
+        }
 
         case "models_update":
           setModels(msg.models as ModelOption[]);

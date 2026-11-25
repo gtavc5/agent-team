@@ -188,7 +188,10 @@ export class Server {
     this.telemetry = new TelemetryStore(baseDir, this.config.telemetry);
     applyRuntimeEnvironment(this.config.server.proxy, this.config.pi?.acp?.binary);
     this.hostRegistry = this.initHosts();
-    this.auth = new Auth(() => this.config.auth);
+    this.auth = new Auth(
+      () => this.config.auth,
+      () => this.config.user.language,
+    );
     this.git = new GitScanner(
       () => [...this.workspaces.values()].filter((w) => !w.isArchived),
       (w) =>
@@ -444,18 +447,19 @@ export class Server {
     });
 
     this.projects.showAllAwaiting();
+    const userLanguage = this.config.user.language;
     const commandsByAgent = Object.fromEntries(
       [...this.workspaces.values()].map((w) => [
         w.id,
         Object.fromEntries(
           (this.isProjectSealed(w) ? [] : [...w.agents.keys()]).map((id) => [
             id,
-            this.commandsByAgent.get(w.id)?.get(id) ?? mergeLocalCommands([]),
+            this.commandsByAgent.get(w.id)?.get(id) ?? mergeLocalCommands([], userLanguage),
           ]),
         ),
       ]),
     );
-    const commands = mergeLocalCommands([]);
+    const commands = mergeLocalCommands([], userLanguage);
     this.sendJson(ws, {
       type: "init",
       sendReceipt: true,
@@ -1176,11 +1180,31 @@ export class Server {
         }
       }
       if (this.config.user.language !== previousLanguage) {
+        const userLanguage = this.config.user.language;
         for (const workspace of this.workspaces.values()) {
           if (workspace.projectLink?.role === "lead") this.refreshLeadTools(workspace);
           else if (workspace.projectLink) {
             const tools = this.projects.toolsFor(workspace);
             for (const agent of workspace.agents.values()) agent.session.setPanelTools?.(tools);
+          }
+        }
+        this.broadcastUI({
+          type: "commands_update",
+          commands: mergeLocalCommands([], userLanguage),
+        });
+        for (const [wsId, byAgent] of this.commandsByAgent) {
+          for (const [agentId, existing] of byAgent) {
+            const commands = mergeLocalCommands(
+              existing.filter((c) => c.source !== "panel"),
+              userLanguage,
+            );
+            byAgent.set(agentId, commands);
+            this.broadcastUI({
+              type: "agent_commands_update",
+              workspaceId: wsId,
+              agentId,
+              commands,
+            });
           }
         }
       }
@@ -1838,7 +1862,7 @@ export class Server {
       return;
     }
     if (!workspace) this.commandsByAgent.set(wsId, (workspace = new Map<string, CommandInfo[]>()));
-    const commands = mergeLocalCommands(list);
+    const commands = mergeLocalCommands(list, this.config.user.language);
     workspace.set(agentId, commands);
     this.broadcastUI({ type: "agent_commands_update", workspaceId: wsId, agentId, commands });
   }
@@ -1966,6 +1990,7 @@ export class Server {
       },
       modelOptions: () => this.models,
       piConfig: () => this.piConfig(),
+      userLanguage: () => this.config.user.language,
       onSessionReplaced: (workspace, session) => {
         session.setPanelTools?.(this.projects.toolsFor(workspace));
       },

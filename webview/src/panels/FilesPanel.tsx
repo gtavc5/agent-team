@@ -14,6 +14,7 @@ import { copyText } from "../chat/clipboard";
 import { MdBlock } from "../chat/markdown";
 import { FileOpenContext, splitFileRef, WIN_DRIVE, type FileRef } from "../chat/fileRef";
 import { formatSize, utf8Length } from "../format";
+import { usePanelT } from "../i18n/panels";
 import { FileIcon, Icon } from "./Icon";
 import {
   ChangeCount,
@@ -240,6 +241,7 @@ function DirView({
   view: Extract<FileView, { kind: "dir" }>;
   open: (p: string) => void;
 }) {
+  const t = usePanelT();
   const sep = /^[A-Za-z]:\\/.test(view.path) ? "\\" : "/";
   const base = view.path.replace(/[\\/]+$/, "");
   return (
@@ -258,8 +260,8 @@ function DirView({
           {!e.dir && <span className="dir-entry-size">{formatSize(e.size)}</span>}
         </button>
       ))}
-      {view.entries.length === 0 && <div className="file-note">Empty folder</div>}
-      {view.truncated && <div className="file-note">Only the first entries are listed.</div>}
+      {view.entries.length === 0 && <div className="file-note">{t("emptyFolder")}</div>}
+      {view.truncated && <div className="file-note">{t("dirTruncated")}</div>}
     </div>
   );
 }
@@ -296,6 +298,7 @@ export function FilesPanel({
   changesOnly?: boolean;
   openFile?: (path: string) => void;
 }) {
+  const t = usePanelT();
   const [ref, setRef] = useState(target);
   const [load, setLoad] = useState<Load>({ loading: true });
   // A line to show is a line of the source, not of the rendered page.
@@ -320,7 +323,7 @@ export function FilesPanel({
     picked && (
       <button
         className="fp-btn fp-ask"
-        title="Ask about these lines in the chat"
+        title={t("askLinesTitle")}
         // Keeps the selection: the click reads it.
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => {
@@ -328,8 +331,9 @@ export function FilesPanel({
           document.getSelection()?.removeAllRanges();
         }}
       >
-        Ask · L{picked.from}
-        {picked.to > picked.from && `–${picked.to}`}
+        {picked.to > picked.from
+          ? t("askLinesRange", { from: picked.from, to: picked.to })
+          : t("askLinesSingle", { from: picked.from })}
       </button>
     );
 
@@ -413,14 +417,16 @@ export function FilesPanel({
           {(changed || !changesOnly) && (
             <button
               className="fp-btn fp-up"
-              title={changed ? "All changes" : "Files"}
+              title={changed ? t("allChangesTitle") : t("filesTitle")}
               onClick={() => (changed ? setChanged(null) : setChangesOn(false))}
             >
               <Icon name="up" />
             </button>
           )}
           <span className="fp-path" title={shown}>
-            <bdi>{changed ? changed.path : changesOnly ? (root?.label ?? top) : "Changes"}</bdi>
+            <bdi>
+              {changed ? changed.path : changesOnly ? (root?.label ?? top) : t("changesTitle")}
+            </bdi>
           </span>
           {changed ? (
             <ChangeCount added={changed.added} removed={changed.removed} />
@@ -430,7 +436,7 @@ export function FilesPanel({
           {changed && changed.status !== "deleted" && (
             <button
               className="fp-btn"
-              title="Open the file"
+              title={t("openFileTitle")}
               onClick={() => {
                 if (changesOnly) return openFile?.(shown);
                 setChangesOn(false);
@@ -438,13 +444,13 @@ export function FilesPanel({
                 open(shown);
               }}
             >
-              Open
+              {t("open")}
             </button>
           )}
           {!changesOnly && (
             <button
               className="fp-btn fp-toggle on"
-              title="Back to the files"
+              title={t("backToFilesTitle")}
               aria-pressed="true"
               onClick={() => {
                 setChangesOn(false);
@@ -456,14 +462,14 @@ export function FilesPanel({
           )}
         </div>
         <div className="fp-body">
-          {!changed && "loading" in changes && <div className="file-note">Loading…</div>}
+          {!changed && "loading" in changes && <div className="file-note">{t("loading")}</div>}
           {!changed && "error" in changes && (
             <div className="file-note file-error">{changes.error}</div>
           )}
           {!changed && "value" in changes && (
             <ChangesList changes={changes.value} open={setChanged} closed={folded} toggle={fold} />
           )}
-          {changed && "loading" in diff && <div className="file-note">Loading…</div>}
+          {changed && "loading" in diff && <div className="file-note">{t("loading")}</div>}
           {changed && "error" in diff && <div className="file-note file-error">{diff.error}</div>}
           {changed && "value" in diff && (
             <DiffView diff={diff.value} lang={languageFor(changed.path)} onPick={pick} />
@@ -477,17 +483,21 @@ export function FilesPanel({
   return (
     <div className="files-panel">
       <div className="fp-bar">
-        <button className="fp-btn fp-up" title="Parent folder" onClick={() => open(parentOf(path))}>
+        <button
+          className="fp-btn fp-up"
+          title={t("parentFolderTitle")}
+          onClick={() => open(parentOf(path))}
+        >
           <Icon name="up" />
         </button>
         {roots.length > 1 && (
           <select
             className="fp-roots"
-            aria-label="Folder"
+            aria-label={t("folderSelectLabel")}
             value={root?.path ?? ""}
             onChange={(e) => open(e.target.value)}
           >
-            {!root && <option value="">Elsewhere</option>}
+            {!root && <option value="">{t("folderElsewhere")}</option>}
             {roots.map((r) => (
               <option key={r.path} value={r.path}>
                 {r.label}
@@ -500,12 +510,12 @@ export function FilesPanel({
         </span>
         {isMarkdown && (
           <button className="fp-btn" onClick={() => setSource((v) => !v)}>
-            {source ? "Preview" : "Source"}
+            {source ? t("markdownPreview") : t("markdownSource")}
           </button>
         )}
         <button
           className="fp-btn"
-          title="Copy path"
+          title={t("copyPathTitle")}
           onClick={() => {
             void copyText(path).then((ok) => {
               if (!ok) return;
@@ -514,16 +524,16 @@ export function FilesPanel({
             });
           }}
         >
-          {copied ? "Copied" : "Copy"}
+          {copied ? t("copied") : t("copy")}
         </button>
         {view && view.kind !== "dir" && (
           <a className="fp-btn" href={raw} target="_blank" rel="noopener noreferrer">
-            Raw
+            {t("rawFile")}
           </a>
         )}
         <button
           className="fp-btn fp-toggle"
-          title="Changes against the base branch"
+          title={t("changesAgainstBaseTitle")}
           aria-pressed="false"
           onClick={() => setChangesOn(true)}
         >
@@ -531,7 +541,7 @@ export function FilesPanel({
         </button>
       </div>
       <div className="fp-body">
-        {"loading" in load && <div className="file-note">Loading…</div>}
+        {"loading" in load && <div className="file-note">{t("loading")}</div>}
         {"error" in load && <div className="file-note file-error">{load.error}</div>}
         {view?.kind === "dir" && <DirView view={view} open={open} />}
         {view?.kind === "text" &&
@@ -546,7 +556,10 @@ export function FilesPanel({
           ))}
         {view?.kind === "text" && view.truncated && (
           <div className="file-note">
-            Showing the first {formatSize(utf8Length(view.content))} of {formatSize(view.size)}.
+            {t("fileTruncated", {
+              shown: formatSize(utf8Length(view.content)),
+              total: formatSize(view.size),
+            })}
           </div>
         )}
         {view?.kind === "image" && (
@@ -556,9 +569,9 @@ export function FilesPanel({
         )}
         {view?.kind === "binary" && (
           <div className="file-note">
-            Binary file · {formatSize(view.size)} ·{" "}
+            {t("binaryFilePrefix", { size: formatSize(view.size) })}
             <a href={raw} target="_blank" rel="noopener noreferrer">
-              open raw
+              {t("openRawLink")}
             </a>
           </div>
         )}

@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "../panels/Icon";
+import { useT } from "../i18n/chat";
 import type { AgentInfo } from "../state/useServer";
 
 export function StopControl({
@@ -9,6 +10,7 @@ export function StopControl({
   busyAgents: AgentInfo[];
   onStop: (agentIds: string[]) => void;
 }) {
+  const tr = useT();
   if (busyAgents.length === 0) return null;
   if (busyAgents.length === 1) {
     const agent = busyAgents[0];
@@ -16,8 +18,8 @@ export function StopControl({
       <button
         type="button"
         className="btn-abort"
-        aria-label={`Stop ${agent.name}`}
-        title={`Stop ${agent.name}'s turn; background tasks keep going`}
+        aria-label={tr("stopAgent", { name: agent.name })}
+        title={tr("stopAgentTitle", { name: agent.name })}
         onClick={() => onStop([agent.id])}
       >
         <Icon name="stop" />
@@ -34,6 +36,7 @@ function StopPopover({
   busyAgents: AgentInfo[];
   onStop: (agentIds: string[]) => void;
 }) {
+  const tr = useT();
   const id = useId();
   const [mode, setMode] = useState<"hover" | "pinned" | null>(null);
   const root = useRef<HTMLDivElement>(null);
@@ -110,7 +113,7 @@ function StopPopover({
         ref={trigger}
         type="button"
         className="btn-abort"
-        aria-label={`Stop running agents (${count})`}
+        aria-label={tr("stopRunningAgents", { count })}
         aria-expanded={!!mode}
         aria-controls={mode ? id : undefined}
         onClick={() => {
@@ -130,15 +133,15 @@ function StopPopover({
             id={id}
             className="stop-actions"
             role="group"
-            aria-label="Stop running turns"
+            aria-label={tr("stopRunningTurns")}
           >
             {busyAgents.map((agent) => (
               <button key={agent.id} type="button" onClick={() => stop([agent])}>
-                Stop {agent.name}
+                {tr("stopAgent", { name: agent.name })}
               </button>
             ))}
             <button type="button" onClick={() => stop(busyAgents)}>
-              Stop all ({count})
+              {tr("stopAll", { count })}
             </button>
           </div>
         </div>

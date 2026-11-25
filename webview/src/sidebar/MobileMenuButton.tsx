@@ -1,3 +1,4 @@
+import { useWorkspaceT } from "../i18n/workspace";
 import { describeAttention, type AttentionSummary } from "./attention";
 
 export function MobileMenuButton({
@@ -7,11 +8,14 @@ export function MobileMenuButton({
   attention: AttentionSummary;
   onClick: () => void;
 }) {
+  const tr = useWorkspaceT();
   return (
     <button
       type="button"
       className="mobile-menu-btn"
-      aria-label={`Open workspace menu: ${describeAttention(attention, "background session")}`}
+      aria-label={tr("openWorkspaceMenu", {
+        attention: describeAttention(attention, "background session"),
+      })}
       onClick={onClick}
     >
       <span aria-hidden="true">&#9776;</span>
