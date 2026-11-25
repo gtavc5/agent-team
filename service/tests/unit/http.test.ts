@@ -29,6 +29,17 @@ let port: number;
 let authConfig: AuthConfig | null;
 let handler: HttpHandler;
 
+const proxyHealth = {
+  totalRequests: 4,
+  activeH2Sessions: 1,
+  lastPingRttMs: null,
+  connectionReuseRate: 0.5,
+  retryRecoveries: 1,
+  circuitBreakerTrips: 0,
+  perModel: { "test-model": 3 },
+  errors: { timeout: 1 },
+};
+
 const AUTH: AuthConfig = {
   username: "u",
   password: "p",
@@ -102,7 +113,11 @@ beforeAll(async () => {
     undefined,
     undefined,
     undefined,
-    () => ({ facts: { pi: { value: "/test/pi", source: "instance pin" } }, issues: [] }),
+    () => ({
+      facts: { pi: { value: "/test/pi", source: "instance pin" } },
+      issues: [],
+      ccpaProxy: proxyHealth,
+    }),
   );
   server = http.createServer((req, res) => handler.handle(req, res));
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -261,11 +276,15 @@ it("serves the same runtime facts in both formats only after authentication", as
     expect((await request(`/api/diagnostics${suffix}`)).status).toBe(302);
     const response = await request(`/api/diagnostics${suffix}`, { headers });
     expect(response.headers["cache-control"]).toBe("no-store");
-    if (suffix) expect(response.body.toString()).toBe("pi: /test/pi [instance pin]");
-    else
+    if (suffix) {
+      expect(response.body.toString()).toContain("pi: /test/pi [instance pin]");
+      expect(response.body.toString()).toContain("ccpaProxy.totalRequests: 4");
+      expect(response.body.toString()).toContain('ccpaProxy.perModel: {"test-model":3}');
+    } else
       expect(JSON.parse(response.body.toString())).toMatchObject({
         facts: { pi: { value: "/test/pi", source: "instance pin" } },
         issues: [],
+        ccpaProxy: proxyHealth,
       });
   }
 });

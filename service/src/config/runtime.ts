@@ -5,10 +5,21 @@ export class RuntimeConfigError extends Error {}
 
 const proxyKeys = ["http_proxy", "https_proxy", "no_proxy"] as const;
 export type ProxyConfig = Partial<Record<(typeof proxyKeys)[number], string>>;
+export interface AcpProxyConfig {
+  enabled?: boolean;
+  upstream_url?: string;
+  port?: number;
+  ping_interval_ms?: number;
+  ping_timeout_ms?: number;
+  max_retries?: number;
+  retry_budget_ms?: number;
+}
+
 export interface AcpConfig {
   binary?: string;
   permissions?: "default" | "auto_edit" | "yolo";
   runtime_updates?: "automatic" | "notify" | "manual";
+  proxy?: AcpProxyConfig;
 }
 
 function table(input: unknown, name: string): Record<string, unknown> {
@@ -35,10 +46,56 @@ export function readProxy(input: unknown): ProxyConfig | undefined {
   return proxy;
 }
 
+const maxTimerMs = 2_147_483_647;
+const acpProxyIntegerBounds = {
+  port: [0, 65_535],
+  ping_interval_ms: [1, maxTimerMs],
+  ping_timeout_ms: [1, maxTimerMs],
+  max_retries: [0, 1],
+  retry_budget_ms: [1, maxTimerMs],
+} as const;
+
+function readAcpProxy(input: unknown): AcpProxyConfig | undefined {
+  if (input === undefined) return undefined;
+  const config: AcpProxyConfig = {};
+  const raw = table(input, "pi.acp.proxy");
+  if (Object.getPrototypeOf(raw) !== Object.prototype)
+    throw new RuntimeConfigError("Expected [pi.acp.proxy] table");
+  for (const [key, value] of Object.entries(raw)) {
+    if (key === "enabled") {
+      if (typeof value !== "boolean")
+        throw new RuntimeConfigError("pi.acp.proxy.enabled must be a boolean");
+      config.enabled = value;
+    } else if (key === "upstream_url") {
+      if (
+        typeof value !== "string" ||
+        /[\r\n\0]/.test(value) ||
+        !/^https?:\/\/[^\s/@?#\\]+\/?$/i.test(value) ||
+        !URL.canParse(value)
+      )
+        throw new RuntimeConfigError("pi.acp.proxy.upstream_url must be an HTTP(S) origin");
+      config.upstream_url = new URL(value).origin;
+    } else if (Object.hasOwn(acpProxyIntegerBounds, key)) {
+      const integerKey = key as keyof typeof acpProxyIntegerBounds;
+      const [min, max] = acpProxyIntegerBounds[integerKey];
+      if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max)
+        throw new RuntimeConfigError(
+          `pi.acp.proxy.${integerKey} must be an integer from ${min} to ${max}`,
+        );
+      config[integerKey] = value;
+    } else {
+      throw new RuntimeConfigError("Unsupported key in [pi.acp.proxy]");
+    }
+  }
+  return config;
+}
+
 export function readAcp(input: unknown): AcpConfig | undefined {
   if (input === undefined) return undefined;
   const raw = table(input, "pi.acp");
-  if (Object.keys(raw).some((k) => !["permissions", "runtime_updates", "binary"].includes(k)))
+  if (
+    Object.keys(raw).some((k) => !["permissions", "runtime_updates", "binary", "proxy"].includes(k))
+  )
     throw new RuntimeConfigError("Unsupported key in [pi.acp]");
   const { permissions, runtime_updates, binary } = raw;
   if (
@@ -60,7 +117,8 @@ export function readAcp(input: unknown): AcpConfig | undefined {
     (typeof binary !== "string" || !path.isAbsolute(binary) || /[\r\n\0]/.test(binary))
   )
     throw new RuntimeConfigError("pi.acp.binary must be an absolute executable path");
-  return { binary, permissions, runtime_updates };
+  const proxy = readAcpProxy(raw.proxy);
+  return { binary, permissions, runtime_updates, ...(proxy && { proxy }) };
 }
 
 export function applyRuntimeEnvironment(proxy?: ProxyConfig, binary?: string) {

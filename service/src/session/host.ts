@@ -125,6 +125,7 @@ export class LocalHost implements Host {
       codex: (limits: RateLimitSnapshot) => void;
     },
     private readonly usageRecorder?: UsageRecorder,
+    private readonly ccpaProxyUrl?: () => string | undefined,
   ) {
     this.id = id;
     this.label = label;
@@ -171,7 +172,11 @@ export class LocalHost implements Host {
     } else if (config.backend === "pi") {
       session = new PiSession(
         { ...config, agentId },
-        { panelHttp: this.getPanelHttp(), recordUsage: recorder?.recordUsage },
+        {
+          panelHttp: this.getPanelHttp(),
+          recordUsage: recorder?.recordUsage,
+          ccpaProxyUrl: this.ccpaProxyUrl?.(),
+        },
       );
     } else {
       throw new Error(`Backend "${config.backend ?? "unknown"}" cannot create new sessions`);
@@ -216,7 +221,11 @@ export class LocalHost implements Host {
     } else if (state.config.backend === "pi") {
       session = PiSession.fromState(
         { ...state, config: { ...state.config, agentId } },
-        { panelHttp: this.getPanelHttp(), recordUsage: recorder?.recordUsage },
+        {
+          panelHttp: this.getPanelHttp(),
+          recordUsage: recorder?.recordUsage,
+          ccpaProxyUrl: this.ccpaProxyUrl?.(),
+        },
       );
     } else {
       session = new ReadOnlyLegacySession(state);
@@ -229,7 +238,7 @@ export class LocalHost implements Host {
     const agentId = `model-catalog-${Math.random().toString(36).slice(2)}`;
     const session = new PiSession(
       { ...config, agentId },
-      { catalogOnly: true, panelHttp: this.getPanelHttp() },
+      { catalogOnly: true, panelHttp: this.getPanelHttp(), ccpaProxyUrl: this.ccpaProxyUrl?.() },
     );
     this.sessions.set(agentId, session);
     try {

@@ -1665,6 +1665,26 @@ describe("PiSession dispatch and stream state", () => {
     expect(h.done).toHaveBeenCalledTimes(1);
   });
 
+  it.each([undefined, "https://override.test", ""])(
+    "sets the CCPA proxy only for the Pi child when the endpoint override is %s",
+    async (override) => {
+      const endpoint = "http://127.0.0.1:12345";
+      vi.stubEnv("AGY_ACP_CCPA_BASE_URL", override);
+      vi.stubEnv("NO_PROXY", "upper.test,localhost");
+      vi.stubEnv("no_proxy", "lower.test, 127.0.0.1");
+      const { session, factory } = harness({ options: { ccpaProxyUrl: endpoint } });
+      await session.ensureStarted();
+      expect(factory.mock.calls[0][0].env).toMatchObject({
+        AGY_ACP_CCPA_BASE_URL: override ?? endpoint,
+        NO_PROXY: "upper.test,localhost,127.0.0.1",
+        no_proxy: "lower.test,127.0.0.1,localhost",
+      });
+      expect(process.env.AGY_ACP_CCPA_BASE_URL).toBe(override);
+      expect(process.env.NO_PROXY).toBe("upper.test,localhost");
+      expect(process.env.no_proxy).toBe("lower.test, 127.0.0.1");
+    },
+  );
+
   it("starts a top-level session with no Panel tools even from a nested Pi shell", async () => {
     const nested = [
       "PI_SUBAGENT_CHILD",

@@ -23,11 +23,12 @@ export type PiRuntimeSessionConfig = Pick<
 >;
 
 export function piSessionConfig(config: AppConfig): PiRuntimeSessionConfig {
+  const { proxy: _proxy, ...acp } = config.pi?.acp ?? {};
   return {
     piPackages: config.pi?.packages ? [...config.pi.packages] : undefined,
     piExcludePackages: config.pi?.exclude_packages ? [...config.pi.exclude_packages] : undefined,
     piOffline: config.pi?.offline,
-    piAcp: config.pi?.acp ? { ...config.pi.acp } : undefined,
+    piAcp: config.pi?.acp ? acp : undefined,
   };
 }
 

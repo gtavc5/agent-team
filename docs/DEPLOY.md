@@ -48,6 +48,21 @@ Catalog probes use Pi's offline mode. If ACP is loaded but its runtime is missin
 
 YAAT manages `permissions` and `runtimeUpdates` in its own `pi-agent-home/antigravity-acp-provider/config.json`, not the host profile. Defaults are `yolo` (commands and edits without confirmation) and `manual` (no automatic runtime upgrades). To request confirmation, set `[pi.acp].permissions = "default"`. With a custom runtime, diagnostics report enforcement as **unverified**. Configure outbound proxies in `[server.proxy]`; see `config.example.toml`. Restart the service after changing these ACP or proxy settings.
 
+### Standalone CCPA proxy
+
+Build with `npm run build -w service`, then run the proxy in the foreground:
+
+```bash
+node dist/ccpa-proxy.js --port 18080 --base-dir ./proxy-state
+# Equivalent: npm run ccpa-proxy -- --port 18080 --base-dir ./proxy-state
+```
+
+Run the printed `export AGY_ACP_CCPA_BASE_URL=http://127.0.0.1:<port>` in the terminal that launches `pi`. If that terminal uses an HTTP proxy, include `127.0.0.1,localhost` in `NO_PROXY` and `no_proxy`. `GET /__health` shows local request statistics. YAAT starts its own loopback proxy by default and supplies its URL to Pi unless the child environment already sets `AGY_ACP_CCPA_BASE_URL`; use `[pi.acp.proxy].enabled = false` to disable it. The proxy connects directly to the configured upstream origin, so a system tunnel works but environment HTTP forward proxies are not used for that leg.
+
+Omit `--port` (or use `0`) to select an available port. `--upstream-url` overrides the default upstream. If `--base-dir` is omitted, the proxy uses `AGENT_TEAM_BASE_DIR` or the current working directory. Stop it with Ctrl-C or `SIGTERM` to flush queued metrics. The bundled CLI only needs Node.js at runtime and does not start the YAAT panel.
+
+Use a separate base directory per proxy instance. Request metrics are appended to `.agent-team/ccpa-proxy-metrics.jsonl` under that directory, with mode `0600` and one rotated `.1` file (8 MiB per file). Logging is best effort: rows can be dropped when the write queue fills or disk writes fail. Health request statistics summarize the latest 1,024 requests in memory, independent of the log.
+
 ---
 
 ## Configuration (`config.toml`)

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import type { AppConfig } from "./config";
+import type { ProxyHealth } from "../acp-proxy/metrics";
 import { inspectPiAcpProfile } from "../session/pi-agent-home";
 import type { ModelDiscoverySnapshot } from "../server/model-discovery";
 import { inspectAcpRuntime, ACP_PREPARE_STEP } from "../session/acp-readiness";
@@ -18,6 +19,7 @@ export interface DiagnosticIssue {
 export interface RuntimeReport {
   facts: Record<string, { value: string; source: string }>;
   issues: DiagnosticIssue[];
+  ccpaProxy: ProxyHealth | null;
 }
 
 export function executable(file: string): boolean {
@@ -59,6 +61,7 @@ export function runtimeReport(
       },
     },
     issues: [],
+    ccpaProxy: null,
   };
   for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]) {
     const source = env[key.toLowerCase()] ? key.toLowerCase() : env[key] ? key : undefined;
@@ -75,8 +78,10 @@ export function serviceReport(
   config: AppConfig,
   discovery: ModelDiscoverySnapshot,
   env = process.env,
+  ccpaProxy: ProxyHealth | null = null,
 ): RuntimeReport {
   const report = runtimeReport(baseDir, env);
+  report.ccpaProxy = ccpaProxy;
   const acp = inspectAcpRuntime(env);
   const settings = config.pi?.acp;
   report.facts.models = {
@@ -156,6 +161,11 @@ export function serviceReport(
 export function formatReport(report: RuntimeReport): string {
   return [
     ...Object.entries(report.facts).map(([key, fact]) => `${key}: ${fact.value} [${fact.source}]`),
+    ...(report.ccpaProxy
+      ? Object.entries(report.ccpaProxy).map(
+          ([key, value]) => `ccpaProxy.${key}: ${JSON.stringify(value)}`,
+        )
+      : ["ccpaProxy: not running"]),
     ...report.issues.map(
       (issue) =>
         `\n[${issue.stage}/${issue.code}] ${issue.value ?? "—"} (${issue.source})\n${issue.impact}\nNext: ${issue.nextStep}`,

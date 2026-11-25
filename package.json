@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "build": "npm run build -w webview && npm run build -w service",
+    "ccpa-proxy": "node dist/ccpa-proxy.js",
     "test:fast": "npm run test:fast -w service && npm run test:fast -w webview",
     "test": "npm run test -w service && npm run test -w webview",
     "test:browser": "npm run test:browser -w webview",

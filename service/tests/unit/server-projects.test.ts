@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
+import * as net from "node:net";
 import { DeployControl } from "../../src/server/deploy-control";
 import * as path from "path";
 import WebSocket from "ws";
@@ -11,7 +12,13 @@ import type { Objective } from "../../src/project/objectives";
 
 import { Server } from "../../src/server/server";
 import { ProjectManager } from "../../src/project/manager";
-import { closeHistory, historyOf, saveIndex, saveWorkspace } from "../../src/workspace/state";
+import {
+  closeHistory,
+  historyOf,
+  readWorkspaceMetadata,
+  saveIndex,
+  saveWorkspace,
+} from "../../src/workspace/state";
 import type { PiAvailableModel, PromptEnvelope, SessionConfig } from "../../src/session/types";
 import * as codex from "../../src/session/codex";
 import * as acpReadiness from "../../src/session/acp-readiness";
@@ -369,6 +376,52 @@ const readState = (base: string, id: string): WorkspaceState => {
   closeHistory(base);
   return { ...meta, messages };
 };
+
+describe("server ACP proxy lifecycle", () => {
+  it.each([true, false])("reports proxy health when enabled is %s", async (enabled) => {
+    const { base, web } = seed();
+    if (!enabled)
+      fs.appendFileSync(path.join(base, "config.toml"), "\n[pi.acp.proxy]\nenabled = false\n");
+    vi.spyOn(LocalHost.prototype, "discoverPiModels").mockResolvedValue([]);
+    const server = new Server(0, base, web);
+    try {
+      await server.controlReady;
+      const port = await server.listening;
+      const response = await fetch(`http://127.0.0.1:${port}/api/diagnostics`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ccpaProxy: enabled ? { totalRequests: 0, activeH2Sessions: 0 } : null,
+      });
+    } finally {
+      await server.close();
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
+  it("refuses to start on a busy proxy port without rewriting the workspace index", async () => {
+    const { base, web } = seed();
+    const occupied = net.createServer();
+    await new Promise<void>((resolve) => occupied.listen(0, "127.0.0.1", resolve));
+    try {
+      const before = [...readWorkspaceMetadata(base)].map((workspace) => workspace.id);
+      expect(before.length).toBeGreaterThan(0);
+      const { port } = occupied.address() as net.AddressInfo;
+      fs.appendFileSync(path.join(base, "config.toml"), `\n[pi.acp.proxy]\nport = ${port}\n`);
+      const catalog = vi.spyOn(LocalHost.prototype, "discoverPiModels").mockResolvedValue([]);
+      const server = new Server(0, base, web);
+      try {
+        await expect(server.controlReady).rejects.toThrow();
+        expect(catalog).not.toHaveBeenCalled();
+      } finally {
+        await server.close();
+      }
+      expect([...readWorkspaceMetadata(base)].map((workspace) => workspace.id)).toEqual(before);
+    } finally {
+      await new Promise<void>((resolve) => occupied.close(() => resolve()));
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+});
 
 describe("server restart with projects", () => {
   it("persists a local model change before sending its receipt and correlates malformed-image errors", async () => {

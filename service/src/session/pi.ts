@@ -82,6 +82,7 @@ export interface PiSessionOptions {
   panelHttp?: PanelHttpServer;
   rpcFactory?: (options: PiRpcSpawnOptions) => PiRpcClient;
   env?: NodeJS.ProcessEnv;
+  ccpaProxyUrl?: string;
   piBinary?: string;
   piArgs?: string[];
   interruptTimeoutMs?: number;
@@ -924,6 +925,23 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         ...this.options.env,
         ...this.home?.env,
       });
+      if (this.options.ccpaProxyUrl !== undefined) {
+        env.AGY_ACP_CCPA_BASE_URL ??= this.options.ccpaProxyUrl;
+        const bypass = (value: string | undefined) =>
+          [
+            ...new Set([
+              ...(value ?? "")
+                .split(",")
+                .map((entry) => entry.trim())
+                .filter(Boolean),
+              "localhost",
+              "127.0.0.1",
+            ]),
+          ].join(",");
+        const { NO_PROXY, no_proxy } = env;
+        env.NO_PROXY = bypass(NO_PROXY ?? no_proxy);
+        env.no_proxy = bypass(no_proxy ?? NO_PROXY);
+      }
       // A Hub session is a top-level Pi, even when Hub itself was started from a child shell.
       for (const name of [
         "PI_SUBAGENT_CHILD",

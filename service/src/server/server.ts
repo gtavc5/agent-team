@@ -71,6 +71,7 @@ import {
 import { SystemMonitor } from "./system";
 import { serviceReport } from "../config/diagnostics";
 import { applyRuntimeEnvironment, RuntimeConfigError } from "../config/runtime";
+import { startCcpaProxy, type CcpaProxy } from "../acp-proxy/proxy";
 
 function stripEventsInnerEvents(events: StreamEvent[]): StreamEvent[] {
   return events.map((e) => {
@@ -113,6 +114,8 @@ export class Server {
   private models: ModelOption[] = availableModelOptions([], { codexAuthenticated: false });
   private staleLeadToolWorkspaces = new Set<string>();
   private readonly restoring: Promise<void>;
+  private workspaceStateLoaded = false;
+  private ccpaProxy?: CcpaProxy;
   private closing = false;
   private closePromise?: Promise<void>;
   private readonly deploy?: DeployControl;
@@ -226,7 +229,6 @@ export class Server {
             if (!w.isArchived) for (const id of w.agents.keys()) w.dequeueNext(id);
         },
       );
-    this.watchConfig();
 
     this.http = new HttpHandler(
       this.auth,
@@ -241,7 +243,14 @@ export class Server {
         const project = this.workspaces.get(id)?.projectLink?.projectId;
         return project && this.projects.paths(project)?.notesDir;
       },
-      () => serviceReport(baseDir, this.config, this.modelDiscoverySnapshot()),
+      () =>
+        serviceReport(
+          baseDir,
+          this.config,
+          this.modelDiscoverySnapshot(),
+          process.env,
+          this.ccpaProxy?.health() ?? null,
+        ),
       this.telemetry,
     );
     this.httpServer = http.createServer((req, res) => this.http.handle(req, res));
@@ -256,7 +265,7 @@ export class Server {
     this.heartbeatTimer = setInterval(() => this.sweepDeadClients(), HEARTBEAT_INTERVAL_MS);
     this.checkAcpQuotaReadiness();
 
-    this.restoring = this.restoreState().finally(() => {
+    this.restoring = this.startRuntime().finally(() => {
       this.restored = true;
     });
     // The search index catches up with the history in the background.
@@ -268,8 +277,6 @@ export class Server {
     this.branchTimer = setInterval(() => {
       void this.git.scan();
     }, 3000);
-    void this.git.scan();
-    this.sweepArchives();
     this.archiveTimer = setInterval(() => this.sweepArchives(), 3600_000);
 
     const host = process.env.AGENT_TEAM_HOST || "0.0.0.0";
@@ -298,8 +305,29 @@ export class Server {
         );
       };
       fs.watchFile(bootFence, { interval: 250 }, releaseFence);
-      void this.listening.then(releaseFence);
+      void this.listening.then(releaseFence, () => undefined);
     }
+  }
+
+  private async startRuntime(): Promise<void> {
+    const proxy = this.startupPiAcp?.proxy;
+    if (proxy?.enabled !== false) {
+      this.ccpaProxy = await startCcpaProxy({
+        baseDir: this.baseDir,
+        upstreamUrl: proxy?.upstream_url,
+        port: proxy?.port,
+        pingIntervalMs: proxy?.ping_interval_ms,
+        pingTimeoutMs: proxy?.ping_timeout_ms,
+        maxRetries: proxy?.max_retries,
+        retryBudgetMs: proxy?.retry_budget_ms,
+      });
+    }
+    if (this.closing) return;
+    this.watchConfig();
+    const restoring = this.restoreState();
+    void this.git.scan();
+    this.sweepArchives();
+    await restoring;
   }
 
   private get dispatchAllowed(): boolean {
@@ -332,6 +360,7 @@ export class Server {
             recordUsage: (observation) => recordUsage(this.baseDir, observation),
             recordJourney: (event) => recordJourney(this.baseDir, event),
           },
+          () => this.ccpaProxy?.url,
         ),
       );
     }
@@ -1403,6 +1432,7 @@ export class Server {
       const tools = this.projects.toolsFor(workspace);
       if (tools) for (const a of workspace.agents.values()) a.session.setPanelTools?.(tools);
     }
+    this.workspaceStateLoaded = true;
     for (const workspace of this.workspaces.values()) {
       if (!workspace.messagesLoaded && !historyOf(this.baseDir).hasUnfinishedDispatch(workspace.id))
         continue;
@@ -1698,9 +1728,10 @@ export class Server {
   }
 
   private piConfig() {
+    const { proxy: _proxy, ...acp } = this.startupPiAcp ?? {};
     return {
       ...piSessionConfig(this.config),
-      piAcp: this.startupPiAcp ? { ...this.startupPiAcp } : undefined,
+      piAcp: this.startupPiAcp ? acp : undefined,
     };
   }
 
@@ -2007,11 +2038,15 @@ export class Server {
         console.error(`[close] ${ws.id}:`, e);
       }
     }
-    this.persistAll();
+    // A failed startup must not replace the on-disk index with an empty one.
+    if (this.workspaceStateLoaded) this.persistAll();
     await Promise.allSettled([...this.workspaces.values()].map((ws) => ws.dispose()));
     const hosts = await Promise.allSettled(
       this.hostRegistry.getAll().map((host) => Promise.resolve(host.close?.())),
     );
+    await this.ccpaProxy
+      ?.close()
+      .catch((error: unknown) => console.error("[close] ACP proxy shutdown failed", error));
     await this.history.close();
     closeHistory(this.baseDir);
     for (const ws of this.uiClients) ws.terminate();

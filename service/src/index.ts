@@ -52,9 +52,15 @@ function serve() {
     target,
     transaction && existsSync(transaction) ? transaction : undefined,
   );
-  void server.controlReady.catch((error: unknown) =>
-    console.error("Deploy control unavailable:", error),
-  );
+  void server.controlReady.catch((error: unknown) => {
+    void server.listening.then(
+      () => console.error("Deploy control unavailable:", error),
+      (startupError: unknown) => {
+        console.error("Service startup failed:", startupError);
+        void shutdown(1);
+      },
+    );
+  });
 
   const collect = () =>
     void refreshUsage(baseDir).catch(() => console.warn("[usage] ACP reader unavailable"));
