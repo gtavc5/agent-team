@@ -3353,15 +3353,45 @@ button.quote-bar-content:focus-visible {
   gap: 4px;
 }
 .usage-pages .btn-secondary {
-  padding-inline: 7px;
+  min-height: 32px;
+  padding-inline: 10px;
+}
+.usage-pages .usage-page-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+.usage-pages .usage-page-button .icon {
+  display: block;
 }
 .usage-pages input {
   width: 4.5em;
-  padding: 4px;
+  height: 32px;
+  padding: 4px 6px;
   border: 1px solid var(--border-strong);
   border-radius: 4px;
   background: var(--bg-tertiary);
   color: var(--text-primary);
+}
+.usage-pages .btn-secondary:hover:not(:disabled) {
+  border-color: var(--text-muted);
+}
+.usage-pages .btn-secondary:focus-visible,
+.usage-pages input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.usage-pages .btn-secondary:disabled,
+.usage-pages input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.usage-pages .btn-secondary:disabled {
+  background: transparent;
 }
 .usage-pages > span {
   margin-inline-end: 4px;

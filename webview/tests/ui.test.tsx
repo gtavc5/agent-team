@@ -753,9 +753,10 @@ describe("message status row and timestamps", () => {
         agents={[agent]}
       />,
     );
-    expect(container.querySelector(".ctx-chip")?.getAttribute("title")).toBe(
-      "Context estimate: 449 / 272,000 tokens",
-    );
+    const chip = container.querySelector(".ctx-chip")!;
+    expect(chip.getAttribute("title")).toBe("Context estimate: 449 / 272,000 tokens");
+    expect(chip.textContent).toBe("ctx 449 / 272k · 0%");
+    expect(chip.textContent).not.toContain("~");
     rerender(<MessageItem msg={{ ...base, context: null }} agents={[agent]} />);
     expect(container.querySelector(".ctx-chip")?.textContent).toBe("ctx unknown");
     expect(container.querySelector(".ctx-bar")).toBeNull();

@@ -188,6 +188,36 @@ describe("AgentsPanel", () => {
     expect(a.onStop).toHaveBeenCalledWith("w1");
   });
 
+  it("shows estimated context without a tilde in folded and expanded cards", () => {
+    const estimated = ws("estimated", {
+      agents: [
+        agent("a", {
+          context: { tokens: 225_000, window: 1_000_000, estimated: true },
+        }),
+      ],
+    });
+    const { container } = render(
+      <AgentsPanel
+        sessions={[estimated]}
+        project={undefined}
+        activeWsId="estimated"
+        connected
+        models={[]}
+        actions={actions()}
+        overview
+      />,
+    );
+    const brief = container.querySelector(".ap-brief-meta")!;
+    expect(brief.textContent).toBe("225k");
+    expect(brief.textContent).not.toContain("~");
+
+    fireEvent.click(container.querySelector(".ap-toggle")!);
+    const context = container.querySelector(".ap-context")!;
+    expect(context.textContent).toBe("225k / 1M");
+    expect(context.textContent).not.toContain("~");
+    expect(context.getAttribute("title")).toBe("Estimate: 225,000 of 1,000,000 tokens");
+  });
+
   it("writes a task's markdown out: its code and bold, its lines run together", () => {
     const md: Project = {
       ...project,

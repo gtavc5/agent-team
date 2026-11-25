@@ -6,6 +6,7 @@ import type {
   UsageOverview as OverviewData,
 } from "../../../shared/usage";
 import { DialogFrame } from "../workspace/DialogFrame";
+import { Icon } from "../panels/Icon";
 import {
   count,
   priceLabel,
@@ -628,19 +629,23 @@ export function UsageDashboard({
             </span>
             <button
               type="button"
-              className="btn-secondary"
+              className="btn-secondary usage-page-button"
+              aria-label="First"
+              title="First page"
               disabled={!journey || journey.page <= 1}
               onClick={() => goToPage(1)}
             >
-              First
+              <Icon name="first" />
             </button>
             <button
               type="button"
-              className="btn-secondary"
+              className="btn-secondary usage-page-button"
+              aria-label="Previous"
+              title="Previous page"
               disabled={!journey || journey.page <= 1}
               onClick={() => journey && goToPage(journey.page - 1)}
             >
-              Previous
+              <Icon name="previous" />
             </button>
             <input
               aria-label="Page number"
@@ -657,19 +662,23 @@ export function UsageDashboard({
             </button>
             <button
               type="button"
-              className="btn-secondary"
+              className="btn-secondary usage-page-button"
+              aria-label="Next"
+              title="Next page"
               disabled={!journey || journey.page >= lastPage}
               onClick={() => journey && goToPage(journey.page + 1)}
             >
-              Next
+              <Icon name="next" />
             </button>
             <button
               type="button"
-              className="btn-secondary"
+              className="btn-secondary usage-page-button"
+              aria-label="Last"
+              title="Last page"
               disabled={!journey || journey.page >= lastPage}
               onClick={() => goToPage(lastPage)}
             >
-              Last
+              <Icon name="last" />
             </button>
           </form>
         )}

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { App } from "../src/App";
+import { ICONS } from "../src/panels/Icon";
 import { formatRecordTime, UsageDashboard } from "../src/usage/UsageDashboard";
 import { FakeSocket } from "./fakeSocket";
 import {
@@ -194,6 +195,20 @@ it("pins all numbered navigation, then explicitly refreshes a new first page", a
   const query = () => usageParams(request.mock.lastCall![0]);
   expect(button("First").disabled).toBe(true);
   expect(button("Previous").disabled).toBe(true);
+  for (const [name, icon] of [
+    ["First", "first"],
+    ["Previous", "previous"],
+    ["Next", "next"],
+    ["Last", "last"],
+  ] as const) {
+    const control = button(name);
+    expect(control.textContent).toBe("");
+    expect(control.title).toBe(`${name} page`);
+    const svg = control.querySelector("svg.icon")!;
+    expect(svg.getAttribute("viewBox")).toBe("0 0 16 16");
+    expect(svg.getAttribute("aria-hidden")).toBe("true");
+    expect(svg.querySelector("path")?.getAttribute("d")).toBe(ICONS[icon]);
+  }
   expect(query().has("until")).toBe(false);
   const go = async (action: string, page: number, until = recordsUntil) => {
     fireEvent.click(button(action));

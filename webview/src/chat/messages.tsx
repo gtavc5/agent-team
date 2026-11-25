@@ -322,8 +322,7 @@ export function MessageStatus({ msg }: { msg: Message }) {
           <span className="ctx-bar">
             <span className="ctx-bar-fill" style={{ width: `${pct}%` }} />
           </span>
-          ctx {ctx.estimated ? "~" : ""}
-          {formatTokens(ctx.tokens)} / {formatTokens(ctx.window)} · {pct}%
+          ctx {formatTokens(ctx.tokens)} / {formatTokens(ctx.window)} · {pct}%
         </span>
       )}
     </div>
