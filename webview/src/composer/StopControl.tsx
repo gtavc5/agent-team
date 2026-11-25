@@ -7,7 +7,7 @@ export function StopControl({
   onStop,
 }: {
   busyAgents: AgentInfo[];
-  onStop: (agentId: string) => void;
+  onStop: (agentIds: string[]) => void;
 }) {
   if (busyAgents.length === 0) return null;
   if (busyAgents.length === 1) {
@@ -18,7 +18,7 @@ export function StopControl({
         className="btn-abort"
         aria-label={`Stop ${agent.name}`}
         title={`Stop ${agent.name}'s turn; background tasks keep going`}
-        onClick={() => onStop(agent.id)}
+        onClick={() => onStop([agent.id])}
       >
         <Icon name="stop" />
       </button>
@@ -32,7 +32,7 @@ function StopPopover({
   onStop,
 }: {
   busyAgents: AgentInfo[];
-  onStop: (agentId: string) => void;
+  onStop: (agentIds: string[]) => void;
 }) {
   const id = useId();
   const [mode, setMode] = useState<"hover" | "pinned" | null>(null);
@@ -68,7 +68,7 @@ function StopPopover({
     clearTimeout(timer.current);
     trigger.current?.focus();
     setMode(null);
-    for (const agent of agents) onStop(agent.id);
+    onStop(agents.map((agent) => agent.id));
   }
 
   function navigate(event: KeyboardEvent) {

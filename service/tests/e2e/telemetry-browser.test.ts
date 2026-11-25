@@ -11,6 +11,12 @@ import type { TelemetryStore } from "../../src/storage/telemetry";
 const webDir = join(__dirname, "../../../dist/webview");
 const action = "confirm.clear_context";
 
+async function summary(origin: string): Promise<ReturnType<TelemetryStore["summary"]>> {
+  return (await (await fetch(`${origin}/api/telemetry/summary`)).json()) as ReturnType<
+    TelemetryStore["summary"]
+  >;
+}
+
 it.each([true, false])(
   "real Chromium UI interaction telemetry (enabled=%s)",
   async (enabled) => {
@@ -72,13 +78,9 @@ it.each([true, false])(
       await dialog.waitFor();
       // Abandoning an open dialog does not count as an explicit cancel.
       await page.goto("about:blank");
-      const summary = async () =>
-        (await (await fetch(`${origin}/api/telemetry/summary`)).json()) as ReturnType<
-          TelemetryStore["summary"]
-        >;
       if (enabled) {
-        await expect.poll(async () => (await summary()).recentChains?.[0]?.length).toBe(10);
-        const report = await summary();
+        await expect.poll(async () => (await summary(origin)).recentChains?.[0]?.length).toBe(10);
+        const report = await summary(origin);
         expect(report.counts.filter((row) => row.action === action)).toEqual([
           { action, layout: "wide", outcome: "cancel", count: 1 },
           { action, layout: "wide", outcome: "confirm", count: 1 },
@@ -110,7 +112,7 @@ it.each([true, false])(
         );
       } else {
         expect(posts).toBe(0);
-        expect(await summary()).toMatchObject({ enabled: false, recentChains: [] });
+        expect(await summary(origin)).toMatchObject({ enabled: false, recentChains: [] });
         expect(readdirSync(dir).filter((name) => name.startsWith("telemetry.db"))).toEqual([]);
       }
     } finally {
@@ -124,3 +126,59 @@ it.each([true, false])(
   },
   60_000,
 );
+
+it("counts a real workspace switch, chat file preview and explicit Files opening separately", async () => {
+  ensureWebviewBuilt();
+  const dir = mkdtempSync(join(tmpdir(), "yaat-telemetry-browser-"));
+  let server: Server | undefined;
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+  try {
+    const seeded = seedDemo(dir, { quiet: true, writeConfig: true });
+    appendFileSync(join(dir, "config.toml"), "\n[telemetry]\nenabled = true\n");
+    server = new Server(0, dir, webDir);
+    const origin = `http://127.0.0.1:${await server.listening}`;
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    page.setDefaultTimeout(10_000);
+    await page.goto(origin);
+
+    await page.locator(".messages", { hasText: "分成两件事" }).waitFor();
+    await page.locator(".ws-group-project.active .ws-group-label").click();
+    await page.locator(".ws-archive-toggle").click();
+    await page.locator(".task-item-archived", { hasText: "parser crash" }).click();
+    const { label } = seeded.fileLinks[0];
+    await page.locator(".messages .file-ref", { hasText: label }).click();
+    const preview = page.locator(".files-panel .code-view");
+    await preview.waitFor();
+    await page.getByRole("button", { name: "Close Files", exact: true }).click();
+    await preview.waitFor({ state: "hidden" });
+    await page.locator("nav.side-rail").getByRole("button", { name: "Files", exact: true }).click();
+    await preview.waitFor();
+    await page.goto("about:blank");
+
+    const actions = [
+      "sidebar.archive_toggle",
+      "workspace.switch",
+      "chat.file_link",
+      "panel.close",
+      "panel.files",
+    ];
+    await expect
+      .poll(async () => (await summary(origin)).counts)
+      .toEqual(
+        [...actions]
+          .sort()
+          .map((action) => ({ action, layout: "wide", outcome: "trigger", count: 1 })),
+      );
+    expect(
+      (await summary(origin)).recentChains.map((chain) => chain.map((row) => row.action)),
+    ).toEqual([actions]);
+  } finally {
+    try {
+      await browser?.close();
+      await server?.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+}, 60_000);

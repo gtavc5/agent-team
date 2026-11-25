@@ -99,6 +99,16 @@ describe("server telemetry", () => {
     expect(files()).toEqual([]);
   });
 
+  it("accepts only enumerated chat actions", async () => {
+    const api = await start(true);
+    const actions = ["chat.file_link", "chat.send", "chat.stop"] as const;
+    const events = actions.map((action) => ({ ...event(Date.now(), "trigger"), action }));
+    expect((await api.post({ tab_run_id: run, events })).status).toBe(204);
+    const invalid = { ...events[0], action: "chat.unknown" };
+    expect((await api.post({ tab_run_id: run, events: [invalid] })).status).toBe(400);
+    expect(await (await api.summary()).json()).toMatchObject({ recentChains: [events] });
+  });
+
   it("announces config reloads and stops writes when switched off", async () => {
     const api = await start(true);
     const body = { tab_run_id: run, events: [event(Date.now())] };
@@ -162,6 +172,25 @@ it("preserves skewed timestamps and sorts events even if a final beacon arrives 
   ]);
 });
 
+it("keeps exactly-60-second ties together and retains only the latest ten action segments", () => {
+  const now = Date.now();
+  const steps = Array.from({ length: 11 }, (_, i) => event(now - (10 - i) * 121_000));
+  const pair = [event(steps[10].ts - 60_000), event(steps[10].ts, "confirm")];
+  store = new TelemetryStore(dir, { enabled: true, retention_days: 30 });
+  store.append({ tab_run_id: run, events: [...steps, ...pair] }, now);
+  expect(store.summary(30, now).recentChains).toEqual([
+    [pair[0], steps[10], pair[1]],
+    ...steps
+      .slice(1, 10)
+      .reverse()
+      .map((step) => [step]),
+  ]);
+  expect(store.summary(30, now).transitions).toEqual([
+    expect.objectContaining({ from_outcome: "open", to_outcome: "confirm", gap_bucket: "<2s" }),
+    expect.objectContaining({ from_outcome: "open", to_outcome: "open", gap_bucket: "10-60s" }),
+  ]);
+});
+
 it("prunes stored rows and summarizes consecutive events within each tab run", () => {
   const now = Date.now();
   const steps = [
@@ -181,7 +210,7 @@ it("prunes stored rows and summarizes consecutive events within each tab run", (
   using db = new DatabaseSync(file, { readOnly: true });
   expect(db.prepare("SELECT count(*) AS n FROM ui_events").get()).toEqual({ n: 6 });
   const summary = store.summary(30, now);
-  expect(summary.recentChains).toEqual([steps, [event(now - 65000)]]);
+  expect(summary.recentChains).toEqual([[steps[4]], steps.slice(0, 4), [event(now - 65000)]]);
   expect(summary.counts).toEqual(
     ["cancel", "confirm", "open"].map((outcome, i) => ({
       layout: "wide",

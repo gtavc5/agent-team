@@ -253,14 +253,16 @@ to YAAT maintainers or third parties; v1 has no external upload or sharing featu
 Events contain a timestamp, an ephemeral random token per page load, a narrow or
 wide layout flag, and a fixed action and outcome. They never contain chat text,
 prompts, search terms, file paths, or user, project, workspace or session IDs.
-Actions cover panel navigation, workspace selection, sidebar search focus and
-archive toggles, manual quota refresh, add dialogs, and explicit open/confirm/cancel
-for clearing context, removing an agent, or deleting a session.
+Actions cover panel navigation, changes of active workspace, sidebar search focus
+and archive toggles, manual quota refresh, add dialogs, and explicit open/confirm/cancel
+for clearing context, removing an agent, or deleting a session. Chat actions count
+file preview, send, and stop requests, not successful reads, delivery, or stops.
 
 Inspect the local JSON at `/api/telemetry/summary?days=30` (uses the panel's
 existing login). It includes counts by layout, action and outcome, common
-consecutive transitions with gap buckets, and recent ordered chains. Turning
-telemetry off stops collection and closes the database, but does not erase
+consecutive transitions with gap buckets, and up to 10 recent action segments
+(`recentChains`), split when consecutive actions in a tab are more than 60 seconds
+apart. Turning telemetry off stops collection and closes the database, but does not erase
 existing files. Retention pruning runs while telemetry is enabled.
 
 ### Environment

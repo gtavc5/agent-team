@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
-import { render, act, fireEvent } from "@testing-library/react";
+import { render, act, fireEvent, screen, within } from "@testing-library/react";
 import { App } from "../src/App";
+import * as telemetry from "../src/telemetry";
 import { AUTO_RELOAD, type AgentInfo, type Message } from "../src/state/useServer";
 
 import { FakeSocket } from "./fakeSocket";
@@ -64,7 +65,12 @@ function openSocket(
     type: "init",
     sendReceipt,
     workspaces: [workspace("w1", "w"), ...others.map((id) => workspace(id, id))],
-    config: { presets: [], models: [], commands: [], hosts: {} },
+    config: {
+      presets: [],
+      models: [AGENT.model, "claude-sonnet-4-6"].map((id) => ({ id, label: id, backend: "pi" })),
+      commands: [],
+      hosts: {},
+    },
     hosts: [],
   });
 }
@@ -95,6 +101,8 @@ const delta = (content: string) => ({
 });
 
 const composer = () => document.querySelector("textarea")!;
+const openAgents = () =>
+  fireEvent.click(document.querySelector('.side-rail [aria-label="Agents and sessions"]')!);
 const selectWorkspace = (name: string) =>
   fireEvent.click(
     [...document.querySelectorAll(".task-item")].find(
@@ -175,6 +183,77 @@ describe("render cost of a live transcript", () => {
 });
 
 describe("composer", () => {
+  it("records only validated composer submissions from Enter and the button", async () => {
+    const record = vi.spyOn(telemetry, "recordTelemetry");
+    const sock = boot([], { sendReceipt: true });
+    const sendIntents = () => record.mock.calls.filter(([action]) => action === "chat.send");
+    const sends = () => sock.frames().filter((frame) => frame.type === "send_message");
+    const enter = () => fireEvent.keyDown(composer(), { key: "Enter" });
+    fireEvent.change(composer(), { target: { value: "   " } });
+    enter();
+    expect(sendIntents()).toHaveLength(0);
+    fireEvent.change(composer(), { target: { value: "first" } });
+    enter();
+    enter(); // duplicate while the first send is waiting for its receipt
+    expect(sends()).toHaveLength(1);
+    expect(sendIntents()).toHaveLength(1);
+    sock.receive({ type: "send_receipt", requestId: sends()[0].requestId });
+    await act(async () => {});
+    fireEvent.change(composer(), { target: { value: "second" } });
+    fireEvent.click(document.querySelector(".btn-primary-slot")!);
+    expect(sends()).toHaveLength(2);
+    expect(sendIntents()).toHaveLength(2);
+  });
+
+  it("does not count Agents panel model or effort switches as composer submissions", () => {
+    const record = vi.spyOn(telemetry, "recordTelemetry");
+    const sock = boot([], { agents: [{ ...AGENT, effortLevels: ["low", "high"] }] });
+    openAgents();
+    fireEvent.change(screen.getByRole("combobox", { name: "Alice's model" }), {
+      target: { value: "claude-sonnet-4-6" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Alice's reasoning effort" }), {
+      target: { value: "high" },
+    });
+    expect(sock.frames().filter((frame) => frame.type === "send_message")).toMatchObject([
+      { content: "/model claude-sonnet-4-6" },
+      { content: "/effort high" },
+    ]);
+    expect(record).not.toHaveBeenCalledWith("chat.send");
+  });
+
+  it("counts each composer and Agents panel stop intent once", () => {
+    const record = vi.spyOn(telemetry, "recordTelemetry");
+    const sock = boot([], {
+      agents: [
+        {
+          ...AGENT,
+          state: "working",
+          backgroundTasks: [{ id: "t", type: "local_bash", description: "build", since: 0 }],
+        },
+      ],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Stop Alice" }));
+    openAgents();
+    const session = within(screen.getByRole("region", { name: "w" }));
+    for (const name of ["Stop", "Stop build", "Stop everything"]) {
+      fireEvent.click(session.getByRole("button", { name }));
+    }
+    expect(
+      sock
+        .frames()
+        .filter(
+          ({ type }) => type === "interrupt" || type === "cancel_subagent" || type === "abort",
+        ),
+    ).toEqual([
+      { type: "interrupt", workspaceId: "w1", agentId: AGENT.id },
+      { type: "interrupt", workspaceId: "w1" },
+      { type: "cancel_subagent", workspaceId: "w1", agentId: AGENT.id, taskId: "t" },
+      { type: "abort", workspaceId: "w1" },
+    ]);
+    expect(record.mock.calls.filter(([action]) => action === "chat.stop")).toHaveLength(4);
+  });
+
   it("names each agent's model in the @ list as the agent cards do", () => {
     const cursor = { ...AGENT, id: "a2", name: "Isla", model: "cursor/composer-2.5" };
     boot([], { agents: [AGENT, cursor] });
@@ -285,14 +364,18 @@ describe("composer", () => {
 });
 
 describe("search jumps", () => {
-  function searchAndOpen(sock: FakeSocket, hit: { messageId: string; timestamp: number }) {
+  function searchAndOpen(
+    sock: FakeSocket,
+    hit: { messageId: string; timestamp: number },
+    workspaceId = "w1",
+  ) {
     fireEvent.change(document.querySelector(".search-bar input")!, {
       target: { value: "needle" },
     });
     sock.receive({
       type: "search_results",
       query: "needle",
-      hits: [{ workspaceId: "w1", workspaceName: "w", snippet: "needle", ...hit }],
+      hits: [{ workspaceId, workspaceName: "w", snippet: "needle", ...hit }],
     });
     fireEvent.click(document.querySelector(".search-result-item")!);
     frame();
@@ -300,6 +383,22 @@ describe("search jumps", () => {
 
   const page = (ids: number[]): Message[] =>
     ids.map((i) => ({ ...settled(i), id: `m${i}`, timestamp: i }));
+
+  it("only counts cross-workspace jumps and closes the drawer on sidebar reselect", () => {
+    const record = vi.spyOn(telemetry, "recordTelemetry");
+    const sock = boot(page([100]), { others: ["w2"] });
+    fireEvent.click(document.querySelector(".mobile-menu-btn")!);
+    expect(document.querySelector(".sidebar-open")).not.toBeNull();
+    selectWorkspace("w");
+    expect(document.querySelector(".sidebar-open")).toBeNull();
+    const hit = { messageId: "m100", timestamp: 100 };
+    searchAndOpen(sock, hit);
+    expect(record).not.toHaveBeenCalledWith("workspace.switch");
+    searchAndOpen(sock, hit, "w2");
+    expect(record.mock.calls.filter(([action]) => action === "workspace.switch")).toEqual([
+      ["workspace.switch"],
+    ]);
+  });
 
   it("is dropped when the reader leaves the workspace before it lands", () => {
     const sock = boot(page([100, 101]), { hasMore: true, others: ["w2"] });
@@ -489,6 +588,7 @@ describe("files panel", () => {
   it.each(["C:\\captures\\one#final.png", "artifacts/one`two.png"])(
     "opens a ViewImage filename literally: %s",
     async (path) => {
+      const record = vi.spyOn(telemetry, "recordTelemetry");
       boot([
         {
           ...settled(1),
@@ -510,6 +610,7 @@ describe("files panel", () => {
       await act(async () => {});
       expect(lastFetch()).toBe(`api/file?ws=w1&path=${encodeURIComponent(path)}&literal=1`);
       expect(panel()!.querySelector(".fp-btn[href]")?.getAttribute("href")).toContain("&literal=1");
+      expect(record.mock.calls).toEqual([["chat.file_link"]]);
     },
   );
 
@@ -610,6 +711,7 @@ describe("changes panel", () => {
   const aside = (label: string) => document.querySelector(`aside[aria-label="${label}"]`);
 
   it("opens the session's changes from the rail, and a changed file in the Files panel", async () => {
+    const record = vi.spyOn(telemetry, "recordTelemetry");
     boot([settled(1)], { others: ["w2"] });
     fireEvent.click(document.querySelector('.side-rail [aria-label="Changes"]')!);
     await act(async () => {});
@@ -628,6 +730,7 @@ describe("changes panel", () => {
     expect(aside("Changes")).toBeNull();
     expect(aside("Files")!.querySelector(".code-text")!.textContent).toBe("b\n");
     expect(urls.at(-1)).toBe("api/file?ws=w1&path=%2Ftmp%2Fsrc%2Fa.ts");
+    expect(record.mock.calls).toEqual([["panel.diff"], ["panel.files"]]);
 
     // Another session's changes are its own.
     fireEvent.click(document.querySelector('.side-rail [aria-label="Changes"]')!);

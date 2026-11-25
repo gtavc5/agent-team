@@ -379,7 +379,6 @@ export function App() {
   >({});
   const fileSeq = useRef(0);
   const showFile = useCallback((wsId: string, ref: FileRef, session: string) => {
-    recordTelemetry("panel.files");
     const seq = ++fileSeq.current;
     setFileTargets((t) => ({ ...t, [session]: { wsId, ref, seq } }));
     setOpenPanel("files");
@@ -595,12 +594,14 @@ export function App() {
     return (wsId: string) => {
       let open = byWs.get(wsId);
       if (!open) {
-        open = (ref, options) =>
+        open = (ref, options) => {
+          recordTelemetry("chat.file_link");
           showFile(
             wsId,
             options?.literalPath ? { path: ref, literalPath: true } : splitFileRef(ref),
             fileScope,
           );
+        };
         byWs.set(wsId, open);
       }
       return open;
@@ -663,12 +664,19 @@ export function App() {
     },
     [loadSubagentEvents],
   );
+  const stopTask = useCallback(
+    (wsId: string, agentId: string, taskId: string) => {
+      recordTelemetry("chat.stop");
+      cancelSubagent(wsId, agentId, taskId);
+    },
+    [cancelSubagent],
+  );
   const onCancelSubagent = useCallback(
     (agentId: string, taskId: string) => {
       const ws = activeWsRef.current;
-      if (ws) cancelSubagent(ws.id, agentId, taskId);
+      if (ws) stopTask(ws.id, agentId, taskId);
     },
-    [cancelSubagent],
+    [stopTask],
   );
   const onCancelQueued = useCallback(
     (messageId: string) => {
@@ -693,11 +701,17 @@ export function App() {
     [agentsLook],
   );
 
-  const onSelectWorkspace = useCallback((id: string) => {
-    recordTelemetry("workspace.switch");
+  const selectWorkspace = useCallback((id: string) => {
+    if (id !== activeWsRef.current?.id) recordTelemetry("workspace.switch");
     setActiveWsId(id);
-    setSidebarOpen(false);
   }, []);
+  const onSelectWorkspace = useCallback(
+    (id: string) => {
+      selectWorkspace(id);
+      setSidebarOpen(false);
+    },
+    [selectWorkspace],
+  );
   // Links to other sessions (message senders, the board, the lead) can
   // outlive the session they point at.
   const workspacesRef = useRef(workspaces);
@@ -709,6 +723,17 @@ export function App() {
     },
     [onSelectWorkspace],
   );
+  const stopTurns = useCallback(
+    (wsId: string, agentIds?: string[]) => {
+      recordTelemetry("chat.stop");
+      if (agentIds) {
+        for (const id of agentIds) interrupt(wsId, id);
+      } else {
+        interrupt(wsId);
+      }
+    },
+    [interrupt],
+  );
   const agentActions = useMemo<AgentsPanelActions>(
     () => ({
       onOpen: (id) => {
@@ -716,7 +741,7 @@ export function App() {
         if (window.matchMedia?.(PHONE).matches) setOpenPanel(null);
         openWorkspace(id);
       },
-      onStop: (id) => void interrupt(id),
+      onStop: stopTurns,
       onArchive: (id) => archiveWorkspace(id),
       onRestore: (id) => unarchiveWorkspace(id),
       onSetReporting: (id, reports) => setReporting(id, reports),
@@ -729,20 +754,23 @@ export function App() {
       // Through the chat, so the switch shows where it happened.
       onSetModel: (id, agentId, model) => void sendMessage(id, `/model ${model}`, agentId),
       onSetEffort: (id, agentId, effort) => void sendMessage(id, `/effort ${effort}`, agentId),
-      onStopTask: (id, agentId, taskId) => cancelSubagent(id, agentId, taskId),
+      onStopTask: stopTask,
       onCancelWake: (id, agentId) => cancelWakeup(id, agentId),
-      onStopAll: (id) => abort(id),
+      onStopAll: (id) => {
+        recordTelemetry("chat.stop");
+        abort(id);
+      },
     }),
     [
       openWorkspace,
-      interrupt,
+      stopTurns,
       archiveWorkspace,
       unarchiveWorkspace,
       setReporting,
       clearContext,
       removeAgent,
       sendMessage,
-      cancelSubagent,
+      stopTask,
       cancelWakeup,
       abort,
     ],
@@ -907,11 +935,11 @@ export function App() {
   );
   const jumpToMessage = useCallback(
     (wsId: string, msgId: string) => {
-      setActiveWsId(wsId);
+      selectWorkspace(wsId);
       setSearchQuery("");
       startJump(wsId, msgId, true);
     },
-    [startJump],
+    [selectWorkspace, startJump],
   );
   const jumpToMessageInActiveWs = useCallback(
     (msgId: string) => {
@@ -1351,6 +1379,7 @@ export function App() {
       return;
     }
     sendingRef.current = true;
+    recordTelemetry("chat.send");
     setSending(true);
     let outcome: Awaited<ReturnType<typeof sendMessage>>;
     try {
@@ -1888,7 +1917,7 @@ export function App() {
                     <StopControl
                       key={activeWs.id}
                       busyAgents={busyAgents}
-                      onStop={(agentId) => interrupt(activeWs.id, agentId)}
+                      onStop={(agentIds) => stopTurns(activeWs.id, agentIds)}
                     />
                   )}
                   {showPrimary && (
@@ -2015,7 +2044,10 @@ export function App() {
               roots={roots}
               onAsk={askAbout}
               changesOnly
-              openFile={(path) => showFile(activeWs.id, { path }, fileScope)}
+              openFile={(path) => {
+                recordTelemetry("panel.files");
+                showFile(activeWs.id, { path }, fileScope);
+              }}
             />
           </SidePanel>
         )}

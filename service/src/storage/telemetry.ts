@@ -12,6 +12,7 @@ import {
 import type { TelemetryConfig } from "../config/config";
 
 const DAY = 86_400_000;
+const MAX_ACTION_GAP = 60_000;
 const PRUNE_INTERVAL = 3600_000;
 // Tolerate ordinary clock skew without letting future-dated rows evade retention.
 const MAX_CLOCK_SKEW = 5 * 60_000;
@@ -136,12 +137,13 @@ export class TelemetryStore {
         action AS to_action, outcome AS to_outcome,
         CASE WHEN gap < 2000 THEN '<2s' WHEN gap < 10000 THEN '2-10s' ELSE '10-60s' END AS gap_bucket,
         count(*) AS count
-      FROM steps WHERE gap BETWEEN 0 AND 60000
+      FROM steps WHERE gap BETWEEN 0 AND ${MAX_ACTION_GAP}
       GROUP BY 1, 2, 3, 4, 5, 6, 7 ORDER BY count DESC, 1, 2, 3, 4, 5, 6, 7 LIMIT 30
     `,
       )
       .all(cutoff);
-    // Group a bounded recent sample without exposing the ephemeral tab tokens.
+    // Recent action segments, not full visits: split on the same gap as transitions.
+    // Use a bounded sample, ordered by latest segment end, without exposing tab tokens.
     const recent = db
       .prepare(
         `
@@ -150,18 +152,27 @@ export class TelemetryStore {
     `,
       )
       .all(cutoff);
-    const chains = new Map<unknown, Omit<(typeof recent)[number], "tab_run_id">[]>();
+    type Segment = Omit<(typeof recent)[number], "tab_run_id">[];
+    const segments: Segment[] = [];
+    const currentByTab = new Map<unknown, Segment>();
     for (const { tab_run_id, ...event } of recent) {
-      const chain = chains.get(tab_run_id);
-      if (chain) chain.push(event);
-      else if (chains.size < 10) chains.set(tab_run_id, [event]);
+      const current = currentByTab.get(tab_run_id);
+      if (current && Number(current.at(-1)!.ts) - Number(event.ts) <= MAX_ACTION_GAP) {
+        current.push(event);
+      } else if (segments.length < 10) {
+        const segment = [event];
+        segments.push(segment);
+        currentByTab.set(tab_run_id, segment);
+      } else {
+        currentByTab.delete(tab_run_id);
+      }
     }
     return {
       enabled: true,
       days,
       counts,
       transitions,
-      recentChains: [...chains.values()].map((chain) => chain.reverse()),
+      recentChains: segments.map((segment) => segment.reverse()),
     };
   }
 

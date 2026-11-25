@@ -2,8 +2,11 @@ import { act, cleanup, fireEvent, render, within } from "@testing-library/react"
 import { afterEach, expect, it, vi } from "vitest";
 import { cdp, page, userEvent } from "vitest/browser";
 import { App } from "../../src/App";
+import { recordTelemetry } from "../../src/telemetry";
 import { FakeSocket } from "../fakeSocket";
 import "../../src/styles.css";
+
+vi.mock("../../src/telemetry", { spy: true });
 
 const WORKSPACE = {
   id: "w",
@@ -28,6 +31,7 @@ let touch = false;
 afterEach(async () => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.clearAllMocks();
   localStorage.clear();
   if (touch) await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: false });
   touch = false;
@@ -112,13 +116,19 @@ it("opens on desktop hover, bridges the gap to actions, and supports click and E
   await userEvent.keyboard("{Escape}");
   await expect.element(button).toHaveFocus();
   await expect.element(popup).not.toBeInTheDocument();
+  expect(recordTelemetry).not.toHaveBeenCalledWith("chat.stop");
   await button.click();
-  await popup.getByRole("button", { name: "Stop all (2)" }).click();
+  await userEvent.keyboard("{ArrowUp}");
+  await expect.element(popup.getByRole("button", { name: "Stop all (2)" })).toHaveFocus();
+  await userEvent.keyboard("{Enter}");
   await expect.element(popup).not.toBeInTheDocument();
   expect(sock.frames().filter((f) => f.type === "interrupt")).toEqual([
     { type: "interrupt", workspaceId: "w", agentId: "Alpha" },
     { type: "interrupt", workspaceId: "w", agentId: "Beta" },
   ]);
+  expect(
+    vi.mocked(recordTelemetry).mock.calls.filter(([action]) => action === "chat.stop"),
+  ).toEqual([["chat.stop"]]);
 });
 
 async function tap(el: Element) {
@@ -166,6 +176,9 @@ it("fits at 390×844 and toggles, dismisses and stops a turn using real touch in
   await expect.element(popup).toBeVisible();
   checkBounds();
   await tap(composer.getByRole("button", { name: "Stop Beta" }));
+  expect(
+    vi.mocked(recordTelemetry).mock.calls.filter(([action]) => action === "chat.stop"),
+  ).toEqual([["chat.stop"]]);
   await expect.element(popup).not.toBeInTheDocument();
   expect(sock.frames().filter((f) => f.type === "interrupt")).toEqual([
     { type: "interrupt", workspaceId: "w", agentId: "Beta" },
