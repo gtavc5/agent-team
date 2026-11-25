@@ -4,7 +4,12 @@ import * as fs from "fs";
 import * as path from "path";
 import { z } from "zod";
 import { ProjectStore } from "../../src/project/store";
-import { leadToolset, workerToolset, type PanelApi } from "../../src/project/tools";
+import {
+  languageInstructions,
+  leadToolset,
+  workerToolset,
+  type PanelApi,
+} from "../../src/project/tools";
 import { SETTLE_MS, START_SPACING_MS, awaitsUser } from "../../src/project/manager";
 import { AGENT_PRESETS } from "../../src/config/presets";
 import { MCP_TEXT_LIMIT } from "../../src/session/types";
@@ -275,9 +280,19 @@ describe("panel tool arguments", () => {
     );
   });
 
-  it.each([undefined, "Icelandic"])(
-    "scopes the optional user-facing language (%s) to project replies",
+  it.each([undefined, "", "   ", "Icelandic", "简体中文"])(
+    "keeps the internal English rule unconditional and scopes optional user-facing language (%s)",
     (language) => {
+      const englishRule =
+        "Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English. Preserve quoted user text, identifiers, paths, and error messages verbatim.";
+      const trimmed = language?.trim();
+      const expectedDirect = trimmed
+        ? [
+            `Write chat messages addressed to the user, including questions and summaries, in ${trimmed}. ${englishRule}`,
+          ]
+        : [englishRule];
+      expect(languageInstructions(language)).toEqual(expectedDirect);
+
       const set = leadToolset(api, project, "/notes", ["gpt-6-astra"], [], language);
       for (const text of [
         set.instructions,
@@ -285,11 +300,14 @@ describe("panel tool arguments", () => {
         workerToolset(api, "ws-w", project, "/notes", true, false, language).instructions,
         workerToolset(api, "ws-w", project, "/notes", false, true, language).instructions,
       ]) {
-        if (language)
+        expect(text).toContain(englishRule);
+        if (trimmed) {
           expect(text).toContain(
-            `Write chat messages addressed to the user, including questions and summaries, in ${language}. Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English. Preserve quoted user text, identifiers, paths, and error messages verbatim.`,
+            `Write chat messages addressed to the user, including questions and summaries, in ${trimmed}. ${englishRule}`,
           );
-        else expect(text).not.toContain("Write chat messages addressed to the user");
+        } else {
+          expect(text).not.toContain("Write chat messages addressed to the user");
+        }
       }
       expect(byName(set).start_session.description).toContain("a worktree, reused");
     },
@@ -401,7 +419,7 @@ describe("panel tool arguments", () => {
       expect(field.description).toBe("The whole list");
     }
     expect(lead).toContain("check the board keeps nothing about the old one");
-    expect(lead.length).toBeLessThan(5000);
+    expect(lead.length).toBeLessThan(5200);
     expect(worker.length).toBeLessThan(3800);
     // Nothing the CLI would cut.
     const tools = [

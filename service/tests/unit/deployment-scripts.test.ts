@@ -324,13 +324,119 @@ describe.skipIf(process.platform === "win32")("yaat-service.sh and start-server.
     expect(existsSync(trace)).toBe(false);
   });
 
-  it("generates credentials using verified Node without openssl", () => {
-    ok("yaat-service", ["init-config"]);
-    const config = readFileSync(join(base, "config.toml"), "utf8");
+  it("generates credentials using verified Node without openssl and reminds about [user].language", () => {
+    const output = ok("yaat-service", ["init-config"]);
+    const configPath = join(base, "config.toml");
+    const config = readFileSync(configPath, "utf8");
     expect(config).toMatch(/password = "[a-f0-9]{24}"/);
     expect(config).toMatch(/session_secret = "[a-f0-9]{64}"/);
     expect(config).toContain('[user]\nlanguage = "简体中文"\n');
+    expect(output).toContain(`[note] [user].language is set to "简体中文" in ${configPath}`);
+    expect(output).toContain("user-facing chat language only");
+    expect(output).toContain("stay English");
   });
+
+  it.each([
+    {
+      name: "missing [user] section",
+      toml: "[server]\n[workspace]\narchive_after_days = 14\n",
+      expectReminder: true,
+    },
+    {
+      name: "commented out language and [user] header",
+      toml: '# [user]\n# language = "简体中文"\n[user]\n# language = "English"\nname = "You"\n',
+      expectReminder: true,
+    },
+    {
+      name: "whitespace-only language",
+      toml: '[user]\nlanguage = "   " # blank\n',
+      expectReminder: true,
+    },
+    {
+      name: "language in a separate section or subtable",
+      toml: '[other]\nlanguage = "English"\n[user]\nname = "You"\n[user.profile]\nlanguage = "English"\n',
+      expectReminder: true,
+    },
+    {
+      name: "multiline string containing [user] and language",
+      toml: '[workspace]\ndescription = """\n[user]\nlanguage = "English"\n"""\n',
+      expectReminder: true,
+    },
+    {
+      name: "escaped Unicode BOM whitespace-only language",
+      toml: '[user]\nlanguage = "\\uFEFF"\n',
+      expectReminder: true,
+    },
+    {
+      name: "language configured in [user] with inline comment and whitespace",
+      toml: '  [ user ] # user settings\n  language = "English" # chat language\n',
+      expectReminder: false,
+    },
+    {
+      name: "language configured via inline table",
+      toml: 'user = { language = "English" }\n',
+      expectReminder: false,
+    },
+    {
+      name: "language configured via multiline string",
+      toml: '[user]\nlanguage = """English"""\n',
+      expectReminder: false,
+    },
+    {
+      name: "language configured as top-level dotted key",
+      toml: "user.language = '简体中文' # chat language\n",
+      expectReminder: false,
+    },
+  ])(
+    "reminds about missing [user].language on existing config during install ($name)",
+    ({ toml, expectReminder }) => {
+      mkdirSync(base, { recursive: true });
+      const configPath = join(base, "config.toml");
+      writeFileSync(configPath, toml);
+      const args = ["install", "--no-start", "--no-build", "--no-auth"];
+
+      const bashFallbackOutput = ok("yaat-service", args);
+      if (expectReminder) {
+        expect(bashFallbackOutput).toContain(`[note] [user].language is not set in ${configPath}`);
+        expect(bashFallbackOutput).toContain("defaults to model choice");
+        expect(bashFallbackOutput).toContain("stay English");
+      } else {
+        expect(bashFallbackOutput).not.toContain("[user].language");
+      }
+
+      // Exercise the python3 tomllib inspection path when available.
+      const systemPython = ["/usr/bin/python3", "/usr/local/bin/python3"].find((p) =>
+        existsSync(p),
+      );
+      if (
+        systemPython &&
+        spawnSync(systemPython, ["-c", "import tomllib"], { encoding: "utf8" }).status === 0
+      ) {
+        const pyDir = join(root, "pybin");
+        mkdirSync(pyDir, { recursive: true });
+        symlinkSync(systemPython, join(pyDir, "python3"));
+        const pyOutput = ok("yaat-service", args, { PATH: `${pyDir}:${bin}` });
+        if (expectReminder) {
+          expect(pyOutput).toContain(`[note] [user].language is not set in ${configPath}`);
+        } else {
+          expect(pyOutput).not.toContain("[user].language");
+        }
+      }
+
+      // Exercise the @iarna/toml inspection path too.
+      const tomlModule = resolve(__dirname, "../../../node_modules/@iarna/toml");
+      if (existsSync(tomlModule)) {
+        mkdirSync(join(root, "node_modules/@iarna"), { recursive: true });
+        symlinkSync(tomlModule, join(root, "node_modules/@iarna/toml"));
+        const tomlParserOutput = ok("yaat-service", args);
+        if (expectReminder) {
+          expect(tomlParserOutput).toContain(`[note] [user].language is not set in ${configPath}`);
+        } else {
+          expect(tomlParserOutput).not.toContain("[user].language");
+        }
+      }
+    },
+  );
 
   it("forwards --doctor --json even if config and Pi are missing and does not write", () => {
     const brokenBundle = run("start-server", ["--doctor"]);

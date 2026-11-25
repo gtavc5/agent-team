@@ -42,9 +42,10 @@ new work. The panel provides the orchestration and UI, not a model of its own.
 - **Surviving restarts and limits** — a turn a server restart cut off is
   carried on by the panel itself; a turn stopped by a usage limit is retried
   after the window resets.
-- Leads and workers write to you in Simplified Chinese (code, identifiers
-  and commits stay English); the instruction is in
-  `service/src/project/tools.ts`.
+- By default (`init-config` / `config.example.toml`), `[user].language` tells leads
+  and workers to address you in Simplified Chinese while repository artifacts,
+  project-board entries, and agent-to-agent instructions stay English
+  (`service/src/project/tools.ts`).
 
 ## The panel
 
@@ -237,9 +238,11 @@ offline = true               # set false to allow Pi npm access on startup
 # restart_command = ["launchctl", "kickstart", "-k", "gui/501/com.yaat.server"]
 ```
 
-Omitting `[user].language` adds no language instruction. A language change
-is reflected in Pi's project instructions on the next turn and in Codex on
-thread start or resume in a new app-server process.
+Omitting `[user].language` omits only the user-facing chat language rule (agents
+choose how to reply to you), while keeping the English rule for repository
+artifacts, project-board entries, and agent-to-agent instructions and reports. A
+language change is reflected in Pi's project instructions on the next turn and in
+Codex on thread start or resume in a new app-server process.
 
 If upgrading from a config with `[providers.*]`, migrate custom Pi providers to
 `~/.pi/agent/models.json` and remove those tables from `config.toml`. The managed

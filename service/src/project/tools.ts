@@ -212,13 +212,17 @@ const LIVE =
 const ISSUES =
   "Known defects are the project's issues; write_issues says how they are kept and fixed.";
 
-// How the panel's agents talk to the user.
-function languageInstructions(language?: string): string[] {
-  return language
-    ? [
-        `Write chat messages addressed to the user, including questions and summaries, in ${language}. Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English. Preserve quoted user text, identifiers, paths, and error messages verbatim.`,
-      ]
-    : [];
+const INTERNAL_ENGLISH_RULE =
+  "Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English. Preserve quoted user text, identifiers, paths, and error messages verbatim.";
+
+// How the panel's agents talk to the user and keep internal writing consistent.
+export function languageInstructions(language?: string): string[] {
+  const userLanguage = language?.trim();
+  return [
+    userLanguage
+      ? `Write chat messages addressed to the user, including questions and summaries, in ${userLanguage}. ${INTERNAL_ENGLISH_RULE}`
+      : INTERNAL_ENGLISH_RULE,
+  ];
 }
 
 function uniquePresetNames(names: string[]): string[] {

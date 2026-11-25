@@ -508,6 +508,7 @@ language = \"简体中文\"
     printf '  username: %s\n' "$USERNAME"
     printf '  password: %s\n' "$pw"
   fi
+  printf '[note] [user].language is set to "简体中文" in %s (controls user-facing chat language only; repository artifacts, project-board entries, and agent-to-agent instructions/reports always stay English). Edit or remove [user].language in %s to change or unset it.\n' "$cfg" "$cfg"
 }
 
 write_darwin_plist() {
@@ -602,7 +603,7 @@ EOF
 inspect_install_config() {
   local cfg="$BASE_DIR/config.toml"
   local toml_module="$REPO_DIR/node_modules/@iarna/toml"
-  local has_auth restart_state
+  local has_auth restart_state has_user_language
   if [ "$OS_NAME" = "Darwin" ]; then
     set -- "gui/${UID_VAL}/${LABEL}"
   else
@@ -619,10 +620,14 @@ const hasAuth = auth && typeof auth === 'object' && Object.getPrototypeOf(auth) 
 const restart = config.server?.restart_command;
 const restartState = restart === undefined ? 'missing'
   : Array.isArray(restart) && targets.some((target) => restart.includes(target)) ? 'current' : 'stale';
-console.log(hasAuth ? 'yes' : 'no', restartState);
+const user = config.user;
+const hasUserLanguage =
+  user && typeof user === 'object' && Object.getPrototypeOf(user) === Object.prototype &&
+  typeof user.language === 'string' && user.language.trim().length > 0;
+console.log(hasAuth ? 'yes' : 'no', restartState, hasUserLanguage ? 'yes' : 'no');
 JS
 )" || die "could not inspect $cfg with @iarna/toml; check the TOML syntax"
-    read -r has_auth restart_state <<< "$inspection"
+    read -r has_auth restart_state has_user_language <<< "$inspection"
   elif [ "${YAAT_DISABLE_TOMLLIB:-0}" != "1" ] && command -v python3 >/dev/null 2>&1 && python3 -c "import tomllib" >/dev/null 2>&1; then
     local inspection
     inspection="$(python3 - "$cfg" "$@" 2>/dev/null <<'PY'
@@ -643,15 +648,239 @@ elif isinstance(restart, list) and any(target in restart for target in targets):
     restart_state = "current"
 else:
     restart_state = "stale"
+JS_WS = " \t\n\r\v\f\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+user = config.get("user")
+language = user.get("language") if isinstance(user, dict) else None
+has_user_language = isinstance(language, str) and bool(language.strip(JS_WS))
 
-print("yes" if has_auth else "no", restart_state)
+print("yes" if has_auth else "no", restart_state, "yes" if has_user_language else "no")
 PY
 )" || die "could not inspect $cfg with python3 tomllib; check the TOML syntax"
-    read -r has_auth restart_state <<< "$inspection"
+    read -r has_auth restart_state has_user_language <<< "$inspection"
   else
-    # Fail closed when neither @iarna/toml nor Python 3.11+ tomllib is available.
+    # Fail closed on auth and restart_command when neither @iarna/toml nor Python 3.11+ tomllib is available.
     has_auth=unknown
     restart_state=unknown
+    has_user_language=no
+    if [ -n "${YAAT_NODE_BIN:-}" ]; then
+      has_user_language="$("$YAAT_NODE_BIN" - "$cfg" 2>/dev/null <<'JS'
+const fs = require('fs');
+let s = fs.readFileSync(process.argv[2], 'utf8').replace(/\r\n?/g, '\n');
+if (s.charCodeAt(0) === 0xfeff) s = s.slice(1);
+let i = 0;
+const n = s.length;
+
+function skipWs(nl) {
+  while (i < n) {
+    const c = s[i];
+    if (c === ' ' || c === '\t' || (nl && c === '\n')) {
+      i++;
+    } else if (c === '#') {
+      while (i < n && s[i] !== '\n') i++;
+    } else {
+      break;
+    }
+  }
+}
+
+function unescapeChar() {
+  const ch = s[i++];
+  if (ch === 'b') return '\b';
+  if (ch === 't') return '\t';
+  if (ch === 'n') return '\n';
+  if (ch === 'f') return '\f';
+  if (ch === 'r') return '\r';
+  if (ch === '"' || ch === '\\') return ch;
+  if (ch === 'u' || ch === 'U') {
+    const len = ch === 'u' ? 4 : 8;
+    const hex = s.slice(i, i + len);
+    if (!new RegExp(`^[0-9a-fA-F]{${len}}$`).test(hex)) throw new Error('bad unicode escape');
+    i += len;
+    return String.fromCodePoint(parseInt(hex, 16));
+  }
+  throw new Error('bad escape');
+}
+
+function readBasic(multi) {
+  let out = '';
+  if (multi && s[i] === '\n') i++;
+  while (i < n) {
+    if (multi) {
+      if (s.slice(i, i + 3) === '"""') {
+        let q = 3;
+        while (q < 6 && s[i + q] === '"') q++;
+        if (q === 6) throw new Error('too many quotes');
+        i += q;
+        out += '"'.repeat(q - 3);
+        return out;
+      }
+      if (s[i] === '\\') {
+        i++;
+        let j = i;
+        while (j < n && (s[j] === ' ' || s[j] === '\t')) j++;
+        if (j < n && s[j] === '\n') {
+          i = j + 1;
+          while (i < n && (s[i] === ' ' || s[i] === '\t' || s[i] === '\n')) i++;
+          continue;
+        }
+        out += unescapeChar();
+        continue;
+      }
+      out += s[i++];
+    } else {
+      const c = s[i++];
+      if (c === '"') return out;
+      if (c === '\n') throw new Error('unterminated string');
+      if (c === '\\') out += unescapeChar();
+      else out += c;
+    }
+  }
+  throw new Error('unterminated string');
+}
+
+function readLiteral(multi) {
+  let out = '';
+  if (multi && s[i] === '\n') i++;
+  while (i < n) {
+    if (multi) {
+      if (s.slice(i, i + 3) === "'''") {
+        let q = 3;
+        while (q < 6 && s[i + q] === "'") q++;
+        if (q === 6) throw new Error('too many quotes');
+        i += q;
+        out += "'".repeat(q - 3);
+        return out;
+      }
+      out += s[i++];
+    } else {
+      const c = s[i++];
+      if (c === "'") return out;
+      if (c === '\n') throw new Error('unterminated string');
+      out += c;
+    }
+  }
+  throw new Error('unterminated string');
+}
+
+function readKeyPart() {
+  if (s[i] === '"') { i++; return readBasic(false); }
+  if (s[i] === "'") { i++; return readLiteral(false); }
+  const start = i;
+  while (i < n && /[A-Za-z0-9_-]/.test(s[i])) i++;
+  if (i === start) throw new Error('expected key');
+  return s.slice(start, i);
+}
+
+function readDottedKey() {
+  const parts = [readKeyPart()];
+  while (true) {
+    skipWs(false);
+    if (s[i] !== '.') break;
+    i++;
+    skipWs(false);
+    parts.push(readKeyPart());
+  }
+  return parts;
+}
+
+function readInlineTable() {
+  i++;
+  const obj = Object.create(null);
+  skipWs(true);
+  if (s[i] === '}') { i++; return obj; }
+  while (i < n) {
+    skipWs(true);
+    if (s[i] === '}') { i++; return obj; }
+    const keys = readDottedKey();
+    skipWs(false);
+    if (s[i++] !== '=') throw new Error('expected =');
+    skipWs(false);
+    const val = readValue();
+    let cur = obj;
+    for (let k = 0; k < keys.length - 1; k++) {
+      if (!cur[keys[k]] || typeof cur[keys[k]] !== 'object') cur[keys[k]] = Object.create(null);
+      cur = cur[keys[k]];
+    }
+    cur[keys[keys.length - 1]] = val;
+    skipWs(true);
+    if (s[i] === ',') { i++; skipWs(true); continue; }
+    if (s[i] === '}') { i++; return obj; }
+    throw new Error('expected , or }');
+  }
+  throw new Error('unterminated inline table');
+}
+
+function readArray() {
+  i++;
+  while (i < n) {
+    skipWs(true);
+    if (s[i] === ']') { i++; return null; }
+    readValue();
+    skipWs(true);
+    if (s[i] === ',') { i++; continue; }
+    if (s[i] === ']') { i++; return null; }
+    throw new Error('expected , or ]');
+  }
+  throw new Error('unterminated array');
+}
+
+function readValue() {
+  if (s.slice(i, i + 3) === '"""') { i += 3; return readBasic(true); }
+  if (s.slice(i, i + 3) === "'''") { i += 3; return readLiteral(true); }
+  if (s[i] === '"') { i++; return readBasic(false); }
+  if (s[i] === "'") { i++; return readLiteral(false); }
+  if (s[i] === '{') return readInlineTable();
+  if (s[i] === '[') return readArray();
+  const start = i;
+  while (i < n && !',]}#\n'.includes(s[i])) i++;
+  if (i === start) throw new Error('expected value');
+  return null;
+}
+
+let table = [];
+let userLanguage;
+let userIsArray = false;
+while (i < n) {
+  skipWs(true);
+  if (i >= n) break;
+  if (s[i] === '[') {
+    const isArray = s[i + 1] === '[';
+    i += isArray ? 2 : 1;
+    skipWs(false);
+    const keys = readDottedKey();
+    skipWs(false);
+    if (isArray) {
+      if (s.slice(i, i + 2) !== ']]') throw new Error('expected ]]');
+      i += 2;
+      if (keys.length === 1 && keys[0] === 'user') userIsArray = true;
+      table = ['__array__', ...keys];
+    } else {
+      if (s[i++] !== ']') throw new Error('expected ]');
+      table = keys;
+    }
+    skipWs(false);
+    if (i < n && s[i] !== '\n') throw new Error('unexpected trailing token');
+  } else {
+    const keys = readDottedKey();
+    skipWs(false);
+    if (s[i++] !== '=') throw new Error('expected =');
+    skipWs(false);
+    const val = readValue();
+    skipWs(false);
+    if (i < n && s[i] !== '\n') throw new Error('unexpected trailing token');
+    const full = table.concat(keys);
+    if (full.length === 2 && full[0] === 'user' && full[1] === 'language') {
+      userLanguage = typeof val === 'string' ? val : undefined;
+    } else if (full.length === 1 && full[0] === 'user' && val && typeof val === 'object') {
+      userLanguage = typeof val.language === 'string' ? val.language : undefined;
+    }
+  }
+}
+const hasLang = !userIsArray && typeof userLanguage === 'string' && userLanguage.trim().length > 0;
+console.log(hasLang ? 'yes' : 'no');
+JS
+)" || die "could not inspect $cfg; check the TOML syntax"
+    fi
     if [ "$HOST_EXPLICIT" -eq 0 ] && [ "$NO_AUTH" -eq 0 ]; then
       HOST="127.0.0.1"
       printf '[warn] Cannot parse %s (neither @iarna/toml nor Python 3.11+ tomllib available); binding to 127.0.0.1 for safety (pass --host explicitly to override).\n' "$cfg"
@@ -672,6 +901,10 @@ PY
   if [ "$has_auth" = "no" ] && [ "$HOST_EXPLICIT" -eq 0 ] && [ "$NO_AUTH" -eq 0 ]; then
     HOST="127.0.0.1"
     printf '[note] No [auth] section in %s; binding to 127.0.0.1 (pass --host explicitly to override).\n' "$cfg"
+  fi
+
+  if [ "$has_user_language" = "no" ]; then
+    printf '[note] [user].language is not set in %s; user-facing chat language defaults to model choice (repository artifacts, project-board entries, and agent-to-agent instructions/reports always stay English). Set language = "简体中文" (or your preferred language) under [user] in %s.\n' "$cfg" "$cfg"
   fi
 }
 
