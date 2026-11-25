@@ -17,9 +17,16 @@ import { toolNameOf, toolSummary } from "../state/stream";
 import { copySelectionAsMarkdown } from "./clipboard";
 import { CodeBlock, CopyButton, FileRefCode, MdBlock, StreamingMdBlock } from "./markdown";
 import { FileOpenContext } from "./fileRef";
+import { LocalDayContext, parseLocalDayKey } from "./localDay";
 import { DEFAULT_USER } from "../state/useServer";
 import { AgentAvatar, Avatar, isImageAvatar } from "../workspace/avatar";
-import { formatTokens, formatDuration, formatRunTime } from "../format";
+import {
+  formatTokens,
+  formatDuration,
+  formatRunTime,
+  formatMessageTime,
+  formatFullDateTime,
+} from "../format";
 import { shortModel } from "../workspace/models";
 
 function renderMentionContent(content: string, agents: AgentInfo[]) {
@@ -1192,6 +1199,7 @@ export const MessageItem = memo(function MessageItem({
     [summarized, onLoadDetails, msg.id],
   );
   const outerLinks = useContext(SessionLinkContext);
+  const localDayKey = useContext(LocalDayContext);
   const sessionLinks = useMemo(
     () => ({ ...outerLinks, ...(onOpenWorkspace && { open: onOpenWorkspace }) }),
     [outerLinks, onOpenWorkspace],
@@ -1302,10 +1310,11 @@ export const MessageItem = memo(function MessageItem({
   const tailBlocks = tailAt >= 0 ? timelineBlocks(segments[tailAt].events) : [];
   const standaloneSince = tailBlocks.at(-1)?.kind === "steps" ? undefined : liveSince;
 
-  const time = new Date(msg.timestamp).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const time = formatMessageTime(
+    msg.timestamp,
+    localDayKey ? parseLocalDayKey(localDayKey) : Date.now(),
+  );
+  const timeTitle = formatFullDateTime(msg.timestamp);
 
   const quoteButton =
     !isUser && onQuote && segments.length > 0 ? (
@@ -1393,10 +1402,19 @@ export const MessageItem = memo(function MessageItem({
                     <span className="message-author" style={{ color: agent.color }}>
                       {agent.name}
                     </span>
-                    <span className="message-model">{shortModel(msg.model ?? agent.model)}</span>
+                    {(() => {
+                      const modelLabel = shortModel(msg.model ?? agent.model);
+                      return (
+                        <span className="message-model" title={modelLabel}>
+                          {modelLabel}
+                        </span>
+                      );
+                    })()}
                   </>
                 ) : null}
-                <span className="message-time">{time}</span>
+                <span className="message-time" title={timeTitle}>
+                  {time}
+                </span>
                 {isUser && msg.status !== "queued" && (
                   <span className="delivery-inline-slot">
                     {deliveryLabel && <PendingDeliveryStatus key={msg.id} label={deliveryLabel} />}
@@ -1408,7 +1426,9 @@ export const MessageItem = memo(function MessageItem({
             )}
             {compact && (
               <div className="compact-header">
-                <span className="message-time">{time}</span>
+                <span className="message-time" title={timeTitle}>
+                  {time}
+                </span>
                 {streaming && <span className="streaming-dot" />}
                 {!streaming && quoteButton}
               </div>

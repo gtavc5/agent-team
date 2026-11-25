@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
 import { render, act, fireEvent, screen, within } from "@testing-library/react";
 import { App } from "../src/App";
+import * as format from "../src/format";
 import * as telemetry from "../src/telemetry";
 import { AUTO_RELOAD, type AgentInfo, type Message } from "../src/state/useServer";
 
@@ -135,7 +136,7 @@ afterEach(() => {
 describe("render cost of a live transcript", () => {
   // MessageItem formats its timestamp once per render.
   const renders = () => {
-    const spy = vi.spyOn(Date.prototype, "toLocaleTimeString");
+    const spy = vi.spyOn(format, "formatMessageTime");
     return () => {
       const n = spy.mock.calls.length;
       spy.mockClear();
@@ -179,6 +180,22 @@ describe("render cost of a live transcript", () => {
     });
     expect(count()).toBe(1);
     expect(document.querySelector("#msg-live .turn-footer")!.textContent).toBe("Bash · 3s");
+  });
+
+  it("updates settled today message timestamps in App after local midnight rollover", () => {
+    vi.setSystemTime(new Date(2026, 5, 15, 23, 59, 50));
+    const todayTs = new Date(2026, 5, 15, 21, 0, 0).getTime();
+    boot([{ ...settled(1), timestamp: todayTs }]);
+    const timeEl = () => document.querySelector("#msg-s1 .message-time")!;
+    expect(timeEl().textContent).toBe(
+      new Date(todayTs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(11_000);
+    });
+    expect(timeEl().textContent).toBe(format.formatShortDateTime(todayTs));
+    expect(timeEl().getAttribute("title")).toBe(format.formatFullDateTime(todayTs));
   });
 });
 

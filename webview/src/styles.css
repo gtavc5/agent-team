@@ -1189,7 +1189,16 @@ button {
   font-size: 10.5px;
   color: var(--text-muted);
   white-space: nowrap;
+}
+.message-time,
+.delivery-inline-slot {
   flex-shrink: 0;
+}
+/* Let long model labels truncate before a non-today timestamp pushes Quote off-row. */
+.message-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .streaming-dot {
   width: 6px;

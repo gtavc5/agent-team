@@ -5,6 +5,9 @@ import {
   formatRunTime,
   formatRelative,
   formatTokens,
+  formatShortDateTime,
+  formatMessageTime,
+  formatFullDateTime,
   shortModel,
 } from "../src/format";
 
@@ -80,5 +83,59 @@ describe("formatSize", () => {
       "2.0 KB",
       "3.4 MB",
     ]);
+  });
+});
+
+describe("formatMessageTime", () => {
+  const ref = new Date(2026, 5, 15, 14, 30, 0);
+
+  it("shows only HH:MM for timestamps on the same local day", () => {
+    const morning = new Date(2026, 5, 15, 0, 5, 0);
+    const night = new Date(2026, 5, 15, 23, 59, 0);
+    expect(formatMessageTime(morning.getTime(), ref)).toBe(
+      morning.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    );
+    expect(formatMessageTime(night.getTime(), ref)).toBe(
+      night.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    );
+  });
+
+  it("matches formatShortDateTime for a different day in the same local year", () => {
+    const yesterday = new Date(2026, 5, 14, 23, 45, 0);
+    const earlierMonth = new Date(2026, 0, 2, 8, 10, 0);
+    expect(formatMessageTime(yesterday.getTime(), ref)).toBe(
+      formatShortDateTime(yesterday.getTime()),
+    );
+    expect(formatMessageTime(earlierMonth.getTime(), ref)).toBe(
+      formatShortDateTime(earlierMonth.getTime()),
+    );
+    expect(formatMessageTime(yesterday.getTime(), ref)).toBe(
+      yesterday.toLocaleString([], {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    );
+  });
+
+  it("includes the numeric year for timestamps in a different local year", () => {
+    const prevYear = new Date(2025, 11, 31, 23, 55, 0);
+    expect(formatMessageTime(prevYear.getTime(), ref)).toBe(
+      prevYear.toLocaleString([], {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    );
+  });
+});
+
+describe("formatFullDateTime", () => {
+  it("returns the full locale date and time string for tooltips", () => {
+    const ts = new Date(2026, 5, 15, 9, 5, 30).getTime();
+    expect(formatFullDateTime(ts)).toBe(new Date(ts).toLocaleString());
   });
 });

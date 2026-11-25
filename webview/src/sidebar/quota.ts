@@ -86,14 +86,7 @@ export function selectSummaryWindows(windows: QuotaWindow[]): QuotaWindow[] {
     .map((entry) => entry.w);
 }
 
-export function formatShortDateTime(timestamp: number): string {
-  return new Date(timestamp).toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+export { formatShortDateTime } from "../format";
 
 export function quotaWaitingHint(row: QuotaRow): string | undefined {
   switch (row.reason) {

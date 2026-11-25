@@ -28,6 +28,7 @@ import { isImeKeyEvent } from "./chat/ime";
 import { AgentAvatar } from "./workspace/avatar";
 import { formatRelative, shortModel } from "./format";
 import { MessageItem, MessageBoundary, originLabel, SessionLinkContext } from "./chat/messages";
+import { LocalDayProvider } from "./chat/localDay";
 import {
   AddAgentDialog,
   CodexSetupDialog,
@@ -1687,71 +1688,75 @@ export function App() {
 
               <div className="messages" ref={messagesContainerRef} onScroll={onMessagesScrollTrack}>
                 <FileOpenContext.Provider value={fileOpener(activeWs.id)}>
-                  {(() => {
-                    const msgs = activeWs.messages;
-                    const total = msgs.length;
-                    if (!activeWs.messagesLoaded) {
+                  <LocalDayProvider>
+                    {(() => {
+                      const msgs = activeWs.messages;
+                      const total = msgs.length;
+                      if (!activeWs.messagesLoaded) {
+                        return (
+                          <HistoryHint hasMore={false} loading={false} loaded={false} count={0} />
+                        );
+                      }
+                      if (total === 0) {
+                        return (
+                          <div className="empty-state">
+                            {activeWs.agents.length === 0
+                              ? "Add an agent to get started."
+                              : "Send a message to start working."}
+                          </div>
+                        );
+                      }
                       return (
-                        <HistoryHint hasMore={false} loading={false} loaded={false} count={0} />
+                        <>
+                          <HistoryHint
+                            hasMore={!!activeWs.hasMore}
+                            loading={!!activeWs.loadingOlder}
+                            loaded
+                            count={total}
+                          />
+                          {msgs.map((msg, i) => {
+                            const prev = i > 0 ? msgs[i - 1] : null;
+                            const compact =
+                              !!prev &&
+                              msg.kind === "agent" &&
+                              prev.kind === "agent" &&
+                              !!msg.turnId &&
+                              msg.turnId === prev.turnId;
+                            const item = (
+                              <MessageItem
+                                user={user}
+                                msg={msg}
+                                agents={
+                                  msg.status === "streaming" ? activeWs.agents : settledAgents
+                                }
+                                compact={compact}
+                                highlight={msg.id === highlightMsgId}
+                                onQuote={handleQuote}
+                                onJumpToMessage={jumpToMessageInActiveWs}
+                                onLoadSubagentEvents={onLoadSubagentEvents}
+                                onCancelSubagent={onCancelSubagent}
+                                onCancelQueued={onCancelQueued}
+                                onLoadDetails={onLoadDetails}
+                                onOpenWorkspace={openWorkspace}
+                              />
+                            );
+                            const from = msg.from?.workspaceId;
+                            return (
+                              <MessageBoundary key={msg.id} messageId={msg.id}>
+                                {from && from !== activeWs.id && workspaceIds.has(from) ? (
+                                  <FileOpenContext.Provider value={fileOpener(from)}>
+                                    {item}
+                                  </FileOpenContext.Provider>
+                                ) : (
+                                  item
+                                )}
+                              </MessageBoundary>
+                            );
+                          })}
+                        </>
                       );
-                    }
-                    if (total === 0) {
-                      return (
-                        <div className="empty-state">
-                          {activeWs.agents.length === 0
-                            ? "Add an agent to get started."
-                            : "Send a message to start working."}
-                        </div>
-                      );
-                    }
-                    return (
-                      <>
-                        <HistoryHint
-                          hasMore={!!activeWs.hasMore}
-                          loading={!!activeWs.loadingOlder}
-                          loaded
-                          count={total}
-                        />
-                        {msgs.map((msg, i) => {
-                          const prev = i > 0 ? msgs[i - 1] : null;
-                          const compact =
-                            !!prev &&
-                            msg.kind === "agent" &&
-                            prev.kind === "agent" &&
-                            !!msg.turnId &&
-                            msg.turnId === prev.turnId;
-                          const item = (
-                            <MessageItem
-                              user={user}
-                              msg={msg}
-                              agents={msg.status === "streaming" ? activeWs.agents : settledAgents}
-                              compact={compact}
-                              highlight={msg.id === highlightMsgId}
-                              onQuote={handleQuote}
-                              onJumpToMessage={jumpToMessageInActiveWs}
-                              onLoadSubagentEvents={onLoadSubagentEvents}
-                              onCancelSubagent={onCancelSubagent}
-                              onCancelQueued={onCancelQueued}
-                              onLoadDetails={onLoadDetails}
-                              onOpenWorkspace={openWorkspace}
-                            />
-                          );
-                          const from = msg.from?.workspaceId;
-                          return (
-                            <MessageBoundary key={msg.id} messageId={msg.id}>
-                              {from && from !== activeWs.id && workspaceIds.has(from) ? (
-                                <FileOpenContext.Provider value={fileOpener(from)}>
-                                  {item}
-                                </FileOpenContext.Provider>
-                              ) : (
-                                item
-                              )}
-                            </MessageBoundary>
-                          );
-                        })}
-                      </>
-                    );
-                  })()}
+                    })()}
+                  </LocalDayProvider>
                 </FileOpenContext.Provider>
                 <div ref={messagesEndRef} />
               </div>

@@ -61,4 +61,39 @@ export function formatRunTime(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : formatDuration(ms);
 }
 
+export function formatShortDateTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export function formatMessageTime(timestamp: number, now: number | Date = Date.now()): string {
+  const date = new Date(timestamp);
+  const ref = now instanceof Date ? now : new Date(now);
+  const sameYear = date.getFullYear() === ref.getFullYear();
+  if (sameYear && date.getMonth() === ref.getMonth() && date.getDate() === ref.getDate()) {
+    return date.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+  if (sameYear) {
+    return formatShortDateTime(timestamp);
+  }
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export function formatFullDateTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString();
+}
+
 export { shortModel } from "./workspace/models";

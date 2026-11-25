@@ -400,6 +400,35 @@ it("keeps the quote control out of the text and truncates a long sender on one l
   expect(getComputedStyle(sender).textAlign).toBe("left");
 });
 
+it("keeps a cross-year timestamp and quote button inside a narrow desktop header", async () => {
+  await page.viewport(900, 600);
+  const prevYear = new Date(new Date().getFullYear() - 1, 11, 31, 23, 55, 0).getTime();
+  const { container } = render(
+    <div className="messages" style={{ width: 300 }}>
+      <MessageItem
+        msg={{
+          ...message,
+          model: "provider/long-model-identifier-for-narrow-header[1m]",
+          timestamp: prevYear,
+        }}
+        agents={[agent]}
+        onQuote={no}
+      />
+    </div>,
+  );
+  await document.fonts.ready;
+  const header = get(container, ".message-header");
+  const model = get(header, ".message-model");
+  const time = get(header, ".message-time");
+  const quote = get(header, ".btn-quote");
+  expect(lines(time)).toBe(1);
+  expect(rect(time).right).toBeLessThanOrEqual(rect(header).right + 0.5);
+  expect(rect(quote).right).toBeLessThanOrEqual(rect(header).right + 0.5);
+  expect(model.scrollWidth).toBeGreaterThan(model.clientWidth);
+  expect(getComputedStyle(model).textOverflow).toBe("ellipsis");
+  expect(model.title).toBe(model.textContent);
+});
+
 it("keeps attached images unstretched and gives queue cancellation a larger target than its glyph", async () => {
   await page.viewport(390, 760);
   const image = (width: number, height: number) => ({
