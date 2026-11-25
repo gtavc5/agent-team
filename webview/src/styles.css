@@ -1606,6 +1606,61 @@ span.katex-display {
   border-color: var(--accent);
 }
 
+.message-footer-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.btn-mention-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 16px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition:
+    opacity 0.15s,
+    color 0.15s,
+    border-color 0.15s,
+    background 0.15s;
+}
+.message:hover .btn-mention-agent,
+.btn-mention-agent:hover,
+.btn-mention-agent:focus-visible {
+  opacity: 1;
+}
+.btn-mention-agent:hover,
+.btn-mention-agent:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.btn-mention-agent:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+@media (hover: none) {
+  .btn-mention-agent {
+    opacity: 0.8;
+  }
+}
+.btn-mention-at {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+.btn-mention-name {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---- Step groups and events --------------------------------------------- */
 
 .step-group {
@@ -2603,6 +2658,173 @@ button.action-target:hover {
 .btn-attach:hover {
   background: var(--bg-hover) !important;
   color: var(--text-primary) !important;
+}
+
+/* Composer target agent selector */
+.target-select {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-end;
+}
+.input-row .target-select-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  max-width: 150px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    color 0.12s;
+}
+.input-row .target-select-btn:hover:not(:disabled),
+.input-row .target-select-btn.open {
+  background: var(--bg-elevated);
+  border-color: var(--border-strong);
+}
+.input-row .target-select-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.input-row .target-select-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.input-row .target-select-btn.is-locked {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-secondary));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.input-row .target-select-btn.is-locked:hover:not(:disabled),
+.input-row .target-select-btn.is-locked.open {
+  background: color-mix(in srgb, var(--accent) 20%, var(--bg-secondary));
+  border-color: var(--accent);
+}
+.input-row .target-select-btn.is-override {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-secondary));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.target-select-at {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-weight: 600;
+}
+.target-select-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.target-select-caret {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.target-select-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 220px;
+  max-width: min(320px, 85vw);
+  max-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  z-index: 30;
+  padding: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+}
+.target-select-header {
+  padding: 5px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.target-select-note {
+  margin: 0 4px 4px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-tertiary));
+  color: var(--accent-hover);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.input-row .target-select-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: auto;
+  min-height: 36px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  align-self: stretch;
+}
+.input-row .target-select-option:hover,
+.input-row .target-select-option:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+.input-row .target-select-option.selected {
+  background: var(--bg-active);
+}
+.target-select-option-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.target-select-option-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.target-select-option-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.target-select-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 14px;
+}
+.target-select-check {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .info-toast {
@@ -3678,6 +3900,21 @@ button.quote-bar-content:focus-visible {
     width: auto;
     padding: 0 6px;
     border-radius: 17px;
+  }
+  .input-row .target-select-btn {
+    height: 34px;
+    max-width: 108px;
+    padding: 0 6px;
+    gap: 4px;
+    border-radius: 17px;
+    font-size: 11.5px;
+  }
+  .target-select-popover {
+    max-width: min(320px, calc(100vw - 64px));
+  }
+  .btn-mention-agent {
+    padding: 3px 10px;
+    font-size: 12px;
   }
   .command-popup,
   .mention-popup {

@@ -218,6 +218,7 @@ export const chatCatalog = {
   agentFallback: { en: "agent", "zh-CN": "代理" },
   sending: { en: "Sending…", "zh-CN": "发送中…" },
   quoteMessage: { en: "Quote this message", "zh-CN": "引用此消息" },
+  replyToAgent: { en: "Reply to @{name}", "zh-CN": "回复 @{name}" },
   queuedBadge: { en: "queued", "zh-CN": "排队中" },
   sentRunning: { en: "Sent into the running turn", "zh-CN": "已插入当前运行轮次" },
   removeQueue: { en: "Remove from queue", "zh-CN": "从队列中移除" },

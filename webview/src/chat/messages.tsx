@@ -1238,6 +1238,8 @@ export const MessageItem = memo(function MessageItem({
   onCancelQueued,
   onLoadDetails,
   onOpenWorkspace,
+  onMentionAgent,
+  isTurnTail = true,
 }: {
   msg: Message;
   agents: AgentInfo[];
@@ -1251,6 +1253,8 @@ export const MessageItem = memo(function MessageItem({
   onCancelSubagent?: (agentId: string, taskId: string) => void;
   onCancelQueued?: (messageId: string) => void;
   onLoadDetails?: (messageId: string) => void;
+  onMentionAgent?: (agent: AgentInfo) => void;
+  isTurnTail?: boolean;
 }) {
   const tr = useT();
   const handleLoadEvents = useCallback(
@@ -1293,6 +1297,8 @@ export const MessageItem = memo(function MessageItem({
   const from = isUser ? msg.from : undefined;
   const agent = !isUser ? agents.find((a) => a.id === msg.agentId) : null;
   const streaming = msg.status === "streaming";
+  const showMentionAction =
+    !isUser && !streaming && !!agent && agents.length > 1 && isTurnTail && !!onMentionAgent;
   const deliveryLabel = !isUser
     ? null
     : msg.status === "starting"
@@ -1583,6 +1589,23 @@ export const MessageItem = memo(function MessageItem({
                 detailEvents={detailEvents}
                 thinkingInHeader={standaloneSince != null}
               />
+            )}
+            {showMentionAction && (
+              <div className="message-footer-actions">
+                <button
+                  type="button"
+                  className="btn-mention-agent"
+                  data-agent-id={agent.id}
+                  title={tr("replyToAgent", { name: agent.name })}
+                  aria-label={tr("replyToAgent", { name: agent.name })}
+                  onClick={() => onMentionAgent(agent)}
+                >
+                  <span className="btn-mention-at" aria-hidden="true">
+                    @
+                  </span>
+                  <span className="btn-mention-name">{agent.name}</span>
+                </button>
+              </div>
             )}
           </div>
         </div>

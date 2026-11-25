@@ -14,6 +14,13 @@ import {
 import { groupWorkspaces } from "./sidebar/groups";
 import { agentQueues, agentState, isAgentActive, pillLabel } from "./workspace/agents";
 import { StopControl } from "./composer/StopControl";
+import { TargetAgentSelect } from "./composer/TargetAgentSelect";
+import {
+  clearConflictingMention,
+  extractMentionName,
+  getDefaultAgent,
+  resolveTargetState,
+} from "./composer/targetRouting";
 import { Icon } from "./panels/Icon";
 import { SidePanel } from "./panels/SidePanel";
 import { Rail, type RailItem } from "./panels/Rail";
@@ -995,7 +1002,7 @@ export function App() {
       }
     }
     setHasInput(restored.trim().length > 0);
-    setMentionTarget(restored.match(/(?:^|\s)@(\S+)/)?.[1] ?? null);
+    setMentionTarget(extractMentionName(restored));
     userScrolledUpRef.current = false;
     stuckToBottomRef.current = true;
     prevMsgCountRef.current = 0;
@@ -1204,17 +1211,26 @@ export function App() {
   const isAnyRunning = activeWs?.agents.some(isAgentActive) ?? false;
   const hasAgents = (activeWs?.agents.length ?? 0) > 0;
 
+  // Per-workspace locked target (frontend-only; never alters backend isDefault).
+  const [lockedTargets, setLockedTargets] = useState<Record<string, string>>({});
+  const lockedTargetsRef = useRef(lockedTargets);
+  lockedTargetsRef.current = lockedTargets;
+
   // The agent a Send would go to: first @mention in the draft, else the
-  // default agent. The primary button morphs to Stop while it is busy.
+  // locked target, else the default agent. The primary button morphs to Stop
+  // while it is busy.
   const [mentionTarget, setMentionTarget] = useState<string | null>(null);
-  const targetAgent = useMemo(() => {
-    if (!activeWs || activeWs.agents.length === 0) return null;
-    if (mentionTarget) {
-      const hit = activeWs.agents.find((a) => a.name === mentionTarget);
-      if (hit) return hit;
-    }
-    return activeWs.agents.find((a) => a.isDefault) ?? activeWs.agents[0];
-  }, [activeWs, mentionTarget]);
+  const lockedAgentId = activeWs ? (lockedTargets[activeWs.id] ?? null) : null;
+  const targetState = useMemo(
+    () =>
+      resolveTargetState(
+        activeWs?.agents ?? [],
+        lockedAgentId,
+        mentionTarget ? `@${mentionTarget}` : "",
+      ),
+    [activeWs?.agents, lockedAgentId, mentionTarget],
+  );
+  const targetAgent = targetState.effectiveAgent;
   const targetBusy = !!targetAgent && agentQueues(targetAgent);
   const busyAgents = activeWs?.agents.filter(agentQueues) ?? [];
 
@@ -1276,8 +1292,48 @@ export function App() {
         el.style.height = Math.min(el.scrollHeight, 120) + "px";
       }
       setHasInput(text.trim().length > 0);
+      setMentionTarget(extractMentionName(text));
     },
-    [activeWsId],
+    [activeWsId, setMentionTarget],
+  );
+
+  const handleSelectTarget = useCallback(
+    (agentId: string | null) => {
+      if (activeProjectRef.current?.status === "sealed") return;
+      const ws = activeWsRef.current;
+      if (!ws) return;
+      setLockedTargets((prev) => {
+        if (agentId === null) {
+          if (!(ws.id in prev)) return prev;
+          const next = { ...prev };
+          delete next[ws.id];
+          return next;
+        }
+        if (prev[ws.id] === agentId) return prev;
+        return { ...prev, [ws.id]: agentId };
+      });
+      const chosen = agentId
+        ? (ws.agents.find((a) => a.id === agentId) ?? null)
+        : getDefaultAgent(ws.agents);
+      const draft = textareaRef.current?.value ?? "";
+      if (chosen && draft) {
+        const cleaned = clearConflictingMention(draft, chosen, ws.agents);
+        if (cleaned !== draft) setDivText(cleaned);
+      }
+      textareaRef.current?.focus();
+    },
+    [setDivText],
+  );
+
+  const handleMentionAgent = useCallback(
+    (agent: AgentInfo) => {
+      const ws = activeWsRef.current;
+      const live = ws?.agents.find((a) => a.id === agent.id);
+      if (!ws || !live) return;
+      const defaultAgent = getDefaultAgent(ws.agents);
+      handleSelectTarget(defaultAgent?.id === live.id ? null : live.id);
+    },
+    [handleSelectTarget],
   );
 
   // Lines picked in the Files panel, quoted into the composer under their
@@ -1408,10 +1464,15 @@ export function App() {
           setUploading(false);
         }
       }
+      const sendTarget = resolveTargetState(
+        ws.agents,
+        lockedTargetsRef.current[ws.id],
+        text,
+      ).sendTarget;
       outcome = await sendMessage(
         ws.id,
         text,
-        undefined,
+        sendTarget,
         images,
         quotedMsg
           ? { messageId: quotedMsg.id, agentId: quotedMsg.agentId, content: quotedMsg.content }
@@ -1436,8 +1497,10 @@ export function App() {
     if (activeWsRef.current?.id !== ws.id) return;
     if (el && el.value.trim() !== text) {
       inputMapRef.current.set(ws.id, el.value);
+      setMentionTarget(extractMentionName(el.value));
       return;
     }
+    setMentionTarget(null);
     setMentionQuery(null);
     setCmdQuery(null);
     if (el) {
@@ -1510,7 +1573,7 @@ export function App() {
     const has = val.trim().length > 0;
     if (has !== hasInput) setHasInput(has);
     if (activeWsId) inputMapRef.current.set(activeWsId, val);
-    setMentionTarget(val.match(/(?:^|\s)@(\S+)/)?.[1] ?? null);
+    setMentionTarget(extractMentionName(val));
 
     el.style.height = "36px";
     el.style.height = Math.min(el.scrollHeight, 120) + "px";
@@ -1741,6 +1804,14 @@ export function App() {
                               prev.kind === "agent" &&
                               !!msg.turnId &&
                               msg.turnId === prev.turnId;
+                            const next = i + 1 < total ? msgs[i + 1] : null;
+                            const isTurnTail = !(
+                              !!next &&
+                              msg.kind === "agent" &&
+                              next.kind === "agent" &&
+                              !!msg.turnId &&
+                              next.turnId === msg.turnId
+                            );
                             const item = (
                               <MessageItem
                                 user={user}
@@ -1757,6 +1828,8 @@ export function App() {
                                 onCancelQueued={onCancelQueued}
                                 onLoadDetails={onLoadDetails}
                                 onOpenWorkspace={openWorkspace}
+                                onMentionAgent={projectSealed ? undefined : handleMentionAgent}
+                                isTurnTail={isTurnTail}
                               />
                             );
                             const from = msg.from?.workspaceId;
@@ -1906,6 +1979,15 @@ export function App() {
                   >
                     <Icon name="plus" />
                   </button>
+                  <TargetAgentSelect
+                    key={`target-${activeWs.id}`}
+                    agents={activeWs.agents}
+                    effectiveAgent={targetState.effectiveAgent}
+                    lockedAgent={targetState.lockedAgent}
+                    isMentionOverride={targetState.isMentionOverride}
+                    disabled={!hasAgents || projectSealed}
+                    onSelectTarget={handleSelectTarget}
+                  />
                   <textarea
                     ref={textareaRef}
                     className="chat-input"
