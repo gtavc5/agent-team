@@ -1,3 +1,11 @@
+import {
+  TRACE_MAX_BYTES,
+  TRACE_MAX_EVENTS,
+  traceBytes,
+  type TracePage,
+  type TraceTarget,
+  type TraceWindow,
+} from "../../../shared/subagent-trace";
 import type { SubagentStatus } from "../../../shared/subagent-status";
 import type { ContextUsage } from "../../../shared/context-usage";
 import { configureTelemetry, recordTelemetry } from "../telemetry";
@@ -21,7 +29,6 @@ import {
 import {
   applyStreamBatch,
   downgradedMessageIds,
-  mergeDetailEvents,
   mergeLatestPage,
   PendingEvent,
   withoutLiveTiming,
@@ -50,7 +57,6 @@ export interface SubAgentInfo {
   description: string;
   model?: string;
   effort?: string;
-  prompt?: string;
   agentType?: string;
   // SDK task type; absent on older records (all agents).
   taskType?: string;
@@ -62,12 +68,6 @@ export interface SubAgentInfo {
   summary?: string;
   transcriptRevision?: number;
   eventCount?: number;
-  events?: StreamEvent[];
-  // Client-only, on a card whose transcript was never loaded: nested tasks
-  // whose progress entry it gained live (the next one replaces it).
-  liveProgress?: string[];
-  hasPrompt?: boolean;
-  summaryLength?: number;
   cancellable?: boolean;
 }
 
@@ -512,6 +512,9 @@ export function useServer() {
   const [issues, setIssues] = useState<Record<string, IssueModules>>({});
   const [connected, setConnected] = useState(false);
   const [snapshotReady, setSnapshotReady] = useState(false);
+  const [connectionEpoch, setConnectionEpoch] = useState(0);
+  const traceRequestId = useRef(0);
+  const traceReceivers = useRef(new Map<number, (page: TracePage) => void>());
   const [user, setUser] = useState(DEFAULT_USER);
   const [presets, setPresets] = useState<AgentPreset[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -1023,8 +1026,6 @@ export function useServer() {
           const context = msg.context as ContextUsage | null | undefined;
           const effort = msg.effort as string | undefined;
           const thinking = msg.thinking as ThinkingStats | undefined;
-          // The completion payload strips subagent transcripts, so events
-          // still waiting for a frame must land first or the live tail is lost.
           flushStreamEvents();
           setWorkspaces((prev) =>
             prev.map((w) => {
@@ -1034,7 +1035,6 @@ export function useServer() {
                 queued: (msg.queued as boolean | undefined) ?? w.queued,
                 messages: w.messages.map((m) => {
                   if (m.id !== messageId) return m;
-                  const merged = events ? mergeDetailEvents(m.events, events) : undefined;
                   return {
                     ...withoutLiveTiming(m),
                     status,
@@ -1043,7 +1043,7 @@ export function useServer() {
                       ? { queuedFor: (msg.queuedFor as string | null) ?? undefined }
                       : {}),
                     ...("steering" in msg ? { steering: msg.steering === true || undefined } : {}),
-                    ...(merged ? { events: merged } : {}),
+                    ...(events ? { events } : {}),
                     ...(context !== undefined ? { context } : {}),
                     ...(effort ? { effort } : {}),
                     ...(thinking ? { thinking } : {}),
@@ -1160,9 +1160,7 @@ export function useServer() {
               return {
                 ...w,
                 messages: w.messages.map((m) =>
-                  m.id === messageId
-                    ? { ...m, events: mergeDetailEvents(m.events, events), detail: undefined }
-                    : m,
+                  m.id === messageId ? { ...m, events, detail: undefined } : m,
                 ),
               };
             }),
@@ -1170,39 +1168,18 @@ export function useServer() {
           break;
         }
 
-        case "subagent_events": {
-          const wsId = msg.workspaceId as string;
-          const messageId = msg.messageId as string;
-          const taskId = msg.taskId as string;
-          const saEvents = msg.events as StreamEvent[];
-          const revision = (msg.transcriptRevision as number | undefined) ?? 0;
-          flushStreamEvents();
-          setWorkspaces((prev) =>
-            prev.map((w) => {
-              if (w.id !== wsId) return w;
-              return {
-                ...w,
-                messages: w.messages.map((m) => {
-                  if (m.id !== messageId || !m.events) return m;
-                  return {
-                    ...m,
-                    events: m.events.map((e) => {
-                      // A response requested before enrichment must not repopulate the old slice.
-                      if (
-                        e.subagent?.taskId !== taskId ||
-                        (e.subagent.transcriptRevision ?? 0) !== revision
-                      )
-                        return e;
-                      return {
-                        ...e,
-                        subagent: { ...e.subagent, events: saEvents, eventCount: saEvents.length },
-                      };
-                    }),
-                  };
-                }),
-              };
-            }),
-          );
+        case "subagent_trace_page": {
+          if (typeof msg.requestId !== "number") break;
+          const pending = traceReceivers.current.get(msg.requestId);
+          if (!pending) break;
+          traceReceivers.current.delete(msg.requestId);
+          if (
+            Array.isArray(msg.events) &&
+            msg.events.length <= TRACE_MAX_EVENTS &&
+            traceBytes(msg) <= TRACE_MAX_BYTES
+          ) {
+            pending(msg as unknown as TracePage);
+          }
           break;
         }
 
@@ -1328,6 +1305,7 @@ export function useServer() {
     wsRef.current = ws;
     ws.onopen = () => {
       setConnected(true);
+      setConnectionEpoch((n) => n + 1);
       refreshQuota(false);
     };
     ws.onclose = () => {
@@ -1471,6 +1449,7 @@ export function useServer() {
     issues,
     connected,
     snapshotReady,
+    connectionEpoch,
     user,
     presets,
     models,
@@ -1515,11 +1494,24 @@ export function useServer() {
     ),
     // An open trace can refetch as new events arrive. Its toggle is tracked
     // at the UI, not here at the effect-driven request.
-    loadSubagentEvents: useCallback(
-      (wsId: string, messageId: string, taskId: string) =>
-        send({ type: "load_subagent_events", workspaceId: wsId, messageId, taskId }),
-      [send],
+    requestSubagentTrace: useCallback(
+      (target: TraceTarget, window: TraceWindow, receive: (page: TracePage) => void) => {
+        const id = ++traceRequestId.current;
+        traceReceivers.current.set(id, receive);
+        if (target.workspaceId === "replay-demo") {
+          void import("../dev/replayFixture").then(({ demoTracePage }) =>
+            handleServerMessage({ ...demoTracePage(id, target, window) }),
+          );
+        } else if (!send({ type: "load_subagent_trace", ...target, ...window, requestId: id })) {
+          traceReceivers.current.delete(id);
+        }
+        return () => {
+          traceReceivers.current.delete(id);
+        };
+      },
+      [send, handleServerMessage],
     ),
+
     respondUiDialog: useCallback(
       (dialog: UiDialogRequest, answer: UiDialogAnswer) =>
         send({

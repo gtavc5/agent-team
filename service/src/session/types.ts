@@ -130,12 +130,10 @@ export interface SubAgentInfo {
   // From the task's start to its end, by our clock: every kind of task.
   durationMs?: number;
   summary?: string;
-  // Advanced by the workspace on each enrichment, including metadata-only updates.
+  // Advanced by the workspace on every trace change, even when the count is unchanged.
   transcriptRevision?: number;
   eventCount?: number;
   events?: StreamEvent[];
-  hasPrompt?: boolean;
-  summaryLength?: number;
   // SDK task type ("local_agent", "local_bash", "local_monitor"...). Absent
   // on older records, which were all agents.
   taskType?: string;

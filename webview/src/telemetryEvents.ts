@@ -15,6 +15,7 @@ const clickActions = [
   "sidebar.archive_toggle",
   "trace.step_toggle",
   "trace.subagent_toggle",
+  "trace.subagent_page",
   "trace.tool_toggle",
   "stats.turn_toggle",
   "stats.step_toggle",

@@ -192,15 +192,14 @@ describe("debug snapshot", () => {
                   </div>
                 </div>
                 <div class="subagent-item">
-                  <div class="subagent-details">
-                    <div class="subagent-prompt">SECRET_SUBAGENT_PROMPT</div>
+                  <div class="subagent-details"><div class="subagent-trace-page">
+                    <div class="subagent-prompt"><p><strong>SECRET_SUBAGENT_PROMPT</strong></p></div>
                     <div class="subagent-events">
-                      <div class="event event-text">
-                        <div class="event-content">SECRET_SUBAGENT_TEXT</div>
-                      </div>
+                      <div class="event event-text"><div class="event-content"><p>SECRET_SUBAGENT_TEXT</p></div></div>
+                      <div class="banner"><div class="banner-text">SECRET_SUBAGENT_BANNER</div></div>
                     </div>
-                    <div class="subagent-summary">SECRET_SUBAGENT_SUMMARY</div>
-                  </div>
+                    <div class="subagent-summary"><p>SECRET_SUBAGENT_SUMMARY</p></div>
+                  </div></div>
                 </div>
               </div>
               <div class="turn-footer">No new events for 18s</div>
@@ -238,6 +237,7 @@ describe("debug snapshot", () => {
     expect(serialized).not.toContain("SECRET_ACTION_RESULT");
     expect(serialized).not.toContain("SECRET_SUBAGENT_PROMPT");
     expect(serialized).not.toContain("SECRET_SUBAGENT_TEXT");
+    expect(serialized).not.toContain("SECRET_SUBAGENT_BANNER");
     expect(serialized).not.toContain("SECRET_SUBAGENT_SUMMARY");
     // Live thinking body in HTML is bounded, and live DOM itself is untouched.
     expect(document.querySelector(".event-tool_use .event-content")?.textContent).toContain(

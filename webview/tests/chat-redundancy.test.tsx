@@ -175,22 +175,16 @@ describe("SubAgentItem state matrix", () => {
           status,
           ...fields,
           usage: { totalTokens: 4_000, toolUses: 2, durationMs: 18_000 },
-          events: [orphan],
+          eventCount: 1,
         },
       };
       const { container } = render(<SubAgentItem ev={ev} />);
-      for (const open of [false, true]) {
-        if (open) click(container, ".subagent-header > .trace-header-toggle");
-        expect(
-          [...container.querySelectorAll(".subagent-header .subagent-time")].map(
-            (e) => e.textContent,
-          ),
-        ).toEqual(expected ? [expected] : []);
-        expect(container.querySelector(".subagent-usage")?.textContent).toBe(
-          open ? "4k tokens · 2 tools" : undefined,
-        );
-        audit(container);
-      }
+      expect(
+        [...container.querySelectorAll(".subagent-header .subagent-time")].map(
+          (e) => e.textContent,
+        ),
+      ).toEqual(expected ? [expected] : []);
+      audit(container);
     },
   );
 });
@@ -337,7 +331,7 @@ it("diagnoses historic duplicates in captured HTML, without scanning message pro
       <div class="event-tool_result"><div class="event-row"><span class="event-chip">Result</span><button class="btn-diff">Result · 511 chars</button></div></div>
       <div class="event-tool_use"><div class="event-row"><span class="event-chip">Edit</span></div><div class="event-summary-line"><code>src/file.ts</code></div><div class="event-content"><p><strong>Edit</strong> <code>src/file.ts</code></p></div></div>
       <div class="event-tool_use"><div class="event-row"><span class="event-chip">Bash</span></div><div class="event-content"><p><strong>Bash</strong></p><div class="code-block"><pre>echo ok</pre></div></div></div>
-      <div class="subagent-item"><div class="subagent-header"><span class="subagent-time">4s</span></div><div class="subagent-body"><div class="subagent-usage">4k tokens · 2 tools · 18s</div></div></div>
+      <div class="subagent-item"><div class="subagent-header"><span class="subagent-time">4s</span></div><div class="subagent-header"><span class="subagent-time">18s</span></div></div>
     </div><div class="turn-footer"><span class="chip-live">Thinking · 1s</span></div>
   </div></div>`;
   const doc = new DOMParser().parseFromString(html, "text/html");

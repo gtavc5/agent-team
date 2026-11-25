@@ -358,6 +358,7 @@ function clearRetry(msg: Message): boolean {
 function copySubagentExecution(target: SubAgentInfo, source: SubAgentInfo | undefined): void {
   if (source?.model != null) target.model = source.model;
   if (source?.effort != null) target.effort = source.effort;
+  if (source?.lastTool != null) target.lastTool = source.lastTool;
 }
 
 function enrichSubagent(events: StreamEvent[], patch: SubAgentInfo): number | undefined {
@@ -385,7 +386,7 @@ function enrichSubagent(events: StreamEvent[], patch: SubAgentInfo): number | un
 // Apply an inner event to a subagent's transcript. Carriers nest: a
 // grandchild's event arrives as progress(child, _innerEvent: progress(grand,
 // _innerEvent: ev)), so recurse into the nested start's own transcript.
-function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): boolean {
+export function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent): boolean {
   if (innerEvent.kind === "subagent_enrichment") {
     const patch = innerEvent.subagent;
     if (!patch) return false;
@@ -913,8 +914,25 @@ export class Workspace {
       );
 
       if (innerEvent && startIdx >= 0) {
-        const saEvents = (msg.events[startIdx].subagent!.events ??= []);
+        const started = msg.events[startIdx].subagent!;
+        const saEvents = (started.events ??= []);
         if (applyInnerEvent(saEvents, innerEvent)) {
+          started.transcriptRevision = (started.transcriptRevision ?? 0) + 1;
+          started.eventCount = saEvents.length;
+          if (innerEvent.kind === "tool_use") {
+            const tool =
+              innerEvent.toolName ?? /^\*\*([^*]{1,80})\*\*/.exec(innerEvent.content)?.[1];
+            if (tool) started.lastTool = tool;
+          }
+          // Detached descendants can still add detail after the parent settles.
+          const done = msg.events.find(
+            (e) => e.kind === "subagent_done" && e.subagent?.taskId === taskId,
+          )?.subagent;
+          if (done) {
+            done.transcriptRevision = started.transcriptRevision;
+            done.eventCount = started.eventCount;
+            done.lastTool = started.lastTool;
+          }
           this.streamed(msg, event);
         }
         return;
@@ -957,13 +975,27 @@ export class Workspace {
           started.eventCount = finished.events.length;
         }
         started.status = finished?.status;
-        started.summary = finished?.summary;
+        if (finished?.summary != null) started.summary = finished.summary;
         started.usage = finished?.usage;
         if (finished?.durationMs != null) started.durationMs = finished.durationMs;
       }
-      if (finished?.events) {
+      if (finished) {
+        const started = startIdx >= 0 ? msg.events[startIdx].subagent : undefined;
+        const transcriptRevision =
+          (started?.transcriptRevision ?? finished.transcriptRevision ?? 0) + 1;
+        if (started) started.transcriptRevision = transcriptRevision;
         const { events, ...summary } = finished;
-        event = { ...event, subagent: { ...summary, eventCount: events.length } };
+        event = {
+          ...event,
+          subagent: {
+            ...summary,
+            // Without a start this event itself owns the detail (legacy/orphan runs).
+            ...(startIdx < 0 && { events }),
+            eventCount:
+              (events ?? started?.events)?.length ?? started?.eventCount ?? finished.eventCount,
+            transcriptRevision,
+          },
+        };
       }
       const progIdx = msg.events.findIndex(
         (e) => e.kind === "subagent_progress" && e.subagent?.taskId === taskId,

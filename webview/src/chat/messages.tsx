@@ -13,7 +13,14 @@ import {
 import { telemetryTarget } from "../telemetryEvents";
 import type { ReactNode } from "react";
 import type { Message, MessageOrigin, AgentInfo, StreamEvent } from "../state/useServer";
-import { hasOutstandingSubagents, timelineBlocks, type TimelineBlock } from "./events";
+import {
+  hasOutstandingSubagents,
+  SUBAGENT_KINDS,
+  timelineBlocks,
+  type TimelineBlock,
+} from "./events";
+import { SubagentTraceContext, useTracePage } from "./subagentTrace";
+import { traceBytes, type TraceRow, type TraceWindow } from "../../../shared/subagent-trace";
 import { isOutstandingSubagentStatus, type SubagentStatus } from "../../../shared/subagent-status";
 import { toolNameOf, toolSummary } from "../state/stream";
 import { copySelectionAsMarkdown } from "./clipboard";
@@ -487,8 +494,11 @@ export const EventItem = memo(function EventItem({
     setBodyOpen((v) => !v);
   };
 
+  const failed = ev.isError || ev.toolResultIsError;
   return (
-    <div className={`event event-${ev.kind}${liveThinking ? " live-thinking" : ""}`}>
+    <div
+      className={`event event-${ev.kind}${failed ? " event-failed" : ""}${liveThinking ? " live-thinking" : ""}`}
+    >
       <div className="event-row" aria-hidden={liveThinking || undefined}>
         {!liveThinking && <span className={`event-chip ${chipClass}`}>{label}</span>}
         {isToolUse && ev.durationMs != null && (
@@ -519,6 +529,7 @@ export const EventItem = memo(function EventItem({
           >
             {isResult ? (resultOpen ? "Hide" : "Show") : resultOpen ? "Hide result" : "Result"} ·{" "}
             {resultLabel(resultLen)}
+            {failed ? " · failed" : ""}
           </button>
         )}
       </div>
@@ -664,50 +675,44 @@ const SUBAGENT_STATUS_ICONS: Record<SubagentStatus, string> = {
   rejected: "⊘",
 };
 
+type TraceScope = {
+  messageId: string;
+  rootTaskId: string;
+  path: readonly string[];
+  revision: number;
+};
+const ROOT_TRACE_PATH: readonly string[] = [];
+
 export const SubAgentItem = memo(function SubAgentItem({
   ev,
-  onLoadEvents,
+  messageId,
+  traceParent,
   onCancel,
-  onLoadDetails,
 }: {
   ev: StreamEvent;
-  onLoadEvents?: (taskId: string) => void;
+  messageId?: string;
+  traceParent?: TraceScope;
   onCancel?: (taskId: string) => void;
-  onLoadDetails?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const bottom = useBottomCollapse(open, () => setOpen(false));
   const sa = ev.subagent;
-  // The server holds more of the transcript than the client (a summary
-  // page, or a live tail that arrived after the summary).
-  const needsLoad = !!sa && (sa.eventCount ?? 0) > (sa.events?.length ?? 0);
-  const transcriptRevision = sa?.transcriptRevision;
-  useEffect(() => {
-    if (open && needsLoad && onLoadEvents && sa?.taskId) onLoadEvents(sa.taskId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch once per open/needsLoad flip or transcript replacement; sa and onLoadEvents change identity on every stream update
-  }, [open, needsLoad, transcriptRevision]);
+  const parentPath = traceParent?.path;
+  const taskId = sa?.taskId;
+  const path = useMemo(
+    () => (parentPath && taskId ? [...parentPath, taskId] : ROOT_TRACE_PATH),
+    [parentPath, taskId],
+  );
   if (!sa) return null;
-
+  const scope: TraceScope = {
+    path,
+    messageId: traceParent?.messageId ?? messageId ?? "",
+    rootTaskId: traceParent?.rootTaskId ?? sa.taskId,
+    revision: traceParent?.revision ?? sa.transcriptRevision ?? 0,
+  };
   const status = sa.status ?? (ev.kind === "subagent_done" ? "failed" : "stopped");
   const outstanding = isOutstandingSubagentStatus(status);
-
-  const allInner = sa.events ?? [];
-  const hasBody = !!(sa.prompt || sa.summary || sa.usage || allInner.some(hasVisibleEventBody));
-
-  const handleToggle = () => {
-    const willOpen = !open;
-    setOpen(willOpen);
-    if (willOpen && onLoadDetails) onLoadDetails();
-  };
-
-  // Its time is in the header, measured from this run's start: the CLI's
-  // counts from the first, a resumed agent's idle time between included.
-  // Records from before it was measured: the CLI's time of a finished agent.
   const ran = sa.durationMs ?? (outstanding ? undefined : sa.usage?.durationMs);
-  const usageStr = sa.usage
-    ? `${Math.round(sa.usage.totalTokens / 1000)}k tokens · ${sa.usage.toolUses} tools`
-    : null;
-
   const role = sa.description || "Subagent";
   return (
     <div className={`subagent-item subagent-${status}`}>
@@ -715,7 +720,7 @@ export const SubAgentItem = memo(function SubAgentItem({
         className="subagent-header"
         ref={bottom.header}
         {...telemetryTarget("trace.subagent_toggle")}
-        onClick={handleToggle}
+        onClick={() => setOpen((value) => !value)}
       >
         <button
           type="button"
@@ -762,54 +767,163 @@ export const SubAgentItem = memo(function SubAgentItem({
           </button>
         )}
       </div>
-      {open && (
-        <div className="subagent-details subagent-body">
-          {sa.prompt && (
-            <div className="subagent-prompt">
-              <MdBlock>{sa.prompt}</MdBlock>
-            </div>
-          )}
-          {(needsLoad || (!sa.prompt && sa.hasPrompt) || (!sa.summary && sa.summaryLength)) && (
-            <div className="subagent-loading">Loading…</div>
-          )}
-          {allInner.length > 0 && (
-            <div className="subagent-events">
-              {timelineBlocks(allInner).map((block, bi) => {
-                if (block.kind === "steps") {
-                  return block.events.map((ie, i) => (
-                    <EventItem key={`${bi}-${i}`} ev={ie} onLoadDetails={onLoadDetails} />
-                  ));
-                }
-                return (
-                  <TimelineBlockItem
-                    key={timelineBlockKey(block, bi)}
-                    block={block}
-                    onLoadEvents={onLoadEvents}
-                    onCancelSubagent={onCancel}
-                    onLoadDetails={onLoadDetails}
-                  />
-                );
-              })}
-            </div>
-          )}
-          {sa.summary && (
-            <div className="subagent-summary">
-              <MdBlock>{sa.summary}</MdBlock>
-            </div>
-          )}
-          {usageStr && <div className="subagent-usage">{usageStr}</div>}
-          {hasBody && (
-            <BottomCollapse
-              onClick={bottom.collapse}
-              label="Collapse subagent trace"
-              action="trace.subagent_toggle"
-            />
-          )}
-        </div>
-      )}
+      {open && <SubagentDetails scope={scope} onCollapse={bottom.collapse} />}
     </div>
   );
 });
+
+function eventFromTraceRow(row: TraceRow): StreamEvent {
+  const hiddenChild = !row.child && SUBAGENT_KINDS.has(row.kind);
+  return {
+    kind: row.kind === "omitted" || hiddenChild ? "notice" : row.kind,
+    content: row.kind === "omitted" ? "Step shortened to fit this page." : row.content,
+    toolName: row.toolName,
+    toolUseId: row.toolUseId,
+    toolResult: row.toolResult,
+    isMarkdown: row.isMarkdown,
+    toolResultIsMarkdown: row.toolResultIsMarkdown,
+    ...(row.failed && (row.kind === "tool_use" ? { toolResultIsError: true } : { isError: true })),
+    durationMs: row.durationMs,
+    subagent: row.child,
+  };
+}
+
+function SubagentDetails({ scope, onCollapse }: { scope: TraceScope; onCollapse: () => void }) {
+  const connection = useContext(SubagentTraceContext);
+  const workspaceId = connection?.workspaceId;
+  const { messageId, rootTaskId, path, revision } = scope;
+  const target = useMemo(
+    () => (workspaceId && messageId ? { workspaceId, messageId, taskId: rootTaskId } : null),
+    [workspaceId, messageId, rootTaskId],
+  );
+  const [cursor, setCursor] = useState<Pick<TraceWindow, "cursor" | "direction">>({});
+  const window = useMemo(() => ({ ...cursor, ...(path.length ? { path } : {}) }), [cursor, path]);
+  const { page, isNavigating, timedOut } = useTracePage(connection, target, window, revision);
+  const projection = useMemo(() => {
+    const events = page?.events.map(eventFromTraceRow) ?? [];
+    return { blocks: timelineBlocks(events), indexes: new Map(events.map((ev, i) => [ev, i])) };
+  }, [page]);
+  const loading = !target
+    ? "Trace is unavailable."
+    : connection?.epoch == null
+      ? "Offline. Waiting to reconnect…"
+      : timedOut
+        ? "Trace request timed out."
+        : !page || (isNavigating && page.unavailable)
+          ? "Loading trace…"
+          : isNavigating
+            ? "Loading page…"
+            : page.unavailable
+              ? "Trace is unavailable."
+              : null;
+  const usage = page?.usage;
+  const reset = () => setCursor({});
+  return (
+    <div className="subagent-details subagent-body">
+      {loading && (
+        <div className="subagent-loading" role="status">
+          {loading}
+          {(timedOut || (!isNavigating && page?.unavailable)) && connection?.epoch != null && (
+            <button
+              type="button"
+              className="btn-inline"
+              {...telemetryTarget("trace.subagent_page")}
+              onClick={() => setCursor({ ...cursor })}
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+      {page && !page.unavailable && (
+        <div
+          className="subagent-trace-page"
+          data-trace-entries={page.events.length}
+          data-trace-bytes={traceBytes(page)}
+        >
+          {page.prompt && (
+            <div className="subagent-prompt">
+              <MdBlock>{page.prompt}</MdBlock>
+            </div>
+          )}
+          {page.totalEvents > page.events.length && (
+            <nav className="subagent-pagination" aria-label="Trace pages">
+              <span>
+                {page.events.length ? `${page.start + 1}–${page.end} of ` : ""}
+                {page.totalEvents} steps
+              </span>
+              <button
+                type="button"
+                className="btn-inline"
+                {...telemetryTarget("trace.subagent_page")}
+                disabled={!page.start || isNavigating || connection?.epoch == null}
+                onClick={() => setCursor({ direction: "before", cursor: page.start })}
+              >
+                Earlier
+              </button>
+              <button
+                type="button"
+                className="btn-inline"
+                {...telemetryTarget("trace.subagent_page")}
+                disabled={page.end >= page.totalEvents || isNavigating || connection?.epoch == null}
+                onClick={() => setCursor({ direction: "after", cursor: page.end })}
+              >
+                Newer
+              </button>
+              <button
+                type="button"
+                className="btn-inline"
+                {...telemetryTarget("trace.subagent_page")}
+                disabled={cursor.cursor == null || connection?.epoch == null}
+                onClick={reset}
+              >
+                Latest
+              </button>
+            </nav>
+          )}
+          {page.truncated && (
+            <div className="subagent-loading">Some detail was shortened to fit this page.</div>
+          )}
+          {!page.totalEvents && !page.prompt && !page.result && (
+            <div className="subagent-loading">No trace steps recorded.</div>
+          )}
+          {projection.blocks.length > 0 && (
+            <div className="subagent-events">
+              {projection.blocks.flatMap((block, i) =>
+                block.kind === "steps"
+                  ? block.events.map((ev) => (
+                      <EventItem key={`step:${page.start + projection.indexes.get(ev)!}`} ev={ev} />
+                    ))
+                  : [
+                      <TimelineBlockItem
+                        key={timelineBlockKey(block, i)}
+                        block={block}
+                        traceParent={scope}
+                      />,
+                    ],
+              )}
+            </div>
+          )}
+          {page.result && (
+            <div className="subagent-summary">
+              <MdBlock>{page.result}</MdBlock>
+            </div>
+          )}
+          {usage && (
+            <div className="subagent-usage">
+              {formatTokens(usage.totalTokens)} tokens · {usage.toolUses} tools
+            </div>
+          )}
+        </div>
+      )}
+      <BottomCollapse
+        onClick={onCollapse}
+        label="Collapse subagent trace"
+        action="trace.subagent_toggle"
+      />
+    </div>
+  );
+}
 
 function stepSummary(regular: StreamEvent[]): string {
   const count = (kind: string) => regular.filter((e) => e.kind === kind).length;
@@ -982,7 +1096,8 @@ function StepBox({
 // boundary, so the step boxes between them count only what happened there.
 type StepTimelineProps = {
   blocks: TimelineBlock[];
-  onLoadEvents?: (taskId: string) => void;
+  messageId?: string;
+  traceParent?: TraceScope;
   onCancelSubagent?: (taskId: string) => void;
   onLoadDetails?: () => void;
   defaultOpen?: boolean;
@@ -1000,7 +1115,7 @@ export function StepGroup({
 
 function StepTimeline({
   blocks,
-  onLoadEvents,
+  messageId,
   onCancelSubagent,
   onLoadDetails,
   defaultOpen = false,
@@ -1029,7 +1144,7 @@ function StepTimeline({
           <TimelineBlockItem
             key={timelineBlockKey(block, i)}
             block={block}
-            onLoadEvents={onLoadEvents}
+            messageId={messageId}
             onCancelSubagent={onCancelSubagent}
             onLoadDetails={onLoadDetails}
           />
@@ -1047,10 +1162,11 @@ function timelineBlockKey(block: TimelineCard, index: number): string {
 
 function TimelineBlockItem({
   block,
-  onLoadEvents,
+  messageId,
+  traceParent,
   onCancelSubagent,
   onLoadDetails,
-}: Pick<StepTimelineProps, "onLoadEvents" | "onCancelSubagent" | "onLoadDetails"> & {
+}: Pick<StepTimelineProps, "messageId" | "traceParent" | "onCancelSubagent" | "onLoadDetails"> & {
   block: TimelineCard;
 }) {
   switch (block.kind) {
@@ -1062,9 +1178,9 @@ function TimelineBlockItem({
       return (
         <SubAgentItem
           ev={block.ev}
-          onLoadEvents={onLoadEvents}
+          messageId={messageId}
+          traceParent={traceParent}
           onCancel={onCancelSubagent}
-          onLoadDetails={onLoadDetails}
         />
       );
   }
@@ -1218,7 +1334,6 @@ export const MessageItem = memo(function MessageItem({
   onStartingRow,
   onQuote,
   onJumpToMessage,
-  onLoadSubagentEvents,
   onCancelSubagent,
   onCancelQueued,
   onLoadDetails,
@@ -1234,15 +1349,10 @@ export const MessageItem = memo(function MessageItem({
   onOpenWorkspace?: (workspaceId: string) => void;
   onQuote?: (msg: Message) => void;
   onJumpToMessage?: (messageId: string) => void;
-  onLoadSubagentEvents?: (messageId: string, taskId: string) => void;
   onCancelSubagent?: (agentId: string, taskId: string) => void;
   onCancelQueued?: (messageId: string) => void;
   onLoadDetails?: (messageId: string) => void;
 }) {
-  const handleLoadEvents = useCallback(
-    (taskId: string) => onLoadSubagentEvents?.(msg.id, taskId),
-    [msg.id, onLoadSubagentEvents],
-  );
   // Only wired while the message is a summary; once details arrive the
   // prop becomes undefined and the items render their bodies directly.
   const summarized = msg.detail === "summary";
@@ -1547,7 +1657,7 @@ export const MessageItem = memo(function MessageItem({
                         {(seg.events.length > 0 || si === tailAt) && (
                           <StepTimeline
                             blocks={si === tailAt ? tailBlocks : timelineBlocks(seg.events)}
-                            onLoadEvents={handleLoadEvents}
+                            messageId={msg.id}
                             onCancelSubagent={handleCancelSubagent}
                             onLoadDetails={handleLoadDetails}
                             live={si === tailAt ? liveBlock : undefined}

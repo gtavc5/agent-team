@@ -44,11 +44,12 @@ export function auditChatRedundancy(input: ParentNode | string): ChatRedundancyF
       toggles[0]?.getAttribute("aria-expanded") === "true"
         ? "Hide"
         : "Show";
+    const failureSuffix = row.classList.contains("event-failed") ? " · failed" : "";
     return (
       chips.length !== 1 ||
       text(chips[0]) !== "Result" ||
       toggles.length !== 1 ||
-      !new RegExp(`^${action} · \\d+k? chars$`).test(text(toggles[0]))
+      !new RegExp(`^${action} · \\d+k? chars${failureSuffix}$`).test(text(toggles[0]))
     );
   });
 
@@ -70,12 +71,7 @@ export function auditChatRedundancy(input: ParentNode | string): ChatRedundancyF
 
   audit("subagent-duration", ".subagent-item", (card) => {
     const times = card.querySelectorAll(":scope > .subagent-header > .subagent-time");
-    const usage = card.querySelector(":scope > .subagent-body > .subagent-usage");
-    // Usage is a token/tool count, not a second elapsed time for this run.
-    return (
-      times.length > 1 ||
-      (times.length === 1 && !!usage && !/^\d+k tokens · \d+ tools$/.test(text(usage)))
-    );
+    return times.length > 1;
   });
   return findings;
 }

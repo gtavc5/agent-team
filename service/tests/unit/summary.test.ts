@@ -180,8 +180,7 @@ describe("summarizeEvent", () => {
       usage: { totalTokens: 10, toolUses: 2, durationMs: 5 },
       durationMs: 6,
       eventCount: 2,
-      hasPrompt: true,
-      summaryLength: 8,
+      summary: "found it",
     });
     expect(s.contentOffset).toBe(3);
   });

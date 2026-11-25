@@ -238,7 +238,11 @@ describe("UI telemetry middleware", () => {
       result.current.refreshQuota(false, ["provider"]);
       result.current.loadMessages("w1", 123);
       result.current.markSeen("w1");
-      result.current.loadSubagentEvents("w1", "message-private", "task-private");
+      result.current.requestSubagentTrace(
+        { workspaceId: "w1", messageId: "message-private", taskId: "task-private" },
+        {},
+        () => {},
+      )();
     });
     expect(record).not.toHaveBeenCalled();
     act(() => {

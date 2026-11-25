@@ -67,8 +67,8 @@ it.each([320, 1200])(
               effort: "high",
               status: "completed",
               durationMs: 3000,
-              lastTool: "hidden-tool",
-              events: [{ kind: "text", content: "hidden-trace" }],
+              lastTool: "Read",
+              eventCount: 100,
             },
           }}
         />
@@ -95,50 +95,50 @@ it.each([320, 1200])(
   },
 );
 
-it.each([
-  [390, "step"],
-  [390, "subagent"],
-  [1200, "step"],
-  [1200, "subagent"],
-] as const)(
-  "collapsing the %ipx %s trace from the bottom restores its off-screen header",
-  async (width, trace) => {
+it("keeps the native toggle leading and Cancel trailing in a running subagent header", async () => {
+  await page.viewport(1200, 720);
+  const { container } = render(
+    <SubAgentItem
+      ev={{
+        kind: "subagent_start",
+        content: "",
+        subagent: { taskId: "running", description: "Reviewer", status: "running" },
+      }}
+      onCancel={no}
+    />,
+  );
+  const header = get(container, ".subagent-header");
+  const cancel = get(header, ".btn-cancel-subagent");
+  const toggle = get(header, ".trace-header-toggle");
+  expect(rect(toggle).left).toBeCloseTo(rect(header).left);
+  expect(rect(toggle).right).toBeLessThan(rect(get(header, ".subagent-status-icon")).left);
+  expect(rect(cancel).right).toBeCloseTo(rect(header).right);
+});
+
+it.each([390, 1200])(
+  "collapsing the %ipx step trace from the bottom restores its off-screen header",
+  async (width) => {
     await page.viewport(width, width === 390 ? 844 : 720);
     const { container, getByRole } = render(
       <div className="messages" style={{ height: 360, overflowAnchor: "none" }}>
         <div style={{ flex: "none", height: 210 }} />
-        {trace === "step" ? (
-          <StepGroup
-            group={{
-              step: 0,
-              events: Array.from({ length: 50 }, () => ({
-                kind: "thinking" as const,
-                content: "Thinking about the next step.",
-              })),
-            }}
-          />
-        ) : (
-          <SubAgentItem
-            ev={{
-              kind: "subagent_start",
-              content: "",
-              subagent: {
-                taskId: "trace",
-                description: "Reviewer",
-                status: "completed",
-                summary: "A paragraph of trace details.\n\n".repeat(50),
-              },
-            }}
-          />
-        )}
+        <StepGroup
+          group={{
+            step: 0,
+            events: Array.from({ length: 50 }, () => ({
+              kind: "thinking",
+              content: "Thinking about the next step.",
+            })),
+          }}
+        />
         <div style={{ flex: "none", height: 2000 }} />
       </div>,
     );
     const scroller = get(container, ".messages");
-    const header = get(container, `.${trace}-header`);
+    const header = get(container, ".step-header");
     const toggle = get(header, "button");
     fireEvent.click(toggle);
-    const footer = getByRole("button", { name: `Collapse ${trace} trace` });
+    const footer = getByRole("button", { name: "Collapse step trace" });
     expect(rect(footer).height).toBeGreaterThanOrEqual(width === 390 ? 44 : 26);
     if (width === 1200) expect(rect(footer).height).toBeLessThan(44);
     expect(rect(footer).width).toBeCloseTo(rect(footer.parentElement!).width, 1);
@@ -225,24 +225,21 @@ it("restores keyboard focus and keeps the last collapsed card in view with norma
   const { container } = render(
     <div className="messages" style={{ height: 340 }}>
       <div style={{ flex: "none", height: 500 }} />
-      <SubAgentItem
-        ev={{
-          kind: "subagent_start",
-          content: "",
-          subagent: {
-            taskId: "last",
-            description: "Reviewer",
-            status: "completed",
-            summary: "A long trace paragraph.\n\n".repeat(50),
-          },
+      <StepGroup
+        group={{
+          step: 0,
+          events: Array.from({ length: 24 }, () => ({
+            kind: "thinking",
+            content: "A long trace paragraph.",
+          })),
         }}
       />
     </div>,
   );
   const scroller = get(container, ".messages");
-  const header = get(container, ".subagent-header");
+  const header = get(container, ".step-header");
   const toggle = get(header, "button");
-  await page.getByRole("button", { name: "Expand subagent: Reviewer" }).click();
+  await page.getByRole("button", { name: "Expand steps" }).click();
   const footer = get(container, ".trace-collapse");
   footer.focus();
   expect(rect(header).bottom).toBeLessThan(rect(scroller).top);
@@ -694,11 +691,10 @@ it("distinguishes error labels from normal text", () => {
       <BannerItem ev={{ kind: "notice", level: "wakeup", content: "Checks complete" }} />
     </>,
   );
-  fireEvent.click(get(container, ".subagent-header"));
   const error = getComputedStyle(get(container, ".banner-error .banner-label")).color;
-  expect(
-    getComputedStyle(get(container, ".subagent-failed .subagent-summary")).borderLeftColor,
-  ).toBe(error);
+  expect(getComputedStyle(get(container, ".subagent-failed .subagent-status-icon")).color).toBe(
+    error,
+  );
   expect(getComputedStyle(get(container, ".banner-wakeup .banner-label")).color).not.toBe(error);
 });
 
@@ -718,7 +714,6 @@ it("wraps shell commands and tool paths without letting a long name displace con
             description: long,
             taskType: "local_bash",
             status: "running",
-            prompt: `\`\`\`bash\n${command}\n\`\`\``,
           },
         }}
         onCancel={no}
@@ -742,15 +737,10 @@ it("wraps shell commands and tool paths without letting a long name displace con
     </div>,
   );
   const header = get(container, ".subagent-header");
-  fireEvent.click(header);
   const desc = get(header, ".subagent-desc");
   expect(desc.scrollWidth).toBeGreaterThan(desc.clientWidth);
   expect(getComputedStyle(desc).textOverflow).toBe("ellipsis");
-  for (const selector of [
-    ".subagent-prompt pre",
-    ".event-content pre",
-    ".event-summary-line code",
-  ]) {
+  for (const selector of [".event-content pre", ".event-summary-line code"]) {
     const text = get(container, selector);
     expect(lines(text)).toBeGreaterThan(1);
     expect(rect(text).right).toBeLessThanOrEqual(320);

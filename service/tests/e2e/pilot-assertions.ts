@@ -67,16 +67,26 @@ export function observeBrowserErrors(page: Page) {
 
 export function transcriptState(page: Page) {
   return page.locator(".messages").evaluate((messages) => ({
-    rows: Array.from(messages.querySelectorAll("[id^=msg-]"), (row) => ({
-      id: row.id,
-      text: Array.from(row.querySelectorAll(".message-content"), (body) => body.textContent),
-      queue: row.querySelector(".queued-badge")?.textContent ?? null,
-      canRemove: !!row.querySelector(".queued-cancel"),
-      subagents: Array.from(row.querySelectorAll(".subagent-item"), (card) => ({
-        summary: card.querySelector("[aria-label^='Expand subagent:']")?.getAttribute("aria-label"),
-        status: card.className,
-      })),
-    })),
+    rows: Array.from(messages.querySelectorAll("[id^=msg-]"), (row) => {
+      // Compare the regular transcript, independent of local expansion state.
+      const transcript = row.cloneNode(true) as Element;
+      transcript
+        .querySelectorAll(".subagent-details, .subagent-header .trace-header-toggle")
+        .forEach((node) => node.remove());
+      return {
+        id: row.id,
+        text: Array.from(
+          transcript.querySelectorAll(".message-content"),
+          (body) => body.textContent,
+        ),
+        queue: row.querySelector(".queued-badge")?.textContent ?? null,
+        canRemove: !!row.querySelector(".queued-cancel"),
+        subagents: Array.from(transcript.querySelectorAll(".subagent-item"), (card) => ({
+          label: card.querySelector(".subagent-desc")?.textContent,
+          status: card.className,
+        })),
+      };
+    }),
   }));
 }
 

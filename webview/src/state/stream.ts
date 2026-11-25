@@ -1,13 +1,10 @@
-import { isOutstandingSubagentStatus } from "../../../shared/subagent-status";
 import type { StreamEvent, Message, SubAgentInfo } from "./useServer";
 import {
   attachToolResult,
   findSubagentEvent,
-  innerSubagentEvent,
   isSubagentEvent,
   isTerminalSubagent,
   mergeSubagentInfo,
-  transcriptLength,
   upsertSubagentProgress,
 } from "../chat/events";
 
@@ -69,20 +66,6 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
       : m;
   }
 
-  // Subagent starts are copied before their transcript changes, once per
-  // batch: the rest are shared with the previous state or are the wire
-  // objects themselves, and React may run the same batch twice (StrictMode,
-  // a rebased updater). Untouched cards keep their identity for memo.
-  const owned = new Set<StreamEvent>();
-  const ownSubagent = (i: number): SubAgentInfo => {
-    if (!owned.has(events[i])) {
-      const sa = events[i].subagent!;
-      events[i] = { ...events[i], subagent: { ...sa, events: sa.events && [...sa.events] } };
-      owned.add(events[i]);
-    }
-    return events[i].subagent!;
-  };
-
   let context = m.context;
 
   for (const ev of evts) {
@@ -114,18 +97,8 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
     }
     const taskId = ev.subagent?.taskId;
     if (ev.kind === "subagent_progress" && taskId) {
-      const inner = innerSubagentEvent(ev);
       const start = findSubagentEvent(events, "subagent_start", taskId);
-      if (inner) {
-        if (start >= 0) {
-          const sa = ownSubagent(start);
-          // A live tail must not pass for a transcript the client never loaded.
-          if (sa.events) applyInnerEvent(sa, inner);
-          else sa.eventCount = (sa.eventCount ?? 0) + unloadedGrowth(sa, inner);
-        }
-      } else {
-        events = recordSubagentProgress(events, ev, taskId, start);
-      }
+      events = recordSubagentProgress(events, ev, taskId, start);
       continue;
     }
     if (ev.kind === "subagent_enrichment") {
@@ -208,25 +181,6 @@ export function withoutLiveTiming(m: Message): Message {
   return rest;
 }
 
-// How much one live inner event grows the server's copy of a transcript the
-// client never loaded (the cases of applyInnerEvent), so the card's count
-// tracks what loading it would show.
-function unloadedGrowth(sa: SubAgentInfo, innerEv: StreamEvent): number {
-  const nid = innerEv.subagent?.taskId;
-  if (innerEv.kind === "tool_result" || innerEv.kind === "subagent_enrichment") return 0;
-  if (innerEv.kind === "subagent_progress" && nid) {
-    if (innerSubagentEvent(innerEv)) return 0;
-    if (sa.liveProgress?.includes(nid)) return 0;
-    sa.liveProgress = [...(sa.liveProgress ?? []), nid];
-    return 1;
-  }
-  if (innerEv.kind === "subagent_done" && nid && sa.liveProgress?.includes(nid)) {
-    sa.liveProgress = sa.liveProgress.filter((id) => id !== nid);
-    return 0;
-  }
-  return 1;
-}
-
 function mergeLifecycle(start: StreamEvent, update: StreamEvent): StreamEvent {
   if (update.kind === "subagent_progress" && isTerminalSubagent(start)) return start;
   return { ...start, subagent: mergeSubagentInfo(start.subagent, update.subagent!) };
@@ -240,8 +194,7 @@ function recordSubagentProgress(
 ): StreamEvent[] {
   const next = upsertSubagentProgress(events, update, taskId);
   if (start >= 0) {
-    const progress = findSubagentEvent(next, "subagent_progress", taskId);
-    next[start] = mergeLifecycle(next[start], next[progress]);
+    next[start] = mergeLifecycle(next[start], update);
   }
   return next;
 }
@@ -253,25 +206,13 @@ function finishSubagent(events: StreamEvent[], done: StreamEvent, taskId: string
   const fallback = progress >= 0 ? events.splice(progress, 1)[0] : undefined;
   const start = findSubagentEvent(events, "subagent_start", taskId);
   if (start >= 0) {
-    // A loaded transcript can hold metadata only on the progress event.
-    const base = fallback ? mergeLifecycle(events[start], fallback) : events[start];
-    const merged = mergeLifecycle(base, done);
-    // Live Pi subagent_done replaces the server transcript with an authoritative reconstruction
-    // and broadcasts eventCount without inline events. Clear any mid-run loaded slice so the UI
-    // reloads or adopts the authoritative copy even when counts match or shrink.
-    if (
-      !done.subagent?.events &&
-      done.subagent?.eventCount != null &&
-      base.subagent?.events !== undefined &&
-      isOutstandingSubagentStatus(base.subagent?.status)
-    ) {
-      merged.subagent = {
-        ...merged.subagent!,
-        events: undefined,
-        eventCount: done.subagent.eventCount,
-      };
-    }
-    events[start] = merged;
+    const base = fallback
+      ? {
+          ...events[start],
+          subagent: mergeSubagentInfo(fallback.subagent, events[start].subagent!),
+        }
+      : events[start];
+    events[start] = mergeLifecycle(base, done);
   }
   events.push(
     start < 0 && fallback
@@ -281,8 +222,6 @@ function finishSubagent(events: StreamEvent[], done: StreamEvent, taskId: string
 }
 
 function enrichSubagent(events: StreamEvent[], patch: SubAgentInfo): void {
-  const start = findSubagentEvent(events, "subagent_start", patch.taskId);
-  const count = patch.events?.length ?? patch.eventCount;
   for (let i = 0; i < events.length; i++) {
     const e = events[i];
     const sa = e.subagent;
@@ -298,49 +237,11 @@ function enrichSubagent(events: StreamEvent[], patch: SubAgentInfo): void {
         ...(patch.model != null && { model: patch.model }),
         ...(patch.effort != null && { effort: patch.effort }),
         ...(patch.durationMs != null && { durationMs: patch.durationMs }),
-        ...(patch.summary != null && { summary: patch.summary, summaryLength: undefined }),
-        ...(count != null && {
-          events: i === start || start < 0 ? patch.events : undefined,
-          eventCount: count,
-          liveProgress: undefined,
-        }),
+        ...(patch.summary != null && { summary: patch.summary }),
+        ...(patch.lastTool != null && { lastTool: patch.lastTool }),
+        ...(patch.eventCount != null && { eventCount: patch.eventCount }),
       },
     };
-  }
-}
-
-function applyInnerEvent(sa: SubAgentInfo, innerEv: StreamEvent): void {
-  const events = (sa.events ??= []);
-  if (
-    innerEv.kind === "tool_use" &&
-    innerEv.toolUseId &&
-    events.some((e) => e.kind === "tool_use" && e.toolUseId === innerEv.toolUseId)
-  ) {
-    return;
-  }
-  const attached = attachToolResult(events, innerEv);
-  if (attached) {
-    events[attached.index] = attached.event;
-    return;
-  }
-  const taskId = innerEv.subagent?.taskId;
-  if (innerEv.kind === "subagent_progress" && taskId) {
-    const inner = innerSubagentEvent(innerEv);
-    const start = findSubagentEvent(events, "subagent_start", taskId);
-    if (!inner) {
-      sa.events = recordSubagentProgress(events, innerEv, taskId, start);
-    } else if (start >= 0) {
-      const child = events[start].subagent!;
-      const subagent = { ...child, events: [...(child.events ?? [])] };
-      applyInnerEvent(subagent, inner);
-      events[start] = { ...events[start], subagent };
-    }
-  } else if (innerEv.kind === "subagent_enrichment") {
-    if (innerEv.subagent) enrichSubagent(events, innerEv.subagent);
-  } else if (innerEv.kind === "subagent_done" && taskId) {
-    finishSubagent(events, innerEv, taskId);
-  } else {
-    events.push(innerEv);
   }
 }
 
@@ -367,27 +268,6 @@ export function applyStreamBatch<W extends { id: string; messages: Message[] }>(
         return evts ? applyEventsToMessage(m, evts) : m;
       }),
     };
-  });
-}
-
-// Replace a message's events with the server's full copy while keeping any
-// subagent transcripts the client already loaded (the server strips those).
-export function mergeDetailEvents(
-  clientEvents: StreamEvent[] | undefined,
-  serverEvents: StreamEvent[],
-): StreamEvent[] {
-  if (!clientEvents?.length) return serverEvents;
-  return serverEvents.map((serverEv) => {
-    if (!serverEv.subagent?.taskId) return serverEv;
-    const clientEv = clientEvents.find((e) => e.subagent?.taskId === serverEv.subagent!.taskId);
-    const kept = clientEv?.subagent?.events;
-    const sameRevision =
-      (clientEv?.subagent?.transcriptRevision ?? 0) === (serverEv.subagent.transcriptRevision ?? 0);
-    // Shorter than the server's is a live tail with a gap before it.
-    if (sameRevision && kept?.length && kept.length >= transcriptLength(serverEv.subagent)) {
-      return { ...serverEv, subagent: { ...serverEv.subagent, events: kept } };
-    }
-    return serverEv;
   });
 }
 
@@ -444,9 +324,6 @@ function reconcileMessage(cur: Message, next: Message): Message {
     const { detail: _summary, ...rest } = next;
     return { ...rest, events: cur.events };
   }
-  const merged = next.events
-    ? { ...next, events: mergeDetailEvents(cur.events, next.events) }
-    : next;
   // Keep a locally received prefix only if the server is still on that block.
   if (
     next.status === "streaming" &&
@@ -454,9 +331,9 @@ function reconcileMessage(cur: Message, next: Message): Message {
     next.liveThinkingSince === cur.liveThinkingSince &&
     cur.liveThinking != null
   ) {
-    return { ...merged, liveThinking: cur.liveThinking };
+    return { ...next, liveThinking: cur.liveThinking };
   }
-  return merged;
+  return next;
 }
 
 function sameEvents(cur: StreamEvent[] = [], next: StreamEvent[] = []): boolean {
@@ -480,7 +357,9 @@ function sameEvents(cur: StreamEvent[] = [], next: StreamEvent[] = []): boolean 
         c.subagent.model === n.subagent.model &&
         c.subagent.effort === n.subagent.effort &&
         (c.subagent.transcriptRevision ?? 0) === (n.subagent.transcriptRevision ?? 0) &&
-        transcriptLength(c.subagent) >= transcriptLength(n.subagent)
+        (c.subagent.eventCount ?? 0) === (n.subagent.eventCount ?? 0) &&
+        c.subagent.lastTool === n.subagent.lastTool &&
+        c.subagent.summary === n.subagent.summary
       );
     })
   );

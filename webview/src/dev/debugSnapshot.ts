@@ -359,7 +359,8 @@ const TOOL_PAYLOAD_SELECTOR = [
   ".banner-action .banner-text > :not(.banner-label):not(.action-target)",
   ".subagent-prompt",
   ".subagent-summary",
-  ".subagent-events .event-text .event-content",
+  ".subagent-events .event-content",
+  ".subagent-events .banner-text",
 ].join(", ");
 
 // The DOM with message bodies cut down: layout matters, transcripts and tool
@@ -380,7 +381,7 @@ export function trimmedHtml(maxMessages = 3): string {
       if (!keep.has(item)) item.remove();
     }
   }
-  for (const list of clone.querySelectorAll(".events-list, .subagent-events")) {
+  for (const list of clone.querySelectorAll(".events-list")) {
     const events = [...list.children];
     if (events.length > MAX_HTML_EVENTS) {
       const keep = new Set<Element>(events.slice(events.length - MAX_HTML_EVENTS));

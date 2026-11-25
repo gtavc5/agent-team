@@ -284,7 +284,7 @@ const painted = () =>
   );
 
 it.each([1280, 390])(
-  "keeps transcript width and settles a collapsed trace without a scroll event at %ipx",
+  "keeps the transcript width fixed when an inline trace adds overflow at %ipx",
   async (width) => {
     await page.viewport(width, 720);
     const view = mount();
@@ -300,7 +300,7 @@ it.each([1280, 390])(
               taskId: "trace",
               description: "Reviewer",
               status: "completed",
-              summary: "A line of trace details.\n\n".repeat(80),
+              transcriptRevision: 1,
             },
           },
         ],
@@ -318,25 +318,33 @@ it.each([1280, 390])(
     expect(scroller.scrollHeight).toBe(scroller.clientHeight);
     const collapsed = geometry();
     fireEvent.click(view.getByRole("button", { name: "Expand subagent: Reviewer" }));
+    const request = sock.frames().find((f) => f.type === "load_subagent_trace");
+    expect(request).toBeDefined();
+    act(() =>
+      sock.receive({
+        type: "subagent_trace_page",
+        requestId: request!.requestId,
+        events: [],
+        start: 0,
+        end: 0,
+        totalEvents: 0,
+        revision: 1,
+        hasMore: false,
+        truncated: false,
+        result: "A line of trace details.\n\n".repeat(80),
+      }),
+    );
     await painted();
-    expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight + 150);
+    expect(get(".subagent-item > .subagent-details .subagent-summary")).toBeTruthy();
+    expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight);
     expect(geometry()).toEqual(collapsed);
     expect(scroller.scrollWidth).toBeLessThanOrEqual(scroller.clientWidth);
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width);
-
-    scroller.scrollTop = 20;
-    await expect.poll(jump).not.toBeNull();
-    scroller.scrollTop = 0;
+    fireEvent.click(view.getByRole("button", { name: "Collapse subagent trace" }));
     await painted();
-    expect(jump()).not.toBeNull();
-    const scroll = vi.fn();
-    scroller.addEventListener("scroll", scroll);
-    fireEvent.click(view.getByRole("button", { name: "Collapse subagent: Reviewer" }));
-    await expect.poll(jump).toBeNull();
+    expect(jump()).toBeNull();
     expect(scroller.scrollTop).toBe(0);
-    expect(scroller.scrollHeight).toBe(scroller.clientHeight);
     expect(geometry()).toEqual(collapsed);
-    expect(scroll).not.toHaveBeenCalled();
   },
 );
 

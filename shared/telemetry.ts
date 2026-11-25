@@ -24,6 +24,7 @@ export const TELEMETRY_ACTIONS = [
   "chat.cancel_wakeup",
   "trace.step_toggle",
   "trace.subagent_toggle",
+  "trace.subagent_page",
   "trace.tool_toggle",
   "trace.load_details",
   "stats.turn_toggle",

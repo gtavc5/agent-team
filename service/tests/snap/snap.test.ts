@@ -11,7 +11,6 @@ import {
   recordingPath,
   replay,
   strip,
-  stripChildTranscript,
   transcript,
   agentMessages,
 } from "./harness";
@@ -72,9 +71,9 @@ for (const backend of ["codex", "pi"] as Backend[]) {
         const server = agentMessages(result);
         expect(client.length, "client message count").toBe(server.length);
         server.forEach((m, j) => {
-          const expected =
-            backend === "pi" ? { ...m, events: m.events?.map(stripChildTranscript) } : m;
-          expect(strip(client[j]), `message ${j + 1}`).toEqual(strip(expected));
+          // Subagent summaries need Workspace's authoritative revision and count.
+          // See broadcast.test.ts for their actual wire projection.
+          expect(strip(client[j]), `message ${j + 1}`).toEqual(strip(m));
           if (backend === "pi") {
             // Asynchronous occupancy is tested through real workspace callbacks in broadcast.test.ts.
             const projection = ({ content, status, effort, thinking }: typeof m) => ({

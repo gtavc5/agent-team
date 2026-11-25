@@ -309,11 +309,11 @@ it("streams Replay Demo thinking, drills into a subagent, jumps to a quote and c
   await card.getByTitle("completed", { exact: true }).waitFor();
   expect(await card.getByTitle("Cancel this subagent").count()).toBe(0);
   await card.getByRole("button", { name: "Expand subagent: Search the syntax module" }).click();
-  await card.getByText("Found 2 mutation sites, verifying callers now.").waitFor();
-  await card.getByText("15k tokens · 7 tools").waitFor();
+  const details = card.locator(":scope > .subagent-details");
+  await details.getByText("Found 2 mutation sites, verifying callers now.").waitFor();
   await card.locator(".subagent-time", { hasText: /^21s$/ }).waitFor();
-  await card.getByRole("button", { name: "Collapse subagent trace" }).click();
-  await card.locator(".subagent-details").waitFor({ state: "hidden" });
+  await details.getByRole("button", { name: "Collapse subagent trace" }).click();
+  await details.waitFor({ state: "detached" });
 
   const running = page.locator(".subagent-item", { hasText: "Watch CI for regressions" });
   await running.getByRole("button", { name: "Cancel", exact: true }).click();

@@ -36,13 +36,19 @@ import {
   isCodexCliAvailable,
   type ModelOption,
 } from "../config/presets";
-import { CommandInfo, StreamEvent, type Backend, type PiAvailableModel } from "../session/types";
+import { CommandInfo, type Backend, type PiAvailableModel } from "../session/types";
 import { HostRegistry, LocalHost } from "../session/host";
 import { codexProcessEnv, probeCodexAuth, type CodexAuthState } from "../session/codex";
 import { completeDirs, resolveWorkspacePath } from "../repo/dirs";
 import { GitScanner } from "../repo/scanner";
 import { HistoryService, sidebarHits, type SearchHit } from "../workspace/history-service";
-import { summarizeMessages, toWireMessage } from "../workspace/summary";
+import {
+  summarizeMessages,
+  toWireEvent,
+  toWireMessage,
+  toWireStreamEvent,
+} from "../workspace/summary";
+import { readTracePage } from "../../../shared/subagent-trace";
 import { ProjectManager, type ProjectHost } from "../project/manager";
 import { Auth } from "./auth";
 import { mergeLocalCommands } from "./commands";
@@ -72,16 +78,6 @@ import { SystemMonitor } from "./system";
 import { serviceReport } from "../config/diagnostics";
 import { applyRuntimeEnvironment, RuntimeConfigError } from "../config/runtime";
 import { startCcpaProxy, type CcpaProxy } from "../acp-proxy/proxy";
-
-function stripEventsInnerEvents(events: StreamEvent[]): StreamEvent[] {
-  return events.map((e) => {
-    if (!e.subagent?.events?.length) return e;
-    return {
-      ...e,
-      subagent: { ...e.subagent, eventCount: e.subagent.events.length, events: undefined },
-    };
-  });
-}
 
 const execFileAsync = promisify(execFile);
 
@@ -546,7 +542,7 @@ export class Server {
         "open_workspace",
         "load_messages",
         "load_message_details",
-        "load_subagent_events",
+        "load_subagent_trace",
         "search",
         "list_dirs",
         "ping",
@@ -645,25 +641,26 @@ export class Server {
           type: "message_details",
           workspaceId: workspace.id,
           messageId: message.id,
-          events: stripEventsInnerEvents(message.events ?? []),
+          events: (message.events ?? []).map(toWireEvent),
         });
         return;
       }
 
-      case "load_subagent_events": {
-        const workspace = this.workspaces.get(msg.workspaceId as string);
-        if (workspace && this.ensureLoaded(workspace)) {
-          const message = workspace.getMessages().find((m) => m.id === msg.messageId);
-          const ev = message?.events?.find((e) => e.subagent?.taskId === msg.taskId);
-          this.sendJson(ws, {
-            type: "subagent_events",
-            workspaceId: msg.workspaceId,
-            messageId: msg.messageId,
-            taskId: msg.taskId,
-            events: ev?.subagent?.events ?? [],
-            transcriptRevision: ev?.subagent?.transcriptRevision,
-          });
-        }
+      case "load_subagent_trace": {
+        if (typeof msg.requestId !== "number" || !Number.isSafeInteger(msg.requestId)) return;
+        const message =
+          workspace && this.ensureLoaded(workspace) && typeof msg.messageId === "string"
+            ? workspace.findMessage(msg.messageId)
+            : undefined;
+        this.sendJson(
+          ws,
+          readTracePage(
+            msg.requestId,
+            message?.events,
+            typeof msg.taskId === "string" ? msg.taskId : "",
+            msg,
+          ),
+        );
         return;
       }
 
@@ -1946,7 +1943,7 @@ export class Server {
           type: "stream_event",
           workspaceId: wsId,
           messageId: agentMsg.id,
-          event,
+          event: toWireStreamEvent(event, agentMsg),
           ...(streamAt != null && { streamAt }),
           ...(retryLabel !== undefined && { retryLabel }),
           ...((streamAt != null || retryLabel !== undefined) && { agentId: agentMsg.agentId }),
@@ -1962,7 +1959,7 @@ export class Server {
           messageId: msgId,
           status,
           content,
-          events: events ? stripEventsInnerEvents(events) : undefined,
+          events: events?.map(toWireEvent),
           ...patch,
           ...(patch &&
             "queuedFor" in patch && { queued: this.workspaces.get(wsId)?.hasQueuedInput }),

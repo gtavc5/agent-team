@@ -128,7 +128,6 @@ describe("the transcript", () => {
             taskType: "local_bash",
             status: "completed",
             durationMs: 6004,
-            events: [],
           },
         }}
       />,
@@ -153,7 +152,6 @@ describe("the transcript", () => {
               description: "look",
               agentType: "Explore",
               status: "completed",
-              events: [{ kind: "text", content: "found" }],
               ...sa,
             },
           }}
@@ -164,8 +162,6 @@ describe("the transcript", () => {
     // Resumed: the CLI counts from the first run, idle time included.
     const resumed = agentCard({ usage, durationMs: 27_800 });
     expect(time(resumed)).toBe("27.8s");
-    fireEvent.click(resumed.querySelector(".subagent-header")!);
-    expect(resumed.querySelector(".subagent-usage")!.textContent).toBe("14k tokens · 3 tools");
     expect(time(agentCard({ usage }))).toBe("43.6s");
     expect(time(agentCard({ usage, status: "running" }))).toBeNull();
   });

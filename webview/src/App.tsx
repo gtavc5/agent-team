@@ -1,3 +1,4 @@
+import { SubagentTraceContext } from "./chat/subagentTrace";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { recordTelemetry } from "./telemetry";
 import { recordTelemetryEvent, telemetryTarget } from "./telemetryEvents";
@@ -162,6 +163,7 @@ export function App() {
     issues,
     connected,
     snapshotReady,
+    connectionEpoch,
     user,
     presets,
     models,
@@ -194,7 +196,7 @@ export function App() {
     clearContext,
     loadMessages,
     loadMessageDetails,
-    loadSubagentEvents,
+    requestSubagentTrace,
     cancelSubagent,
     cancelQueued,
     startReplayDemo,
@@ -706,18 +708,21 @@ export function App() {
   const activeWsRef = useRef(activeWs);
   activeWsRef.current = activeWs;
 
+  const traceWorkspaceId = activeWs?.id;
+  const traceEpoch =
+    traceWorkspaceId === "replay-demo" ? 0 : connected && snapshotReady ? connectionEpoch : null;
+  const traceConnection = useMemo(
+    () =>
+      traceWorkspaceId
+        ? { workspaceId: traceWorkspaceId, epoch: traceEpoch, requestPage: requestSubagentTrace }
+        : null,
+    [traceWorkspaceId, traceEpoch, requestSubagentTrace],
+  );
   // Message props must keep their identity across stream frames, or every
   // memoized MessageItem re-renders on each one. Handlers read the active
   // workspace at call time; settled messages get an agents list that only
   // changes when an agent's name, look or model does, not with its
   // activity, which ticks every second while a tool runs.
-  const onLoadSubagentEvents = useCallback(
-    (messageId: string, taskId: string) => {
-      const ws = activeWsRef.current;
-      if (ws) loadSubagentEvents(ws.id, messageId, taskId);
-    },
-    [loadSubagentEvents],
-  );
   const stopTask = useCallback(
     (wsId: string, agentId: string, taskId: string) => {
       cancelSubagent(wsId, agentId, taskId);
@@ -1760,88 +1765,94 @@ export function App() {
                 onScroll={onMessagesScrollTrack}
               >
                 <div className="messages-content">
-                  <FileOpenContext.Provider value={fileOpener(activeWs.id)}>
-                    <LocalDayProvider>
-                      {(() => {
-                        const msgs = activeWs.messages;
-                        const total = msgs.length;
-                        if (!activeWs.messagesLoaded) {
-                          return (
-                            <HistoryHint hasMore={false} loading={false} loaded={false} count={0} />
+                  <SubagentTraceContext.Provider value={traceConnection}>
+                    <FileOpenContext.Provider value={fileOpener(activeWs.id)}>
+                      <LocalDayProvider>
+                        {(() => {
+                          const msgs = activeWs.messages;
+                          const total = msgs.length;
+                          if (!activeWs.messagesLoaded) {
+                            return (
+                              <HistoryHint
+                                hasMore={false}
+                                loading={false}
+                                loaded={false}
+                                count={0}
+                              />
+                            );
+                          }
+                          if (total === 0) {
+                            return (
+                              <div className="empty-state">
+                                {activeWs.agents.length === 0
+                                  ? "Add an agent to get started."
+                                  : "Send a message to start working."}
+                              </div>
+                            );
+                          }
+                          const streamingAgentIds = new Set(
+                            msgs
+                              .filter((msg) => msg.kind === "agent" && msg.status === "streaming")
+                              .map((msg) => msg.agentId),
                           );
-                        }
-                        if (total === 0) {
                           return (
-                            <div className="empty-state">
-                              {activeWs.agents.length === 0
-                                ? "Add an agent to get started."
-                                : "Send a message to start working."}
-                            </div>
+                            <>
+                              <HistoryHint
+                                hasMore={!!activeWs.hasMore}
+                                loading={!!activeWs.loadingOlder}
+                                loaded
+                                count={total}
+                              />
+                              {msgs.map((msg, i) => {
+                                const prev = i > 0 ? msgs[i - 1] : null;
+                                const compact =
+                                  !!prev &&
+                                  msg.kind === "agent" &&
+                                  prev.kind === "agent" &&
+                                  !!msg.turnId &&
+                                  msg.turnId === prev.turnId;
+                                const item = (
+                                  <MessageItem
+                                    user={user}
+                                    msg={msg}
+                                    agents={
+                                      msg.status === "streaming" ? activeWs.agents : settledAgents
+                                    }
+                                    compact={compact}
+                                    highlight={msg.id === highlightMsgId}
+                                    hasStreamingReply={
+                                      msg.status === "starting" &&
+                                      !!msg.queuedFor &&
+                                      streamingAgentIds.has(msg.queuedFor)
+                                    }
+                                    onStartingRow={onStartingRow}
+                                    onQuote={handleQuote}
+                                    onJumpToMessage={jumpToMessageInActiveWs}
+                                    onCancelSubagent={onCancelSubagent}
+                                    onCancelQueued={onCancelQueued}
+                                    onLoadDetails={onLoadDetails}
+                                    onOpenWorkspace={openWorkspace}
+                                  />
+                                );
+                                const from = msg.from?.workspaceId;
+                                return (
+                                  <MessageBoundary key={msg.id} messageId={msg.id}>
+                                    {from && from !== activeWs.id && workspaceIds.has(from) ? (
+                                      <FileOpenContext.Provider value={fileOpener(from)}>
+                                        {item}
+                                      </FileOpenContext.Provider>
+                                    ) : (
+                                      item
+                                    )}
+                                  </MessageBoundary>
+                                );
+                              })}
+                            </>
                           );
-                        }
-                        const streamingAgentIds = new Set(
-                          msgs
-                            .filter((msg) => msg.kind === "agent" && msg.status === "streaming")
-                            .map((msg) => msg.agentId),
-                        );
-                        return (
-                          <>
-                            <HistoryHint
-                              hasMore={!!activeWs.hasMore}
-                              loading={!!activeWs.loadingOlder}
-                              loaded
-                              count={total}
-                            />
-                            {msgs.map((msg, i) => {
-                              const prev = i > 0 ? msgs[i - 1] : null;
-                              const compact =
-                                !!prev &&
-                                msg.kind === "agent" &&
-                                prev.kind === "agent" &&
-                                !!msg.turnId &&
-                                msg.turnId === prev.turnId;
-                              const item = (
-                                <MessageItem
-                                  user={user}
-                                  msg={msg}
-                                  agents={
-                                    msg.status === "streaming" ? activeWs.agents : settledAgents
-                                  }
-                                  compact={compact}
-                                  highlight={msg.id === highlightMsgId}
-                                  hasStreamingReply={
-                                    msg.status === "starting" &&
-                                    !!msg.queuedFor &&
-                                    streamingAgentIds.has(msg.queuedFor)
-                                  }
-                                  onStartingRow={onStartingRow}
-                                  onQuote={handleQuote}
-                                  onJumpToMessage={jumpToMessageInActiveWs}
-                                  onLoadSubagentEvents={onLoadSubagentEvents}
-                                  onCancelSubagent={onCancelSubagent}
-                                  onCancelQueued={onCancelQueued}
-                                  onLoadDetails={onLoadDetails}
-                                  onOpenWorkspace={openWorkspace}
-                                />
-                              );
-                              const from = msg.from?.workspaceId;
-                              return (
-                                <MessageBoundary key={msg.id} messageId={msg.id}>
-                                  {from && from !== activeWs.id && workspaceIds.has(from) ? (
-                                    <FileOpenContext.Provider value={fileOpener(from)}>
-                                      {item}
-                                    </FileOpenContext.Provider>
-                                  ) : (
-                                    item
-                                  )}
-                                </MessageBoundary>
-                              );
-                            })}
-                          </>
-                        );
-                      })()}
-                    </LocalDayProvider>
-                  </FileOpenContext.Provider>
+                        })()}
+                      </LocalDayProvider>
+                    </FileOpenContext.Provider>
+                  </SubagentTraceContext.Provider>
                 </div>
                 <div aria-hidden="true" />
               </div>

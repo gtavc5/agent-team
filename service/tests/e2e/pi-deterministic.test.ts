@@ -11,6 +11,12 @@ import { DatabaseSync } from "node:sqlite";
 import { WebSocket } from "ws";
 import { expect, it, vi } from "vitest";
 import { trackAcceptanceProcesses } from "../../../scripts/e2e-pi-acp";
+import {
+  TRACE_MAX_BYTES,
+  TRACE_MAX_EVENTS,
+  traceBytes,
+  type TracePage,
+} from "../../../shared/subagent-trace";
 import { lsofBinary } from "../lsof";
 import type { ProjectManager } from "../../src/project/manager";
 import { ReportJournalStore } from "../../src/project/report-journal";
@@ -155,13 +161,13 @@ export default function (pi) {
   );
 }
 
-interface Frame {
+interface Frame extends Partial<Pick<TracePage, "revision" | "prompt" | "result" | "unavailable">> {
   type: string;
   workspaceId?: string;
   workspace?: WorkspaceInfo;
   project?: Project & { objectives: Array<{ tasks: Array<{ state: string }> }> };
   dialog?: UiDialogRequest;
-  requestId?: string;
+  requestId?: string | number;
   messageId?: string;
   taskId?: string;
   events?: StreamEvent[];
@@ -532,35 +538,52 @@ async function runDeterministicPiScenario() {
           since,
         )
       ).event!.subagent!;
-    const childEvents = async (taskId: string, since: number) => {
+    const childToolSummary = async (taskId: string, since: number) => {
+      const frame = await seen(
+        "stream_event",
+        (f) =>
+          f.workspaceId === lead &&
+          f.event?.kind === "subagent_enrichment" &&
+          f.event.subagent?.taskId === taskId &&
+          !!f.event.subagent.lastTool,
+        since,
+      );
+      expect(frame.event!.subagent!.transcriptRevision).toBeGreaterThan(0);
+      expect(frame.event!.subagent).not.toHaveProperty("_innerEvent");
+      expect(frame.event!.subagent).not.toHaveProperty("events");
+    };
+    const childTrace = async (taskId: string, since: number) => {
       const owner = frames
         .slice(since)
         .find((f) => f.event?.kind === "subagent_start" && f.event.subagent?.taskId === taskId);
       const requestedAt = frames.length;
       wire({
-        type: "load_subagent_events",
+        type: "load_subagent_trace",
+        requestId: requestedAt,
         workspaceId: lead,
         messageId: owner?.messageId,
         taskId,
       });
-      const reply = await seen("subagent_events", (f) => f.taskId === taskId, requestedAt);
-      return reply.events?.map((event) => event.content).join("\n");
+      const reply = await seen(
+        "subagent_trace_page",
+        (f) => f.requestId === requestedAt,
+        requestedAt,
+      );
+      expect(reply.unavailable).toBeUndefined();
+      expect(reply.events!.length).toBeLessThanOrEqual(TRACE_MAX_EVENTS);
+      expect(traceBytes(reply)).toBeLessThanOrEqual(TRACE_MAX_BYTES);
+      return reply;
     };
+    const childEvents = async (taskId: string, since: number) =>
+      (await childTrace(taskId, since)).events?.map((event) => event.content).join("\n");
     let offset = frames.length;
     prompt(lead, "pi-e2e-launch:foreground");
     try {
       const a = await child("subagent_start", offset);
       const b = await child("subagent_start", offset, a.taskId.replace(/0$/, "1"));
-      await seen(
-        "stream_event",
-        (f) =>
-          f.workspaceId === lead &&
-          f.event?.kind === "subagent_progress" &&
-          f.event.subagent?.taskId === a.taskId &&
-          f.event.subagent._innerEvent?.kind === "tool_use",
-        offset,
-      );
-      expect(await childEvents(a.taskId, offset)).toContain("seen-foregrounda");
+      await childToolSummary(a.taskId, offset);
+      const activeTrace = await childTrace(a.taskId, offset);
+      expect(activeTrace.events?.map((e) => e.content).join("\n")).toContain("seen-foregrounda");
       expect(
         frames
           .slice(offset)
@@ -574,7 +597,10 @@ async function runDeterministicPiScenario() {
         [b.taskId, foregroundB],
       ]) {
         expect((await child("subagent_done", offset, taskId)).status).toBe("completed");
-        expect(await childEvents(taskId, offset)).toContain(marker);
+        const completedTrace = await childTrace(taskId, offset);
+        expect(completedTrace.events?.map((e) => e.content).join("\n")).toContain(marker);
+        if (taskId === a.taskId)
+          expect(completedTrace.revision).toBeGreaterThan(activeTrace.revision!);
         searches.push({ session: lead, marker, taskId });
       }
       console.log("Pi E2E: foreground siblings completed with separate transcripts");
@@ -603,15 +629,7 @@ async function runDeterministicPiScenario() {
         const statusFile = path.join(runs[0].asyncDir, "status.json");
         await vi.waitFor(() => expect(fs.existsSync(statusFile)).toBe(true));
         if (mode === "reconcile") {
-          await seen(
-            "stream_event",
-            (f) =>
-              f.workspaceId === lead &&
-              f.event?.kind === "subagent_progress" &&
-              f.event.subagent?.taskId === a.taskId &&
-              f.event.subagent._innerEvent?.kind === "tool_use",
-            offset,
-          );
+          await childToolSummary(a.taskId, offset);
           expect(await childEvents(a.taskId, offset)).toContain("seen-reconcilea");
           expect(
             frames

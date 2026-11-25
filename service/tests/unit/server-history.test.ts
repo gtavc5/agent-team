@@ -307,7 +307,7 @@ describe("a real server saving histories", () => {
             (f) =>
               f.type === "stream_event" &&
               (f.event as { subagent?: { transcriptRevision?: number } }).subagent
-                ?.transcriptRevision === 2,
+                ?.transcriptRevision === 3,
           ),
         "enrichment frame",
       );
@@ -324,14 +324,14 @@ describe("a real server saving histories", () => {
           messageId,
           event: {
             kind: "subagent_enrichment",
-            subagent: { transcriptRevision: 1, durationMs: 300 },
+            subagent: { transcriptRevision: 2, durationMs: 300 },
           },
         },
         {
           messageId,
           event: {
             kind: "subagent_enrichment",
-            subagent: { taskId, eventCount: 1, summary: "final summary", transcriptRevision: 2 },
+            subagent: { taskId, eventCount: 1, summary: "final summary", transcriptRevision: 3 },
           },
         },
       ]);
@@ -346,9 +346,16 @@ describe("a real server saving histories", () => {
     try {
       fresh.send({ type: "open_workspace", workspaceId });
       fresh.send({ type: "load_message_details", workspaceId, messageId });
-      fresh.send({ type: "load_subagent_events", workspaceId, messageId, taskId });
+      fresh.send({
+        type: "load_subagent_trace",
+        requestId: 17,
+        limit: 1,
+        workspaceId,
+        messageId,
+        taskId,
+      });
       await until(
-        () => fresh.frames.some((f) => f.type === "subagent_events"),
+        () => fresh.frames.some((f) => f.type === "subagent_trace_page"),
         "fresh child details",
       );
       const reply = (
@@ -366,20 +373,22 @@ describe("a real server saving histories", () => {
           model: "provider/model",
           effort: "high",
           durationMs: 500,
-          summaryLength: 13,
+          summary: "final summary",
           eventCount: 1,
-          transcriptRevision: 2,
+          transcriptRevision: 3,
         });
       }
       const detail = fresh.frames.find((f) => f.type === "message_details")!.events as NonNullable<
         Message["events"]
       >;
       for (const e of detail.slice(1)) {
-        expect(e.subagent).toMatchObject({ summary: "final summary", transcriptRevision: 2 });
+        expect(e.subagent).toMatchObject({ summary: "final summary", transcriptRevision: 3 });
       }
-      expect(fresh.frames.find((f) => f.type === "subagent_events")).toMatchObject({
+      expect(fresh.frames.find((f) => f.type === "subagent_trace_page")).toMatchObject({
         events,
-        transcriptRevision: 2,
+        requestId: 17,
+        totalEvents: 1,
+        revision: 3,
       });
     } finally {
       await fresh.stop();

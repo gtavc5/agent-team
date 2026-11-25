@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { assertRedactedCorpus, type AnonCorpus } from "../../../scripts/export-anon-corpus";
+import { TRACE_MAX_BYTES, TRACE_MAX_EVENTS } from "../../../shared/subagent-trace";
 import { ProjectStore } from "../../src/project/store";
 import { PiRpcClient } from "../../src/session/pi-rpc";
 import type { Message, WorkspaceState } from "../../src/workspace/workspace";
@@ -101,10 +102,11 @@ it("keeps the reading anchor, width and child transcript stable across toggles, 
       const replyRow = messages.locator(`#msg-${reply.id}`);
       const cards = replyRow.locator(".subagent-item");
       const card = cards.first();
-      const expand = card.getByRole("button", { name: /^Expand subagent:/ });
-      const collapse = card.getByRole("button", { name: "Collapse subagent trace" });
-      const details = card.locator(".subagent-details");
-      await expand.waitFor();
+      const openTrace = card.getByRole("button", { name: /^Expand subagent:/ });
+      const details = card.locator(":scope > .subagent-details");
+      const closeTrace = details.getByRole("button", { name: "Collapse subagent trace" });
+      const transcript = details.locator(".event-text").getByText("x".repeat(18), { exact: true });
+      await openTrace.waitFor();
       await page.evaluate("document.fonts.ready.then(() => undefined)");
       const collapsed = await transcriptState(page);
       expect(
@@ -113,9 +115,28 @@ it("keeps the reading anchor, width and child transcript stable across toggles, 
       const geometry = () => stableGeometry(page, `#msg-${reply.id} .subagent-item`);
       const baseline = await geometry();
       let detailText: string | undefined;
-      let expandedCeiling: number | undefined;
       const nodes = () => messages.locator("*").count();
       const collapsedCeiling = await nodes();
+      const assertBounds = async () => {
+        const window = details.locator(".subagent-trace-page");
+        expect(await window.count()).toBe(1);
+        expectBounded(
+          Number(await window.getAttribute("data-trace-entries")),
+          TRACE_MAX_EVENTS,
+          "trace entries",
+        );
+        expectBounded(
+          Number(await window.getAttribute("data-trace-bytes")),
+          TRACE_MAX_BYTES,
+          "trace bytes",
+        );
+        expectBounded(
+          await details.locator("*").count(),
+          TRACE_MAX_EVENTS * 7 + 32,
+          "inline trace DOM",
+        );
+        expect(await nodes()).toBeGreaterThan(collapsedCeiling);
+      };
       const wasStored = () =>
         server["workspaces"]
           .get("pilot-0")!
@@ -125,17 +146,15 @@ it("keeps the reading anchor, width and child transcript stable across toggles, 
 
       for (const _ of switches.slice(0, 4)) {
         expect(await geometry()).toEqual(baseline);
-        await expand.click();
-        const transcript = details.getByText("x".repeat(18), { exact: true });
+        await openTrace.click();
         await transcript.waitFor();
         expect(await transcript.count()).toBe(1);
         expect(await geometry()).toEqual(baseline);
-        expect(await details.locator(".subagent-events > *").count()).toBe(child.events!.length);
+        expect(await details.locator(".subagent-events .event").count()).toBe(child.events!.length);
         detailText ??= await details.innerText();
         expect(await details.innerText()).toBe(detailText);
-        expandedCeiling ??= await nodes();
-        expectBounded(await nodes(), expandedCeiling, "expanded transcript DOM");
-        await collapse.click();
+        await assertBounds();
+        await closeTrace.click();
         await details.waitFor({ state: "detached" });
         expect(await geometry()).toEqual(baseline);
         expectBounded(await nodes(), collapsedCeiling, "collapsed transcript DOM");
@@ -148,11 +167,13 @@ it("keeps the reading anchor, width and child transcript stable across toggles, 
         await messages.getByText("Other pilot session", { exact: true }).waitFor();
         expect(await messages.locator(".subagent-item").count()).toBe(0);
         await page.locator(".ws-group-project").getByText("Trace pilot", { exact: true }).click();
-        await expand.waitFor();
+        await openTrace.waitFor();
         await expectEquivalent(page, collapsed);
         expect(wasStored()).toEqual(stored);
       }
 
+      await openTrace.click();
+      await transcript.waitFor();
       const reconnect = page.waitForEvent("websocket");
       for (const socket of server["wss"].clients) socket.close(1000, "Pilot reconnect");
       const socket = await reconnect;
@@ -164,17 +185,22 @@ it("keeps the reading anchor, width and child transcript stable across toggles, 
         timeout: 6_000,
       });
       await expectEquivalent(page, collapsed);
-      await refreshSession(page, () => expand.waitFor());
+      await transcript.waitFor();
+      expect(await geometry()).toEqual(baseline);
+      await assertBounds();
+      await refreshSession(page, () => openTrace.waitFor());
       await expectEquivalent(page, collapsed);
+      expect(await details.count()).toBe(0);
       await page.evaluate("document.fonts.ready.then(() => undefined)");
       expect(await geometry()).toEqual(baseline);
-      await expand.click();
+      await openTrace.click();
       await waitForState(
         "child detail after refresh",
         () => details.innerText(),
         (text) => text === detailText,
       );
-      expectBounded(await nodes(), expandedCeiling!, "refreshed transcript DOM");
+      await assertBounds();
+      await closeTrace.click();
       expect(wasStored()).toEqual(stored);
 
       await page.locator(".ws-archive-toggle").click();

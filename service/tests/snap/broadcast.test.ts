@@ -8,32 +8,27 @@ import {
   type AgentRuntimeInfo,
   type WorkspaceCallbacks,
 } from "../../src/workspace/workspace";
-import { summarizeMessages } from "../../src/workspace/summary";
+import {
+  summarizeMessages,
+  toWireEvent,
+  toWireMessage,
+  toWireStreamEvent,
+} from "../../src/workspace/summary";
+import { readTracePage } from "../../../shared/subagent-trace";
+import { splitEvents } from "../../../webview/src/chat/events";
 import {
   type Backend,
   readRecording,
   recordingPath,
   replay as replaySnap,
   loadFixture,
-  stripChildTranscript,
 } from "./harness";
 import {
   applyStreamBatch,
-  mergeDetailEvents,
   withoutLiveTiming,
   type PendingEvent,
 } from "../../../webview/src/state/stream";
 import type { Message as ClientMessage } from "../../../webview/src/state/useServer";
-
-function stripEventsInnerEvents(events: StreamEvent[]): StreamEvent[] {
-  return events.map((e) => {
-    if (!e.subagent?.events?.length) return e;
-    return {
-      ...e,
-      subagent: { ...e.subagent, eventCount: e.subagent.events.length, events: undefined },
-    };
-  });
-}
 
 type Frame = Record<string, unknown> & { type: string; t: number };
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
@@ -47,15 +42,13 @@ async function replayBroadcast(backend: Backend, name: string) {
   const cb: WorkspaceCallbacks = {
     onAgentUpdated: (_ws, agent) => void liveAgents.set(agent.id, clone(agent)),
     onNewMessage: (_ws, message) =>
-      frames.push({ type: "new_message", t: at(), message: clone(message) }),
+      frames.push({ type: "new_message", t: at(), message: clone(toWireMessage(message)) }),
     onStreamEvent: (_ws, msg, event) =>
       frames.push({
         type: "stream_event",
         t: at(),
         messageId: msg.id,
-        event: clone(
-          backend === "pi" && event.kind === "subagent_done" ? stripChildTranscript(event) : event,
-        ),
+        event: clone(toWireStreamEvent(event, msg)),
       }),
     onMessageDone: (_ws, messageId, status, content, events, patch) =>
       frames.push({
@@ -64,7 +57,7 @@ async function replayBroadcast(backend: Backend, name: string) {
         messageId,
         status,
         content,
-        events: events ? clone(stripEventsInnerEvents(events)) : undefined,
+        events: events ? clone(events.map(toWireEvent)) : undefined,
         ...clone(patch ?? {}),
       }),
   };
@@ -123,12 +116,11 @@ function clientFold(frames: Frame[], mode: "each" | "hidden") {
       msgs = msgs.map((m) => {
         if (m.id !== f.messageId) return m;
         const events = f.events as ClientMessage["events"];
-        const merged = events ? mergeDetailEvents(m.events, events) : undefined;
         return {
           ...withoutLiveTiming(m),
           status: f.status as ClientMessage["status"],
           content: f.content as string,
-          ...(merged ? { events: merged } : {}),
+          ...(events ? { events } : {}),
           ...("context" in f ? { context: f.context as ClientMessage["context"] } : {}),
           ...(f.effort ? { effort: f.effort as string } : {}),
           ...(f.thinking ? { thinking: f.thinking as ClientMessage["thinking"] } : {}),
@@ -141,18 +133,12 @@ function clientFold(frames: Frame[], mode: "each" | "hidden") {
   return { msgs, spans };
 }
 
-const norm = (m: unknown) =>
-  JSON.parse(
-    JSON.stringify(m, (k: string, v: unknown) =>
-      k === "_innerEvent" || k === "eventCount" || k === "transcriptRevision" ? undefined : v,
-    ),
-  ) as unknown;
-
 const FIXTURES: Array<[Backend, string]> = [
   ["codex", "tools"],
   ["pi", "basic-turn"],
   ["pi", "antigravity-acp-turn"],
   ["pi", "tools-bash-edit"],
+  ["pi", "crash-and-restore"],
   ["pi", "pi-subagents-foreground"],
   ["pi", "pi-subagents-async"],
   ["pi", "panel-tools-roundtrip"],
@@ -199,7 +185,7 @@ describe("broadcast parity", () => {
         );
         const hasThinking =
           !name.startsWith("pi-subagents-") &&
-          !["tools-bash-edit", "panel-tools-roundtrip"].includes(name); // Tool-only turn, no reasoning block on wire.
+          !["tools-bash-edit", "crash-and-restore", "panel-tools-roundtrip"].includes(name); // Tool-only turn, no reasoning block on wire.
         if (hasThinking) expect(deltas.length).toBeGreaterThan(0);
         else expect(deltas).toHaveLength(0);
         for (const m of messages) {
@@ -215,10 +201,9 @@ describe("broadcast parity", () => {
           expect(cm.thinking, `thinking ${i}`).toEqual(sm.thinking);
           expect(cm.context, `context ${i}`).toEqual(sm.context);
           expect(cm.effort, `effort ${i}`).toEqual(sm.effort);
-          expect(
-            norm(stripEventsInnerEvents((cm.events ?? []) as StreamEvent[])),
-            `events ${i}`,
-          ).toEqual(norm(stripEventsInnerEvents(sm.events ?? [])));
+          expect(clone(cm.events ?? []), `events ${i}`).toEqual(
+            clone((sm.events ?? []).map(toWireEvent)),
+          );
         });
         for (const span of spans) expect(span.closedAt, span.messageId).not.toBeNull();
         if (backend === "pi" && hasThinking) {
@@ -245,28 +230,21 @@ describe("broadcast parity", () => {
             const index = messages.findIndex((m) => m.id === frame.messageId);
             const taskId = subagent.taskId;
             const serverEvents = messages[index].events!;
-            // Same payload selection as load_subagent_events, then the client's
-            // detail update followed by a later summary refresh.
-            const detail = serverEvents.find((e) => e.subagent?.taskId === taskId)!.subagent!
-              .events!;
-            const clientEvents = msgs[index].events!;
-            expect(clientEvents.find((e) => e.subagent?.taskId === taskId)?.subagent).toMatchObject(
-              {
-                eventCount: detail.length,
-              },
+            const page = readTracePage(1, serverEvents, taskId, { limit: 1 });
+            expect(page).toMatchObject({
+              events: [{ kind: "text", content: expect.stringMatching(/^x+$/) as unknown }],
+              totalEvents: 1,
+              revision: subagent.transcriptRevision,
+              hasMore: false,
+            });
+            const cards = (events: ClientMessage["events"]) =>
+              splitEvents(events ?? []).subagents.map((e) => e.subagent);
+            expect(clone(cards(msgs[index].events))).toEqual(
+              clone(cards(summarizeMessages([messages[index]])[0].events)),
             );
-            const hydrated = clientEvents.map((e) =>
-              e.subagent?.taskId === taskId
-                ? { ...e, subagent: { ...e.subagent, events: detail, eventCount: detail.length } }
-                : e,
-            );
-            const refreshed = mergeDetailEvents(hydrated, stripEventsInnerEvents(serverEvents));
-            expect(refreshed.find((e) => e.subagent?.taskId === taskId)?.subagent?.events).toEqual(
-              detail,
-            );
-            expect(detail).toEqual([
-              { kind: "text", content: expect.stringMatching(/^x+$/) as unknown },
-            ]);
+            const payload = JSON.stringify(frames);
+            expect(payload).not.toContain('"_innerEvent"');
+            expect(payload).not.toContain('"prompt":');
           }
         }
         // Summary pages keep the stats.

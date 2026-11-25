@@ -16,11 +16,6 @@ export function isSubagentEvent(e: StreamEvent): boolean {
   return SUBAGENT_KINDS.has(e.kind);
 }
 
-export function innerSubagentEvent(e: StreamEvent): StreamEvent | undefined {
-  const subagent: (SubAgentInfo & { _innerEvent?: StreamEvent }) | undefined = e.subagent;
-  return subagent?._innerEvent;
-}
-
 export function findSubagentEvent(
   events: readonly StreamEvent[],
   kind: "subagent_start" | "subagent_progress",
@@ -55,16 +50,11 @@ export function mergeSubagentInfo(
     model: next.model ?? prev.model,
     effort: next.effort ?? prev.effort,
     taskType: next.taskType ?? prev.taskType,
-    prompt: next.prompt ?? prev.prompt,
-    hasPrompt: next.hasPrompt ?? prev.hasPrompt,
     lastTool: next.lastTool ?? prev.lastTool,
-    events: prev.events ?? next.events,
-    eventCount: Math.max(prev.eventCount ?? 0, next.eventCount ?? 0) || undefined,
+    summary: next.summary ?? prev.summary,
+    eventCount: next.eventCount ?? prev.eventCount,
+    transcriptRevision: next.transcriptRevision ?? prev.transcriptRevision,
   };
-}
-
-export function transcriptLength(sa: SubAgentInfo): number {
-  return sa.events?.length ?? sa.eventCount ?? 0;
 }
 
 export function isTerminalSubagent(e: StreamEvent): boolean {
@@ -104,7 +94,7 @@ export const panelAction = panelActionOf;
 // done event is appended rather than replacing the start so contentOffset
 // interleaving still works). For display we fold them into one entry per
 // taskId, preferring the most final event but keeping the start's description
-// and accumulated inner events.
+// and latest trace summary.
 // One entry per taskId, in order of first appearance.
 function foldSubagents(events: StreamEvent[]): Map<string, StreamEvent> {
   const parts = new Map<string, StreamEvent[]>();
@@ -139,9 +129,14 @@ function foldTask(parts: StreamEvent[]): StreamEvent {
     if (
       !folded ||
       e.kind === "subagent_done" ||
-      (e.kind === "subagent_progress" && !innerSubagentEvent(e) && !isTerminalSubagent(folded))
+      (e.kind === "subagent_progress" && !isTerminalSubagent(folded))
     ) {
-      folded = { ...e, subagent: mergeSubagentInfo(folded?.subagent, e.subagent!) };
+      const subagent = mergeSubagentInfo(folded?.subagent, e.subagent!);
+      // Stored progress can precede a more recent trace update applied to the start.
+      if (e.kind === "subagent_progress" && folded?.subagent?.lastTool != null) {
+        subagent.lastTool = folded.subagent.lastTool;
+      }
+      folded = { ...e, subagent };
     }
   }
   foldCache.set(parts[0], { parts, folded: folded! });
