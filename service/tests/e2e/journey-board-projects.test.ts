@@ -305,8 +305,8 @@ it("uses real sidebar groups, archives, history search, confirmations, and debug
       await chat(page, "sheet 头部已经改好");
       await visible(worker.getByText("Your turn"));
       await hidden(worker.getByText("Unread result"));
-      const health = (await (await report).json()) as { issues: unknown[] };
-      const unhealthy = health.issues.length > 0;
+      const health = (await (await report).json()) as { issues: { severity?: string }[] };
+      const unhealthy = health.issues.some((issue) => issue.severity !== "info");
       const collapsedTrigger = page.getByRole("button", {
         name: unhealthy ? "Debug tools (service diagnostics unhealthy)" : "Debug tools",
         exact: true,
@@ -414,8 +414,10 @@ it("uses real sidebar groups, archives, history search, confirmations, and debug
       });
       await page.goto(`${origin}/?debug=1`);
       await visible(otherLead);
-      const debugHealth = (await (await debugHealthReport).json()) as { issues: unknown[] };
-      const debugUnhealthy = debugHealth.issues.length > 0;
+      const debugHealth = (await (await debugHealthReport).json()) as {
+        issues: { severity?: string }[];
+      };
+      const debugUnhealthy = debugHealth.issues.some((issue) => issue.severity !== "info");
       const debugCollapsedTrigger = page.getByRole("button", {
         name: debugUnhealthy ? "Debug tools (service diagnostics unhealthy)" : "Debug tools",
         exact: true,

@@ -36,7 +36,7 @@ import {
   isCodexCliAvailable,
   type ModelOption,
 } from "../config/presets";
-import { CommandInfo, StreamEvent, type PiAvailableModel } from "../session/types";
+import { CommandInfo, StreamEvent, type Backend, type PiAvailableModel } from "../session/types";
 import { HostRegistry, LocalHost } from "../session/host";
 import { codexProcessEnv, probeCodexAuth, type CodexAuthState } from "../session/codex";
 import { completeDirs, resolveWorkspacePath } from "../repo/dirs";
@@ -110,6 +110,7 @@ export class Server {
   private piCatalogIssue?: ModelDiscoveryIssue;
   private catalogRevision = 0;
   private codexAuth: CodexAuthState = initialCodexAuthState();
+  private codexPreviouslyAuthenticated = false;
   private recheckingCodexAuth: Promise<CodexAuthState> | null = null;
   private models: ModelOption[] = availableModelOptions([], { codexAuthenticated: false });
   private staleLeadToolWorkspaces = new Set<string>();
@@ -1742,11 +1743,20 @@ export class Server {
   }
 
   modelDiscoverySnapshot(): ModelDiscoverySnapshot {
+    const liveBackends = new Set<Backend>();
+    for (const workspace of this.workspaces.values()) {
+      if (workspace.isArchived) continue;
+      for (const { session } of workspace.agents.values()) {
+        const backend = session.getState().config.backend;
+        if (backend === "pi" || backend === "codex") liveBackends.add(backend);
+      }
+    }
     return describeModelDiscovery(
       this.config,
       this.models,
       this.piCatalogIssue,
       this.codexAuth.status,
+      { liveBackends, codexPreviouslyAuthenticated: this.codexPreviouslyAuthenticated },
     );
   }
 
@@ -1812,6 +1822,7 @@ export class Server {
     this.notifyCodexRecheck = false;
     if (this.closing) return this.codexAuth;
     this.codexAuth = next;
+    if (next.status === "authenticated") this.codexPreviouslyAuthenticated = true;
     if (!this.codexQuota.isConfigured()) {
       const at = wasQuotaConfigured ? Date.now() : 0;
       this.quota.accept({ ...unavailable(NATIVE_CODEX, at), reason: "not configured" });

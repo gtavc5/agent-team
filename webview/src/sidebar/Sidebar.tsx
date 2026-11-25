@@ -198,7 +198,13 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           typeof report === "object" &&
           "issues" in report &&
           Array.isArray(report.issues) &&
-          report.issues.length === 0
+          report.issues.every(
+            (issue: unknown) =>
+              !!issue &&
+              typeof issue === "object" &&
+              "severity" in issue &&
+              issue.severity === "info",
+          )
             ? "healthy"
             : "unhealthy";
       } catch {

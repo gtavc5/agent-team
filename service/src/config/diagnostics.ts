@@ -8,6 +8,7 @@ import type { ModelDiscoverySnapshot } from "../server/model-discovery";
 import { inspectAcpRuntime, ACP_PREPARE_STEP } from "../session/acp-readiness";
 
 export interface DiagnosticIssue {
+  severity?: "info" | "warning";
   stage: string;
   code: string;
   value: string | null;
@@ -168,7 +169,7 @@ export function formatReport(report: RuntimeReport): string {
       : ["ccpaProxy: not running"]),
     ...report.issues.map(
       (issue) =>
-        `\n[${issue.stage}/${issue.code}] ${issue.value ?? "—"} (${issue.source})\n${issue.impact}\nNext: ${issue.nextStep}`,
+        `\n${issue.severity === "info" ? "[info] " : ""}[${issue.stage}/${issue.code}] ${issue.value ?? "—"} (${issue.source})\n${issue.impact}\nNext: ${issue.nextStep}`,
     ),
   ].join("\n");
 }
