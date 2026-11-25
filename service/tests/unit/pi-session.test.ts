@@ -836,6 +836,320 @@ describe("PiSession dispatch and stream state", () => {
     },
   );
 
+  it("updates live and restored workspace context occupancy after manual /compact with estimatedTokensAfter", async () => {
+    const h = harness({
+      models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
+    });
+    const updated: Array<{ context: { tokens: number; window: number } | null }> = [];
+    const { ws, registry } = workspaceFor(h, {
+      onAgentUpdated: (_wsId, agent) => updated.push({ context: agent.context }),
+    });
+    const agent = ws.addAgent("Pi", "mock/test", "", "", { backend: "pi" });
+
+    // Seed a high pre-compaction context from a normal turn.
+    const first = ws.sendMessage("hello", agent.id);
+    await vi.waitFor(() => expect(h.clients[0]?.wire.at(-1)?.type).toBe("prompt"));
+    const c = h.clients[0];
+    c.respond(c.wire.at(-1)!);
+    c.event({ type: "agent_start" });
+    c.event({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+        usage: { input: 312_248, output: 1_641, cacheRead: 512, cacheWrite: 0 },
+      },
+    });
+    c.event({ type: "agent_end", messages: [] });
+    c.event({ type: "agent_settled", aborted: false });
+    await first;
+    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 312_760, window: 1_048_576 });
+
+    // Manual /compact reports estimatedTokensAfter; both live and restored state must drop to it.
+    updated.length = 0;
+    const compacting = ws.sendMessage("/compact", agent.id);
+    await vi.waitFor(() => expect(c.wire.at(-1)?.type).toBe("compact"));
+    const compactFrame = c.wire.at(-1)!;
+    const compactResult = {
+      summary: "Compacted",
+      firstKeptEntryId: "kept",
+      tokensBefore: 314_401,
+      estimatedTokensAfter: 33_812,
+    };
+    c.event({ type: "compaction_start", reason: "manual" });
+    c.event({
+      type: "compaction_end",
+      reason: "manual",
+      result: compactResult,
+      aborted: false,
+      willRetry: false,
+    });
+    c.respond(compactFrame, compactResult);
+    await compacting;
+
+    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 33_812, window: 1_048_576 });
+    expect(updated.at(-1)?.context).toEqual({ tokens: 33_812, window: 1_048_576 });
+    expect(ws.getMessages().at(-1)?.context).toEqual({ tokens: 33_812, window: 1_048_576 });
+
+    const restored = Workspace.fromState(ws.getState(), registry, {
+      onNewMessage: () => {},
+      onStreamEvent: () => {},
+      onMessageDone: () => {},
+    });
+    restored.setMessages(structuredClone(ws.getMessages()));
+    expect(restored.getInfo().agents[0].context).toEqual({ tokens: 33_812, window: 1_048_576 });
+  });
+
+  it("clears stale pre-compaction context when /compact has no token estimate and stops pre-compaction fallback on reload", async () => {
+    const h = harness({
+      models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
+    });
+    const updated: Array<{ context: { tokens: number; window: number } | null }> = [];
+    const { ws, registry } = workspaceFor(h, {
+      onAgentUpdated: (_wsId, agent) => updated.push({ context: agent.context }),
+    });
+    const agent = ws.addAgent("Pi", "mock/test", "", "", { backend: "pi" });
+
+    const first = ws.sendMessage("hello", agent.id);
+    await vi.waitFor(() => expect(h.clients[0]?.wire.at(-1)?.type).toBe("prompt"));
+    const c = h.clients[0];
+    c.respond(c.wire.at(-1)!);
+    c.event({ type: "agent_start" });
+    c.event({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+        usage: { input: 312_000, output: 100, cacheRead: 760, cacheWrite: 0 },
+      },
+    });
+    c.event({ type: "agent_end", messages: [] });
+    c.event({ type: "agent_settled", aborted: false });
+    await first;
+    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 312_760, window: 1_048_576 });
+
+    // A failed compact keeps the existing context intact.
+    const failed = ws.sendMessage("/compact", agent.id);
+    await vi.waitFor(() => expect(c.wire.at(-1)?.type).toBe("compact"));
+    const failFrame = c.wire.at(-1)!;
+    c.event({ type: "compaction_start", reason: "manual" });
+    c.event({
+      type: "compaction_end",
+      reason: "manual",
+      aborted: false,
+      willRetry: false,
+      errorMessage: "Compaction failed: Nothing to compact (session too small)",
+    });
+    c.respond(failFrame, undefined, false);
+    await failed;
+    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 312_760, window: 1_048_576 });
+
+    // A successful compact without estimatedTokensAfter clears stale context both live and after reload.
+    updated.length = 0;
+    const wireCountBefore = c.wire.length;
+    const compacting = ws.sendMessage("/compact", agent.id);
+    await vi.waitFor(() => {
+      expect(c.wire.length).toBeGreaterThan(wireCountBefore);
+      expect(c.wire.at(-1)?.type).toBe("compact");
+    });
+    const compactFrame = c.wire.at(-1)!;
+    const compactResult = { summary: "Compacted", firstKeptEntryId: "kept", tokensBefore: 314_401 };
+    c.event({ type: "compaction_start", reason: "manual" });
+    c.event({
+      type: "compaction_end",
+      reason: "manual",
+      result: compactResult,
+      aborted: false,
+      willRetry: false,
+    });
+    c.respond(compactFrame, compactResult);
+    await compacting;
+
+    expect(ws.getInfo().agents[0].context).toBeNull();
+    expect(updated.at(-1)?.context).toBeNull();
+
+    const restored = Workspace.fromState(ws.getState(), registry, {
+      onNewMessage: () => {},
+      onStreamEvent: () => {},
+      onMessageDone: () => {},
+    });
+    restored.setMessages(structuredClone(ws.getMessages()));
+    expect(restored.getInfo().agents[0].context).toBeNull();
+  });
+
+  it("does not restore pre-compaction context at turn settlement after threshold auto-compaction", async () => {
+    for (const estimatedTokensAfter of [28_400, undefined]) {
+      const h = harness({
+        models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
+      });
+      const { ws, registry } = workspaceFor(h, {});
+      const agent = ws.addAgent("Pi", "mock/test", "", "", { backend: "pi" });
+
+      const turn = ws.sendMessage("big turn", agent.id);
+      await vi.waitFor(() => expect(h.clients[0]?.wire.at(-1)?.type).toBe("prompt"));
+      const c = h.clients[0];
+      c.respond(c.wire.at(-1)!);
+      c.event({ type: "agent_start" });
+      c.event({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "answer" }],
+          usage: { input: 310_000, output: 1_000, cacheRead: 2_000, cacheWrite: 0 },
+        },
+      });
+      c.event({ type: "compaction_start", reason: "threshold" });
+      c.event({
+        type: "compaction_end",
+        reason: "threshold",
+        result: {
+          summary: "Compacted",
+          firstKeptEntryId: "kept",
+          tokensBefore: 313_000,
+          ...(estimatedTokensAfter !== undefined && { estimatedTokensAfter }),
+        },
+        aborted: false,
+        willRetry: false,
+      });
+      c.event({ type: "agent_end", messages: [] });
+      c.event({ type: "agent_settled", aborted: false });
+      await turn;
+
+      const expected =
+        estimatedTokensAfter !== undefined
+          ? { tokens: estimatedTokensAfter, window: 1_048_576 }
+          : null;
+      expect(ws.getInfo().agents[0].context).toEqual(expected);
+      expect(ws.getMessages().at(-1)?.context).toEqual(expected ?? undefined);
+
+      const restored = Workspace.fromState(ws.getState(), registry, {
+        onNewMessage: () => {},
+        onStreamEvent: () => {},
+        onMessageDone: () => {},
+      });
+      restored.setMessages(structuredClone(ws.getMessages()));
+      expect(restored.getInfo().agents[0].context).toEqual(expected);
+    }
+  });
+
+  it("preserves out-of-turn compaction estimates and clears across workspace reload", async () => {
+    for (const estimatedTokensAfter of [22_500, undefined]) {
+      const h = harness({
+        models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
+      });
+      const { ws, registry } = workspaceFor(h, {});
+      const agent = ws.addAgent("Pi", "mock/test", "", "", { backend: "pi" });
+
+      const first = ws.sendMessage("seed", agent.id);
+      await vi.waitFor(() => expect(h.clients[0]?.wire.at(-1)?.type).toBe("prompt"));
+      const c = h.clients[0];
+      c.respond(c.wire.at(-1)!);
+      c.event({ type: "agent_start" });
+      c.event({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "done" }],
+          usage: { input: 200_000, output: 500, cacheRead: 1_000, cacheWrite: 0 },
+        },
+      });
+      c.event({ type: "agent_end", messages: [] });
+      c.event({ type: "agent_settled", aborted: false });
+      await first;
+      expect(ws.getInfo().agents[0].context).toEqual({ tokens: 201_000, window: 1_048_576 });
+
+      // Idle out-of-turn compaction (no active turn).
+      c.event({ type: "compaction_start", reason: "threshold" });
+      c.event({
+        type: "compaction_end",
+        reason: "threshold",
+        result: {
+          summary: "Compacted",
+          firstKeptEntryId: "kept",
+          tokensBefore: 201_500,
+          ...(estimatedTokensAfter !== undefined && { estimatedTokensAfter }),
+        },
+        aborted: false,
+        willRetry: false,
+      });
+
+      const expected =
+        estimatedTokensAfter !== undefined
+          ? { tokens: estimatedTokensAfter, window: 1_048_576 }
+          : null;
+      expect(ws.getInfo().agents[0].context).toEqual(expected);
+      expect(ws.lastTurns()[0]?.replies.every((m) => m.kind === "agent")).toBe(true);
+
+      const restored = Workspace.fromState(ws.getState(), registry, {
+        onNewMessage: () => {},
+        onStreamEvent: () => {},
+        onMessageDone: () => {},
+      });
+      restored.setMessages(structuredClone(ws.getMessages()));
+      expect(restored.getInfo().agents[0].context).toEqual(expected);
+    }
+  });
+
+  it("clears running reply context immediately when an unestimated compaction follows an estimated one and errors", async () => {
+    const h = harness({
+      models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
+    });
+    const { ws, registry } = workspaceFor(h, {});
+    const agent = ws.addAgent("Pi", "mock/test", "", "", { backend: "pi" });
+
+    const turn = ws.sendMessage("work", agent.id);
+    await vi.waitFor(() => expect(h.clients[0]?.wire.at(-1)?.type).toBe("prompt"));
+    const c = h.clients[0];
+    c.respond(c.wire.at(-1)!);
+    c.event({ type: "agent_start" });
+    c.event({ type: "compaction_start", reason: "threshold" });
+    c.event({
+      type: "compaction_end",
+      reason: "threshold",
+      result: {
+        summary: "First",
+        firstKeptEntryId: "k1",
+        tokensBefore: 300_000,
+        estimatedTokensAfter: 40_000,
+      },
+      aborted: false,
+      willRetry: false,
+    });
+    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 40_000, window: 1_048_576 });
+
+    // Second compaction lacks an estimate: must clear live context immediately.
+    c.event({ type: "compaction_start", reason: "overflow" });
+    c.event({
+      type: "compaction_end",
+      reason: "overflow",
+      result: { summary: "Second", firstKeptEntryId: "k2", tokensBefore: 42_000 },
+      aborted: false,
+      willRetry: false,
+    });
+    expect(ws.getInfo().agents[0].context).toBeNull();
+    expect(ws.getMessages().at(-1)?.context).toBeUndefined();
+
+    // Error settlement and reload must keep context cleared.
+    c.event({
+      type: "message_end",
+      message: { role: "assistant", content: [], stopReason: "error", errorMessage: "boom" },
+    });
+    c.event({ type: "agent_end", messages: [] });
+    c.event({ type: "agent_settled", aborted: false });
+    await turn;
+
+    expect(ws.getInfo().agents[0].context).toBeNull();
+    expect(ws.getMessages().at(-1)?.context).toBeUndefined();
+
+    const restored = Workspace.fromState(ws.getState(), registry, {
+      onNewMessage: () => {},
+      onStreamEvent: () => {},
+      onMessageDone: () => {},
+    });
+    restored.setMessages(structuredClone(ws.getMessages()));
+    expect(restored.getInfo().agents[0].context).toBeNull();
+  });
+
   it("refuses compact with attachments before dispatch", async () => {
     const h = harness();
     fs.writeFileSync(path.join(h.dir, "a.png"), Buffer.from("89504e470d0a1a0a", "hex"));

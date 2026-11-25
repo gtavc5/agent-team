@@ -122,6 +122,7 @@ export interface StreamEvent {
   startedAt?: number;
   waitingSince?: number | null;
   tokens?: number;
+  context?: ContextUsage;
   subagent?: SubAgentInfo;
   // Present on summary pages instead of the bodies.
   contentLength?: number;

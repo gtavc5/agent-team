@@ -1520,16 +1520,34 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           (event.aborted
             ? `Compaction aborted (${reason})`
             : `Context compacted (${reason})${counts}`);
+        const compacted = Boolean(event.result) && !event.aborted && !error;
+        const window = this.model.applied
+          ? this.resolveModel(this.model.applied)?.contextWindow
+          : undefined;
+        const context =
+          compacted && window !== undefined && after !== undefined
+            ? { window, tokens: after }
+            : undefined;
         if (event.result) {
           this.stats = null;
           this.compactionBoundary = {};
           void this.syncCompactionCheckpoint(this.rpc!);
         }
+        if (compacted && turn) turn.contextualInput = undefined;
         if (manual && error) this.finish(turn, { kind: "error", content });
         else {
-          this.event({ kind: "compact", content });
+          this.event({
+            kind: "compact",
+            content,
+            ...(context && { context }),
+          });
           if (manual)
-            this.finish(turn, { kind: "result", content: "", interrupted: event.aborted === true });
+            this.finish(turn, {
+              kind: "result",
+              content: "",
+              interrupted: event.aborted === true,
+              ...(context && { context }),
+            });
         }
       }
       return;

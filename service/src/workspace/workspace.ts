@@ -567,7 +567,9 @@ export class Workspace {
       if (i < 0) continue;
       let next = i + 1;
       while (next < this.messages.length && this.messages[next].kind !== "user") next++;
-      const replies = this.messages.slice(i + 1, next).filter((m) => m.agentId === agentId);
+      const replies = this.messages
+        .slice(i + 1, next)
+        .filter((m) => m.kind === "agent" && m.agentId === agentId);
       out.push({ agentId, input: this.messages[i], replies });
     }
     return out;
@@ -659,14 +661,19 @@ export class Workspace {
     if (last && last.timestamp > this.lastActivityAt) this.lastActivityAt = last.timestamp;
   }
 
-  private pushSystemMessage(content: string): void {
+  private pushSystemMessage(
+    content: string,
+    extra?: Pick<Message, "agentId" | "events" | "context">,
+  ): void {
     const msg: Message = {
       id: genId("msg"),
       kind: "system",
-      agentId: null,
+      agentId: extra?.agentId ?? null,
       content,
       timestamp: Date.now(),
       status: "done",
+      ...(extra?.events && { events: extra.events }),
+      ...(extra?.context && { context: extra.context }),
     };
     this.pushMessage(msg);
   }
@@ -878,6 +885,16 @@ export class Workspace {
           return;
         }
         if (event.kind === "notice" || event.kind === "compact" || event.kind === "retry") {
+          if (isCompactedEvent(event)) {
+            entry.lastContext = event.context ?? null;
+            this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
+            this.pushSystemMessage(event.content, {
+              agentId,
+              events: [event],
+              ...(event.context && { context: event.context }),
+            });
+            return;
+          }
           this.pushSystemMessage(event.content);
           return;
         }
@@ -950,11 +967,15 @@ export class Workspace {
             entry.currentMsg.context = event.context;
             entry.lastContext = event.context;
             this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
+          } else if (isCompactedMessage(entry.currentMsg) && !entry.currentMsg.context) {
+            entry.lastContext = null;
+            this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
           }
           if (event.effort) entry.currentMsg.effort = event.effort;
           if (event.thinking) entry.currentMsg.thinking = event.thinking;
+          const contextPatch = event.context ?? entry.currentMsg.context;
           const patch = {
-            ...(event.context && { context: event.context }),
+            ...(contextPatch && { context: contextPatch }),
             ...(event.effort && { effort: event.effort }),
             ...(event.thinking && { thinking: event.thinking }),
           };
@@ -983,10 +1004,20 @@ export class Workspace {
         if (entry.retryPending && answered(msg)) entry.lastEnvelope = undefined;
         msg.status = "error";
         clearLiveTiming(msg);
+        if (isCompactedMessage(msg) && !msg.context) {
+          entry.lastContext = null;
+          this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
+        }
         event.contentOffset = msg.content.length;
         msg.events!.push(event);
         this.streamed(msg, event);
-        this.finished(msg.id, "error", msg.content, msg.events);
+        this.finished(
+          msg.id,
+          "error",
+          msg.content,
+          msg.events,
+          msg.context ? { context: msg.context } : undefined,
+        );
         this.finishReply(entry);
       } else if (event.kind === "subagent_progress" || event.kind === "subagent_done") {
         const msg = this.ensureAgentMsg(entry);
@@ -1040,6 +1071,11 @@ export class Workspace {
             ? Math.min(Math.max(0, event.contentOffset), msg.content.length)
             : msg.content.length;
         msg.events!.push(event);
+        if (isCompactedEvent(event)) {
+          msg.context = event.context;
+          entry.lastContext = event.context ?? null;
+          this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
+        }
         this.streamed(msg, event);
       }
     };
@@ -2504,14 +2540,17 @@ export class Workspace {
   }
 
   // From the newest reply that recorded one; an unloaded history (archived)
-  // leaves it unknown.
+  // leaves it unknown, and a compaction without a post-compaction estimate
+  // stops the scan so pre-compaction occupancy never resurfaces.
   private lastContext(a: AgentEntry): ContextUsage | null {
     if (a.lastContext !== undefined) return a.lastContext;
     if (!this.messagesLoaded) return null;
     let found: ContextUsage | null = null;
     for (let i = this.messages.length - 1; i >= 0 && !found; i--) {
       const m = this.messages[i];
-      if (m.agentId === a.info.id && m.context) found = m.context;
+      if (m.agentId !== a.info.id) continue;
+      if (m.context) found = m.context;
+      else if (isCompactedMessage(m)) break;
     }
     a.lastContext = found;
     return found;
@@ -2855,4 +2894,12 @@ function renderBar(pct: number): string {
 // A turn the user stopped keeps what it said, marked.
 function withInterrupted(content: string): string {
   return content ? `${content}\n\n*\\[interrupted\\]*` : "*\\[interrupted\\]*";
+}
+
+function isCompactedEvent(event: StreamEvent): boolean {
+  return event.kind === "compact" && /^Context compacted\b/.test(event.content);
+}
+
+function isCompactedMessage(msg: Message): boolean {
+  return Boolean(msg.events?.some(isCompactedEvent));
 }

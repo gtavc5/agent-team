@@ -63,8 +63,8 @@ export interface StreamEvent {
   toolName?: string;
   toolSource?: ToolSource;
   level?: NoticeLevel;
-  // On result events: size of the context sent on the turn's last request
-  // and the model's window, for the per-message usage row.
+  // On result and compact events: size of the context sent on the turn's last
+  // request (or estimated after compaction) and the model's window.
   context?: ContextUsage;
   // On result events: the effort the turn actually ran at.
   effort?: string;

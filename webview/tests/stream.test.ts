@@ -917,4 +917,27 @@ describe("live thinking", () => {
     const open = applyEventsToMessage(msg(), [think("x")]);
     expect(applyEventsToMessage(open, [])).toBe(open);
   });
+
+  it("updates and clears live message context on compaction events to match snapshots", () => {
+    const estimated = applyEventsToMessage(msg({ status: "streaming" }), [
+      ev("compact", {
+        content: "Context compacted (threshold): 300000 → ~40000 tokens",
+        context: { window: 1_048_576, tokens: 40_000 },
+      }),
+    ]);
+    expect(estimated.context).toEqual({ window: 1_048_576, tokens: 40_000 });
+
+    // Aborted compaction leaves existing context intact.
+    const aborted = applyEventsToMessage(estimated, [
+      ev("compact", { content: "Compaction aborted (manual)" }),
+    ]);
+    expect(aborted.context).toEqual({ window: 1_048_576, tokens: 40_000 });
+
+    // Successful compaction without an estimate clears stale context immediately.
+    const cleared = applyEventsToMessage(aborted, [
+      ev("compact", { content: "Context compacted (overflow): 42000 tokens" }),
+    ]);
+    expect(cleared.context).toBeUndefined();
+    expect("context" in cleared).toBe(false);
+  });
 });
