@@ -182,11 +182,8 @@ it("keeps the mobile attention count through reading, peeking and resolving at 3
   );
   expect(projectHeader.parentElement!.querySelector(".ws-group-items")).toBeNull();
   const projectAttention = projectHeader.querySelector<HTMLElement>(".ws-group-attention")!;
-  expect(projectAttention.querySelector(".attention-badge")!.textContent).toBe("2");
-  expect(projectAttention.querySelector(".awaits-tag")!.textContent).toBe("your turn");
-  expect(projectAttention.getAttribute("aria-label")).toBe(
-    "Project: 2 sessions need attention, 1 your turn",
-  );
+  expect(projectAttention.textContent).toBe("1 need you · 1 unread");
+  expect(projectAttention.getAttribute("aria-label")).toBe("Project: 1 need you · 1 unread");
   expectNoOverflow();
 
   // Unfold explicitly, then read C. The server echo clears C's eight messages,
@@ -196,6 +193,7 @@ it("keeps the mobile attention count through reading, peeking and resolving at 3
     .poll(() => projectHeader.querySelector(".ws-group-toggle")!.getAttribute("aria-expanded"))
     .toBe("true");
   await tap(row("C"));
+  receive({ type: "workspace_messages", workspaceId: "C", messages: [], hasMore: false });
   await expect
     .poll(() =>
       sock.frames().some((frame) => frame.type === "mark_seen" && frame.workspaceId === "C"),

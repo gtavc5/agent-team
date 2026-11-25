@@ -14,6 +14,9 @@ export interface PendingEvent {
   wsId: string;
   messageId: string;
   event: StreamEvent;
+  agentId?: string;
+  streamAt?: number;
+  retryLabel?: string | null;
 }
 
 // Kinds that only carry streamed text and never land in `events`.

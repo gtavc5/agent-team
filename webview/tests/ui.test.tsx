@@ -364,15 +364,15 @@ describe("streaming turn footer", () => {
 
   it.each(["done", "error"] as const)("keeps one footer until the turn is %s", (status) => {
     const view = (over: Partial<Message> = {}) => <MessageItem msg={msg(over)} agents={[agent]} />;
-    const { container, rerender } = render(view());
+    const { container, rerender } = render(view({ waitingSince: Date.now() }));
     const node = footer(container)!;
     expect(node).toBe(container.querySelector(".message-body")!.lastElementChild);
     expect(node.textContent).toBe("");
-    tick(4_999);
+    tick(14_999);
     expect(node.textContent).toBe("");
     tick(1);
-    expect(node.textContent).toBe("Waiting for the model · 5s");
-    rerender(view({ content: "So" }));
+    expect(node.textContent).toBe("No new events for 15s");
+    rerender(view({ content: "So", waitingSince: Date.now() }));
     expect([...container.querySelectorAll(".turn-footer")]).toEqual([node]);
     expect(node.textContent).toBe("");
     rerender(view({ content: "So", status }));
@@ -386,7 +386,7 @@ describe("streaming turn footer", () => {
     );
     const { container, rerender } = render(view({ waitingSince: since }));
     const node = footer(container)!;
-    expect(node.textContent).toBe("Waiting for the model · 45s");
+    expect(node.textContent).toBe("No new events for 45s");
     const thinking = {
       events: [{ ...read, toolResult: "ok" }],
       liveThinkingSince: since,
@@ -424,10 +424,10 @@ describe("streaming turn footer", () => {
 
     tick(250);
     rerender(view({ waitingSince: Date.now() }));
-    tick(4_999);
+    tick(14_999);
     expect(node.textContent).toBe("");
     tick(1);
-    expect(node.textContent).toBe("Waiting for the model · 5s");
+    expect(node.textContent).toBe("No new events for 15s");
   });
 
   it("rechecks a wait deadline if the wall clock moved backward", () => {
@@ -438,10 +438,10 @@ describe("streaming turn footer", () => {
         <MessageItem msg={msg({ waitingSince: 10_000 })} agents={[agent]} />,
       );
       clock.mockImplementation(() => new Date().getTime() - 1_000);
-      tick(5_000);
+      tick(15_000);
       expect(footer(container)?.textContent).toBe("");
       tick(1_000);
-      expect(footer(container)?.textContent).toBe("Waiting for the model · 5s");
+      expect(footer(container)?.textContent).toBe("No new events for 15s");
     } finally {
       clock.mockRestore();
     }
@@ -452,7 +452,7 @@ describe("streaming turn footer", () => {
     const view = (over: Partial<Message>) => <MessageItem msg={msg(over)} agents={[agent]} />;
     const { container, rerender } = render(view({ waitingSince }));
     const node = footer(container)!;
-    expect(node.textContent).toBe("Waiting for the model · 45s");
+    expect(node.textContent).toBe("No new events for 45s");
     const call = { ...read, startedAt: Date.now() };
     rerender(view({ waitingSince, events: [call] }));
     expect(node.textContent).toBe("");
@@ -494,7 +494,6 @@ describe("Sidebar archived section", () => {
     activeWsId: "live",
     connected: true,
     groupOverrides: {},
-    finishedStatus: {},
     searchQuery: "",
     searchHits: null,
     systemStatus: null,
@@ -671,7 +670,6 @@ describe("Sidebar group quick-create", () => {
       activeWsId: "w",
       connected: true,
       groupOverrides: {},
-      finishedStatus: {},
       searchQuery: "",
       searchHits: null,
       systemStatus: null,

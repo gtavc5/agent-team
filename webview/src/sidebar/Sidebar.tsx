@@ -1,11 +1,22 @@
 import { recordTelemetry } from "../telemetry";
 import type { QuotaState } from "../../../shared/quota";
-import { memo, useState, useEffect, useId, useRef, useSyncExternalStore } from "react";
+import {
+  memo,
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useId,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import type { Workspace, Project, SystemStatus, SearchHit } from "../state/useServer";
 import {
   groupWorkspaces,
   isGroupExpanded,
   archivedWorkspaces,
+  canFoldWorker,
+  initialIdleWorkers,
   type WorkspaceGroup,
 } from "./groups";
 import { isAgentActive } from "../workspace/agents";
@@ -17,7 +28,8 @@ import { NameInput } from "../project/NameInput";
 import { ConfirmDialog } from "../workspace/dialogs";
 import { QuotaPanel } from "./QuotaPanel";
 import { formatShortDateTime, quotaTone } from "./quota";
-import { describeAttention, summarizeAttention } from "./attention";
+import { attentionBreakdown, sessionAttention, summarizeAttention } from "./attention";
+import { StreamSilence } from "./StreamSilence";
 import { UsageDashboard } from "../usage/UsageDashboard";
 
 interface ThemeController {
@@ -54,6 +66,19 @@ function gitTitle(git: { dirty: number; ahead: number; behind: number }): string
   if (git.ahead) parts.push(`${git.ahead} ahead`);
   if (git.behind) parts.push(`${git.behind} behind`);
   return parts.length ? parts.join(", ") : "clean";
+}
+
+function SessionWait({ workspace }: { workspace: Workspace }) {
+  const retry = workspace.agents.find((a) => a.retryLabel)?.retryLabel;
+  if (retry) {
+    const attempt = retry.match(/\bRetrying (?:in \d+s )?\((\d+)\b/)?.[1];
+    return (
+      <span className="session-silence" title={retry}>
+        {attempt ? `Retrying (attempt ${attempt})` : "Retrying"}
+      </span>
+    );
+  }
+  return <StreamSilence workspace={workspace} />;
 }
 
 const STATUS_COLORS = { danger: "var(--error)", warn: "var(--warning)", normal: "var(--accent)" };
@@ -107,7 +132,6 @@ export interface SidebarProps {
   // Mobile keeps the drawer mounted while it is translated off screen.
   sidebarOpen?: boolean;
   groupOverrides: Record<string, boolean>;
-  finishedStatus: Record<string, "done" | "failed">;
   searchQuery: string;
   searchHits: SearchHit[] | null;
   systemStatus: SystemStatus | null;
@@ -281,7 +305,47 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       </button>
     );
   };
-  const groups = groupWorkspaces(p.workspaces, p.projects);
+  const groups = useMemo(
+    () => groupWorkspaces(p.workspaces, p.projects),
+    [p.workspaces, p.projects],
+  );
+  const [foldedIdle, setFoldedIdle] = useState<ReadonlySet<string>>(
+    () => new Set(groups.flatMap((g) => initialIdleWorkers(g, p.activeWsId, now))),
+  );
+  const [showIdle, setShowIdle] = useState<ReadonlySet<string>>(new Set());
+  const bootstrapped = useRef(groups.length > 0);
+  const expandedDefaults = useRef(new Map<string, boolean>());
+  useLayoutEffect(() => {
+    if (!bootstrapped.current && groups.length) {
+      bootstrapped.current = true;
+      setFoldedIdle(new Set(groups.flatMap((g) => initialIdleWorkers(g, p.activeWsId, now))));
+    } else {
+      // A visible worker never folds itself after settling. Once promoted,
+      // it stays in the main list until the reader explicitly folds it.
+      setFoldedIdle((prev) => {
+        const promoted = p.workspaces.filter(
+          (w) => prev.has(w.id) && !canFoldWorker(w, p.activeWsId),
+        );
+        if (!promoted.length) return prev;
+        const next = new Set(prev);
+        for (const w of promoted) next.delete(w.id);
+        return next;
+      });
+    }
+    for (const g of groups) {
+      if (!expandedDefaults.current.has(g.key) || g.workspaces.some((w) => w.id === p.activeWsId)) {
+        expandedDefaults.current.set(
+          g.key,
+          isGroupExpanded(
+            g,
+            {},
+            now,
+            g.workspaces.some((w) => w.id === p.activeWsId),
+          ),
+        );
+      }
+    }
+  }, [groups, p.workspaces, p.activeWsId, now]);
   const archived = archivedWorkspaces(p.workspaces, p.projects);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const activeIsArchived = archived.some((w) => w.id === p.activeWsId);
@@ -371,12 +435,10 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
   // A folder's group or a project's (its row is its lead), with its archived
   // sessions folded under it; `shelf` for an archived project's.
   const renderGroup = (g: WorkspaceGroup, shelf = false) => {
-    const expanded = isGroupExpanded(
-      g,
-      p.groupOverrides,
-      now,
-      [...g.workspaces, ...g.archived].some((w) => w.id === p.activeWsId),
-    );
+    const current = [...g.workspaces, ...g.archived].some((w) => w.id === p.activeWsId);
+    const expanded =
+      p.groupOverrides[g.key] ??
+      (current || (expandedDefaults.current.get(g.key) ?? isGroupExpanded(g, {}, now)));
     const toggle = () => p.onToggleGroup(g.key, !expanded);
     // A project's own row is its lead, archived with it or not: it opens the
     // lead, which is not listed again under it; the arrow folds the sessions
@@ -386,13 +448,24 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       : undefined;
     const items = g.workspaces.filter((w) => w !== lead);
     const past = g.archived.filter((w) => w !== lead);
-    const leadUnread = lead?.unread ?? 0;
-    const attention = summarizeAttention(g.workspaces, p.activeWsId, g.project ? [g.project] : []);
+    const attention = summarizeAttention(g.workspaces, null, g.project ? [g.project] : []);
+    const summary = attentionBreakdown(attention);
+    const idle = items.filter((w) => foldedIdle.has(w.id) && canFoldWorker(w, p.activeWsId));
+    const visible = items.filter((w) => !idle.includes(w));
+    const foldable =
+      !shelf && g.project ? visible.filter((w) => canFoldWorker(w, p.activeWsId)) : [];
+    const idleOpen = showIdle.has(g.key);
+    const foldIdle = () => {
+      setFoldedIdle((prev) => new Set([...prev, ...foldable.map((w) => w.id)]));
+      setShowIdle((prev) => {
+        const next = new Set(prev);
+        next.delete(g.key);
+        return next;
+      });
+    };
     const hasContent = items.length > 0 || past.length > 0;
     // A project of archived sessions only (its lead archived too) has no live one.
     const git = (g.workspaces[0] ?? g.archived[0])?.git;
-    // The group of the open session: on touch only its row offers a new one.
-    const current = [...g.workspaces, ...g.archived].some((w) => w.id === p.activeWsId);
     return (
       <div key={g.key} className="ws-group">
         <div
@@ -455,9 +528,18 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               Sealed
             </span>
           )}
-          {expanded && leadUnread > 0 && lead!.id !== p.activeWsId && (
-            <span className="unread-badge">{leadUnread}</span>
-          )}
+          {g.project && summary ? (
+            <span
+              className={`ws-group-attention attention-${attention.yourTurn ? "yourTurn" : attention.failed ? "failed" : "unread"}`}
+              role="status"
+              aria-label={`${g.label}: ${summary}`}
+              title={summary}
+            >
+              {summary}
+            </span>
+          ) : lead && p.connected ? (
+            <SessionWait workspace={lead} />
+          ) : null}
           {git?.branch && !DEFAULT_BRANCH.test(git.branch) && (
             <span className="ws-group-branch" title={gitTitle(git)}>
               {git.branch}
@@ -475,30 +557,10 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               <Icon name="plus" />
             </button>
           )}
-          {!expanded &&
-            (g.project && attention.count > 0 ? (
-              <span
-                className="ws-group-attention"
-                role="status"
-                aria-label={`${g.label}: ${describeAttention(attention)}`}
-                title={describeAttention(attention)}
-              >
-                <span
-                  className={`attention-badge${attention.yourTurn > 0 ? " attention-badge-your-turn" : ""}`}
-                  aria-hidden="true"
-                >
-                  {attention.count}
-                </span>
-                {attention.yourTurn > 0 && (
-                  <span className="awaits-tag" aria-hidden="true">
-                    your turn
-                  </span>
-                )}
-              </span>
-            ) : (
-              items.length > 0 && <span className="ws-group-count">{items.length}</span>
-            ))}
-          {g.running && <span className="streaming-dot" />}
+          {!expanded && !summary && items.length > 0 && (
+            <span className="ws-group-count">{items.length}</span>
+          )}
+          {g.running && !summary && <span className="task-status running" aria-hidden="true" />}
           {!shelf && g.project && g.project.status !== "sealed" && p.onArchiveProject && (
             <button
               className="ws-group-pill ws-group-archive"
@@ -527,10 +589,9 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
         </div>
         {expanded && hasContent && (
           <div className="ws-group-items">
-            {items.map((ws) => {
-              const running = ws.agents.some(isAgentActive);
-              const unread = ws.unread ?? 0;
-              const awaits = ws.awaitsUser && !running && ws.id !== p.activeWsId;
+            {[...visible, ...(idleOpen ? idle : [])].map((ws) => {
+              const running = ws.agents.some((a) => a.busy || isAgentActive(a));
+              const cue = sessionAttention(ws);
               return (
                 <div
                   key={ws.id}
@@ -538,7 +599,8 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
                   onClick={() => p.onSelect(ws.id)}
                 >
                   <div
-                    className={`task-status ${running ? "running" : (p.finishedStatus[ws.id] ?? "idle")}`}
+                    className={`task-status ${running && !cue ? "running" : "idle"}`}
+                    aria-hidden="true"
                   />
                   <div className="task-info">
                     <div className="task-name">
@@ -547,15 +609,20 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
                         <span className="clip" title={ws.name}>
                           {ws.name}
                         </span>
-                        {awaits && (
-                          <span className="awaits-tag" title="Waiting for your reply">
-                            your turn
-                          </span>
-                        )}
-                        {unread > 0 && ws.id !== p.activeWsId && (
-                          <span className="unread-badge">{unread}</span>
-                        )}
                       </span>
+                      {cue ? (
+                        <span
+                          className={`session-attention attention-${cue}${cue === "yourTurn" ? " awaits-tag" : ""}`}
+                        >
+                          {cue === "yourTurn"
+                            ? "Your turn"
+                            : cue === "failed"
+                              ? "Failed"
+                              : "Unread result"}
+                        </span>
+                      ) : p.connected ? (
+                        <SessionWait workspace={ws} />
+                      ) : null}
                     </div>
                   </div>
                   <span className="task-hover">
@@ -567,6 +634,27 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
                 </div>
               );
             })}
+            {idle.length > 0 && (
+              <button
+                type="button"
+                className="ws-idle-toggle"
+                aria-expanded={idleOpen}
+                onClick={() =>
+                  setShowIdle((prev) => {
+                    const next = new Set(prev);
+                    if (!next.delete(g.key)) next.add(g.key);
+                    return next;
+                  })
+                }
+              >
+                {idleOpen ? `Hide idle (${idle.length})` : `Idle / Done (${idle.length})`}
+              </button>
+            )}
+            {foldable.length > 0 && (
+              <button type="button" className="ws-idle-toggle" onClick={foldIdle}>
+                Fold idle ({foldable.length})
+              </button>
+            )}
             {past.length > 0 && archiveList(g, past)}
           </div>
         )}
@@ -763,7 +851,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       {p.quota && (
         <QuotaPanel quota={p.quota} refresh={p.onRefreshQuota} now={now} connected={p.connected} />
       )}
-      {p.systemStatus && <SystemStatusPanel status={p.systemStatus} />}
+      {debugOpen && p.systemStatus && <SystemStatusPanel status={p.systemStatus} />}
       {showUsage && (
         <UsageDashboard workspaces={p.workspaces} onClose={() => setShowUsage(false)} />
       )}

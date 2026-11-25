@@ -639,11 +639,35 @@ button {
   margin-left: 0;
 }
 .ws-group-attention {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  margin-left: auto;
+  max-width: 64%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-tag);
+  font-weight: 600;
+}
+.ws-idle-toggle {
+  display: block;
+  width: 100%;
+  min-height: 24px;
+  padding: 2px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-meta);
+  text-align: left;
+  cursor: pointer;
+}
+.ws-idle-toggle:hover,
+.ws-idle-toggle:focus-visible {
+  background: var(--bg-hover);
+}
+@media (max-width: 767px), (pointer: coarse) {
+  .ws-idle-toggle {
+    min-height: 36px;
+  }
 }
 .ws-group-count {
   flex-shrink: 0;
@@ -695,17 +719,11 @@ button {
   opacity: 0.5;
 }
 .task-status.running {
-  background: var(--accent);
-  opacity: 1;
-  animation: pulse 2s infinite;
+  background: var(--text-secondary);
+  opacity: 0.75;
 }
-.task-status.done {
-  background: var(--success);
-  opacity: 1;
-}
-.task-status.failed {
-  background: var(--error);
-  opacity: 1;
+.ws-group-header .task-status {
+  margin-top: 0;
 }
 @keyframes pulse {
   0%,
@@ -776,18 +794,37 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.unread-badge {
-  flex-shrink: 0;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 5px;
-  border-radius: var(--radius-sm);
-  background: var(--accent-solid);
-  color: var(--on-solid);
+.session-attention,
+.session-silence {
+  min-width: 0;
+  flex: 0 0 auto;
+  max-width: 69%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--fs-tag);
+}
+.session-attention {
   font-weight: 600;
-  line-height: 16px;
-  text-align: center;
+}
+.session-silence {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.attention-yourTurn {
+  color: var(--warning);
+}
+.attention-failed {
+  color: var(--error);
+}
+.attention-unread {
+  color: var(--accent-text);
+}
+.task-item:has(.session-attention, .session-silence) {
+  padding-inline-end: 27px;
+}
+.task-item:has(.session-attention, .session-silence) .task-hover .task-time {
+  display: none;
 }
 .attention-badge {
   display: inline-flex;
@@ -2490,9 +2527,28 @@ button.action-target:hover {
 /* ---- Composer ----------------------------------------------------------- */
 
 .input-area {
+  position: relative;
   padding: 10px 20px calc(14px + env(safe-area-inset-bottom, 0px));
   background: var(--bg-secondary);
   border-top: 1px solid var(--border);
+}
+.jump-latest {
+  position: absolute;
+  z-index: 1;
+  inset-block-end: calc(100% + 6px);
+  inset-inline-end: 16px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  box-shadow: 0 1px 4px var(--border-strong);
+  cursor: pointer;
+}
+.jump-latest:hover {
+  background: var(--bg-elevated);
 }
 .input-row {
   display: flex;
@@ -2557,9 +2613,9 @@ button.action-target:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  min-width: 34px;
-  padding: 0 6px;
+  gap: 4px;
+  min-width: 40px;
+  padding: 0 8px;
 }
 .input-row .btn-abort:hover {
   background: var(--error);
@@ -3485,7 +3541,7 @@ button.quote-bar-content:focus-visible {
   max-height: 40vh;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 6px 12px 8px;
+  padding: 4px 10px 5px;
   font-size: var(--fs-meta);
 }
 .quota-header {
@@ -3518,14 +3574,6 @@ button.quote-bar-content:focus-visible {
   width: 13px;
   height: 13px;
 }
-.quota-refresh.refreshing .icon {
-  animation: quota-spin 0.9s linear infinite;
-}
-@keyframes quota-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
 .quota-refresh:disabled {
   opacity: 0.5;
   cursor: default;
@@ -3544,8 +3592,8 @@ button.quote-bar-content:focus-visible {
   gap: 5px;
   width: 100%;
   min-width: 0;
-  min-height: 24px;
-  padding: 2px 4px;
+  min-height: 21px;
+  padding: 1px 4px;
   margin: 0;
   font: inherit;
   color: var(--text-primary);
@@ -3610,7 +3658,8 @@ button.quote-bar-content:focus-visible {
   flex-shrink: 0;
 }
 .quota-pct-normal {
-  color: var(--text-primary);
+  color: var(--text-secondary);
+  font-weight: 500;
 }
 .quota-pct-warn {
   color: var(--warning);
@@ -3628,10 +3677,6 @@ button.quote-bar-content:focus-visible {
   border-radius: 3px;
   padding: 1px 4px;
   flex-shrink: 0;
-}
-.quota-badge-stale {
-  color: var(--warning);
-  background: color-mix(in srgb, var(--warning) 14%, transparent);
 }
 .quota-badge-error {
   color: var(--error);
@@ -3678,9 +3723,6 @@ button.quote-bar-content:focus-visible {
   }
 }
 @media (max-width: 768px), (max-height: 500px), (pointer: coarse) {
-  .quota-panel {
-    padding: 6px 12px 8px;
-  }
   .quota-refresh {
     width: 32px;
     height: 32px;
@@ -3690,8 +3732,8 @@ button.quote-bar-content:focus-visible {
     height: 15px;
   }
   .quota-row-toggle {
-    min-height: 36px;
-    padding: 6px 4px;
+    min-height: 32px;
+    padding: 3px 4px;
   }
   .quota-details {
     font-size: var(--fs-meta);
@@ -4093,11 +4135,21 @@ button.quote-bar-content:focus-visible {
     background: transparent !important;
     color: var(--text-secondary) !important;
   }
+  .input-row .btn-abort {
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+  }
+  .stop-label {
+    display: none;
+  }
+  .jump-latest {
+    min-height: 40px;
+  }
   .input-row .composer-stop .btn-abort {
     width: auto;
     padding: 0 6px;
-    /* The count widens the 34px circular control; keep the same end caps. */
-    border-radius: 17px;
+    border-radius: 20px;
   }
   .command-popup,
   .mention-popup {
@@ -4280,6 +4332,9 @@ button.quote-bar-content:focus-visible {
   background: none;
   border: none;
   cursor: pointer;
+}
+.bp-views .bp-mode-secondary:not([aria-pressed="true"]):not(:hover, :focus-visible) {
+  color: var(--text-muted);
 }
 .bp-views button[aria-pressed="true"] {
   color: var(--text-primary);
@@ -5446,6 +5501,10 @@ button.quote-bar-content:focus-visible {
   border: none;
   border-radius: var(--radius-sm);
   cursor: pointer;
+}
+.rail-btn-quiet:not(:hover, :focus-visible, [aria-pressed="true"]) .icon,
+.ap-agent-actions button:not(:hover, :focus-visible) .icon {
+  opacity: 0.72;
 }
 .rail-btn:hover {
   color: var(--text-primary);
@@ -6870,7 +6929,6 @@ button.quote-bar-content:focus-visible {
   .banner-retry .banner-icon,
   .subagent-icon-running,
   .spinner,
-  .quota-refresh.refreshing .icon,
   .ap-dot.ss-working,
   .sidebar-debug-strip,
   .sidebar.sidebar-open,

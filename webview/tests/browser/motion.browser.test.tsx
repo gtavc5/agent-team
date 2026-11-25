@@ -32,7 +32,7 @@ it("stops status loops and chrome motion without hiding status text in reduced m
       <span className="history-loading">
         <span className="spinner" /> Loading history
       </span>
-      <button className="quota-refresh refreshing" disabled aria-label="Refreshing…">
+      <button className="quota-refresh" disabled aria-label="Refreshing…">
         <svg className="icon" />
       </button>
       <span className="ap-dot ss-working" />
@@ -54,7 +54,6 @@ it("stops status loops and chrome motion without hiding status text in reduced m
   for (const animation of container.getAnimations({ subtree: true })) animation.pause();
   const get = (selector: string) => container.querySelector(selector)!;
   const loopMarkers = [
-    ".task-status",
     ".agent-status-busy",
     ".agent-status-waiting",
     ".pr-checks-pending",
@@ -62,7 +61,6 @@ it("stops status loops and chrome motion without hiding status text in reduced m
     ".banner-icon",
     ".subagent-icon-running",
     ".spinner",
-    ".quota-refresh .icon",
     ".ap-dot",
   ];
   const fades = [".sidebar-debug-strip", ".quota-details", ".stop-actions"];
@@ -79,6 +77,9 @@ it("stops status loops and chrome motion without hiding status text in reduced m
   }
   for (const selector of loopMarkers) {
     expect(getComputedStyle(get(selector)).animationIterationCount, selector).toBe("infinite");
+  }
+  for (const selector of [".task-status", ".quota-refresh .icon"]) {
+    expect(getComputedStyle(get(selector)).animationName).toBe("none");
   }
   for (const selector of fades) expect(properties(selector), selector).toEqual(["opacity"]);
   expect(properties(".dialog")).toEqual(["opacity", "transform"]);

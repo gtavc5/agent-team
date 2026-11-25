@@ -224,8 +224,8 @@ it("audits folded and expanded turns across replayFixture", () => {
         previous.waitingSince != null
       ) {
         const clock = Date.now();
-        vi.setSystemTime(previous.waitingSince + 5_000);
-        auditTurn(previous, agents, { footer: "Waiting for the model · 5s" });
+        vi.setSystemTime(previous.waitingSince + 15_000);
+        auditTurn(previous, agents, { footer: "No new events for 15s" });
         vi.setSystemTime(clock);
         livePhases.add("waiting");
       }

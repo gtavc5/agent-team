@@ -95,9 +95,15 @@ new work. The panel provides the orchestration and UI, not a model of its own.
   history leaves memory (still on disk) and idle CLI processes shut down.
   Sending a message restores them.
 
+### Session attention
+
+The sidebar keeps session positions fixed as turns run. Each session shows its highest-priority cue: Your turn, Failed, or Unread result. Only an answer, failure, or new request for the user's input adds unread attention. The project row summarizes its lead and workers even when folded. A silent active turn shows the time since its last stream event, not a guessed cause. Read, idle workers can be folded without moving sessions that need attention.
+
+Switching sessions keeps the reader at the same message, or follows the latest reply if they were already at the bottom. Jump to latest resumes following.
+
 ### Account quota
 
-The sidebar shows last-observed account limits separately from CPU and memory. Refresh reads native Codex limits and asks one connected Pi session for its registered providers. Antigravity ACP uses the provider’s `/usage` event; Pi OAuth logins for `openai-codex` and `kimi-coding` use their respective read-only account usage endpoints. None starts a model turn. An unconfigured backend is neutral, not a quota failure. While Pi or ACP is getting ready, the sidebar shows what it is waiting for. Installing the ACP runtime triggers a new read from a connected Pi session. A transient read failure retries that provider at most twice; last-known bars retain their original observation time. Pi providers without a verified quota reader report unsupported.
+The sidebar keeps the last-observed account limits visible in a compact summary. Open a quota row to see observation time and the manual Refresh button. CPU and memory are under Debug tools. Refresh reads native Codex limits and asks one connected Pi session for its registered providers. Antigravity ACP uses the provider’s `/usage` event; Pi OAuth logins for `openai-codex` and `kimi-coding` use their respective read-only account usage endpoints. None starts a model turn. An unconfigured backend is neutral, not a quota failure. While Pi or ACP is getting ready, the sidebar shows what it is waiting for. Installing the ACP runtime triggers a new read from a connected Pi session. A transient read failure retries that provider at most twice; last-known values retain their original observation time. Pi providers without a verified quota reader report unsupported.
 
 Pi sessions load `/quota` automatically. To use the same command in standalone Pi, run `pi -e /path/to/yaat/service/src/session/pi-quota.ts` from an installed checkout. `/quota` checks all registered providers regardless of the current model. Enable `pi-antigravity-acp-provider` for ACP readings. OAuth quota comes from Pi’s credential resolver, not from the native Codex login. No account pooling or credential switching is performed.
 

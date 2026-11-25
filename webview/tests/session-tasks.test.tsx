@@ -199,6 +199,20 @@ describe("Stop in the app", () => {
     ]);
   });
 
+  it.each(["waiting", "sleeping"] as const)(
+    "offers Stop as soon as a prompt opens from %s",
+    (state) => {
+      const sock = boot([ws("w", [agent("a", { state, busy: false })])]);
+      const row = within(document.querySelector<HTMLElement>(".input-row")!);
+      expect(row.queryByRole("button", { name: "Stop a" })).toBeNull();
+      act(() =>
+        sock.receive({ type: "agent_busy", workspaceId: "w", agentId: "a", streamAt: Date.now() }),
+      );
+      fireEvent.click(row.getByRole("button", { name: "Stop a" }));
+      expect(sock.frames()).toContainEqual({ type: "interrupt", workspaceId: "w", agentId: "a" });
+    },
+  );
+
   it("lists only working agents, including a legacy busy agent, and stops the chosen turns", () => {
     const sock = boot([
       ws("w", [

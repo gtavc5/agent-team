@@ -304,6 +304,8 @@ export interface AgentInfo {
   canSwitchBackend?: boolean;
   busy?: boolean;
   state?: RunState;
+  lastStreamAt?: number;
+  retryLabel?: string;
   // Transient label of what the agent is doing (compacting, a long tool...).
   activity?: string | null;
   // Current reasoning effort level, when the model supports one.
@@ -360,10 +362,10 @@ export interface Workspace {
   projectLink?: ProjectLink;
   // A worker stopped on the user's reply (its task asked them something).
   awaitsUser?: boolean;
-  // Messages since any client last showed the session (the server counts).
+  // Actionable results since any client last read the session (server-owned).
   unread?: number;
-  // Client only: bumped each time a client marks the session seen.
-  seenTick?: number;
+  lastResult?: "done" | "failed";
+  queued?: boolean;
   hasMore?: boolean;
   messagesLoaded?: boolean;
   // An older page has been requested and not yet arrived.
@@ -574,7 +576,30 @@ export function useServer() {
     const batch = pendingEventsRef.current;
     if (batch.length === 0) return;
     pendingEventsRef.current = [];
-    setWorkspaces((prev) => applyStreamBatch(prev, batch));
+    type Progress = Pick<AgentInfo, "lastStreamAt" | "retryLabel">;
+    const updates = new Map<string, Map<string, Progress>>();
+    for (const { wsId, agentId, streamAt, retryLabel } of batch) {
+      if (!agentId || (streamAt == null && retryLabel === undefined)) continue;
+      let agents = updates.get(wsId);
+      if (!agents) updates.set(wsId, (agents = new Map<string, Progress>()));
+      const progress = agents.get(agentId) ?? {};
+      if (streamAt != null) progress.lastStreamAt = streamAt;
+      if (retryLabel !== undefined) progress.retryLabel = retryLabel ?? undefined;
+      agents.set(agentId, progress);
+    }
+    setWorkspaces((prev) =>
+      applyStreamBatch(prev, batch).map((w) => {
+        const agents = updates.get(w.id);
+        if (!agents) return w;
+        return {
+          ...w,
+          agents: w.agents.map((a) => {
+            const progress = agents.get(a.id);
+            return progress ? { ...a, ...progress } : a;
+          }),
+        };
+      }),
+    );
   }, []);
 
   const scheduleFlush = useCallback(() => {
@@ -607,6 +632,7 @@ export function useServer() {
             return;
           }
           if (buildId) buildIdRef.current = buildId;
+          flushStreamEvents();
           setQuota((msg.quota as QuotaState | undefined) ?? null);
           const incoming = msg.workspaces as Workspace[];
           setWorkspaces((prev) => {
@@ -614,16 +640,15 @@ export function useServer() {
             const prevMap = new Map(prev.map((w) => [w.id, w]));
             return incoming.map((w) => {
               const existing = prevMap.get(w.id);
-              const kept = existing?.seenTick ? { ...w, seenTick: existing.seenTick } : w;
               if (existing?.messagesLoaded) {
                 return {
-                  ...kept,
+                  ...w,
                   messages: existing.messages,
                   messagesLoaded: true,
                   hasMore: existing.hasMore,
                 };
               }
-              return kept;
+              return w;
             });
           });
           const config = msg.config as {
@@ -658,6 +683,7 @@ export function useServer() {
         }
 
         case "workspace_updated": {
+          flushStreamEvents();
           const info = msg.workspace as Workspace;
           setWorkspaces((prev) =>
             prev.map((w) =>
@@ -668,7 +694,6 @@ export function useServer() {
                     messagesLoaded: w.messagesLoaded,
                     hasMore: w.hasMore,
                     loadingOlder: w.loadingOlder,
-                    seenTick: w.seenTick,
                   }
                 : w,
             ),
@@ -676,12 +701,18 @@ export function useServer() {
           break;
         }
 
-        case "workspace_seen": {
-          const wsId = msg.workspaceId as string;
+        case "workspace_attention": {
+          const unread = msg.unread as number;
+          const lastResult = msg.lastResult as Workspace["lastResult"];
           setWorkspaces((prev) =>
-            prev.map((w) =>
-              w.id === wsId ? { ...w, unread: 0, seenTick: (w.seenTick ?? 0) + 1 } : w,
-            ),
+            prev.map((w) => (w.id === msg.workspaceId ? { ...w, unread, lastResult } : w)),
+          );
+          break;
+        }
+
+        case "workspace_seen": {
+          setWorkspaces((prev) =>
+            prev.map((w) => (w.id === msg.workspaceId ? { ...w, unread: 0 } : w)),
           );
           break;
         }
@@ -835,7 +866,9 @@ export function useServer() {
                 ...w,
                 messages,
                 hasMore: keptOlder ? w.hasMore : hasMore,
-                loadingOlder: false,
+                // A newest-page reply cannot complete an older-page request
+                // that still targets the same cursor.
+                loadingOlder: w.loadingOlder && messages[0]?.timestamp === w.messages[0]?.timestamp,
               };
             }),
           );
@@ -870,6 +903,7 @@ export function useServer() {
         }
 
         case "agent_updated": {
+          flushStreamEvents();
           const wsId = msg.workspaceId as string;
           const agent = msg.agent as AgentInfo;
           setWorkspaces((prev) =>
@@ -877,7 +911,16 @@ export function useServer() {
               w.id === wsId
                 ? {
                     ...w,
-                    agents: w.agents.map((a) => (a.id === agent.id ? { ...a, ...agent } : a)),
+                    agents: w.agents.map((a) =>
+                      a.id === agent.id
+                        ? {
+                            ...a,
+                            ...agent,
+                            lastStreamAt: agent.lastStreamAt,
+                            retryLabel: agent.retryLabel,
+                          }
+                        : a,
+                    ),
                   }
                 : w,
             ),
@@ -918,8 +961,8 @@ export function useServer() {
                 ? {
                     ...w,
                     messages: [...w.messages, message],
-                    lastMessageAt: message.timestamp,
-                    unread: (w.unread ?? 0) + 1,
+                    lastMessageAt: Math.max(w.lastMessageAt ?? w.createdAt, message.timestamp),
+                    queued: (msg.queued as boolean | undefined) ?? w.queued,
                   }
                 : w,
             ),
@@ -933,6 +976,9 @@ export function useServer() {
             wsId: msg.workspaceId as string,
             messageId: msg.messageId as string,
             event: msg.event as StreamEvent,
+            agentId: msg.agentId as string | undefined,
+            streamAt: msg.streamAt as number | undefined,
+            retryLabel: msg.retryLabel as string | null | undefined,
           });
           scheduleFlush();
           break;
@@ -955,6 +1001,7 @@ export function useServer() {
               if (w.id !== wsId) return w;
               return {
                 ...w,
+                queued: (msg.queued as boolean | undefined) ?? w.queued,
                 messages: w.messages.map((m) => {
                   if (m.id !== messageId) return m;
                   const merged = events ? mergeDetailEvents(m.events, events) : undefined;
@@ -979,6 +1026,7 @@ export function useServer() {
         }
 
         case "agent_busy": {
+          flushStreamEvents();
           const wsId = msg.workspaceId as string;
           const agentId = msg.agentId as string;
           setWorkspaces((prev) =>
@@ -987,7 +1035,15 @@ export function useServer() {
                 ? {
                     ...w,
                     agents: w.agents.map((a) =>
-                      a.id === agentId ? { ...a, busy: true, canSwitchBackend: false } : a,
+                      a.id === agentId
+                        ? {
+                            ...a,
+                            busy: true,
+                            canSwitchBackend: false,
+                            lastStreamAt: msg.streamAt as number | undefined,
+                            retryLabel: undefined,
+                          }
+                        : a,
                     ),
                   }
                 : w,
@@ -997,6 +1053,7 @@ export function useServer() {
         }
 
         case "agent_idle": {
+          flushStreamEvents();
           const wsId = msg.workspaceId as string;
           const agentId = msg.agentId as string;
           setWorkspaces((prev) =>
@@ -1004,7 +1061,11 @@ export function useServer() {
               w.id === wsId
                 ? {
                     ...w,
-                    agents: w.agents.map((a) => (a.id === agentId ? { ...a, busy: false } : a)),
+                    agents: w.agents.map((a) =>
+                      a.id === agentId
+                        ? { ...a, busy: false, lastStreamAt: undefined, retryLabel: undefined }
+                        : a,
+                    ),
                   }
                 : w,
             ),
@@ -1129,7 +1190,13 @@ export function useServer() {
           const messageId = msg.messageId as string;
           setWorkspaces((prev) =>
             prev.map((w) =>
-              w.id === wsId ? { ...w, messages: w.messages.filter((m) => m.id !== messageId) } : w,
+              w.id === wsId
+                ? {
+                    ...w,
+                    queued: (msg.queued as boolean | undefined) ?? w.queued,
+                    messages: w.messages.filter((m) => m.id !== messageId),
+                  }
+                : w,
             ),
           );
           break;

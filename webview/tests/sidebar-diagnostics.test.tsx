@@ -34,7 +34,6 @@ function sidebar(connected = true, over: Partial<SidebarProps> = {}) {
     activeWsId: null,
     workspaces: [],
     groupOverrides: {},
-    finishedStatus: {},
     searchQuery: "",
     searchHits: null,
     systemStatus: null,

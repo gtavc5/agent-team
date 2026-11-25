@@ -101,6 +101,8 @@ export interface AgentRuntimeInfo extends AgentInfo {
   busy: boolean;
   state: RunState;
   activity: string | null;
+  lastStreamAt?: number;
+  retryLabel?: string;
   effort: string | null;
   // The levels /effort takes for its model.
   effortLevels: string[];
@@ -175,9 +177,10 @@ export interface WorkspaceInfo {
   // A worker stopped on the user (project/manager.ts awaitsUser); the server
   // adds it to the list it sends.
   awaitsUser?: boolean;
-  // Messages since any client last showed the session: one count for every
-  // device, so a reply read on the phone is read on the desktop too.
+  // Actionable results since any client last read the session.
   unread: number;
+  lastResult?: "done" | "failed";
+  queued?: boolean;
 }
 
 export interface WorkspaceState {
@@ -195,7 +198,7 @@ export interface WorkspaceState {
   lastActivityAt?: number;
   archivedAt?: number | null;
   projectLink?: ProjectLink;
-  unread?: number;
+  attention?: { unread: number; lastResult?: WorkspaceInfo["lastResult"]; awaitsUser: boolean };
 }
 
 type CommandOutcome = string | { forward: string } | null;
@@ -224,6 +227,8 @@ export interface AgentEntry {
   // Transient "doing X right now" label from the session (see setActivity).
   activity?: string | null;
   runState?: RunState;
+  lastStreamAt?: number;
+  retryLabel?: string;
   // Context at the end of the last turn; undefined until looked up.
   lastContext?: ContextUsage | null;
   contextRevision?: number;
@@ -248,7 +253,14 @@ export interface TurnInput {
 
 export interface WorkspaceCallbacks {
   onNewMessage: (wsId: string, msg: Message) => void;
-  onStreamEvent: (wsId: string, msg: Message, event: StreamEvent) => void;
+  onStreamEvent: (
+    wsId: string,
+    msg: Message,
+    event: StreamEvent,
+    streamAt?: number,
+    retryLabel?: string | null,
+  ) => void;
+  onAttention?: (wsId: string, unread: number, lastResult: WorkspaceInfo["lastResult"]) => void;
   onMessageDone: (
     wsId: string,
     msgId: string,
@@ -260,7 +272,7 @@ export interface WorkspaceCallbacks {
       steering?: boolean;
     },
   ) => void;
-  onAgentBusy?: (wsId: string, agentId: string) => void;
+  onAgentBusy?: (wsId: string, agentId: string, streamAt: number) => void;
   onAgentIdle?: (wsId: string, agentId: string) => void;
   onSaveNow?: () => void;
   onReportDeliveryState?: (
@@ -414,8 +426,10 @@ export class Workspace {
   lastActivityAt: number;
   archivedAt: number | null = null;
   projectLink?: ProjectLink;
-  // Messages since a client last showed it (WorkspaceInfo.unread).
   unseen = 0;
+  lastResult: WorkspaceInfo["lastResult"];
+  // Last projected wait state, persisted so reconnecting does not re-mark it unread.
+  projectedAwaitsUser = false;
   // False once the history has been unloaded (archived workspace). Every
   // path that touches `messages` must call ensureLoaded via the server first.
   messagesLoaded = true;
@@ -662,7 +676,36 @@ export class Workspace {
   private streamed(msg: Message, event: StreamEvent): void {
     this.changed.add(msg.id);
     const timed = updateLiveTiming(msg, event);
-    this.cb?.onStreamEvent(this.id, msg, timed);
+    const agent = msg.agentId ? this.agents.get(msg.agentId) : undefined;
+    // Do not reset the turn's clock for token estimates or detached work.
+    const streamAt =
+      agent?.currentMsg === msg && msg.status === "streaming" && event.kind !== "thinking_tokens"
+        ? (agent.lastStreamAt = Date.now())
+        : undefined;
+    let retryLabel: string | null | undefined;
+    if (agent && agent.currentMsg === msg) {
+      if (event.kind === "retry") retryLabel = event.content || null;
+      else if (agent.retryLabel && RETRY_PROGRESS_KINDS.has(event.kind)) retryLabel = null;
+      if (retryLabel !== undefined) agent.retryLabel = retryLabel ?? undefined;
+    }
+    this.cb?.onStreamEvent(this.id, msg, timed, streamAt, retryLabel);
+  }
+
+  private beganTurn(entry: AgentEntry): void {
+    entry.lastStreamAt ??= Date.now();
+    this.cb?.onAgentBusy?.(this.id, entry.info.id, entry.lastStreamAt);
+  }
+
+  private endedTurn(entry: AgentEntry): void {
+    entry.lastStreamAt = undefined;
+    entry.retryLabel = undefined;
+    this.cb?.onAgentIdle?.(this.id, entry.info.id);
+  }
+
+  private recordResult(result: NonNullable<WorkspaceInfo["lastResult"]>): void {
+    this.lastResult = result;
+    this.unseen++;
+    this.cb?.onAttention?.(this.id, this.unseen, result);
   }
 
   private finished(
@@ -684,7 +727,6 @@ export class Workspace {
   private pushMessage(msg: Message): void {
     this.messages.push(msg);
     if (msg.timestamp > this.lastActivityAt) this.lastActivityAt = msg.timestamp;
-    this.unseen++;
     this.cb?.onNewMessage(this.id, msg);
   }
 
@@ -757,7 +799,7 @@ export class Workspace {
     for (const m of this.messages) if (m.agentId === entry.info.id && m !== live) this.settle(m);
     if (entry.currentMsg && !live) {
       entry.currentMsg = null;
-      this.cb?.onAgentIdle?.(this.id, entry.info.id);
+      this.endedTurn(entry);
     }
   }
 
@@ -991,7 +1033,7 @@ export class Workspace {
         event.kind !== "error" &&
         event.kind !== "compact"
       ) {
-        this.cb?.onAgentBusy?.(this.id, agentId);
+        this.beganTurn(entry);
       }
 
       if (event.kind === "text_delta") {
@@ -1022,6 +1064,9 @@ export class Workspace {
           this.ensureAgentMsg(entry);
         if (event.interrupted && entry.input) entry.input.stopped = "user";
         if (entry.currentMsg) {
+          if (!event.interrupted && (concludingText(entry.currentMsg) || entry.input?.finished)) {
+            this.recordResult("done");
+          }
           // Defense in depth: a turn that ends with neither text nor any
           // visible event is a failure (CLI crash, network drop, spawn
           // problem) — render a diagnostic instead of a silent empty bubble.
@@ -1069,6 +1114,7 @@ export class Workspace {
         // The model saw the prompt a waiting retry would send: it carries on.
         if (entry.retryPending && answered(msg)) entry.lastEnvelope = undefined;
         msg.status = "error";
+        this.recordResult("failed");
         clearLiveTiming(msg);
         this.recordTerminalContext(entry, msg, event.context, contextPending);
         event.contentOffset = msg.content.length;
@@ -1149,7 +1195,7 @@ export class Workspace {
     // input fenced until its receipt arrives, then notify idle after settlement.
     if (entry.openingPrompt?.input) return;
     entry.openingPrompt = undefined;
-    this.cb?.onAgentIdle?.(this.id, entry.info.id);
+    this.endedTurn(entry);
     setTimeout(() => this.afterTurn(entry.info.id), 0);
   }
 
@@ -1279,7 +1325,11 @@ export class Workspace {
     session.on("wakeDue", () => this.dequeueNext(agentId));
     session.on("runState", (state: RunState) => {
       const entry = this.agents.get(agentId);
-      if (entry) entry.runState = state;
+      if (entry) {
+        entry.runState = state;
+        if (state === "working") entry.lastStreamAt ??= Date.now();
+        else entry.lastStreamAt = undefined;
+      }
       if (entry?.input) {
         if (state === "working") delete entry.input.stopped;
         if (state === "waiting" || state === "sleeping") entry.input.waiting = true;
@@ -1941,7 +1991,9 @@ export class Workspace {
     }
     if (agent.currentMsg) this.settle(agent.currentMsg);
     agent.currentMsg = null;
-    this.cb?.onAgentBusy?.(this.id, agent.info.id);
+    agent.lastStreamAt = undefined;
+    agent.retryLabel = undefined;
+    this.beganTurn(agent);
 
     try {
       if (input?.status === "queued") {
@@ -2040,7 +2092,6 @@ export class Workspace {
       throw error;
     }
     if (msg.timestamp > this.lastActivityAt) this.lastActivityAt = msg.timestamp;
-    this.unseen++;
     this.cb?.onNewMessage(this.id, msg);
   }
 
@@ -2106,7 +2157,7 @@ export class Workspace {
     if (entry.session.isRunning) return;
     if (entry.currentMsg) this.settle(entry.currentMsg);
     entry.currentMsg = null;
-    this.cb?.onAgentIdle?.(this.id, entry.info.id);
+    this.endedTurn(entry);
   }
 
   private cancelOpeningPrompt(entry: AgentEntry, reason: string): void {
@@ -2609,7 +2660,7 @@ export class Workspace {
     }
     entry.currentMsg = null;
     this.settleStale(entry);
-    this.cb?.onAgentIdle?.(this.id, entry.info.id);
+    this.endedTurn(entry);
     setTimeout(() => this.dequeueNext(entry.info.id), 0);
   }
 
@@ -2653,6 +2704,8 @@ export class Workspace {
       busy: a.session.isRunning || !!a.openingPrompt,
       state: this.agentState(a),
       activity: a.activity ?? null,
+      ...(a.lastStreamAt != null && { lastStreamAt: a.lastStreamAt }),
+      ...(a.retryLabel && { retryLabel: a.retryLabel }),
       effort: state.config.effort ?? null,
       effortLevels: this.effortLevels(a, a.info.model) ?? [],
       fast: Boolean(state.config.fast),
@@ -2697,7 +2750,13 @@ export class Workspace {
       archivedAt: this.archivedAt,
       ...(this.projectLink && { projectLink: this.projectLink }),
       unread: this.unseen,
+      lastResult: this.lastResult,
+      queued: this.hasQueuedInput,
     };
+  }
+
+  get hasQueuedInput(): boolean {
+    return this.messages.some((m) => m.kind === "user" && m.status === "queued");
   }
 
   getMessages(): Message[] {
@@ -2731,7 +2790,11 @@ export class Workspace {
       lastActivityAt: this.lastActivityAt,
       archivedAt: this.archivedAt,
       ...(this.projectLink && { projectLink: this.projectLink }),
-      ...(this.unseen && { unread: this.unseen }),
+      attention: {
+        unread: this.unseen,
+        lastResult: this.lastResult,
+        awaitsUser: this.projectedAwaitsUser,
+      },
     };
   }
 
@@ -2756,7 +2819,10 @@ export class Workspace {
     ws.createdAt = state.createdAt;
     ws.archivedAt = state.archivedAt ?? null;
     ws.projectLink = state.projectLink;
-    ws.unseen = state.unread ?? 0;
+    // Old unread counts included input, placeholders, and system messages.
+    ws.unseen = state.attention?.unread ?? 0;
+    ws.lastResult = state.attention?.lastResult;
+    ws.projectedAwaitsUser = state.attention?.awaitsUser ?? false;
     // No messages: the history could not be read, and a save must not
     // write an empty one over it.
     ws.messagesLoaded = state.messages !== undefined;
@@ -2894,6 +2960,17 @@ function restoreMessage(msg: Message & { queuedPrompt?: string }): boolean {
 function answered(msg: Message): boolean {
   const output = ["thinking", "tool_use", "subagent_start"];
   return !!msg.content.trim() || !!msg.events?.some((e) => output.includes(e.kind));
+}
+
+// A plan or preamble before the last tool call is not the turn's conclusion.
+function concludingText(msg: Message): boolean {
+  let after = 0;
+  for (const e of msg.events ?? []) {
+    if (e.kind === "tool_use" || e.kind === "tool_result" || e.kind === "subagent_start") {
+      after = Math.max(after, e.contentOffset ?? 0);
+    }
+  }
+  return !!msg.content.slice(after).trim();
 }
 
 function lastThinking(events: StreamEvent[]): StreamEvent | undefined {

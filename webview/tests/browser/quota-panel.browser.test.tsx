@@ -50,7 +50,7 @@ const sampleQuota: QuotaState = {
       name: "Gemini 3 Pro Preview",
       availability: "available",
       observedAt: NOW - 180_000,
-      windows: [{ label: "5h", usedPct: 35, resetsAt: NOW + 3_600_000 }],
+      windows: [{ label: "5h", usedPct: 100, resetsAt: NOW + 3_600_000 }],
     },
     {
       provider: "antigravity-acp",
@@ -78,7 +78,6 @@ function renderSidebar(quota: QuotaState, onRefreshQuota = vi.fn(), mobileOpen =
     activeWsId: "w1",
     connected: true,
     groupOverrides: {},
-    finishedStatus: {},
     searchQuery: "",
     searchHits: null,
     systemStatus: {
@@ -135,7 +134,8 @@ it("renders compact quota rows on desktop with threshold colors, error badges, a
 
   // Compact default height fits comfortably without internal scrollbars.
   const collapsedHeight = panel.getBoundingClientRect().height;
-  expect(collapsedHeight).toBeLessThan(200);
+  expect(collapsedHeight).toBeLessThan(145);
+  expect(panel.querySelector(".quota-refresh")).toBeNull();
   expect(panel.scrollWidth).toBeLessThanOrEqual(panel.clientWidth);
 
   const toggles = [...panel.querySelectorAll<HTMLButtonElement>(".quota-row-toggle")];
@@ -154,7 +154,7 @@ it("renders compact quota rows on desktop with threshold colors, error badges, a
     );
   }
 
-  // Distinct threshold coloring for normal (<50%), warn (>=50%), and danger (>=80%).
+  // Moderate use stays quiet; only low (>=80%) and exhausted (100%) stand out.
   const normalColor = getComputedStyle(panel.querySelector(".quota-pct-normal")!).color;
   const warnColor = getComputedStyle(panel.querySelector(".quota-pct-warn")!).color;
   const dangerColor = getComputedStyle(panel.querySelector(".quota-pct-danger")!).color;
@@ -208,13 +208,14 @@ it("renders compact quota rows on desktop with threshold colors, error badges, a
   ]);
 });
 
-it("animates the dedicated quota refresh icon while refreshing", () => {
-  const { container } = render(
-    <QuotaPanel quota={{ rows: [], refreshing: true }} now={NOW} connected />,
+it("keeps pending refresh calm rather than animating", () => {
+  const { container, getByRole } = render(
+    <QuotaPanel quota={{ rows: [], refreshing: true }} refresh={vi.fn()} now={NOW} connected />,
   );
-  const icon = container.querySelector(".quota-refresh svg.icon")!;
-  expect(icon).not.toBeNull();
-  expect(getComputedStyle(icon).animationName).toBe("quota-spin");
+  expect((getByRole("button", { name: "Refreshing…" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(getComputedStyle(container.querySelector(".quota-refresh svg.icon")!).animationName).toBe(
+    "none",
+  );
 });
 
 it("gives explicit setup instructions and distinguishes warming from a transient quota error", () => {
@@ -250,7 +251,7 @@ it("gives explicit setup instructions and distinguishes warming from a transient
   expect(details.textContent).toContain("Not yet observed");
 });
 
-it("marks only healthy rows stale at QUOTA_STALE_AFTER and keeps failed cached rows fresh-age aware", () => {
+it("shows only observation detail, not a stale badge, when cached quota ages", () => {
   const observedAt = NOW - 14 * 60_000;
   const quota: QuotaState = {
     refreshing: false,
@@ -284,10 +285,12 @@ it("marks only healthy rows stale at QUOTA_STALE_AFTER and keeps failed cached r
   view.rerender(
     <QuotaPanel quota={quota} now={NOW + (QUOTA_STALE_AFTER - 14 * 60_000)} connected={false} />,
   );
-  expect(healthy.textContent).toContain("stale");
+  expect(healthy.textContent).not.toContain("stale");
+  fireEvent.click(healthy);
+  expect(view.getByText(/stale · Updated 15m ago/)).toBeTruthy();
   expect(failed.textContent).not.toContain("stale");
   expect(failed.textContent).toContain("70%");
-  expect(view.getByText(/Updated 15m ago/)).toBeTruthy();
+  expect(view.getByText(/^Updated 15m ago$/)).toBeTruthy();
 });
 
 it("maintains >= 32px touch targets and zero horizontal overflow inside the 280px mobile drawer", async () => {
@@ -299,9 +302,7 @@ it("maintains >= 32px touch targets and zero horizontal overflow inside the 280p
   const sidebarRect = sidebar.getBoundingClientRect();
   expect(Math.round(sidebarRect.width)).toBe(280);
 
-  const refreshBtn = panel.querySelector<HTMLButtonElement>(".quota-refresh")!;
-  expect(refreshBtn.getBoundingClientRect().height).toBeGreaterThanOrEqual(32);
-  expect(refreshBtn.getBoundingClientRect().width).toBeGreaterThanOrEqual(32);
+  expect(panel.querySelector(".quota-refresh")).toBeNull();
 
   const toggles = [...panel.querySelectorAll<HTMLButtonElement>(".quota-row-toggle")];
   expect(toggles).toHaveLength(5);
@@ -316,6 +317,9 @@ it("maintains >= 32px touch targets and zero horizontal overflow inside the 280p
   // Expand an available row and an error row in the 280px drawer; still no horizontal overflow.
   fireEvent.click(toggles[2]);
   fireEvent.click(toggles[3]);
+  const refreshBtn = panel.querySelector<HTMLButtonElement>(".quota-refresh")!;
+  expect(refreshBtn.getBoundingClientRect().height).toBeGreaterThanOrEqual(32);
+  expect(refreshBtn.getBoundingClientRect().width).toBeGreaterThanOrEqual(32);
   expect(toggles[2].getAttribute("aria-expanded")).toBe("true");
   expect(toggles[3].getAttribute("aria-expanded")).toBe("true");
   const details = [...panel.querySelectorAll<HTMLElement>(".quota-details")];

@@ -2363,7 +2363,7 @@ describe("worker tasks held back for spacing", () => {
       await call(lead, "stop_session", { session_id: w1.id });
       expect(w1.messages.some((m) => m.status === "queued")).toBe(false);
       expect(frames).toContainEqual(
-        expect.objectContaining({ type: "message_removed", workspaceId: w1.id }),
+        expect.objectContaining({ type: "message_removed", workspaceId: w1.id, queued: false }),
       );
       await vi.advanceTimersByTimeAsync(START_SPACING_MS);
       expect(session(w1).sent).toEqual([]);
@@ -3273,10 +3273,15 @@ describe("a worker that goes idle without reporting", () => {
         processGeneration: 1,
         requestId: "confirm-1",
       };
+      const beforeDialog = w.unseen;
       session(w).emit("ui_dialog_request", dialog);
       manager.showAwaiting(w);
       expect(awaitsUser(w)).toBe(true);
       expect(manager.awaitsUser(w)).toBe(true);
+      expect(w.unseen).toBe(beforeDialog + 1);
+      manager.showAwaiting(w);
+      expect(w.unseen).toBe(beforeDialog + 1);
+      expect(w.getState().attention).toMatchObject({ unread: beforeDialog + 1, awaitsUser: true });
       session(w).emit("ui_dialog_resolved", dialog);
       manager.showAwaiting(w);
       expect(awaitsUser(w)).toBe(false);

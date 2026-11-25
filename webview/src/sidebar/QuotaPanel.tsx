@@ -7,7 +7,7 @@ import {
   formatShortDateTime,
   isQuotaStale,
   quotaRowLabels,
-  quotaTone,
+  quotaConstraintTone,
   quotaWaitingHint,
   selectSummaryWindows,
   shortWindowLabel,
@@ -28,9 +28,10 @@ export function QuotaPanel({
   const [clock, setClock] = useState(now);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
+    if (expanded.size === 0) return;
     const timer = setInterval(() => setClock(Date.now()), 30_000);
     return () => clearInterval(timer);
-  }, []);
+  }, [expanded.size]);
   const displayTime = Math.max(now, clock);
   const labels = quotaRowLabels(quota.rows);
   const toggleRow = (key: string, provider: string) => {
@@ -40,6 +41,7 @@ export function QuotaPanel({
       if (!next.delete(key)) next.add(key);
       return next;
     });
+    if (opening) setClock(Date.now());
     if (opening && connected) refresh?.(false, [provider]);
   };
 
@@ -47,16 +49,19 @@ export function QuotaPanel({
     <section className="quota-panel system-status-panel" aria-label="Quota used">
       <header className="quota-header">
         <span className="quota-heading">Quota used</span>
-        <button
-          type="button"
-          className={`quota-refresh${quota.refreshing ? " refreshing" : ""}`}
-          disabled={!connected || quota.refreshing}
-          onClick={() => refresh?.(true)}
-          aria-label={quota.refreshing ? "Refreshing…" : "Refresh"}
-          title={quota.refreshing ? "Refreshing…" : "Refresh quota"}
-        >
-          <Icon name="refresh" />
-        </button>
+        {quota.rows.length === 0 && <span className="quota-detail-meta">No quota data</span>}
+        {refresh && (expanded.size > 0 || quota.rows.length === 0) && (
+          <button
+            type="button"
+            className="quota-refresh"
+            disabled={!connected || quota.refreshing}
+            onClick={() => refresh(true)}
+            aria-label={quota.refreshing ? "Refreshing…" : "Refresh"}
+            title={quota.refreshing ? "Refreshing…" : "Refresh quota"}
+          >
+            <Icon name="refresh" />
+          </button>
+        )}
       </header>
       {quota.rows.length > 0 && (
         <div className="quota-list">
@@ -78,7 +83,7 @@ export function QuotaPanel({
             const rowLabel = labels[index];
             return (
               <div
-                className={`quota-group${open ? " open" : ""}${isError ? " quota-group-error" : ""}${isStale ? " quota-group-stale" : ""}`}
+                className={`quota-group${open ? " open" : ""}${isError ? " quota-group-error" : ""}`}
                 key={key}
               >
                 <button
@@ -107,7 +112,6 @@ export function QuotaPanel({
                         {!row.windows.length && (row.reason ?? row.availability)}
                       </span>
                     )}
-                    {isStale && <span className="quota-badge quota-badge-stale">stale</span>}
                     {summaryWindows.map((w, wi) => {
                       const pct = Math.round(w.usedPct);
                       return (
@@ -118,7 +122,11 @@ export function QuotaPanel({
                             </span>
                           )}
                           <span className="quota-win-label">{shortWindowLabel(w.label)}</span>{" "}
-                          <span className={`quota-pct quota-pct-${quotaTone(pct)}`}>{pct}%</span>
+                          <span
+                            className={`quota-pct quota-pct-${quotaConstraintTone(w.usedPct, !isUnavailable)}`}
+                          >
+                            {pct}%
+                          </span>
                         </span>
                       );
                     })}
@@ -142,7 +150,9 @@ export function QuotaPanel({
                       return (
                         <div className="quota-detail-window" key={w.label}>
                           <span className="quota-detail-label">{detailWindowLabel(w.label)}:</span>{" "}
-                          <span className={`quota-pct quota-pct-${quotaTone(pct)}`}>
+                          <span
+                            className={`quota-pct quota-pct-${quotaConstraintTone(w.usedPct, !isUnavailable)}`}
+                          >
                             {pct}% used
                           </span>
                           {w.resetsAt && (

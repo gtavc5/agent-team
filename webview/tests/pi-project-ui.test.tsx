@@ -180,7 +180,7 @@ it("ages quota without websocket traffic", () => {
     act(() => {
       vi.advanceTimersByTime(QUOTA_STALE_AFTER - 60_001);
     });
-    expect(row.textContent).toContain("stale");
+    expect(row.textContent).not.toContain("stale");
     fireEvent.click(row);
     expect(view.getByText(/stale · Updated 15m ago/)).toBeTruthy();
   } finally {
@@ -292,14 +292,14 @@ it("deduplicates short names, prioritizes top-2 windows, and shows threshold ton
   const codex = view.getByRole("button", { name: /^▸?\s*Codex\b/ });
   expect(codex.querySelector(".quota-name")?.textContent).toBe("Codex");
   expect(codex.querySelectorAll(".quota-pct")[0].className).toContain("quota-pct-normal");
-  expect(codex.querySelectorAll(".quota-pct")[1].className).toContain("quota-pct-warn");
+  expect(codex.querySelectorAll(".quota-pct")[1].className).toContain("quota-pct-normal");
 
   const kimi = view.getByRole("button", { name: /Kimi/ });
   expect(kimi.querySelector(".quota-name")?.textContent).toBe("Kimi");
   // >2 windows: summary shows only top 2 highest usedPct (monthly total 86% and monthly code 62%).
   const kimiSummaryPcts = [...kimi.querySelectorAll(".quota-pct")].map((el) => el.textContent);
   expect(kimiSummaryPcts).toEqual(["86%", "62%"]);
-  expect(kimi.querySelectorAll(".quota-pct")[0].className).toContain("quota-pct-danger");
+  expect(kimi.querySelectorAll(".quota-pct")[0].className).toContain("quota-pct-warn");
   // Expanding Kimi reveals all 3 windows.
   fireEvent.click(kimi);
   expect(view.getByText(/12% used/)).toBeTruthy();

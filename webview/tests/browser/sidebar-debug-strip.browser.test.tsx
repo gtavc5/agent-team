@@ -25,7 +25,6 @@ const props: SidebarProps = {
   activeWsId: null,
   connected: true,
   groupOverrides: {},
-  finishedStatus: {},
   searchQuery: "",
   searchHits: null,
   systemStatus: null,

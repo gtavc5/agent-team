@@ -17,10 +17,14 @@ export function StopControl({
         type="button"
         className="btn-abort"
         aria-label={`Stop ${agent.name}`}
-        title={`Stop ${agent.name}'s turn; background tasks keep going`}
+        title={`Stop ${agent.name}'s current turn`}
+        aria-description="Interrupts this turn. If interruption is unavailable, the agent process may stop."
         onClick={() => onStop([agent.id])}
       >
         <Icon name="stop" />
+        <span className="stop-label" aria-hidden="true">
+          Stop
+        </span>
       </button>
     );
   }
@@ -111,6 +115,8 @@ function StopPopover({
         type="button"
         className="btn-abort"
         aria-label={`Stop running agents (${count})`}
+        title="Choose current turns to stop"
+        aria-description="Choose which turns to interrupt. If interruption is unavailable, the affected agent process may stop."
         aria-expanded={!!mode}
         aria-controls={mode ? id : undefined}
         onClick={() => {
@@ -133,11 +139,20 @@ function StopPopover({
             aria-label="Stop running turns"
           >
             {busyAgents.map((agent) => (
-              <button key={agent.id} type="button" onClick={() => stop([agent])}>
+              <button
+                key={agent.id}
+                type="button"
+                title={`Stop ${agent.name}'s current turn`}
+                onClick={() => stop([agent])}
+              >
                 Stop {agent.name}
               </button>
             ))}
-            <button type="button" onClick={() => stop(busyAgents)}>
+            <button
+              type="button"
+              title="Stop all current turns in this session only"
+              onClick={() => stop(busyAgents)}
+            >
               Stop all ({count})
             </button>
           </div>

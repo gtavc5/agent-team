@@ -184,7 +184,6 @@ export class ProjectManager {
   private issueStores = new Map<string, IssueStore>();
   private settling = new Map<string, ReturnType<typeof setTimeout>>();
   private carrying = new Set<string>();
-  private awaiting = new Set<string>();
   private closed = false;
 
   constructor(
@@ -672,31 +671,24 @@ export class ProjectManager {
     this.settleAfter(w, SETTLE_MS);
   }
 
-  // Whether the clients are to show the worker as waiting for the user,
-  // noted as what they were all last sent: only for what goes to all of
-  // them (see showAllAwaiting for one that connects).
   awaitsUser(w: Workspace): boolean {
-    const awaits = this.waits(w);
-    if (awaits) this.awaiting.add(w.id);
-    else this.awaiting.delete(w.id);
-    return awaits;
+    return this.waits(w);
   }
 
-  // Tells the clients when it changed.
+  // Only an edge into waiting counts, not each snapshot or later idle check.
   showAwaiting(w: Workspace): void {
     const waiting = this.waits(w);
-    if (waiting === this.awaiting.has(w.id)) return;
-    if (waiting) this.awaiting.add(w.id);
-    else this.awaiting.delete(w.id);
+    if (waiting === w.projectedAwaitsUser) return;
+    w.projectedAwaitsUser = waiting;
+    if (waiting) w.unseen++;
+    this.host.persistWorkspace(w);
     this.host.workspaceChanged(w);
   }
 
   // Before a client that connects gets the list: the others are told first
   // what changed unseen (a stop, an archive), so all hold the same.
   showAllAwaiting(): void {
-    for (const w of this.host.workspaces()) {
-      if (w.projectLink?.role === "worker") this.showAwaiting(w);
-    }
+    for (const w of this.host.workspaces()) this.showAwaiting(w);
   }
 
   private waits(w: Workspace): boolean {
@@ -866,7 +858,12 @@ export class ProjectManager {
     );
     for (const m of queued) {
       if (w.cancelQueued(m.id, evenSteered)) {
-        this.host.broadcast({ type: "message_removed", workspaceId: w.id, messageId: m.id });
+        this.host.broadcast({
+          type: "message_removed",
+          workspaceId: w.id,
+          messageId: m.id,
+          queued: w.hasQueuedInput,
+        });
       }
     }
   }

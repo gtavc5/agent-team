@@ -138,7 +138,7 @@ type = "local"
     agents: [],
     createdAt: 1,
     messages: HISTORY,
-    unread: 3,
+    attention: { unread: 3, lastResult: "done", awaitsUser: false },
   };
   saveWorkspace(base, state);
   saveIndex(base, ["ws-h"]);

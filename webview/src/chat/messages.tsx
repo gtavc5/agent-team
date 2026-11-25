@@ -1051,22 +1051,14 @@ function workInFlight(events: StreamEvent[]): boolean {
   );
 }
 
-function progressOf(msg: Message): string {
-  const events = msg.events ?? [];
-  const results = events.filter((e) => e.toolResult != null).length;
-  return `${msg.content.length}:${events.length}:${results}`;
-}
+const WAIT_SHOWN_AFTER_S = 15;
 
-const WAIT_SHOWN_AFTER_S = 5;
-
-function QuietWait({ since }: { since?: number }) {
-  const [localSince] = useState(Date.now);
+function QuietWait({ since }: { since: number }) {
   const now = Date.now();
-  const start = since ?? localSince;
-  const elapsed = elapsedSeconds(now, start);
+  const elapsed = elapsedSeconds(now, since);
   const show = elapsed >= WAIT_SHOWN_AFTER_S;
-  useRenderAt(show ? nextSecondAt(now, start) : start + WAIT_SHOWN_AFTER_S * 1000);
-  return show ? `Waiting for the model · ${elapsed}s` : null;
+  useRenderAt(show ? nextSecondAt(now, since) : since + WAIT_SHOWN_AFTER_S * 1000);
+  return show ? `No new events for ${elapsed}s` : null;
 }
 
 function TurnFooter({
@@ -1112,11 +1104,10 @@ function TurnFooter({
         <span className="turn-activity">{label}</span>
       ) : thinkingSince != null ? (
         <LiveChip secs={elapsedSeconds(now, thinkingSince)} />
-      ) : !workInFlight(detailEvents) ? (
-        <QuietWait
-          key={msg.waitingSince == null ? progressOf(msg) : undefined}
-          since={msg.waitingSince}
-        />
+      ) : msg.waitingSince != null &&
+        !workInFlight(detailEvents) &&
+        !detailEvents.some((e) => e.kind === "retry") ? (
+        <QuietWait since={msg.waitingSince} />
       ) : null}
     </div>
   );

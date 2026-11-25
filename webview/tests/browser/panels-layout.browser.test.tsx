@@ -61,7 +61,6 @@ const sidebar: SidebarProps = {
   activeWsId: "lead",
   connected: true,
   groupOverrides: {},
-  finishedStatus: {},
   searchQuery: "",
   searchHits: null,
   systemStatus: null,
@@ -467,8 +466,8 @@ it("exposes touch actions only on the open session and gives the lists a larger 
     expect(parseFloat(style(el).fontSize)).toBeGreaterThan(renderedDesktop[i]),
   );
   expect(rect(icon).width).toBeGreaterThan(desktopIcon);
-  expect(rect(get(container, ".ws-group-add .icon")).width).toBe(
-    rect(get(container, ".task-delete .icon")).width,
+  expect(rect(get(container, ".ws-group-header.current .ws-group-add .icon")).width).toBe(
+    rect(get(row, ".task-delete .icon")).width,
   );
   expect(style(get(row, ".task-hover")).pointerEvents).toBe("none");
   const current = get(container, ".ws-group-header.current");

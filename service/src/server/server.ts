@@ -939,6 +939,7 @@ export class Server {
             type: "message_removed",
             workspaceId: workspace.id,
             messageId: msg.messageId,
+            queued: workspace.hasQueuedInput,
           });
           this.flushPendingLeadTools(workspace);
         }
@@ -1247,7 +1248,12 @@ export class Server {
     if (!dropped) return;
     this.persistWorkspaceNow(workspaceId);
     for (const messageId of dropped) {
-      this.broadcastUI({ type: "message_removed", workspaceId, messageId });
+      this.broadcastUI({
+        type: "message_removed",
+        workspaceId,
+        messageId,
+        queued: workspace.hasQueuedInput,
+      });
     }
     this.broadcastUI({ type: "agent_removed", workspaceId, agentId });
     this.projects.leadAgentsChanged(workspace);
@@ -1909,9 +1915,17 @@ export class Server {
   private makeCallbacks(id: string): WorkspaceCallbacks {
     return {
       onNewMessage: (wsId, msg) => {
-        this.broadcastUI({ type: "new_message", workspaceId: wsId, message: toWireMessage(msg) });
+        this.broadcastUI({
+          type: "new_message",
+          workspaceId: wsId,
+          message: toWireMessage(msg),
+          ...(msg.status === "queued" && { queued: true }),
+        });
       },
-      onStreamEvent: (wsId, agentMsg, event) => {
+      onAttention: (wsId, unread, lastResult) => {
+        this.broadcastUI({ type: "workspace_attention", workspaceId: wsId, unread, lastResult });
+      },
+      onStreamEvent: (wsId, agentMsg, event, streamAt, retryLabel) => {
         if (isLoggedEvent(event)) {
           appendLog(this.baseDir, wsId, { timestamp: Date.now(), messageId: agentMsg.id, event });
         }
@@ -1920,6 +1934,9 @@ export class Server {
           workspaceId: wsId,
           messageId: agentMsg.id,
           event,
+          ...(streamAt != null && { streamAt }),
+          ...(retryLabel !== undefined && { retryLabel }),
+          ...((streamAt != null || retryLabel !== undefined) && { agentId: agentMsg.agentId }),
         });
         // A finished message changed later (a background task's end): its
         // turn will not save it.
@@ -1934,11 +1951,15 @@ export class Server {
           content,
           events: events ? stripEventsInnerEvents(events) : undefined,
           ...patch,
+          ...(patch &&
+            "queuedFor" in patch && { queued: this.workspaces.get(wsId)?.hasQueuedInput }),
         });
         this.persistWorkspace(wsId);
       },
-      onAgentBusy: (wsId, agentId) => {
-        this.broadcastUI({ type: "agent_busy", workspaceId: wsId, agentId });
+      onAgentBusy: (wsId, agentId, streamAt) => {
+        this.broadcastUI({ type: "agent_busy", workspaceId: wsId, agentId, streamAt });
+        const ws = this.workspaces.get(wsId);
+        if (ws) this.projects.showAwaiting(ws);
       },
       onAgentIdle: (wsId, agentId) => {
         this.broadcastUI({ type: "agent_idle", workspaceId: wsId, agentId });
@@ -1956,6 +1977,7 @@ export class Server {
       onAgentState: (wsId, agentId, state) => {
         this.broadcastUI({ type: "agent_state", workspaceId: wsId, agentId, state });
         const ws = this.workspaces.get(wsId);
+        if (ws) this.projects.showAwaiting(ws);
         if (ws && state === "idle") {
           this.projects.workerIdle(ws);
           this.flushPendingLeadTools(ws);
@@ -1993,7 +2015,12 @@ export class Server {
       },
       onRateLimit: (wsId, agentId, info) => this.handleRateLimit(wsId, agentId, info),
       onMessageRemoved: (wsId, messageId) =>
-        this.broadcastUI({ type: "message_removed", workspaceId: wsId, messageId }),
+        this.broadcastUI({
+          type: "message_removed",
+          workspaceId: wsId,
+          messageId,
+          queued: this.workspaces.get(wsId)?.hasQueuedInput,
+        }),
       onAgentUpdated: (wsId, agent, transient) => {
         this.broadcastUI({ type: "agent_updated", workspaceId: wsId, agent });
         if (!transient) this.persistWorkspace(wsId);

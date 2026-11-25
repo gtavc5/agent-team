@@ -372,10 +372,18 @@ export const BoardPage = memo(function BoardPage({
             <button aria-pressed={mode === "objectives"} onClick={() => choose("objectives")}>
               Objectives
             </button>
-            <button aria-pressed={showIssues} onClick={() => choose("issues")}>
+            <button
+              className="bp-mode-secondary"
+              aria-pressed={showIssues}
+              onClick={() => choose("issues")}
+            >
               Issues{openIssues > 0 && <span className="bp-count">{openIssues}</span>}
             </button>
-            <button aria-pressed={showNotes} onClick={() => choose("notes")}>
+            <button
+              className="bp-mode-secondary"
+              aria-pressed={showNotes}
+              onClick={() => choose("notes")}
+            >
               Notes
             </button>
           </div>

@@ -39,20 +39,31 @@ const subagentStart = (taskId: string): Partial<StreamEvent> => ({
   subagent: { taskId, description: "desc", status: "running", events: [] },
 });
 
-describe("unread messages", () => {
-  it("counts every new message until a client shows the session, across a restart", () => {
-    const { ws, emit, host } = makeWorkspace();
-    ws.unseen = 0;
+describe("unread results", () => {
+  it("counts only a conclusion or a failure, without counting output mid-turn or a tool-only result", () => {
+    const updates = vi.fn();
+    const { ws, emit, host } = makeWorkspace(undefined, { onAttention: updates });
     ws.postSystemMessage("note");
-    emit({ kind: "text_delta", content: "reply" });
-    emit({ kind: "text_delta", content: " grows" });
-    expect(ws.getInfo(false).unread).toBe(2);
+    emit({ kind: "text_delta", content: "I will read the file" });
+    emit({ kind: "tool_use", content: "Read /a", toolUseId: "t1" });
+    emit({ kind: "tool_result", content: "file output", toolUseId: "t1" });
+    expect(ws.getInfo(false).unread).toBe(0);
+    emit({ kind: "result", content: "" });
+    expect(updates).not.toHaveBeenCalled();
+
+    emit({ kind: "text_delta", content: "Interrupted partial answer" });
+    emit({ kind: "result", content: "", interrupted: true });
+    expect(updates).not.toHaveBeenCalled();
+    emit({ kind: "text_delta", content: "Final answer" });
+    expect(updates).not.toHaveBeenCalled();
+    emit({ kind: "result", content: "" });
+    expect(updates).toHaveBeenLastCalledWith(ws.id, 1, "done");
+    emit({ kind: "error", content: "failed" });
+    expect(updates).toHaveBeenLastCalledWith(ws.id, 2, "failed");
     const registry = new HostRegistry();
     registry.register(host);
     const back = Workspace.fromState(ws.getState(), registry);
-    expect(back.getInfo(false).unread).toBe(2);
-    ws.unseen = 0;
-    expect(ws.getState()).not.toHaveProperty("unread");
+    expect(back.getInfo(false)).toMatchObject({ unread: 2, lastResult: "failed" });
   });
 });
 

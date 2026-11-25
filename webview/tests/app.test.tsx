@@ -776,15 +776,20 @@ describe("read state shared by every device", () => {
   const newMessage = (workspaceId: string, id: string): unknown => ({
     type: "new_message",
     workspaceId,
-    message: { ...settled(9), id },
+    message: { ...settled(9), id, status: "streaming" },
+  });
+  const result = (workspaceId: string, unread = 1, lastResult = "done") => ({
+    type: "workspace_attention",
+    workspaceId,
+    unread,
+    lastResult,
   });
 
   it("marks the session on screen read, but not from a page in the background", () => {
     const sock = boot([settled(1)], { others: ["w2"] });
-    expect(marks(sock)).toContain("w1");
-    sock.sent = [];
+    expect(marks(sock)).toEqual([]);
     setVisibility("hidden");
-    sock.receive(newMessage("w1", "n1"));
+    sock.receive(result("w1"));
     expect(marks(sock)).toEqual([]);
     setVisibility("visible");
     expect(marks(sock)).toEqual(["w1"]);
@@ -793,17 +798,19 @@ describe("read state shared by every device", () => {
     act(() => {
       window.dispatchEvent(new Event("blur"));
     });
-    sock.receive(newMessage("w1", "n2"));
+    sock.receive(result("w1", 2));
     expect(marks(sock)).toEqual([]);
   });
 
-  it("counts a session's new messages until any device shows it", () => {
+  it("shows only authoritative unread results until any device reads them", () => {
     const sock = boot([settled(1)], { others: ["w2"] });
     sock.receive(newMessage("w2", "n1"));
     sock.receive(newMessage("w2", "n2"));
-    expect(row("w2").querySelector(".unread-badge")!.textContent).toBe("2");
+    expect(row("w2").querySelector(".session-attention")).toBeNull();
+    sock.receive(result("w2", 2));
+    expect(row("w2").querySelector(".session-attention")!.textContent).toBe("Unread result");
     sock.receive({ type: "workspace_seen", workspaceId: "w2" });
-    expect(row("w2").querySelector(".unread-badge")).toBeNull();
+    expect(row("w2").querySelector(".session-attention")).toBeNull();
   });
 
   const reconnect = (sock: FakeSocket) => {
@@ -817,7 +824,7 @@ describe("read state shared by every device", () => {
   it("marks again after a reconnect when a mark went into a dead socket", () => {
     const sock = boot([settled(1)]);
     setVisibility("hidden");
-    sock.receive(newMessage("w1", "n1"));
+    sock.receive(result("w1"));
     sock.close();
     setVisibility("visible");
     const next = reconnect(sock);
@@ -843,14 +850,12 @@ describe("read state shared by every device", () => {
     expect(marks(next)).toContain("w1");
   });
 
-  it("keeps a finished mark across a reconnect", () => {
+  it("uses the reconnect snapshot instead of a remembered completion", () => {
     const sock = boot([settled(1)], { others: ["w2"] });
-    sock.receive({ type: "workspace_seen", workspaceId: "w2" });
-    sock.receive(newMessage("w2", "n1"));
-    sock.receive({ type: "agent_busy", workspaceId: "w2", agentId: "a1" });
-    sock.receive({ type: "agent_idle", workspaceId: "w2", agentId: "a1" });
+    sock.receive(result("w2"));
+    expect(row("w2").querySelector(".session-attention")!.textContent).toBe("Unread result");
     openSocket(reconnect(sock), [AGENT], ["w2"]);
-    expect(row("w2").querySelector(".task-status")!.className).toContain("done");
+    expect(row("w2").querySelector(".session-attention")).toBeNull();
   });
 
   it("reads nothing from a page left untouched for minutes", () => {
@@ -863,7 +868,7 @@ describe("read state shared by every device", () => {
     const sock = FakeSocket.instances.at(-1)!;
     if (sock.readyState !== FakeSocket.OPEN) openSocket(sock, [AGENT]);
     sock.sent = [];
-    sock.receive(newMessage("w1", "n1"));
+    sock.receive(result("w1"));
     expect(marks(sock)).toEqual([]);
     act(() => {
       window.dispatchEvent(new Event("pointerdown"));
@@ -871,23 +876,20 @@ describe("read state shared by every device", () => {
     expect(marks(sock)).toEqual(["w1"]);
   });
 
-  it("drops a session's finished mark once another device has shown it", () => {
-    const sock = boot([settled(1)], { others: ["w2", "w3"] });
-    sock.receive(newMessage("w2", "n1"));
-    for (const w of ["w2", "w3"]) {
-      sock.receive({ type: "agent_busy", workspaceId: w, agentId: "a1" });
-      sock.receive({ type: "agent_idle", workspaceId: w, agentId: "a1" });
-    }
-    expect(row("w2").querySelector(".task-status")!.className).toContain("done");
-    // Nothing of w3 unread: a device was showing it as it ended.
-    expect(row("w3").querySelector(".task-status")!.className).not.toContain("done");
+  it("keeps a failure actionable after being read; later success supersedes it", () => {
+    const sock = boot([settled(1)], { others: ["w2"] });
+    sock.receive(result("w2", 1, "failed"));
+    expect(row("w2").querySelector(".session-attention")!.textContent).toBe("Failed");
     sock.receive({ type: "workspace_seen", workspaceId: "w2" });
-    expect(row("w2").querySelector(".task-status")!.className).not.toContain("done");
+    expect(row("w2").querySelector(".session-attention")!.textContent).toBe("Failed");
+    sock.receive(result("w2"));
+    expect(row("w2").querySelector(".session-attention")!.textContent).toBe("Unread result");
   });
 
   it("reads nothing after reloading itself for a new build until someone touches the page", () => {
     sessionStorage.setItem(AUTO_RELOAD, "1");
     const sock = boot([settled(1)]);
+    sock.receive(result("w1"));
     expect(marks(sock)).toEqual([]);
     act(() => {
       window.dispatchEvent(new Event("keydown"));
