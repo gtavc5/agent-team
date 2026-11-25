@@ -18,7 +18,7 @@ export function runUsageJob(job: UsageJob): Data | number {
   const { view, filters, cursor } = job.request;
   return view === "overview"
     ? overview(job.baseDir, filters)
-    : journey(job.baseDir, filters, cursor);
+    : journey(job.baseDir, filters, cursor, job.request.page);
 }
 
 // Keep SQLite aggregation and native imports off the session event loop in the built server.
@@ -55,13 +55,14 @@ export function refreshUsage(baseDir: string): Promise<number> {
   return scan;
 }
 
-// Serialize reads (including receipt reconciliation) and bound queued work during refresh bursts.
+// Bound queued work; simultaneous explicit refreshes share the collector scan.
 let tail = Promise.resolve();
 let outstanding = 0;
 export async function usageView(baseDir: string, request: UsageRequest) {
   if (outstanding >= 8) throw new Error("Usage reader busy");
   outstanding++;
-  const read = tail.then(() => run({ baseDir, request }));
+  const scan = request.refresh ? refreshUsage(baseDir) : undefined;
+  const read = Promise.all([tail, scan]).then(() => run({ baseDir, request }));
   tail = read.then(
     () => {},
     () => {},

@@ -1,3 +1,4 @@
+import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { z } from "zod";
 import type {
   JourneyEvent,
@@ -5,9 +6,11 @@ import type {
   UsageJourney,
   UsageOverview,
 } from "../../../shared/usage";
+import { readWorkspaceMetadata } from "../workspace/state";
 import { observationFromRow, withUsageSnapshot } from "./ledger";
 
-const DAY = 86_400_000;
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 const PAGE_SIZE = 30;
 
 function validateWindow({ since, until }: UsageFilters) {
@@ -25,33 +28,43 @@ function filter(q: UsageFilters, event = false, after?: z.infer<typeof cursorKey
   // A NULL timestamp has no position in a dated view and is excluded by the range.
   const where = ["u.timestamp < ?"];
   const args: (number | string)[] = [q.until];
-  if (after && after[0] >= q.since) {
-    // Replacing rather than supplementing `since` lets SQLite seek the full index key.
-    const op = event && after[4] === 0 ? ">=" : ">";
+  where.push("u.timestamp >= ?");
+  args.push(q.since);
+  if (after) {
+    // Within one table, isEvent is constant; include equality only on the other side of the tie.
+    const op = !event && after[4] === 1 ? "<=" : "<";
     where.push(`(${journeyKey}) ${op} (?,?,?,?)`);
     args.push(after[0], after[1], after[2], after[3]);
-  } else {
-    where.push("u.timestamp >= ?");
-    args.push(q.since);
   }
   const match = (expression: string, value: string | undefined) => {
     if (value === undefined) return;
     where.push(`${expression} = ?`);
     args.push(value);
   };
+  const contains = (value: string | undefined, ...expressions: string[]) => {
+    if (value === undefined) return;
+    where.push(`(${expressions.join(" OR ")})`);
+    args.push(...expressions.map(() => value.toLowerCase()));
+  };
   if (!event) {
     match("u.unit", q.unit);
-    match("json_extract(u.fact,'$.model')", q.model);
-    match("json_extract(u.fact,'$.channel')", q.channel);
+    contains(q.model, "usage_contains(json_extract(u.fact,'$.model'), ?)");
+    contains(q.channel, "usage_contains(json_extract(u.fact,'$.channel'), ?)");
   }
   match("u.source", q.source);
-  match("u.session", q.session);
+  contains(
+    q.session,
+    "usage_contains(u.session, ?)",
+    "usage_contains(json_extract(u.fact,'$.piSessionId'), ?)",
+  );
   match("json_extract(u.fact,'$.turnId')", q.turn);
-  if (q.workspace !== undefined) {
-    where.push(`EXISTS (SELECT 1 FROM usage_workspace w
-      WHERE w.source=u.source AND w.session=u.session AND w.workspace=?)`);
-    args.push(q.workspace);
-  }
+  contains(
+    q.workspace,
+    `usage_workspace_matches(${factWorkspace}, ?)`,
+    `EXISTS (
+    SELECT 1 FROM usage_workspace w WHERE ${workspaceBinding} AND usage_workspace_matches(w.workspace, ?)
+  )`,
+  );
   return { where, args };
 }
 
@@ -59,6 +72,31 @@ function filter(q: UsageFilters, event = false, after?: z.infer<typeof cursorKey
 const observations = "observations AS u";
 const events = "journey AS u";
 const receipts = "LEFT JOIN receipts AS r USING(source,session,id)";
+const factWorkspace = "json_extract(u.fact,'$.workspaceId')";
+const workspaceBinding = "w.source=u.source AND w.session=u.session";
+
+function registerFilters(db: DatabaseSync, workspaceNames: ReadonlyMap<string, string>) {
+  const contains = (value: SQLOutputValue, needle: SQLOutputValue) =>
+    typeof value === "string" && value.toLowerCase().includes(String(needle));
+  db.function("usage_contains", { deterministic: true }, (value, needle) =>
+    Number(contains(value, needle)),
+  );
+  db.function("usage_workspace_matches", { deterministic: true }, (id, needle) =>
+    Number(
+      contains(id, needle) ||
+        (typeof id === "string" && contains(workspaceNames.get(id) ?? null, needle)),
+    ),
+  );
+}
+
+function readWorkspaceNames(baseDir: string): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const { id, name } of readWorkspaceMetadata(baseDir)) {
+    if (typeof name === "string" && name) names.set(id, name);
+  }
+  return names;
+}
+
 const input = "json_extract(u.fact,'$.input')";
 const cacheRead = "json_extract(u.fact,'$.cacheRead')";
 const cacheWrite = "json_extract(u.fact,'$.cacheWrite')";
@@ -70,7 +108,16 @@ const sums = `total(${input}) AS input, total(${cacheRead}) AS cacheRead,
 export function overview(baseDir: string, q: UsageFilters): UsageOverview {
   validateWindow(q);
   const { where, args } = filter(q);
+  const workspaceNames = q.workspace === undefined ? new Map() : readWorkspaceNames(baseDir);
   return withUsageSnapshot(baseDir, (db) => {
+    registerFilters(db, workspaceNames);
+    db.function("usage_model_family", { deterministic: true }, (value) =>
+      typeof value === "string"
+        ? value.replace(/-(minimal|low|medium|high|xhigh|max)$/i, "")
+        : null,
+    );
+    const modelFamily = "usage_model_family(json_extract(u.fact,'$.model'))";
+    const bucketMs = q.granularity === "hour" ? HOUR : DAY;
     const selection = `WHERE ${where.join(" AND ")}`;
     const totals = db
       .prepare(
@@ -91,25 +138,10 @@ export function overview(baseDir: string, q: UsageFilters): UsageOverview {
     `,
       )
       .get(...args)!;
-    const trend = db
-      .prepare(
-        `
-      SELECT floor(u.timestamp / ${DAY}) AS utcDay, ${sums}
-      FROM ${observations} ${selection} GROUP BY utcDay ORDER BY utcDay
-    `,
-      )
-      .all(...args)
-      .map((row) => ({
-        day: new Date(Number(row.utcDay) * DAY).toISOString().split("T")[0],
-        input: Number(row.input),
-        cacheRead: Number(row.cacheRead),
-        cacheWrite: Number(row.cacheWrite),
-        output: Number(row.output),
-      }));
     const ranking = db
       .prepare(
         `
-      SELECT json_extract(u.fact,'$.model') AS model, total(${prompt} + ${output}) AS tokens
+      SELECT ${modelFamily} AS model, total(${prompt} + ${output}) AS tokens
       FROM ${observations} ${selection} GROUP BY model ORDER BY tokens DESC, model LIMIT 6
     `,
       )
@@ -118,6 +150,39 @@ export function overview(baseDir: string, q: UsageFilters): UsageOverview {
         model: row.model === null ? null : String(row.model),
         tokens: Number(row.tokens),
       }));
+    const families = new Set(ranking.map(({ model }) => model));
+    const buckets = new Map<number, UsageOverview["trend"][number]>();
+    const grouped = db.prepare(`
+      SELECT floor(u.timestamp / ${bucketMs}) * ${bucketMs} AS bucket, ${modelFamily} AS model, ${sums}
+      FROM ${observations} ${selection} GROUP BY bucket,model ORDER BY bucket,model
+    `);
+    for (const row of grouped.iterate(...args)) {
+      const start = Number(row.bucket);
+      let bucket = buckets.get(start);
+      if (!bucket) {
+        const iso = new Date(start).toISOString();
+        bucket = {
+          day: q.granularity === "hour" ? iso.replace(".000Z", "Z") : iso.split("T")[0],
+          input: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          output: 0,
+          models: [],
+          other: 0,
+        };
+        buckets.set(start, bucket);
+      }
+      const model = row.model === null ? null : String(row.model);
+      let tokens = 0;
+      for (const key of ["input", "cacheRead", "cacheWrite", "output"] as const) {
+        const n = Number(row[key]);
+        bucket[key] += n;
+        tokens += n;
+      }
+      if (families.has(model)) bucket.models.push({ model, tokens });
+      else bucket.other += tokens;
+    }
+    const trend = [...buckets.values()];
     const amount = (key: string) => (totals[key] === null ? null : Number(totals[key]));
     return {
       count: Number(totals.count),
@@ -140,13 +205,15 @@ export function overview(baseDir: string, q: UsageFilters): UsageOverview {
   });
 }
 
-const journeyKey = "u.timestamp,u.source,u.session,u.id";
+const journeyColumns = ["timestamp", "source", "session", "id"];
+const journeyKey = journeyColumns.map((column) => `u.${column}`).join(",");
+const journeyOrder = [...journeyColumns, "isEvent"].map((column) => `${column} DESC`).join(",");
 const cursorKey = z.tuple([
   z.number(), // timestamp
   z.string(), // source
   z.string(), // session
   z.string(), // id
-  z.union([z.literal(0), z.literal(1)]), // event sorts after an observation of the same identity
+  z.union([z.literal(0), z.literal(1)]), // event sorts before an observation of the same identity
 ]);
 
 function decodeCursor(cursor: string) {
@@ -159,38 +226,80 @@ function decodeCursor(cursor: string) {
   }
 }
 
-export function journey(baseDir: string, q: UsageFilters, cursor?: string): UsageJourney {
+export function journey(
+  baseDir: string,
+  q: UsageFilters,
+  cursor?: string,
+  requestedPage = 1,
+): UsageJourney {
   validateWindow(q);
   const after = cursor === undefined ? undefined : decodeCursor(cursor);
+  const workspaceNames = readWorkspaceNames(baseDir);
   return withUsageSnapshot(baseDir, (db) => {
+    registerFilters(db, workspaceNames);
+    // Events have no unit, model, or channel. Never infer a model/channel from nearby observations.
+    const branches: (0 | 1)[] = q.model === undefined && q.channel === undefined ? [0, 1] : [0];
+    const count = (key?: z.infer<typeof cursorKey>) =>
+      branches.reduce<number>((n, isEvent) => {
+        const { where, args } = filter(q, Boolean(isEvent), key);
+        return (
+          n +
+          Number(
+            db
+              .prepare(
+                `SELECT count(*) AS count
+        FROM ${isEvent ? events : observations} WHERE ${where.join(" AND ")}`,
+              )
+              .get(...args)!.count,
+          )
+        );
+      }, 0);
+    const total = count();
+    const ahead = after ? total - count(after) : 0;
+    const page = Math.max(
+      1,
+      Math.min(
+        Math.ceil(total / PAGE_SIZE),
+        after ? Math.floor(ahead / PAGE_SIZE) + 1 : requestedPage,
+      ),
+    );
+    const offset = after ? 0 : (page - 1) * PAGE_SIZE;
     const args: (number | string)[] = [];
-    const scan = (isEvent: 0 | 1) => {
+    const scans = branches.map((isEvent) => {
       const scope = filter(q, Boolean(isEvent), after);
       args.push(...scope.args);
       return `SELECT * FROM (
         SELECT ${journeyKey}, u.fact, ${isEvent} AS isEvent, ${isEvent ? "NULL AS dated, NULL AS usd" : "r.dated,r.usd"}
         FROM ${isEvent ? events : `${observations} ${receipts}`}
         WHERE ${scope.where.join(" AND ")}
-        ORDER BY ${journeyKey} LIMIT ${PAGE_SIZE + 1}
+        ORDER BY ${journeyOrder} LIMIT ${offset + PAGE_SIZE + 1}
       )`;
-    };
-    const scans = [scan(0)];
-    // Events have no unit, model, or channel. Never infer a model/channel from nearby observations.
-    if (q.model === undefined && q.channel === undefined) scans.push(scan(1));
+    });
     const rows = db
       .prepare(
-        `${scans.join(" UNION ALL ")}
-      ORDER BY timestamp,source,session,id,isEvent LIMIT ${PAGE_SIZE + 1}`,
+        `
+      SELECT u.*, coalesce(${factWorkspace}, (SELECT min(w.workspace) FROM usage_workspace w
+        WHERE ${workspaceBinding} HAVING count(*) = 1)) AS workspaceId
+      FROM (${scans.join(" UNION ALL ")}
+        ORDER BY ${journeyOrder} LIMIT ${PAGE_SIZE + 1} OFFSET ${offset}) AS u
+      ORDER BY ${journeyOrder}
+    `,
       )
       .all(...args);
-    const page = rows.slice(0, PAGE_SIZE);
-    const last = page.at(-1);
+    const visible = rows.slice(0, PAGE_SIZE);
+    const last = visible.at(-1);
     return {
-      rows: page.map(({ isEvent, fact, dated, usd }) =>
-        isEvent
+      total,
+      page,
+      pageSize: PAGE_SIZE,
+      rows: visible.map(({ isEvent, fact, dated, usd, workspaceId }) => {
+        const row = isEvent
           ? (JSON.parse(String(fact)) as JourneyEvent)
-          : observationFromRow({ fact, dated, usd }),
-      ),
+          : observationFromRow({ fact, dated, usd });
+        if (typeof workspaceId !== "string") return row;
+        const workspaceName = workspaceNames.get(workspaceId);
+        return { ...row, workspaceId, ...(workspaceName === undefined ? {} : { workspaceName }) };
+      }),
       nextCursor:
         last && rows.length > PAGE_SIZE
           ? Buffer.from(

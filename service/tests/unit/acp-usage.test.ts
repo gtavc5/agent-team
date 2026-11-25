@@ -179,10 +179,16 @@ describe("readAcpUsage", () => {
       cacheRead: 143166,
       cacheWrite: 0,
       output: 530,
-      ranking: [{ model, tokens: 242086 }],
+      ranking: [{ model: "gemini-4-neon", tokens: 242086 }],
     });
     expect(journey(base, q)).toEqual({
-      rows: [rows.find((row) => row.id === "1"), rows.find((row) => row.id === "70")],
+      total: 2,
+      page: 1,
+      pageSize: 30,
+      rows: [
+        rows.find((row) => row.id === "70"),
+        { ...rows.find((row) => row.id === "1"), workspaceId: "ws-sample" },
+      ],
       nextCursor: null,
     });
     expect(overview(base, { ...q, workspace: "ws-sample" }).count).toBe(1);

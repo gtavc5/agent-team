@@ -35,7 +35,9 @@ export interface UsageObservation {
   price: UsagePrice;
 }
 
+export type UsageGranularity = "hour" | "day";
 export interface UsageFilters {
+  granularity?: UsageGranularity;
   since: number;
   until: number;
   unit: UsageObservation["unit"];
@@ -55,11 +57,18 @@ export interface UsageOverview extends TokenCounts {
   at96: number;
   unpriced: number;
   costs: Record<Exclude<UsagePrice["kind"], "unpriced">, number | null>;
-  trend: ({ day: string } & TokenCounts)[];
+  trend: ({
+    day: string;
+    models: { model: string | null; tokens: number }[];
+    other: number;
+  } & TokenCounts)[];
   ranking: { model: string | null; tokens: number }[];
 }
 
 export interface UsageJourney {
-  rows: (UsageObservation | JourneyEvent)[];
+  rows: ((UsageObservation | JourneyEvent) & { workspaceName?: string })[];
+  total: number;
+  page: number;
+  pageSize: number;
   nextCursor: string | null;
 }

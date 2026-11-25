@@ -1,4 +1,10 @@
-import type { UsageOverview as OverviewData, UsagePrice } from "../../../shared/usage";
+import { useId } from "react";
+import type {
+  UsageObservation,
+  UsageOverview as OverviewData,
+  UsagePrice,
+} from "../../../shared/usage";
+import "./UsageOverview.css";
 
 export const count = new Intl.NumberFormat("en");
 const compact = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
@@ -27,93 +33,206 @@ export const priceLabel: Record<UsagePrice["kind"], string> = {
 const totalTokens = (row: Pick<OverviewData, (typeof tokenParts)[number][0]>) =>
   row.input + row.cacheRead + row.cacheWrite + row.output;
 
-const shortDate = new Intl.DateTimeFormat("en", {
+const shortDate = new Intl.DateTimeFormat("en-GB", {
   month: "short",
   day: "numeric",
   timeZone: "UTC",
 });
-const DAY = 86_400_000;
+const shortHour = new Intl.DateTimeFormat("en-GB", {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  timeZone: "UTC",
+});
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+const MAX_HOURLY_BUCKETS = 169;
 const modelLimit = 6;
+const modelName = (model: string | null) => model || "Unknown model";
+const recordUnit = {
+  inference: "Inference",
+  turn: "Turn",
+  session: "Session",
+} satisfies Record<UsageObservation["unit"], string>;
 
-function DailyTokens({ trend }: Pick<OverviewData, "trend">) {
-  const days = trend.slice(-90);
-  const peak = Math.max(0, ...days.map(totalTokens));
-  const start = days.length ? Date.parse(days[0].day) : 0;
-  const end = days.length ? Date.parse(days[days.length - 1].day) : 0;
-  const span = Math.max(1, (end - start) / DAY + 1);
-  const slot = 100 / span;
-  const bar = Math.min(slot * 0.82, 12);
+type TrendRow = OverviewData["trend"][number];
+type TrendWindow = { since: number; until: number; granularity: "day" | "hour" };
+type Series = { label: string; fill: string; tokens: (row: TrendRow) => number };
+
+const tokenSeries: Series[] = tokenParts.map(([key, label]) => ({
+  label,
+  fill: `usage-fill-${key}`,
+  tokens: (row) => row[key],
+}));
+
+function modelSeries(rows: TrendRow[]): Series[] {
+  const totals = new Map<string | null, number>();
+  for (const row of rows) {
+    for (const { model, tokens } of row.models) {
+      if (tokens > 0) totals.set(model, (totals.get(model) ?? 0) + tokens);
+    }
+  }
+  return [
+    ...Array.from(totals)
+      .sort((a, b) => b[1] - a[1] || modelName(a[0]).localeCompare(modelName(b[0])))
+      .map<Series>(([model], index) => ({
+        label: modelName(model),
+        fill: `usage-overview-family-${index % modelLimit}`,
+        tokens: (row) => row.models.find((entry) => entry.model === model)?.tokens ?? 0,
+      })),
+    ...(rows.some((row) => row.other > 0)
+      ? [{ label: "Other", fill: "usage-overview-other", tokens: (row: TrendRow) => row.other }]
+      : []),
+  ];
+}
+
+export type TrendMode = "types" | "models";
+type TrendControl = { mode: TrendMode; setMode: (mode: TrendMode) => void };
+function TokenTrend({
+  trend,
+  since,
+  until,
+  granularity,
+  mode,
+  setMode,
+}: TrendWindow & TrendControl & { trend: TrendRow[] }) {
+  const description = useId();
+  const step = granularity === "hour" ? HOUR : DAY;
+  const first = Math.floor(since / step) * step;
+  const bucketCount = Math.ceil((until - first) / step);
+  const valid = until > since && (granularity !== "hour" || bucketCount <= MAX_HOURLY_BUCKETS);
+  const rows = new Map(trend.map((row) => [Date.parse(row.day), row]));
+  const buckets = Array.from({ length: valid ? bucketCount : 0 }, (_, index) => {
+    const start = first + index * step;
+    return { start, row: rows.get(start) };
+  });
+  const series =
+    mode === "types" ? tokenSeries : modelSeries(buckets.flatMap(({ row }) => (row ? [row] : [])));
+  const peak = Math.max(0, ...buckets.map(({ row }) => (row ? totalTokens(row) : 0)));
+  const axisFormat = granularity === "hour" ? shortHour : shortDate;
+  const chartLabel = `${mode === "types" ? "Token types" : "Top model families"} by UTC ${granularity}`;
+  const position = (time: number) => ((time - since) / (until - since)) * 100;
   return (
     <figure className="usage-card usage-chart">
-      <figcaption>
-        <h3>Daily token composition</h3>
-        <span>Tokens by UTC day</span>
-      </figcaption>
-      <ul className="usage-legend" aria-label="Daily token categories">
-        {tokenParts.map(([key, label]) => (
-          <li key={key}>
-            <i className={`usage-fill-${key}`} />
-            {label}
-          </li>
-        ))}
-      </ul>
-      <div className="usage-trend">
-        <div className="usage-axis" aria-hidden="true">
-          {peak > 0 && (
-            <>
-              <span>{compact.format(peak)}</span>
-              <span>0</span>
-            </>
-          )}
+      <figcaption className="usage-overview-caption">
+        <div>
+          <h3>Token usage over time</h3>
+          <span>Tokens by UTC {granularity}</span>
         </div>
-        <div className="usage-plot">
-          <svg
-            role="img"
-            aria-label="Daily token composition chart"
-            viewBox="0 0 100 100"
-            preserveAspectRatio="none"
+        <div className="usage-overview-modes" role="group" aria-label="Chart breakdown">
+          <button
+            type="button"
+            className="btn-secondary"
+            aria-pressed={mode === "types"}
+            onClick={() => setMode("types")}
           >
-            {[0, 50, 100].map((y) => (
-              <line key={y} x1="0" x2="100" y1={y} y2={y} vectorEffect="non-scaling-stroke" />
-            ))}
-            {days.map((day) => {
-              let y = 100;
-              const x = ((Date.parse(day.day) - start) / DAY) * slot + (slot - bar) / 2;
-              return (
-                <g key={day.day}>
-                  <title>{`${day.day} UTC · ${tokenParts.map(([key, label]) => `${label}: ${count.format(day[key])}`).join(" · ")}`}</title>
-                  {tokenParts.map(([key]) => {
-                    const height = (day[key] / (peak || 1)) * 100;
-                    y -= height;
-                    return (
-                      <rect
-                        key={key}
-                        className={`usage-fill-${key}`}
-                        x={x}
-                        y={y}
-                        width={bar}
-                        height={height}
-                      />
-                    );
-                  })}
-                </g>
-              );
-            })}
-          </svg>
-          {peak === 0 && <span className="usage-chart-empty">No dated tokens</span>}
+            Token types
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            aria-pressed={mode === "models"}
+            onClick={() => setMode("models")}
+          >
+            Top models
+          </button>
         </div>
-        {!!days.length && (
-          <div className="usage-dates">
-            <span>{shortDate.format(start)}</span>
-            {span > 1 && <span>{shortDate.format(end)}</span>}
+      </figcaption>
+      {series.length > 0 && (
+        <ul className="usage-legend" role="list" aria-label={`${chartLabel} legend`}>
+          {series.map(({ label, fill }, index) => (
+            <li key={index}>
+              <i className={fill} aria-hidden="true" />
+              {label}
+            </li>
+          ))}
+        </ul>
+      )}
+      {valid ? (
+        <div className="usage-trend">
+          <div className="usage-axis" aria-hidden="true">
+            {peak > 0 && (
+              <>
+                <span>{compact.format(peak)}</span>
+                <span>0</span>
+              </>
+            )}
           </div>
-        )}
-      </div>
+          <div className="usage-plot">
+            <svg
+              role="img"
+              aria-label={chartLabel}
+              aria-describedby={description}
+              viewBox="0 0 100 100"
+              preserveAspectRatio="none"
+            >
+              <desc id={description}>
+                {`${new Date(since).toISOString()} to ${new Date(until).toISOString()} (end exclusive). ${bucketCount} UTC ${granularity} buckets. ${peak > 0 ? `Peak ${count.format(peak)} tokens.` : "No dated tokens returned."}`}
+              </desc>
+              {[0, 50, 100].map((y) => (
+                <line key={y} x1="0" x2="100" y1={y} y2={y} vectorEffect="non-scaling-stroke" />
+              ))}
+              {buckets.map(({ start, row }) => {
+                if (!row || !totalTokens(row)) return null;
+                const left = position(Math.max(since, start));
+                const width = position(Math.min(until, start + step)) - left;
+                const bar = Math.min(width * 0.82, 12);
+                const x = left + (width - bar) / 2;
+                const parts = series.map((part) => ({ ...part, value: part.tokens(row) }));
+                let stacked = 0;
+                return (
+                  <g key={start}>
+                    <title>{`${row.day} UTC · ${parts.map(({ label, value }) => `${label}: ${count.format(value)}`).join(" · ")}`}</title>
+                    <rect
+                      className="usage-overview-bucket-hit"
+                      x={left}
+                      y="0"
+                      width={width}
+                      height="100"
+                    />
+                    {parts.map(({ fill, value }, index) => {
+                      if (!value) return null;
+                      stacked += value;
+                      return (
+                        <rect
+                          key={index}
+                          className={fill}
+                          x={x}
+                          y={(1 - stacked / peak) * 100}
+                          width={bar}
+                          height={(value / peak) * 100}
+                        />
+                      );
+                    })}
+                  </g>
+                );
+              })}
+            </svg>
+            {peak === 0 && <span className="usage-chart-empty">No dated tokens returned</span>}
+          </div>
+          <div className="usage-dates">
+            <time dateTime={new Date(since).toISOString()}>{axisFormat.format(since)}</time>
+            {axisFormat.format(since) !== axisFormat.format(until) && (
+              <time dateTime={new Date(until).toISOString()}>{axisFormat.format(until)}</time>
+            )}
+          </div>
+        </div>
+      ) : (
+        <p>Cannot chart this UTC window at the selected granularity.</p>
+      )}
     </figure>
   );
 }
 
-function RankedModels({ ranking }: Pick<OverviewData, "ranking">) {
+function RankedModels({
+  ranking,
+  model,
+  onModelChange,
+}: Pick<OverviewData, "ranking"> & {
+  model: string;
+  onModelChange: (model: string) => void;
+}) {
   const models = ranking.slice(0, modelLimit);
   const peak = Math.max(1, ...models.map(({ tokens }) => tokens));
   return (
@@ -122,36 +241,58 @@ function RankedModels({ ranking }: Pick<OverviewData, "ranking">) {
         <h3>Top models</h3>
         <span>Ranked by total tokens</span>
       </figcaption>
-      <div className="usage-ranking">
-        <ol aria-label="Ranked model totals">
-          {models.map(({ model, tokens }) => (
-            <li key={JSON.stringify(model)}>
-              <span title={model ?? "Unknown model"}>{model ?? "Unknown model"}</span>
-              <strong title={`${count.format(tokens)} tokens`}>{compact.format(tokens)}</strong>
-            </li>
-          ))}
-        </ol>
-        <svg
-          role="img"
-          aria-label="Ranked model tokens chart"
-          viewBox={`0 0 100 ${modelLimit * 10}`}
-          preserveAspectRatio="none"
-        >
-          {models.map(({ model, tokens }, index) => (
-            <rect
-              key={JSON.stringify(model)}
-              className="usage-fill-input"
-              x="0"
-              y={index * 10 + 7}
-              width={(tokens / peak) * 100}
-              height="1.5"
-            >
-              <title>{`${model ?? "Unknown model"}: ${count.format(tokens)} tokens`}</title>
-            </rect>
-          ))}
-        </svg>
-        {!models.length && <span className="usage-chart-empty">No models to rank</span>}
-      </div>
+      {models.length > 0 ? (
+        <div className="usage-overview-ranks">
+          <svg
+            role="img"
+            aria-label="Ranked model tokens chart"
+            viewBox={`0 0 100 ${models.length * 32}`}
+            preserveAspectRatio="none"
+          >
+            {models.map(({ model: name, tokens }, i) => (
+              <rect
+                key={JSON.stringify(name)}
+                x={0}
+                y={i * 32 + 27}
+                width={(100 * tokens) / peak}
+                height={3}
+              />
+            ))}
+          </svg>
+          <ol className="usage-overview-ranking" role="list" aria-label="Ranked model totals">
+            {models.map(({ model: name, tokens }) => {
+              const contents = (
+                <>
+                  <span className="usage-overview-rank-label">
+                    <span title={modelName(name)}>{modelName(name)}</span>
+                    <strong title={`${count.format(tokens)} tokens`}>
+                      {compact.format(tokens)}
+                    </strong>
+                  </span>
+                </>
+              );
+              return (
+                <li key={JSON.stringify(name)}>
+                  {name !== null && name !== "" ? (
+                    <button
+                      type="button"
+                      aria-label={`${name}, ${count.format(tokens)} tokens`}
+                      aria-pressed={model === name}
+                      onClick={() => onModelChange(model === name ? "" : name)}
+                    >
+                      {contents}
+                    </button>
+                  ) : (
+                    <div className="usage-overview-rank-static">{contents}</div>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      ) : (
+        <p>No model totals returned</p>
+      )}
     </figure>
   );
 }
@@ -160,17 +301,29 @@ export function UsageOverview({
   data,
   incompleteSources,
   sourcesPending,
-}: {
-  data: OverviewData;
-  incompleteSources: number;
-  sourcesPending?: boolean;
-}) {
+  since,
+  until,
+  granularity,
+  unit,
+  model,
+  onModelChange,
+  mode,
+  setMode,
+}: TrendWindow &
+  TrendControl & {
+    data: OverviewData;
+    incompleteSources: number;
+    sourcesPending?: boolean;
+    unit: UsageObservation["unit"];
+    model: string;
+    onModelChange: (model: string) => void;
+  }) {
   const prompt = data.input + data.cacheRead + data.cacheWrite;
   return (
     <section className="usage-overview" aria-label="Overview">
       {!data.count && (
         <p className="usage-notice" role="status">
-          No usage observations returned.
+          No usage records returned.
         </p>
       )}
       <div className="usage-kpis">
@@ -187,8 +340,8 @@ export function UsageOverview({
           <h3>Weighted cache read share</h3>
           <strong>{share(data.cacheRead, prompt)}</strong>
           <p>
-            {count.format(data.promptBearing)} of {count.format(data.count)} observations with
-            prompt tokens
+            {count.format(data.promptBearing)} of {count.format(data.count)} records with prompt
+            tokens
           </p>
         </div>
         <div className="usage-card usage-prices">
@@ -205,9 +358,13 @@ export function UsageOverview({
           </dl>
         </div>
         <div className="usage-card">
-          <h3>Data coverage</h3>
+          <h3>Usage records</h3>
           <strong>{count.format(data.count)}</strong>
-          <p>Observations · {count.format(data.unpriced)} unpriced</p>
+          <p>{recordUnit[unit]} records</p>
+          <p>
+            {count.format(data.count - data.unpriced)} priced · {count.format(data.unpriced)}{" "}
+            unpriced
+          </p>
           {sourcesPending && (
             <p className="usage-warning" role="status">
               Source scan pending
@@ -215,15 +372,23 @@ export function UsageOverview({
           )}
           {incompleteSources > 0 && (
             <p className="usage-warning">
-              Unavailable or partially decoded usage sources: {count.format(incompleteSources)}
+              {count.format(incompleteSources)} {incompleteSources === 1 ? "source" : "sources"}{" "}
+              unavailable or partially read
             </p>
           )}
-          {!sourcesPending && incompleteSources === 0 && <p>No incomplete sources reported</p>}
+          {!sourcesPending && incompleteSources === 0 && <p>No source issues reported</p>}
         </div>
       </div>
       <div className="usage-charts">
-        <DailyTokens trend={data.trend} />
-        <RankedModels ranking={data.ranking} />
+        <TokenTrend
+          mode={mode}
+          setMode={setMode}
+          trend={data.trend}
+          since={since}
+          until={until}
+          granularity={granularity}
+        />
+        <RankedModels ranking={data.ranking} model={model} onModelChange={onModelChange} />
       </div>
       <details className="usage-method">
         <summary tabIndex={0}>Measurement details and benchmarks</summary>
@@ -240,14 +405,16 @@ export function UsageOverview({
           {count.format(prompt)} prompt tokens (uncached input, cache reads and cache writes). The
           98% benchmark is for reference only.
         </p>
-        <p>
-          Inferences with ≥96% cache reads: {share(data.at96, data.eligible)} ·{" "}
-          {count.format(data.at96)} of {count.format(data.eligible)} eligible. Only inferences with
-          prompt tokens are eligible. The 99% benchmark is for reference only.
-        </p>
+        {unit === "inference" && (
+          <p>
+            Inferences with ≥96% cache reads: {share(data.at96, data.eligible)} ·{" "}
+            {count.format(data.at96)} of {count.format(data.eligible)} eligible. Only inferences
+            with prompt tokens are eligible. The 99% benchmark is for reference only.
+          </p>
+        )}
         <p>
           Price bases are not added together. API-equivalent costs are not account charges. A dash
-          means no priced observations for that basis.
+          means no priced records for that basis.
         </p>
       </details>
     </section>

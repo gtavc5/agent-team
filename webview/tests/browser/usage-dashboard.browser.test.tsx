@@ -5,7 +5,14 @@ import type {} from "@vitest/browser-playwright";
 import { App } from "../../src/App";
 import { UsageDashboard } from "../../src/usage/UsageDashboard";
 import { FakeSocket } from "../fakeSocket";
-import { compaction, journeyResponse, observation, overviewResponse } from "../usageFixtures";
+import {
+  compaction,
+  journeyResponse,
+  observation,
+  overviewResponse,
+  recordsUntil,
+  usageUrl,
+} from "../usageFixtures";
 import "../../src/styles.css";
 
 function bounds(element: Element) {
@@ -19,7 +26,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("opens the mobile overview without shifting chat and renders two bounded token charts", async () => {
+it("opens the mobile overview without shifting chat and renders a bounded token chart and ranked models", async () => {
   await page.viewport(390, 760);
   vi.stubGlobal("WebSocket", FakeSocket);
   const ranking = Array.from({ length: 8 }, (_, index) => ({
@@ -41,12 +48,8 @@ it("opens the mobile overview without shifting chat and renders two bounded toke
   await opener.click();
 
   const dialog = page.getByRole("dialog", { name: "Usage dashboard" });
-  await expect
-    .element(dialog.getByRole("img", { name: "Daily token composition chart" }))
-    .toBeVisible();
-  await expect
-    .element(dialog.getByRole("img", { name: "Ranked model tokens chart" }))
-    .toBeVisible();
+  await expect.element(dialog.getByRole("img", { name: "Token types by UTC day" })).toBeVisible();
+  await expect.element(dialog.getByRole("list", { name: "Ranked model totals" })).toBeVisible();
   const panel = screen.getByRole("dialog");
   const { left, top, right, bottom } = panel.getBoundingClientRect();
   expect(left).toBeGreaterThanOrEqual(0);
@@ -56,6 +59,7 @@ it("opens the mobile overview without shifting chat and renders two bounded toke
   const charts = panel.querySelectorAll("svg");
   expect(charts).toHaveLength(2);
   expect(charts[1].querySelectorAll("rect")).toHaveLength(6);
+  expect(panel.querySelectorAll(".usage-overview-ranking li")).toHaveLength(6);
   for (const chart of charts) {
     const box = bounds(chart);
     expect(box.width).toBeGreaterThan(0);
@@ -68,11 +72,11 @@ it("opens the mobile overview without shifting chat and renders two bounded toke
   await expect
     .element(
       dialog
-        .getByRole("list", { name: "Daily token categories" })
+        .getByRole("list", { name: "Token types by UTC day legend" })
         .getByText("Cache write", { exact: true }),
     )
     .toBeVisible();
-  const label = panel.querySelector<HTMLSpanElement>(".usage-ranking span[title]")!;
+  const label = panel.querySelector<HTMLSpanElement>(".usage-overview-ranking span[title]")!;
   label.scrollIntoView({ block: "center" });
   const labelBox = label.getBoundingClientRect();
   expect(document.elementFromPoint(labelBox.left + 2, labelBox.top + labelBox.height / 2)).toBe(
@@ -81,7 +85,7 @@ it("opens the mobile overview without shifting chat and renders two bounded toke
   const benchmark = dialog.getByText(/The 98% benchmark/);
   const inferenceMeasure = dialog.getByText(/Inferences with ≥96% cache reads/);
   await expect.element(inferenceMeasure).not.toBeVisible();
-  await expect.element(dialog.getByRole("heading", { name: "Data coverage" })).toBeVisible();
+  await expect.element(dialog.getByRole("heading", { name: "Usage records" })).toBeVisible();
   await expect.element(benchmark).not.toBeVisible();
   await dialog.getByText("Measurement details and benchmarks").click();
   await expect.element(benchmark).toBeVisible();
@@ -92,85 +96,112 @@ it("opens the mobile overview without shifting chat and renders two bounded toke
   expect(bounds(main)).toEqual(initialMain);
 });
 
-it("shares all filters with Records and traverses server cursors at the same UTC window", async () => {
-  await page.viewport(1280, 800);
+it("shares instant picks and Enter-applied fuzzy filters with responsive numbered Records", async () => {
+  await page.viewport(390, 760);
   const request = vi.fn<typeof fetch>().mockImplementation((url) => {
-    if (typeof url !== "string") throw new Error("Expected a usage URL");
-    const { pathname, searchParams } = new URL(url, window.location.href);
+    const { pathname, searchParams } = usageUrl(url);
     if (pathname.endsWith("/overview")) return Promise.resolve(overviewResponse());
-    if (searchParams.has("cursor"))
-      return Promise.resolve(
-        journeyResponse([{ ...observation, unit: "turn", id: "page-two", model: "second-model" }]),
-      );
-    if (!searchParams.has("model")) return Promise.resolve(journeyResponse([compaction]));
-    return Promise.resolve(journeyResponse([{ ...observation, unit: "turn" }], "opaque+=/cursor"));
+    const page = Number(searchParams.get("page"));
+    const hasFilter = searchParams.has("model") || searchParams.has("workspace");
+    const rows =
+      page === 2
+        ? [{ ...observation, model: "second-model" }]
+        : hasFilter
+          ? [{ ...observation, unit: "turn" as const }]
+          : [compaction];
+    return Promise.resolve(journeyResponse(rows, { page, total: hasFilter ? 31 : 1 }));
   });
   vi.stubGlobal("fetch", request);
   render(
-    <UsageDashboard onClose={vi.fn()} workspaces={[{ id: "ws-1", name: "Design workspace" }]} />,
+    <UsageDashboard
+      onClose={vi.fn()}
+      workspaces={[
+        { id: "ws-123456789", name: "Design workspace" },
+        { id: "ws-987654321", name: "Design workspace" },
+      ]}
+    />,
   );
   const dialog = page.getByRole("dialog");
+  const params = () => Object.fromEntries(usageUrl(request.mock.lastCall![0]).searchParams);
   await dialog.getByRole("combobox", { name: "Window (UTC)" }).selectOptions("7d");
   await dialog.getByRole("combobox", { name: "Reporting unit" }).selectOptions("turn");
+  const rank = dialog.getByRole("button", { name: "example-model, 104 tokens" });
+  await rank.click();
+  await expect.element(rank).toHaveAttribute("aria-pressed", "true");
+  expect(params().model).toBe("example-model");
+  await rank.click();
+  await expect.element(rank).toHaveAttribute("aria-pressed", "false");
+  expect(params().model).toBeUndefined();
   await dialog.getByText("Filters", { exact: true }).click();
-  const inputs = Array.from(
-    screen.getByRole("dialog").querySelectorAll<HTMLInputElement>(".usage-filter-grid input"),
-  );
-  expect(inputs.map((input) => input.maxLength)).toEqual(Array(5).fill(256));
-  await dialog.getByRole("textbox", { name: "Model" }).fill("example-model");
-  await dialog.getByRole("textbox", { name: "Channel" }).fill("a&b");
+  await expect.element(dialog.getByRole("textbox", { name: /turn/i })).not.toBeInTheDocument();
   await dialog.getByRole("combobox", { name: "Source" }).selectOptions("pi");
-  const workspace = dialog.getByRole("combobox", { name: "Workspace" });
-  expect(screen.getByRole("combobox", { name: "Workspace" }).getAttribute("list")).toBeTruthy();
-  expect(document.querySelector('datalist option[value="ws-1"]')?.getAttribute("label")).toBe(
-    "Design workspace",
-  );
-  await workspace.fill("ws-1");
-  await dialog.getByRole("textbox", { name: "Session ID" }).fill("pi-session");
-  await dialog.getByRole("textbox", { name: "Turn ID" }).fill("turn-1");
-  await dialog.getByRole("button", { name: "Apply filters" }).click();
-  const params = () => {
-    const url = request.mock.calls.at(-1)?.[0];
-    if (typeof url !== "string") throw new Error("Expected a usage URL");
-    return new URL(url, window.location.href).searchParams;
-  };
+  expect(params().source).toBe("pi");
+  const workspace = dialog.getByRole("combobox", { name: "Workspace", exact: true });
+  await expect
+    .element(workspace.getByRole("option", { name: "Design workspace · ws-12345" }))
+    .toBeInTheDocument();
+  await expect
+    .element(workspace.getByRole("option", { name: "Design workspace · ws-98765" }))
+    .toBeInTheDocument();
+  await workspace.selectOptions("ws-123456789");
+  expect(params().workspace).toBe("ws-123456789");
+  await dialog.getByRole("combobox", { name: "Model", exact: true }).selectOptions("example-model");
+  expect(params().model).toBe("example-model");
+  const channel = dialog.getByRole("textbox", { name: "Channel contains" });
+  await channel.fill("  a&b  ");
+  const workspaceText = dialog.getByRole("textbox", { name: "Workspace contains" });
+  await workspaceText.fill("Archived title");
+  expect(params().workspace).toBe("ws-123456789");
+  expect(params().channel).toBeUndefined();
+  await dialog
+    .getByRole("textbox", { name: "Session ID (Pi / ACP / Codex) contains" })
+    .fill("PI-sess");
+  await userEvent.keyboard("{Enter}");
   const filters = {
     range: "7d",
     unit: "turn",
+    granularity: "day",
     model: "example-model",
     channel: "a&b",
     source: "pi",
-    workspace: "ws-1",
-    session: "pi-session",
-    turn: "turn-1",
+    workspace: "Archived title",
+    session: "PI-sess",
   };
-  expect(Object.fromEntries(params())).toEqual(filters);
+  expect(params()).toEqual(filters);
   await dialog.getByRole("button", { name: "Records" }).click();
-  await expect.element(dialog.getByText("example-model", { exact: true })).toBeVisible();
-  expect(Object.fromEntries(params())).toEqual(filters);
-  const receipt = dialog.getByText("inference-receipt", { exact: true });
+  const rows = dialog.getByRole("list", { name: "Recorded observations and events" });
+  await expect.element(rows.getByText("example-model", { exact: true })).toBeVisible();
+  expect(params()).toEqual({ ...filters, page: "1" });
+  await expect.element(rows.getByText("01 Jun 2026, 00:00 UTC", { exact: true })).toBeVisible();
+  await expect.element(rows.getByText(/^\(.*UTC[+-].*\)$/)).toBeVisible();
+  const receipt = rows.getByText("inference-receipt", { exact: true });
   await expect.element(receipt).not.toBeVisible();
-  await dialog.getByText("example-model", { exact: true }).click();
+  await rows.getByText("example-model", { exact: true }).click();
   await expect.element(receipt).toBeVisible();
-  await expect.element(dialog.getByText(/API-equivalent · \$0.125 USD/)).toBeVisible();
-  const next = dialog.getByRole("button", { name: "Next" });
-  const previous = dialog.getByRole("button", { name: "Previous" });
+  await expect.element(rows.getByText(/API-equivalent · \$0.125 USD/)).toBeVisible();
+  const pages = dialog.getByRole("form", { name: "Record pages" });
+  const next = pages.getByRole("button", { name: "Next" });
+  const previous = pages.getByRole("button", { name: "Previous" });
   await expect.element(previous).toBeDisabled();
   await next.click();
-  await expect.element(dialog.getByText("second-model")).toBeVisible();
-  expect(Object.fromEntries(params())).toEqual({
-    ...filters,
-    cursor: "opaque+=/cursor",
-    until: String(Date.UTC(2026, 5, 4)),
-  });
+  await expect.element(rows.getByText("second-model")).toBeVisible();
+  expect(params()).toEqual({ ...filters, page: "2", until: String(recordsUntil) });
   await expect.element(next).toBeDisabled();
-  await previous.click();
-  await expect.element(dialog.getByText("example-model", { exact: true })).toBeVisible();
-  expect(Object.fromEntries(params())).toEqual({ ...filters, until: String(Date.UTC(2026, 5, 4)) });
-  await next.click();
-  await expect.element(dialog.getByText("Page 2")).toBeVisible();
+  const { left, right } = screen.getByRole("dialog").getBoundingClientRect();
+  const footer = screen.getByRole("form", { name: "Record pages" });
+  for (const control of footer.querySelectorAll("button, input")) {
+    const box = control.getBoundingClientRect();
+    expect(box.left).toBeGreaterThanOrEqual(left);
+    expect(box.right).toBeLessThanOrEqual(right);
+  }
+  await workspaceText.fill("Unapplied draft");
   await dialog.getByRole("button", { name: "Clear filters" }).click();
-  await expect.element(dialog.getByText("Context compacted")).toBeVisible();
+  await expect.element(rows.getByText("Context compacted")).toBeVisible();
+  await expect.element(workspaceText).toHaveValue("");
+  await expect.element(channel).toHaveValue("");
   await expect.element(previous).toBeDisabled();
-  expect(Object.fromEntries(params())).toEqual({ range: "7d", unit: "turn" });
+  await expect
+    .element(dialog.getByRole("list", { name: "Active filters" }))
+    .not.toBeInTheDocument();
+  expect(params()).toEqual({ range: "7d", unit: "turn", granularity: "day", page: "1" });
 });

@@ -156,6 +156,7 @@ it("opens the usage ledger and reopens the same observation after reload", async
           cacheRead: 143166,
           input: 23325,
           unpriced: 1,
+          ranking: [{ model: "offline-acceptance-model", tokens: 166698 }],
         });
         const dashboard = page.getByRole("dialog", { name: "Usage dashboard" });
         await expect.poll(() => dashboard.locator('svg[role="img"]').count()).toBe(2);
@@ -164,10 +165,24 @@ it("opens the usage ledger and reopens the same observation after reload", async
           dashboard.getByRole("button", { name: "Records", exact: true }).click(),
         ]);
         expect(await journey.json()).toMatchObject({
-          rows: [{ id: "70", cacheRead: 143166, model: "offline-acceptance-model" }],
+          total: 1,
+          page: 1,
+          pageSize: 30,
+          rows: [{ id: "70", cacheRead: 143166, model: "offline-acceptance-model-high" }],
           nextCursor: null,
         });
-        await dashboard.getByText("offline-acceptance-model", { exact: true }).first().waitFor();
+        await dashboard
+          .getByText("offline-acceptance-model-high", { exact: true })
+          .first()
+          .waitFor();
+        const [refreshed] = await Promise.all([
+          page.waitForResponse((res) => {
+            const url = new URL(res.url());
+            return url.pathname === "/api/usage/journey" && url.searchParams.get("refresh") === "1";
+          }),
+          dashboard.getByRole("button", { name: "Refresh", exact: true }).click(),
+        ]);
+        expect(await refreshed.json()).toMatchObject({ page: 1, total: 1, sourcesPending: false });
       }
     },
     ({ baseDir }) =>
@@ -177,7 +192,7 @@ it("opens the usage ledger and reopens the same observation after reload", async
         id: "70",
         sessionId: "offline-acp",
         timestamp: Date.now() - 1000,
-        model: "offline-acceptance-model",
+        model: "offline-acceptance-model-high",
         input: 23325,
         cacheRead: 143166,
         cacheWrite: 0,

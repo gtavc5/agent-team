@@ -192,7 +192,67 @@ it("requires auth for bounded usage queries and never serves the retired full-hi
   });
   expect(JSON.parse(overview.body.toString())).not.toHaveProperty("observations");
   const page = await request("/api/usage/journey?unit=turn&session=sample", { headers });
-  expect(JSON.parse(page.body.toString())).toMatchObject({ rows: [], nextCursor: null });
+  expect(JSON.parse(page.body.toString())).toMatchObject({
+    rows: [],
+    nextCursor: null,
+    total: 0,
+    page: 1,
+    pageSize: 30,
+  });
+});
+
+it("imports a newly arrived native fact only on an explicit usage refresh", async () => {
+  const id = "00000000-0000-4000-9000-111111111112";
+  const folder = path.join(base, "pi-sessions", "ws-audit");
+  fs.mkdirSync(folder, { recursive: true });
+  const timestamp = Date.UTC(2026, 4, 22, 13, 4);
+  const until = Date.UTC(2026, 4, 22, 14);
+  const model = "refresh-proof-high";
+  fs.writeFileSync(
+    path.join(folder, `sample_${id}.jsonl`),
+    [
+      { type: "session", version: 3, id },
+      {
+        type: "message",
+        id: "entry",
+        message: {
+          role: "assistant",
+          provider: "example",
+          model,
+          responseId: "proof",
+          timestamp,
+          usage: { input: 1, output: 2, cacheWrite: 3, cacheRead: 4 },
+        },
+      },
+    ]
+      .map((row) => JSON.stringify(row) + "\n")
+      .join(""),
+  );
+  const headers = { Cookie: await login() };
+  const url = `/api/usage/overview?range=24h&until=${until}&model=PROOF`;
+  expect(JSON.parse((await request(url, { headers })).body.toString())).toMatchObject({ count: 0 });
+  const [a, b] = await Promise.all([
+    request(url + "&refresh=1", { headers }),
+    request(url + "&refresh=1", { headers }),
+  ]);
+  for (const result of [a, b]) {
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body.toString())).toMatchObject({
+      count: 1,
+      sourcesPending: false,
+      ranking: [{ model: "refresh-proof", tokens: 10 }],
+    });
+  }
+  const page = await request(
+    `/api/usage/journey?range=24h&until=${until}&session=111111111112&page=7`,
+    { headers },
+  );
+  expect(JSON.parse(page.body.toString())).toMatchObject({
+    total: 1,
+    page: 1,
+    pageSize: 30,
+    rows: [{ model, sessionId: id }],
+  });
 });
 
 it("serves the same runtime facts in both formats only after authentication", async () => {
