@@ -10,7 +10,7 @@ YAAT is a self-hosted panel for Pi RPC and native Codex app-server sessions. Old
 - Read the event path end to end: session → workspace → WebSocket → client state → renderer. A continuously connected browser and a fresh snapshot should show the same transcript and queue affordances. Use recordings for backend frame shape and order; never invent them. Explain any snapshot change before regenerating it.
 - Use real-account captures and smoke tests sparingly, one at a time. Prefer existing fixtures or deterministic offline tests; live sessions spend the user's quota.
 - Keep changes small and reversible. Clean up references to behavior you replace, across code, tests, documentation and skills. Preserve the existing UI layout unless asked to change it. Comment non-obvious constraints, not the edit itself.
-- Commit and push only when requested. Review non-trivial diffs independently before committing (review skill). Use an imperative conventional commit subject. Before pushing, run `npm run test:slow` and `npm run build`.
+- Commit and push only when requested. Review non-trivial diffs independently before committing (review skill). Use an imperative conventional commit subject. Keep `main` linear: integrate branches with rebase + `git merge --ff-only`, cherry-pick, or squash; do not create merge commits on `main`. Before pushing, run `npm run test:slow` and `npm run build`.
 
 ## Skills
 
