@@ -1142,14 +1142,18 @@ function systemAvatar(content: string): [string | null, string] {
 
 const DELIVERY_STATUS_DELAY_MS = 350;
 
-function PendingDeliveryStatus({ label }: { label: string }) {
-  const [visible, setVisible] = useState(false);
+function usePendingDeliveryStatus(pending: boolean, messageId: string): boolean {
+  const [visibleFor, setVisibleFor] = useState<string>();
   useEffect(() => {
-    const timer = setTimeout(() => setVisible(true), DELIVERY_STATUS_DELAY_MS);
+    setVisibleFor(undefined);
+    if (!pending) return;
+    const timer = setTimeout(() => setVisibleFor(messageId), DELIVERY_STATUS_DELAY_MS);
     return () => clearTimeout(timer);
-  }, []);
+  }, [pending, messageId]);
+  return pending && visibleFor === messageId;
+}
 
-  if (!visible) return null;
+function PendingDeliveryStatus({ label }: { label: string }) {
   return (
     <span className="delivery-inline" role="status">
       <span className="streaming-dot" aria-hidden="true" /> {label}
@@ -1163,6 +1167,8 @@ export const MessageItem = memo(function MessageItem({
   agents,
   compact,
   highlight,
+  hasStreamingReply,
+  onStartingRow,
   onQuote,
   onJumpToMessage,
   onLoadSubagentEvents,
@@ -1176,6 +1182,8 @@ export const MessageItem = memo(function MessageItem({
   user?: typeof DEFAULT_USER;
   compact?: boolean;
   highlight?: boolean;
+  hasStreamingReply?: boolean;
+  onStartingRow?: (row: HTMLDivElement | null) => void;
   onOpenWorkspace?: (workspaceId: string) => void;
   onQuote?: (msg: Message) => void;
   onJumpToMessage?: (messageId: string) => void;
@@ -1210,6 +1218,14 @@ export const MessageItem = memo(function MessageItem({
     [agentId, onCancelSubagent],
   );
 
+  const isUser = msg.kind === "user";
+  const starting = isUser && msg.status === "starting";
+  const sending = isUser && msg.status === "dispatching";
+  // Starting and dispatching share one delay even though they render in different rows.
+  const showDelivery = usePendingDeliveryStatus(starting || sending, msg.id);
+  const showStarting = showDelivery && starting && !hasStreamingReply;
+  const target = showStarting ? agents.find((a) => a.id === msg.queuedFor) : undefined;
+
   if (msg.kind === "system") {
     const [avatar, text] = systemAvatar(msg.content);
     return (
@@ -1220,17 +1236,9 @@ export const MessageItem = memo(function MessageItem({
     );
   }
 
-  const isUser = msg.kind === "user";
   const from = isUser ? msg.from : undefined;
   const agent = !isUser ? agents.find((a) => a.id === msg.agentId) : null;
   const streaming = msg.status === "streaming";
-  const deliveryLabel = !isUser
-    ? null
-    : msg.status === "starting"
-      ? `Starting ${agents.find((a) => a.id === msg.queuedFor)?.name || "agent"}…`
-      : msg.status === "dispatching"
-        ? "Sending…"
-        : null;
   const deliveryClass =
     msg.status === "queued"
       ? " message-queued"
@@ -1414,7 +1422,7 @@ export const MessageItem = memo(function MessageItem({
                 </span>
                 {isUser && msg.status !== "queued" && (
                   <span className="delivery-inline-slot">
-                    {deliveryLabel && <PendingDeliveryStatus key={msg.id} label={deliveryLabel} />}
+                    {sending && showDelivery && <PendingDeliveryStatus label="Sending…" />}
                   </span>
                 )}
                 {streaming && <span className="streaming-dot" />}
@@ -1513,6 +1521,29 @@ export const MessageItem = memo(function MessageItem({
             )}
           </div>
         </div>
+        {showStarting && (
+          <div className="message message-agent message-starting" ref={onStartingRow}>
+            <div className="message-gutter">
+              {target ? (
+                <AgentAvatar agent={target} size={32} />
+              ) : (
+                <div className="avatar-user">?</div>
+              )}
+            </div>
+            <div className="message-body">
+              <div className="message-header">
+                <span
+                  className="message-author"
+                  title={target?.name}
+                  style={target ? { color: agentNameColor(target.color) } : undefined}
+                >
+                  {target?.name ?? "Agent"}
+                </span>
+                <PendingDeliveryStatus label="Starting…" />
+              </div>
+            </div>
+          </div>
+        )}
       </TurnRunningContext.Provider>
     </SessionLinkContext.Provider>
   );

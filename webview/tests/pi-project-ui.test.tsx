@@ -798,6 +798,90 @@ describe("Project v2", () => {
 });
 
 describe("stream and message rendering", () => {
+  it("derives the same starting rows from live messages and a fresh transcript snapshot", () => {
+    vi.useFakeTimers();
+    try {
+      const target = { ...agent, id: "a2", name: "Bob", avatar: "B", isDefault: false };
+      const ws = workspace("w1", [agent, target]);
+      const first: Message = {
+        id: "input-1",
+        kind: "user",
+        agentId: null,
+        content: "start Bob",
+        timestamp: NOW,
+        status: "starting",
+        queuedFor: target.id,
+      };
+      const second: Message = {
+        ...first,
+        id: "input-2",
+        content: "start Alice",
+        queuedFor: agent.id,
+      };
+      const reply: Message = {
+        id: "reply",
+        kind: "agent",
+        agentId: target.id,
+        content: "",
+        timestamp: NOW + 1,
+        status: "streaming",
+      };
+      const mount = (messages: Message[]) => {
+        const view = render(<App />);
+        const sock = FakeSocket.instances.at(-1)!;
+        act(() => sock.open());
+        receive(sock, initFrame([ws]));
+        receive(sock, { type: "workspace_messages", workspaceId: ws.id, messages, hasMore: false });
+        const rows = () => [...view.container.querySelectorAll(".message-starting")];
+        return { view, sock, rows };
+      };
+      const add = (sock: FakeSocket, message: Message) =>
+        receive(sock, { type: "new_message", workspaceId: ws.id, message });
+      const finish = (sock: FakeSocket, msg: Message, status: Message["status"]) =>
+        receive(sock, {
+          type: "message_done",
+          workspaceId: ws.id,
+          messageId: msg.id,
+          content: msg.content,
+          status,
+          queuedFor: null,
+        });
+      const waitForDelay = () => act(() => void vi.advanceTimersByTime(350));
+
+      const live = mount([]);
+      add(live.sock, first);
+      add(live.sock, second);
+      expect(live.rows()).toHaveLength(0);
+      waitForDelay();
+      expect(live.rows().map((row) => row.querySelector(".message-author")?.textContent)).toEqual([
+        "Bob",
+        "Alice",
+      ]);
+      expect(live.rows().map((row) => row.previousElementSibling?.id)).toEqual([
+        "msg-input-1",
+        "msg-input-2",
+      ]);
+      const markup = () => live.rows().map((row) => row.outerHTML);
+      const fresh = mount([first, second]);
+      waitForDelay();
+      expect(fresh.rows().map((row) => row.outerHTML)).toEqual(markup());
+      fresh.view.unmount();
+
+      // A real streaming reply takes precedence, even before the input status is cleared.
+      add(live.sock, reply);
+      expect(live.rows().map((row) => row.previousElementSibling?.id)).toEqual(["msg-input-2"]);
+      finish(live.sock, first, "done");
+      finish(live.sock, second, "error");
+      expect(live.rows()).toHaveLength(0);
+      expect(
+        [...live.view.container.querySelectorAll(".message-agent")].map((row) => row.id),
+      ).toEqual(["msg-reply"]);
+      live.view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("warns that a message with an unknown delivery outcome will not be sent again", () => {
     const msg: Message = {
       id: "m1",

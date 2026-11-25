@@ -127,6 +127,39 @@ it("follows a growing tail only until the reader moves up, and resumes at the bo
   await bottom(scroll);
 });
 
+it("follows a delayed starting row without moving a reader who has scrolled up", async () => {
+  const { scroll, receive } = await boot();
+  const start = (i: number) => {
+    const input = turn(i, {
+      kind: "user",
+      agentId: null,
+      content: "Start the agent",
+      status: "starting",
+      queuedFor: agent.id,
+    });
+    receive({ type: "new_message", message: input });
+    return input;
+  };
+  const input = start(99);
+  expect(scroll.querySelector(".message-starting")).toBeNull();
+  await expect.poll(() => get(`#msg-${input.id} + .message-starting`)).not.toBeNull();
+  await nextPaint();
+  expect(gap(scroll)).toBeLessThanOrEqual(1);
+  receive({
+    type: "message_done",
+    messageId: input.id,
+    status: "error",
+    content: input.content,
+    queuedFor: null,
+  });
+
+  move(scroll, 200);
+  const next = start(100);
+  await expect.poll(() => get(`#msg-${next.id} + .message-starting`)).not.toBeNull();
+  await nextPaint();
+  expect(scroll.scrollTop).toBe(200);
+});
+
 it("pins a new streaming turn immediately without entry or smooth scrolling", async () => {
   const { scroll, receive } = await boot();
   const live = turn(99, { status: "streaming" });

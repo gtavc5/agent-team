@@ -519,22 +519,30 @@ describe("MessageItem delivery state", () => {
   });
 
   it.each([
-    ["a1", "Starting Alice…"],
-    ["missing", "Starting agent…"],
+    ["a1", "Alice", "A"],
+    ["missing", "Agent", "?"],
+    ["", "Agent", "?"],
   ])(
-    "shows delayed startup copy for target %s and changes to Sending… without hiding",
-    (id, label) => {
+    "shows a delayed starting row for target %s, then moves Sending… to the user header",
+    (id, name, avatar) => {
       const { container, getByRole, queryByRole, rerender } = render(view("starting", id));
       expect(queryByRole("status")).toBeNull();
+      expect(container.querySelector(".message-starting")).toBeNull();
       advance(350);
-      const inline = getByRole("status");
-      expect(inline.closest(".message-header")).not.toBeNull();
-      expect(inline.textContent?.trim()).toBe(label);
+      const input = container.querySelector(".message-user")!;
+      const row = input.nextElementSibling!;
+      expect(row.matches(".message-agent.message-starting")).toBe(true);
+      expect(row.querySelector(".message-author")?.textContent).toBe(name);
+      expect(row.querySelector(".message-gutter")?.textContent).toBe(avatar);
+      expect(row.contains(getByRole("status"))).toBe(true);
+      expect(getByRole("status").textContent?.trim()).toBe("Starting…");
+      expect(input.querySelector('[role="status"]')).toBeNull();
       expect(container.querySelector(".queued-badge, .queued-cancel, .delivery-status")).toBeNull();
 
       rerender(view("dispatching", id));
-      expect(getByRole("status")).toBe(inline);
-      expect(inline.textContent?.trim()).toBe("Sending…");
+      expect(container.querySelector(".message-starting")).toBeNull();
+      expect(getByRole("status").closest(".message-user .message-header")).not.toBeNull();
+      expect(getByRole("status").textContent?.trim()).toBe("Sending…");
       expect(container.querySelector(".queued-badge, .queued-cancel, .delivery-status")).toBeNull();
       rerender(view("done"));
       expect(queryByRole("status")).toBeNull();

@@ -379,7 +379,7 @@ it("keeps attached images unstretched and gives queue cancellation a larger targ
   expect(rect(cancel).width - glyph.getBoundingClientRect().width).toBeGreaterThanOrEqual(10);
 });
 
-it("offers real queue cancellation but no cancel action before or during a write", () => {
+it("replaces the delayed starting row with a real reply or removes it on failure", async () => {
   const cancelled: string[] = [];
   const input: Message = {
     ...message,
@@ -411,8 +411,18 @@ it("offers real queue cancellation but no cancel action before or during a write
   expect(container.querySelector(".queued-cancel")).toBeNull();
   expect(container.querySelectorAll(".message-agent")).toHaveLength(0);
 
+  rerender(view("starting"));
+  await expect.element(page.getByRole("status")).toHaveTextContent("Starting…");
+  const row = get(container, ".message-starting");
+  expect(get(container, "#msg-input").nextElementSibling).toBe(row);
+  expect(get(row, ".message-author").textContent).toBe(agent.name);
+  expect(get(row, ".agent-avatar").textContent).toBe(agent.avatar);
+  expect(get(container, "#msg-input .message-header").textContent).not.toContain("Starting");
+
   rerender(view("done", [{ ...message, status: "streaming" }]));
   expect(container.querySelectorAll(".message-agent")).toHaveLength(1);
+  expect(container.querySelector(".message-starting")).toBeNull();
+  expect(get(container, "#msg-input").nextElementSibling?.id).toBe("msg-m");
 
   const first = { ...message, status: "done" as const };
   rerender(view("queued", [first]));
@@ -422,89 +432,97 @@ it("offers real queue cancellation but no cancel action before or during a write
   expect(queryByRole("status")).toBeNull();
   expect(container.querySelector(".queued-cancel")).toBeNull();
   expect(container.querySelectorAll(".message-agent")).toHaveLength(1);
+  await expect.element(page.getByRole("status")).toHaveTextContent("Starting…");
+  rerender(view("error", [first]));
+  expect(container.querySelector(".message-starting")).toBeNull();
+  expect(container.querySelectorAll(".message-agent")).toHaveLength(1);
 });
 
-it.each([320, 1200])(
-  "shows pending delivery inline with zero layout shift at %ipx",
-  async (width) => {
-    await page.viewport(width, 720);
-    const target = { ...agent, name: long };
-    const view = (status: Message["status"]) => (
-      <div className="messages">
-        <MessageItem
-          msg={{
-            ...message,
-            id: "input",
-            kind: "user",
-            agentId: null,
-            status,
-            queuedFor: target.id,
-          }}
-          agents={[target]}
-          user={{ name: width === 320 ? long.replaceAll(" ", "") : long, avatar: "A" }}
-        />
-        <MessageItem msg={message} agents={[agent]} onQuote={no} />
-      </div>
-    );
-    const { container, queryByRole, rerender } = render(view("done"));
-    await document.fonts.ready;
-    const header = get(container, "#msg-input .message-header");
-    const author = get(header, ".message-author");
-    const time = get(header, ".message-time");
-    if (width === 320) {
-      // Without reserved status space, only 4px remain after the timestamp.
-      const gap = parseFloat(getComputedStyle(header).columnGap);
-      author.style.width = `${rect(header).width - rect(time).width - gap - 4}px`;
-    }
-    const content = get(container, "#msg-input .message-content");
-    // Quote is only available on agent replies, not user messages.
-    const quote = get(container, "#msg-m .btn-quote");
-    const layout = () => ({
-      contentY: rect(content).y,
-      headerHeight: rect(header).height,
-      authorX: rect(author).x,
-      authorWidth: rect(author).width,
-      timeX: rect(time).x,
-      quoteX: rect(quote).x,
-      quoteY: rect(quote).y,
-    });
-    const before = layout();
-    rerender(view("starting"));
-    expect(queryByRole("status")).toBeNull();
-    expect(layout()).toEqual(before);
+it.each([320, 1200])("shows Sending… inline with zero layout shift at %ipx", async (width) => {
+  await page.viewport(width, 720);
+  const target = { ...agent, name: long };
+  const view = (status: Message["status"]) => (
+    <div className="messages">
+      <MessageItem
+        msg={{
+          ...message,
+          id: "input",
+          kind: "user",
+          agentId: null,
+          status,
+          queuedFor: target.id,
+        }}
+        agents={[target]}
+        user={{ name: width === 320 ? long.replaceAll(" ", "") : long, avatar: "A" }}
+      />
+      <MessageItem msg={message} agents={[agent]} onQuote={no} />
+    </div>
+  );
+  const { container, queryByRole, rerender } = render(view("done"));
+  await document.fonts.ready;
+  const header = get(container, "#msg-input .message-header");
+  const author = get(header, ".message-author");
+  const time = get(header, ".message-time");
+  if (width === 320) {
+    // Without reserved status space, only 4px remain after the timestamp.
+    const gap = parseFloat(getComputedStyle(header).columnGap);
+    author.style.width = `${rect(header).width - rect(time).width - gap - 4}px`;
+  }
+  const content = get(container, "#msg-input .message-content");
+  // Quote is only available on agent replies, not user messages.
+  const quote = get(container, "#msg-m .btn-quote");
+  const layout = () => ({
+    contentY: rect(content).y,
+    headerHeight: rect(header).height,
+    authorX: rect(author).x,
+    authorWidth: rect(author).width,
+    timeX: rect(time).x,
+    quoteX: rect(quote).x,
+    quoteY: rect(quote).y,
+  });
+  const before = layout();
+  rerender(view("dispatching"));
+  expect(queryByRole("status")).toBeNull();
+  expect(layout()).toEqual(before);
 
-    const status = page.getByRole("status");
-    await expect.element(status).toHaveTextContent(`Starting ${target.name}…`);
-    const inline = status.element() as HTMLElement;
-    expect(inline.closest(".message-header")).toBe(header);
-    expect(time.nextElementSibling?.contains(inline)).toBe(true);
-    expect(layout()).toEqual(before);
-    expect(inline.scrollWidth).toBeGreaterThan(inline.clientWidth);
-    expect(getComputedStyle(inline).textOverflow).toBe("ellipsis");
-    expect(rect(inline).width).toBeGreaterThanOrEqual(75);
-    expect(lines(author)).toBe(1);
-    expect(author.scrollWidth).toBeGreaterThan(author.clientWidth);
-    expect(author.title).toBe(author.textContent);
-    expect(rect(inline).right).toBeLessThanOrEqual(rect(header).right);
+  const status = page.getByRole("status");
+  await expect.element(status).toHaveTextContent("Sending…");
+  const inline = status.element() as HTMLElement;
+  expect(inline.closest(".message-header")).toBe(header);
+  expect(time.nextElementSibling?.contains(inline)).toBe(true);
+  expect(layout()).toEqual(before);
+  expect(inline.scrollWidth).toBeLessThanOrEqual(inline.clientWidth);
+  expect(rect(inline).width).toBeGreaterThanOrEqual(75);
+  expect(lines(author)).toBe(1);
+  expect(author.scrollWidth).toBeGreaterThan(author.clientWidth);
+  expect(author.title).toBe(author.textContent);
+  expect(rect(inline).right).toBeLessThanOrEqual(rect(header).right);
 
-    await cdp().send("Emulation.setEmulatedMedia", {
-      features: [{ name: "prefers-reduced-motion", value: "reduce" }],
-    });
-    try {
-      expect(getComputedStyle(get(inline, ".streaming-dot")).animationName).toBe("none");
-    } finally {
-      await cdp().send("Emulation.setEmulatedMedia", { features: [] });
-    }
-    rerender(view("dispatching"));
-    expect(inline.textContent?.trim()).toBe("Sending…");
-    expect(inline.scrollWidth).toBeLessThanOrEqual(inline.clientWidth);
-    expect(layout()).toEqual(before);
+  await cdp().send("Emulation.setEmulatedMedia", {
+    features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+  });
+  try {
+    expect(getComputedStyle(get(inline, ".streaming-dot")).animationName).toBe("none");
+  } finally {
+    await cdp().send("Emulation.setEmulatedMedia", { features: [] });
+  }
+  rerender(view("done"));
+  expect(queryByRole("status")).toBeNull();
+  expect(layout()).toEqual(before);
 
-    rerender(view("done"));
-    expect(queryByRole("status")).toBeNull();
-    expect(layout()).toEqual(before);
-  },
-);
+  rerender(view("starting"));
+  await expect.element(status).toHaveTextContent("Starting…");
+  const starting = get(container, ".message-starting");
+  const startingHeader = get(starting, ".message-header");
+  const name = get(startingHeader, ".message-author");
+  expect(name.title).toBe(target.name);
+  expect(lines(name)).toBe(1);
+  const statusRect = rect(status.element());
+  expect(statusRect.left).toBeGreaterThanOrEqual(rect(name).right);
+  expect(statusRect.top).toBeLessThan(rect(name).bottom);
+  expect(statusRect.right).toBeLessThanOrEqual(rect(startingHeader).right);
+  expect(header.querySelector('[role="status"]')).toBeNull();
+});
 
 it("fits a workspace dialog and board detail on a narrow phone", async () => {
   await page.viewport(320, 820);

@@ -1169,6 +1169,12 @@ export function App() {
     }
   }, [activeWs, connected, loadMessages, measureAnchorOffset]);
 
+  // A delayed starting row can grow the transcript without a server update.
+  const onStartingRow = useCallback((row: HTMLDivElement | null) => {
+    const el = messagesContainerRef.current;
+    if (row && el && stuckToBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, []);
+
   const jumpToLatest = () => {
     const el = messagesContainerRef.current;
     if (!el) return;
@@ -1741,6 +1747,11 @@ export function App() {
                           </div>
                         );
                       }
+                      const streamingAgentIds = new Set(
+                        msgs
+                          .filter((msg) => msg.kind === "agent" && msg.status === "streaming")
+                          .map((msg) => msg.agentId),
+                      );
                       return (
                         <>
                           <HistoryHint
@@ -1766,6 +1777,12 @@ export function App() {
                                 }
                                 compact={compact}
                                 highlight={msg.id === highlightMsgId}
+                                hasStreamingReply={
+                                  msg.status === "starting" &&
+                                  !!msg.queuedFor &&
+                                  streamingAgentIds.has(msg.queuedFor)
+                                }
+                                onStartingRow={onStartingRow}
                                 onQuote={handleQuote}
                                 onJumpToMessage={jumpToMessageInActiveWs}
                                 onLoadSubagentEvents={onLoadSubagentEvents}

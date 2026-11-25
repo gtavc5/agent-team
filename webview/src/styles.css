@@ -1355,6 +1355,21 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.message-starting .message-header {
+  flex-wrap: nowrap;
+}
+.message-starting .message-author {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.message-starting .delivery-inline {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
 .delivery-inline .streaming-dot {
   display: inline-block;
   width: 5px;
