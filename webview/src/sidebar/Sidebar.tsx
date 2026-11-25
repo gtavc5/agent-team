@@ -17,6 +17,7 @@ import { NameInput } from "../project/NameInput";
 import { ConfirmDialog } from "../workspace/dialogs";
 import { QuotaPanel } from "./QuotaPanel";
 import { formatShortDateTime, quotaTone } from "./quota";
+import { describeAttention, summarizeAttention } from "./attention";
 
 function gitTitle(git: { dirty: number; ahead: number; behind: number }): string {
   const parts: string[] = [];
@@ -267,6 +268,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
     const items = g.workspaces.filter((w) => w !== lead);
     const past = g.archived.filter((w) => w !== lead);
     const leadUnread = lead?.unread ?? 0;
+    const attention = summarizeAttention(g.workspaces, p.activeWsId, g.project ? [g.project] : []);
     const hasContent = items.length > 0 || past.length > 0;
     // A project of archived sessions only (its lead archived too) has no live one.
     const git = (g.workspaces[0] ?? g.archived[0])?.git;
@@ -334,7 +336,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               Sealed
             </span>
           )}
-          {leadUnread > 0 && lead!.id !== p.activeWsId && (
+          {expanded && leadUnread > 0 && lead!.id !== p.activeWsId && (
             <span className="unread-badge">{leadUnread}</span>
           )}
           {git?.branch && !DEFAULT_BRANCH.test(git.branch) && (
@@ -354,7 +356,29 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               <Icon name="plus" />
             </button>
           )}
-          {!expanded && items.length > 0 && <span className="ws-group-count">{items.length}</span>}
+          {!expanded &&
+            (g.project && attention.count > 0 ? (
+              <span
+                className="ws-group-attention"
+                role="status"
+                aria-label={`${g.label}: ${describeAttention(attention)}`}
+                title={describeAttention(attention)}
+              >
+                <span
+                  className={`attention-badge${attention.yourTurn > 0 ? " attention-badge-your-turn" : ""}`}
+                  aria-hidden="true"
+                >
+                  {attention.count}
+                </span>
+                {attention.yourTurn > 0 && (
+                  <span className="awaits-tag" aria-hidden="true">
+                    your turn
+                  </span>
+                )}
+              </span>
+            ) : (
+              items.length > 0 && <span className="ws-group-count">{items.length}</span>
+            ))}
           {g.running && <span className="streaming-dot" />}
           {!shelf && g.project && g.project.status !== "sealed" && p.onArchiveProject && (
             <button

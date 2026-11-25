@@ -150,6 +150,36 @@ describe("project groups", () => {
     expect(header.querySelector(".unread-badge")!.textContent).toBe("2");
   });
 
+  it("summarizes lead and worker attention on a collapsed row without expanding it", () => {
+    const active = ws("w3", {
+      projectLink: { projectId: "p1", role: "worker" },
+      awaitsUser: true,
+    });
+    const props = {
+      ...sidebarProps(),
+      activeWsId: active.id,
+      groupOverrides: { "project:p1": false },
+      workspaces: [
+        { ...lead, unread: 2 },
+        { ...worker, awaitsUser: true, unread: 8 },
+        ws("w2", { projectLink: { projectId: "p1", role: "worker" }, unread: 3 }),
+        active,
+      ],
+    };
+    const { container, getByRole } = render(<Sidebar {...props} />);
+    const header = container.querySelector(".ws-group-project")!;
+    const summary = getByRole("status", { name: "clice: 3 sessions need attention, 1 your turn" });
+    expect(summary.querySelector(".attention-badge")!.textContent).toBe("3");
+    expect(summary.querySelector(".attention-badge")!.classList).toContain(
+      "attention-badge-your-turn",
+    );
+    expect(summary.querySelector(".awaits-tag")!.textContent).toBe("your turn");
+    expect(header.querySelector(".ws-group-count")).toBeNull();
+    expect(header.querySelector(".unread-badge")).toBeNull();
+    expect(container.querySelector(".ws-group-items")).toBeNull();
+    expect(props.onToggleGroup).not.toHaveBeenCalled();
+  });
+
   it("fold from anywhere on the row when the lead is gone", () => {
     const props = { ...sidebarProps(), workspaces: [worker], activeWsId: "w1" };
     const { container } = render(<Sidebar {...props} />);

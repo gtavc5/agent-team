@@ -39,6 +39,8 @@ import { ExtensionUi } from "./workspace/ExtensionUi";
 import { UiDialogModal } from "./workspace/UiDialogModal";
 import { selectUiDialogs, uiDialogKey } from "./state/uiDialogs";
 import { Sidebar } from "./sidebar/Sidebar";
+import { summarizeAttention } from "./sidebar/attention";
+import { MobileMenuButton } from "./sidebar/MobileMenuButton";
 import { GitBar } from "./workspace/GitBar";
 import { ReportSwitch } from "./workspace/ReportSwitch";
 import { BoardPage, type SessionInfo } from "./project/BoardPage";
@@ -1522,6 +1524,8 @@ export function App() {
     }
   };
 
+  const backgroundAttention = summarizeAttention(workspaces, activeWsId, projects);
+
   return (
     <SessionLinkContext.Provider value={sessionLinks}>
       <div className="app" ref={appRef}>
@@ -1593,9 +1597,10 @@ export function App() {
             <>
               <div className="panel-header" ref={headerRef}>
                 <div className="panel-header-top">
-                  <button className="mobile-menu-btn" onClick={() => setSidebarOpen(true)}>
-                    &#9776;
-                  </button>
+                  <MobileMenuButton
+                    attention={backgroundAttention}
+                    onClick={() => setSidebarOpen(true)}
+                  />
                   <span className="panel-title" title={headerTitle(activeWs)}>
                     {headerTitle(activeWs)}
                   </span>
@@ -1957,9 +1962,10 @@ export function App() {
           ) : (
             <>
               <div className="empty-header mobile-only">
-                <button className="mobile-menu-btn" onClick={() => setSidebarOpen(true)}>
-                  &#9776;
-                </button>
+                <MobileMenuButton
+                  attention={backgroundAttention}
+                  onClick={() => setSidebarOpen(true)}
+                />
                 <span>Agent Team</span>
               </div>
               <div className="empty-state">

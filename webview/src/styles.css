@@ -475,8 +475,16 @@ button {
   color: var(--text-primary);
   background: var(--bg-elevated);
 }
-.ws-group-add + .ws-group-count {
+.ws-group-add + .ws-group-count,
+.ws-group-add + .ws-group-attention {
   margin-left: 0;
+}
+.ws-group-attention {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 .ws-group-count {
   flex-shrink: 0;
@@ -621,6 +629,26 @@ button {
   font-weight: 600;
   line-height: 16px;
   text-align: center;
+}
+.attention-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-size: var(--fs-tag);
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+.attention-badge-your-turn {
+  background: rgba(229, 192, 123, 0.14);
+  color: var(--warning);
 }
 .task-delete {
   display: inline-flex;
@@ -3216,6 +3244,7 @@ button.quote-bar-content:focus-visible {
 
 .mobile-menu-btn {
   display: none;
+  position: relative;
   background: none;
   border: none;
   color: var(--text-primary);
@@ -3223,6 +3252,12 @@ button.quote-bar-content:focus-visible {
   cursor: pointer;
   padding: 0 8px 0 0;
   flex-shrink: 0;
+}
+.mobile-menu-btn > .attention-badge {
+  position: absolute;
+  top: 1px;
+  right: -1px;
+  box-shadow: 0 0 0 2px var(--bg-secondary);
 }
 .sidebar-overlay {
   display: none;
