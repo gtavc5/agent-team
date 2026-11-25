@@ -366,7 +366,10 @@ it("reattaches at the bottom when the viewport grows without scrolling", async (
   await page.viewport(1280, 420);
   const view = mount();
   const { sock } = connect([lead]);
-  sendPage(sock, lead.id, [frame(1, { content: "A transcript paragraph.\n\n".repeat(20) })]);
+  sendPage(sock, lead.id, [
+    frame(1, { content: "A transcript paragraph.\n\n".repeat(16) }),
+    frame(2, { content: "Latest reply." }),
+  ]);
   const scroller = get(".messages");
   const jump = () => view.queryByRole("button", { name: /Jump to latest/ });
   await painted();
@@ -456,9 +459,11 @@ it("restores A's exact reading anchor after sending in B, without following new 
   // Another latest-page reply can arrive before the outstanding older page.
   receive(disjoint);
   expect(olderRequests()).toBe(2);
+  // Scrolling to the bottom while paging back to the anchor hides Jump to latest
+  // only because m99 is in view — it must not reattach following.
   scroller().scrollTop = scroller().scrollHeight;
   fireEvent.scroll(scroller());
-  expect(view.getByRole("button", { name: /Jump to latest/ })).toBeTruthy();
+  expect(view.queryByRole("button", { name: /Jump to latest/ })).toBeNull();
   receive({
     type: "workspace_messages",
     workspaceId: "A",
@@ -467,12 +472,154 @@ it("restores A's exact reading anchor after sending in B, without following new 
     messages: Array.from({ length: 50 }, (_, index) => frame(index)),
   });
   expect(offset()).toBeCloseTo(original, 0);
+  expect(view.getByRole("button", { name: /Jump to latest/ })).toBeTruthy();
   fireEvent.click(view.getByRole("button", { name: /Jump to latest/ }));
   expect(gap()).toBeLessThanOrEqual(1);
   expect(view.queryByRole("button", { name: /Jump to latest/ })).toBeNull();
   fireEvent.click(row("B")!);
   fireEvent.click(row("A")!);
   expect(gap()).toBeLessThanOrEqual(1);
+});
+
+it("hides Jump to latest while reading a tall latest message without yanking on stream updates", async () => {
+  await page.viewport(1280, 720);
+  const view = mount("A");
+  const { sock, receive } = connect([lead, a, b]);
+  const tall = frame(10, {
+    status: "streaming",
+    content: Array.from({ length: 60 }, (_, i) => `Paragraph ${i + 1} of a very long reply.`).join(
+      "\n\n",
+    ),
+  });
+  sendPage(sock, a.id, [...Array.from({ length: 8 }, (_, i) => frame(i)), tall]);
+  const scroller = () => get(".messages");
+  const jump = () => view.queryByRole("button", { name: /Jump to latest/ });
+  const gap = () => scroller().scrollHeight - scroller().clientHeight - scroller().scrollTop;
+
+  await painted();
+  expect(gap()).toBeLessThanOrEqual(1);
+
+  // Scroll up > 150px inside the tall latest message so auto-follow disengages,
+  // while keeping the top/middle of the latest message inside the viewport.
+  const tallEl = get("#msg-m10");
+  scroller().scrollTop +=
+    tallEl.getBoundingClientRect().top - scroller().getBoundingClientRect().top + 120;
+  fireEvent.scroll(scroller());
+  await painted();
+
+  expect(gap()).toBeGreaterThan(150);
+  expect(jump()).toBeNull();
+
+  // Streaming appends to that tall latest message must NOT yank scrollTop down.
+  const lockedTop = scroller().scrollTop;
+  const beforeGrowth = scroller().scrollHeight;
+  receive({
+    type: "stream_event",
+    workspaceId: a.id,
+    messageId: "m10",
+    event: { kind: "text_delta", content: "\n\nMore streaming paragraphs.\n\n".repeat(12) },
+  });
+  await expect.poll(() => scroller().scrollHeight).toBeGreaterThan(beforeGrowth);
+  await painted();
+
+  expect(scroller().scrollTop).toBe(lockedTop);
+  expect(jump()).toBeNull();
+
+  // Switching away and back preserves the reading position without showing Jump to latest.
+  fireEvent.click(row("B")!);
+  sendPage(sock, b.id, [frame(99, { content: "Session B" })]);
+  fireEvent.click(row("A")!);
+  await painted();
+  expect(scroller().scrollTop).toBeCloseTo(lockedTop, 0);
+  expect(jump()).toBeNull();
+});
+
+it("shows Jump to latest immediately when a new message arrives below a tall message being read", async () => {
+  await page.viewport(1280, 720);
+  const view = mount("A");
+  const { sock, receive } = connect([lead, a]);
+  const tall = frame(10, {
+    content: Array.from({ length: 60 }, (_, i) => `Paragraph ${i + 1} of a very long reply.`).join(
+      "\n\n",
+    ),
+  });
+  sendPage(sock, a.id, [frame(0), tall]);
+  const scroller = () => get(".messages");
+  const jump = () => view.queryByRole("button", { name: /Jump to latest/ });
+  const gap = () => scroller().scrollHeight - scroller().clientHeight - scroller().scrollTop;
+
+  await painted();
+  const tallEl = get("#msg-m10");
+  scroller().scrollTop +=
+    tallEl.getBoundingClientRect().top - scroller().getBoundingClientRect().top + 80;
+  fireEvent.scroll(scroller());
+  await painted();
+
+  expect(gap()).toBeGreaterThan(150);
+  expect(jump()).toBeNull();
+  const readingTop = scroller().scrollTop;
+
+  // A new message arrives below the tall message: now the latest message is off-screen.
+  receive({
+    type: "new_message",
+    workspaceId: a.id,
+    message: frame(11, { status: "streaming", content: "Newer message below viewport." }),
+  });
+  await expect.poll(jump).not.toBeNull();
+  expect(scroller().scrollTop).toBe(readingTop);
+
+  // Clicking Jump to latest scrolls to the bottom and hides the button.
+  fireEvent.click(jump()!);
+  expect(gap()).toBeLessThanOrEqual(1);
+  expect(jump()).toBeNull();
+});
+
+it("toggles Jump to latest when scrolling above a tall latest message and back into it", async () => {
+  await page.viewport(1280, 720);
+  const view = mount("A");
+  const { sock, receive } = connect([lead, a]);
+  const history = Array.from({ length: 12 }, (_, i) => frame(i));
+  const tall = frame(12, {
+    status: "streaming",
+    content: Array.from({ length: 60 }, (_, i) => `Paragraph ${i + 1} of a very long reply.`).join(
+      "\n\n",
+    ),
+  });
+  sendPage(sock, a.id, [...history, tall]);
+  const scroller = () => get(".messages");
+  const jump = () => view.queryByRole("button", { name: /Jump to latest/ });
+  const gap = () => scroller().scrollHeight - scroller().clientHeight - scroller().scrollTop;
+
+  await painted();
+  // Scroll up into older history so the latest message is completely below the viewport.
+  scroller().scrollTop = 0;
+  fireEvent.scroll(scroller());
+  await expect.poll(jump).not.toBeNull();
+  expect(get("#msg-m12").getBoundingClientRect().top).toBeGreaterThanOrEqual(
+    scroller().getBoundingClientRect().bottom,
+  );
+
+  // Scroll back down until the top of the tall latest message enters the viewport,
+  // still well above the very bottom of the transcript.
+  scroller().scrollTop +=
+    get("#msg-m12").getBoundingClientRect().top - scroller().getBoundingClientRect().bottom + 100;
+  fireEvent.scroll(scroller());
+  await expect.poll(jump).toBeNull();
+  expect(gap()).toBeGreaterThan(150);
+
+  // Streaming still does not yank the reader who hasn't returned to the very bottom.
+  const midTop = scroller().scrollTop;
+  const beforeGrowth = scroller().scrollHeight;
+  receive({
+    type: "stream_event",
+    workspaceId: a.id,
+    messageId: "m12",
+    event: { kind: "text_delta", content: "\n\nTail extension.\n\n".repeat(10) },
+  });
+  await expect.poll(() => scroller().scrollHeight).toBeGreaterThan(beforeGrowth);
+  await painted();
+  expect(scroller().scrollTop).toBe(midTop);
+  expect(jump()).toBeNull();
 });
 
 it("keeps 307px project headers readable with right-aligned status, centered Archive pill, and one-click worker archive", async () => {

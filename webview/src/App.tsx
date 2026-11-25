@@ -49,6 +49,7 @@ import { GitBar } from "./workspace/GitBar";
 import { ReportSwitch } from "./workspace/ReportSwitch";
 import { BoardPage, type SessionInfo } from "./project/BoardPage";
 import { HistoryHint } from "./chat/HistoryHint";
+import { isLatestMessageVisible, shouldShowJumpToLatest } from "./chat/jumpLatest";
 import {
   viewportVars,
   fullHeight,
@@ -497,6 +498,7 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightMsgId, setHighlightMsgId] = useState<string | null>(null);
   const [following, setFollowing] = useState(true);
+  const [latestVisible, setLatestVisible] = useState(true);
   const readingPositions = useRef(new Map<string, ReadingPosition>());
   const readingSession = useRef<string | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -1070,6 +1072,17 @@ export function App() {
   const jumpScrollTopRef = useRef<number | null>(null);
   const wasStreamingRef = useRef(false);
 
+  const syncLatestVisible = useCallback(() => {
+    const ws = activeWsRef.current;
+    const el = messagesContainerRef.current;
+    if (!el || !ws?.messagesLoaded || ws.messages.length === 0) {
+      setLatestVisible(false);
+      return;
+    }
+    const latestId = ws.messages[ws.messages.length - 1]?.id;
+    setLatestVisible(isLatestMessageVisible(el, latestId));
+  }, []);
+
   const onMessagesScrollTrack = useCallback(() => {
     const el = messagesContainerRef.current;
     if (!el) return;
@@ -1080,6 +1093,7 @@ export function App() {
       anchor.top = el.scrollTop;
       anchor.firstOffset = measureAnchorOffset(el, anchor.firstId);
     }
+    syncLatestVisible();
     // A jump is not a request to reattach to the bottom or load another page.
     const jumpTop = jumpScrollTopRef.current;
     jumpScrollTopRef.current = null;
@@ -1095,7 +1109,7 @@ export function App() {
     setFollowing(stuckToBottomRef.current);
     if (moved || wasFollowing !== stuckToBottomRef.current) saveReadingPosition();
     onMessagesScroll();
-  }, [measureAnchorOffset, onMessagesScroll, saveReadingPosition]);
+  }, [measureAnchorOffset, onMessagesScroll, saveReadingPosition, syncLatestVisible]);
 
   // The composer growing (a long draft, the command list) takes the
   // transcript's room from below: a reader at the end stays there. Keyed on
@@ -1127,13 +1141,14 @@ export function App() {
           el.scrollTop = el.scrollHeight;
         }
       }
+      syncLatestVisible();
       height = nextHeight;
       range = nextRange;
     });
     ro.observe(el);
     if (el.firstElementChild) ro.observe(el.firstElementChild);
     return () => ro.disconnect();
-  }, [activeWs?.id, saveReadingPosition]);
+  }, [activeWs?.id, saveReadingPosition, syncLatestVisible]);
 
   // Follow the conversation while the reader is at the bottom: a new
   // message scrolls into view, a streaming one keeps the end pinned. Only
@@ -1144,6 +1159,7 @@ export function App() {
     const el = messagesContainerRef.current;
     if (!el || !activeWs || !activeWs.messagesLoaded) {
       readingSession.current = null;
+      syncLatestVisible();
       return;
     }
     const saved = readingPositions.current.get(activeWs.id) ?? { following: true };
@@ -1160,6 +1176,7 @@ export function App() {
       readingSession.current = null;
       stuckToBottomRef.current = false;
       setFollowing(false);
+      syncLatestVisible();
       if (connected && !activeWs.loadingOlder)
         loadMessages(activeWs.id, oldest.timestamp, JUMP_PAGE);
       return;
@@ -1174,6 +1191,7 @@ export function App() {
       restoreReadingPosition(el, saved);
       jumpScrollTopRef.current = el.scrollTop;
       lastScrollTopRef.current = el.scrollTop;
+      syncLatestVisible();
       return;
     }
     const prevCount = prevMsgCountRef.current;
@@ -1190,18 +1208,24 @@ export function App() {
           ? nowOffset - anchor.firstOffset
           : el.scrollHeight - anchor.height;
       el.scrollTop = anchor.top + delta;
+      syncLatestVisible();
       return;
     }
     if (el && stuckToBottomRef.current && (msgs.length > prevCount || streaming || wasStreaming)) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [activeWs, connected, loadMessages, measureAnchorOffset]);
+    syncLatestVisible();
+  }, [activeWs, connected, loadMessages, measureAnchorOffset, syncLatestVisible]);
 
   // A delayed starting row can grow the transcript without a server update.
-  const onStartingRow = useCallback((row: HTMLDivElement | null) => {
-    const el = messagesContainerRef.current;
-    if (row && el && stuckToBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, []);
+  const onStartingRow = useCallback(
+    (row: HTMLDivElement | null) => {
+      const el = messagesContainerRef.current;
+      if (row && el && stuckToBottomRef.current) el.scrollTop = el.scrollHeight;
+      syncLatestVisible();
+    },
+    [syncLatestVisible],
+  );
 
   const jumpToLatest = () => {
     const el = messagesContainerRef.current;
@@ -1212,6 +1236,7 @@ export function App() {
     lastScrollTopRef.current = el.scrollTop;
     if (activeWsId) readingPositions.current.set(activeWsId, { following: true });
     setFollowing(true);
+    setLatestVisible(true);
   };
 
   useEffect(() => {
@@ -1239,6 +1264,7 @@ export function App() {
         lastScrollTopRef.current = after;
         saveReadingPosition();
         if (after !== before) jumpScrollTopRef.current = after;
+        syncLatestVisible();
       }, 100);
       jumpHighlightTimerRef.current = setTimeout(() => setHighlightMsgId(null), 2000);
       return;
@@ -1254,7 +1280,15 @@ export function App() {
       setPendingJump(null);
       if (jump.fromSearch) setNotice("That message is no longer in the history.");
     }
-  }, [pendingJump, activeWsId, activeWs, loadMessages, rememberHistoryAnchor, saveReadingPosition]);
+  }, [
+    pendingJump,
+    activeWsId,
+    activeWs,
+    loadMessages,
+    rememberHistoryAnchor,
+    saveReadingPosition,
+    syncLatestVisible,
+  ]);
 
   const isAnyRunning = activeWs?.agents.some(isAgentActive) ?? false;
   const hasAgents = (activeWs?.agents.length ?? 0) > 0;
@@ -1858,7 +1892,12 @@ export function App() {
               </div>
 
               <div className="input-area">
-                {!following && activeWs.messagesLoaded && (
+                {shouldShowJumpToLatest({
+                  following,
+                  messagesLoaded: activeWs.messagesLoaded,
+                  messageCount: activeWs.messages.length,
+                  latestVisible,
+                }) && (
                   <button
                     type="button"
                     className="jump-latest"
