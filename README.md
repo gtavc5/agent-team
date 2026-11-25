@@ -127,7 +127,7 @@ cd agent-team
 ./scripts/yaat-service.sh install
 ```
 
-For setup problems, open **Service diagnostics** in the sidebar, or run `AGENT_TEAM_BASE_DIR="$HOME/.yaat" scripts/start-server.sh --doctor --json` after building. The report identifies the failed step and how to fix it. ACP is optional; prepare its runtime explicitly before using ACP models ([instructions](docs/DEPLOY.md#optional-antigravity-acp-runtime)).
+For setup problems, open **# → Diagnostics** in the sidebar (offline or unhealthy panels show **Service diagnostics** directly), or run `AGENT_TEAM_BASE_DIR="$HOME/.yaat" scripts/start-server.sh --doctor --json` after building. The report identifies the failed step and how to fix it. ACP is optional; prepare its runtime explicitly before using ACP models ([instructions](docs/DEPLOY.md#optional-antigravity-acp-runtime)).
 
 Or run directly in the foreground:
 

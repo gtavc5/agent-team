@@ -255,8 +255,12 @@ button {
   align-items: center;
   justify-content: space-between;
 }
+.sidebar-title {
+  min-width: 0;
+}
 .sidebar-actions {
   display: flex;
+  flex-shrink: 0;
   gap: 2px;
 }
 .sidebar-header button {
@@ -286,6 +290,67 @@ button {
 .sidebar-header button:hover {
   color: var(--text-primary);
   background: var(--bg-hover);
+}
+.sidebar-header .sidebar-debug {
+  opacity: 0.65;
+}
+.sidebar-header .sidebar-debug:hover,
+.sidebar-header .sidebar-debug[aria-expanded="true"] {
+  opacity: 1;
+}
+.sidebar-debug-strip {
+  box-sizing: border-box;
+  width: 100%;
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 14px;
+  padding: 0 16px 9px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--fs-meta);
+  /* Composite small text above the theme's 4.5:1 contrast floor. */
+  opacity: 0.9;
+  transform-origin: top;
+  animation: sidebar-debug-unfold 160ms ease-out;
+}
+.sidebar-debug-strip a,
+.sidebar-debug-strip button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  line-height: 26px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.sidebar-debug-strip a:hover,
+.sidebar-debug-strip button:hover:not(:disabled) {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+.sidebar-debug-strip button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+@keyframes sidebar-debug-unfold {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+    clip-path: inset(0 0 100% 0);
+  }
+  to {
+    opacity: 0.9;
+    transform: translateY(0);
+    clip-path: inset(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-debug-strip {
+    animation: none;
+  }
 }
 
 .disconnected {
@@ -3323,6 +3388,10 @@ button.quote-bar-content:focus-visible {
   .sidebar.sidebar-open {
     transform: translateX(0);
     box-shadow: 4px 0 20px rgba(0, 0, 0, 0.4);
+  }
+  /* ?debug=1 may open the strip before the drawer is first revealed. */
+  .sidebar:not(.sidebar-open) .sidebar-debug-strip {
+    display: none;
   }
   .sidebar-overlay {
     display: block;

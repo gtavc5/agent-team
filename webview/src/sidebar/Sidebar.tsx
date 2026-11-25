@@ -1,6 +1,6 @@
 import { recordTelemetry } from "../telemetry";
 import type { QuotaState } from "../../../shared/quota";
-import { memo, useState, useEffect } from "react";
+import { memo, useState, useEffect, useId, useRef } from "react";
 import type { Workspace, Project, SystemStatus, SearchHit } from "../state/useServer";
 import {
   groupWorkspaces,
@@ -75,6 +75,8 @@ export interface SidebarProps {
   projects?: Project[];
   activeWsId: string | null;
   connected: boolean;
+  // Mobile keeps the drawer mounted while it is translated off screen.
+  sidebarOpen?: boolean;
   groupOverrides: Record<string, boolean>;
   finishedStatus: Record<string, "done" | "failed">;
   searchQuery: string;
@@ -95,8 +97,8 @@ export interface SidebarProps {
   // Create a workspace in a group's folder (the "+" on the group header).
   onCreateIn: (cwd: string) => void;
   onReplayDemo: () => void;
-  // Save a layout snapshot on the server (see debugSnapshot.ts).
-  onDebugSnapshot: () => void;
+  // Capture synchronously, then save a layout snapshot on the server.
+  onDebugSnapshot: () => void | Promise<unknown>;
   // One project's archived sessions, or (null) those in no project.
   onPurgeArchived: (projectId: string | null) => void;
   onArchiveProject?: (projectId: string) => void;
@@ -107,30 +109,41 @@ export interface SidebarProps {
 export const Sidebar = memo(function Sidebar(p: SidebarProps) {
   const now = p.now ?? Date.now();
   const debug = new URLSearchParams(window.location.search).get("debug") === "1";
-  const [healthy, setHealthy] = useState(false);
+  const [debugOpen, setDebugOpen] = useState(debug);
+  const [health, setHealth] = useState<"unknown" | "healthy" | "unhealthy">("unknown");
+  const [snapshotBusy, setSnapshotBusy] = useState(false);
+  const snapshotUpload = useRef<Promise<unknown> | null>(null);
+  const debugId = useId();
+  const debugTrigger = useRef<HTMLButtonElement>(null);
+  const debugHeader = useRef<HTMLDivElement>(null);
+  const debugStrip = useRef<HTMLDivElement>(null);
+  const sidebarOpen = p.sidebarOpen ?? true;
+  const previousSidebarOpen = useRef(sidebarOpen);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const deleting = p.workspaces.find((ws) => ws.id === deleteId);
   useEffect(() => {
-    setHealthy(false);
-    if (!p.connected || debug) return;
+    setHealth("unknown");
+    if (!p.connected) return;
     let request: AbortController | undefined;
     const check = async () => {
       request?.abort();
       const controller = (request = new AbortController());
-      let healthy = false;
+      let health: "healthy" | "unhealthy" = "unhealthy";
       try {
         const response = await fetch("api/diagnostics", { signal: controller.signal });
         const report: unknown = response.ok ? await response.json() : null;
-        healthy =
+        health =
           !!report &&
           typeof report === "object" &&
           "issues" in report &&
           Array.isArray(report.issues) &&
-          report.issues.length === 0;
+          report.issues.length === 0
+            ? "healthy"
+            : "unhealthy";
       } catch {
         // An unavailable report must not hide the diagnostics link.
       }
-      if (!controller.signal.aborted) setHealthy(healthy);
+      if (!controller.signal.aborted) setHealth(health);
     };
     void check();
     // Model/account readiness can change without reconnecting the socket.
@@ -139,7 +152,63 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
       clearInterval(timer);
       request?.abort();
     };
-  }, [p.connected, debug]);
+  }, [p.connected]);
+  useEffect(() => {
+    if (previousSidebarOpen.current && !sidebarOpen) setDebugOpen(false);
+    previousSidebarOpen.current = sidebarOpen;
+  }, [sidebarOpen]);
+  useEffect(() => {
+    if (!debugOpen) return;
+    const outside = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (
+        !target ||
+        debugHeader.current?.contains(target) ||
+        debugStrip.current?.contains(target)
+      ) {
+        return;
+      }
+      // Reveal an initially closed mobile drawer before dismissing its tools.
+      if (target instanceof Element && target.closest(".mobile-menu-btn")) return;
+      setDebugOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+      setDebugOpen(false);
+      debugTrigger.current?.focus();
+    };
+    // Capture clicks whose row handlers stop propagation. Click (not
+    // pointerdown) lets the target finish before this row collapses.
+    document.addEventListener("click", outside, true);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("click", outside, true);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [debugOpen]);
+
+  const saveSnapshot = () => {
+    if (snapshotUpload.current) return;
+    // App collects before this handler opens the strip, then returns its upload.
+    const pending = Promise.resolve(p.onDebugSnapshot());
+    snapshotUpload.current = pending;
+    setSnapshotBusy(true);
+    const settled = () => {
+      if (snapshotUpload.current !== pending) return;
+      snapshotUpload.current = null;
+      setSnapshotBusy(false);
+    };
+    // App shows the upload error notice; rejection must not close the strip.
+    void pending.then(settled, settled);
+  };
+  const toggleDebug = () => {
+    if (debugOpen) {
+      setDebugOpen(false);
+      return;
+    }
+    saveSnapshot();
+    setDebugOpen(true);
+  };
   const known = new Set((p.projects ?? []).map((pr) => pr.id));
   // A lead takes its project with it; one whose project is unknown (its
   // project.json unreadable) is just a workspace.
@@ -457,19 +526,11 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
 
   return (
     <>
-      <div className="sidebar-header">
+      <div className="sidebar-header" ref={debugHeader}>
         <span className="sidebar-title">
           Workspaces {!p.connected && <span className="disconnected">offline</span>}
         </span>
         <span className="sidebar-actions">
-          {debug && (
-            <button
-              title="Replay rendering demo (synthetic events for visual review)"
-              onClick={p.onReplayDemo}
-            >
-              <Icon name="play" />
-            </button>
-          )}
           <button title="New session" onClick={p.onCreate}>
             <Icon name="plus" />
           </button>
@@ -478,17 +539,51 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               <Icon name="board" />
             </button>
           )}
-          {debug && (
-            <button
-              className="sidebar-debug"
-              title="Save a layout debug snapshot (viewport, geometry, DOM) on the server"
-              onClick={p.onDebugSnapshot}
-            >
-              <Icon name="snapshot" />
-            </button>
-          )}
+          <button
+            ref={debugTrigger}
+            type="button"
+            className="sidebar-debug"
+            aria-label="Save snapshot and open debug tools"
+            aria-expanded={debugOpen}
+            aria-controls={debugId}
+            title="Save snapshot and open debug tools"
+            onClick={toggleDebug}
+          >
+            <Icon name="snapshot" />
+          </button>
         </span>
       </div>
+      {debugOpen && (
+        <div
+          ref={debugStrip}
+          id={debugId}
+          className="sidebar-debug-strip"
+          role="group"
+          aria-label="Debug tools"
+        >
+          <a href="api/diagnostics?format=text" target="_blank" rel="noreferrer">
+            Diagnostics
+          </a>
+          <button
+            type="button"
+            title="Replay rendering demo (synthetic events for visual review)"
+            onClick={() => {
+              setDebugOpen(false);
+              p.onReplayDemo();
+            }}
+          >
+            Demo
+          </button>
+          <button
+            type="button"
+            title="Save a fresh layout debug snapshot"
+            disabled={snapshotBusy}
+            onClick={saveSnapshot}
+          >
+            Snapshot
+          </button>
+        </div>
+      )}
       <div className="search-bar">
         <input
           type="text"
@@ -582,14 +677,10 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           )}
         </div>
       )}
-      {(debug || !p.connected || !healthy) && (
+      {(!p.connected || health === "unhealthy") && (
         <small className="system-status-panel">
           <a href="api/diagnostics?format=text" target="_blank" rel="noreferrer">
             Service diagnostics
-          </a>
-          {" · "}
-          <a href="api/diagnostics" target="_blank" rel="noreferrer">
-            JSON
           </a>
         </small>
       )}

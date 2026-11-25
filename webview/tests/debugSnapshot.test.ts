@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
-import { collectSnapshot, trimmedHtml, SNAPSHOT_SELECTORS } from "../src/dev/debugSnapshot";
+import { describe, it, expect, vi } from "vitest";
+import {
+  collectSnapshot,
+  trimmedHtml,
+  uploadSnapshot,
+  SNAPSHOT_SELECTORS,
+} from "../src/dev/debugSnapshot";
 
 describe("debug snapshot", () => {
   it("collects geometry for the shell elements that exist and trims message bodies", () => {
@@ -282,5 +287,25 @@ describe("debug snapshot", () => {
     const quietSnap = collectSnapshot();
     expect(quietSnap.activeTurn?.turnFooter?.state).toBe("quiet");
     expect(quietSnap.activeTurn?.turnFooter?.text).toBe("");
+  });
+
+  it("uploads the pre-collected DOM instead of capturing the opened debug strip", async () => {
+    document.body.innerHTML = '<div id="root"><div class="app"></div></div>';
+    const snapshot = collectSnapshot();
+    document.querySelector(".app")!.innerHTML = '<div class="sidebar-debug-strip"></div>';
+    const fetch = vi.fn((input?: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ path: "snapshot.json" }) });
+    });
+    vi.stubGlobal("fetch", fetch);
+    try {
+      await expect(uploadSnapshot(snapshot)).resolves.toBe("snapshot.json");
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch.mock.calls[0][1]?.body).toBe(JSON.stringify(snapshot));
+      expect(snapshot.html).not.toContain("sidebar-debug-strip");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

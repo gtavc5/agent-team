@@ -429,8 +429,7 @@ export function collectSnapshot(): DebugSnapshot {
   };
 }
 
-export async function uploadSnapshot(): Promise<string> {
-  const snap = collectSnapshot();
+export async function uploadSnapshot(snap: DebugSnapshot = collectSnapshot()): Promise<string> {
   const res = await fetch("debug/snapshot", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

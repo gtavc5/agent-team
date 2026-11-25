@@ -60,7 +60,7 @@ import {
   isTextInput,
   settleScroller,
 } from "./viewport/viewportHeal";
-import { uploadSnapshot } from "./dev/debugSnapshot";
+import { collectSnapshot, uploadSnapshot } from "./dev/debugSnapshot";
 
 // Re-exported for tests and for anyone importing the old single-file layout.
 export { GitBar } from "./workspace/GitBar";
@@ -215,7 +215,9 @@ export function App() {
     return () => clearTimeout(t);
   }, [notice]);
   const takeSnapshot = useCallback(() => {
-    uploadSnapshot().then(
+    // Capture before Sidebar opens its debug strip; only the upload is async.
+    const snapshot = collectSnapshot();
+    return uploadSnapshot(snapshot).then(
       (p) => setNotice(`Snapshot saved: ${p}`),
       (e) => setNotice(`Snapshot failed: ${e instanceof Error ? e.message : e}`),
     );
@@ -1565,6 +1567,7 @@ export function App() {
             projects={projects}
             activeWsId={activeWsId}
             connected={connected}
+            sidebarOpen={sidebarOpen}
             groupOverrides={groupOverrides}
             finishedStatus={finishedStatus}
             searchQuery={searchQuery}

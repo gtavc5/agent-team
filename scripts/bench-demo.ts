@@ -678,6 +678,8 @@ export async function runDemoBrowserSuite(
     clientBeforeReplay = await sampleCdpMemory(cdp);
     serverBeforeReplay = sampleServerMemory();
 
+    // Navigation folded the initially open ?debug=1 strip; reopen it first.
+    await page.locator('button[title="Save snapshot and open debug tools"]').click();
     await page.locator('button[title*="Replay rendering demo"]').click();
 
     // Select the newly created "🎬 Replay Demo" workspace in the sidebar so the
