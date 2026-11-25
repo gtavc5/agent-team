@@ -17,7 +17,7 @@ import {
   usableModels,
 } from "../workspace/models";
 import { EffortSelect, effortOf, selectableLevels } from "../workspace/EffortSelect";
-import { agentState, stateLabel } from "../workspace/agents";
+import { agentNameColor, agentState, stateLabel } from "../workspace/agents";
 import { formatRelative, formatTokens } from "../format";
 import { DEFAULT_BRANCH, sessionName, sessionState, sessionWork } from "./scope";
 import { AgentTasks, hasWork, soon, workCount, type TaskActions } from "./SessionTasks";
@@ -181,7 +181,7 @@ function SessionCard({
           {w.agents.map((a) => (
             <span key={a.id} className="ap-brief-agent">
               <AgentAvatar agent={a} size={16} />
-              <span className="clip" style={{ color: a.color }}>
+              <span className="clip" style={{ color: agentNameColor(a.color) }}>
                 {a.name}
               </span>
               <span className={`ap-brief-meta as-${agentState(a)}`}>{brief(a, connected)}</span>
@@ -359,7 +359,7 @@ function AgentRow({
         <AgentAvatar agent={a} size={22} />
         <div className="ap-agent-main">
           <div className="ap-agent-top">
-            <span className="ap-agent-name" style={{ color: a.color }}>
+            <span className="ap-agent-name" style={{ color: agentNameColor(a.color) }}>
               {a.name}
             </span>
             <span className={`ap-meta${hasControls ? " has-controls" : ""}`}>

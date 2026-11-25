@@ -8,7 +8,7 @@ import { CodeView } from "../../src/panels/FilesPanel";
 import { DiffView } from "../../src/panels/ChangesView";
 import { Sidebar, SystemStatusPanel, type SidebarProps } from "../../src/sidebar/Sidebar";
 import type { AgentInfo, Workspace } from "../../src/state/useServer";
-import "highlight.js/styles/github-dark.css";
+import { MdBlock } from "../../src/chat/markdown";
 import "../../src/styles.css";
 
 const long = "A long name that must not push other controls off the edge ".repeat(8).trim();
@@ -41,6 +41,7 @@ const textRect = (el: Element) => {
 let touch = false;
 afterEach(async () => {
   cleanup();
+  delete document.documentElement.dataset.theme;
   if (touch) await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: false });
   touch = false;
 });
@@ -142,77 +143,6 @@ it("clips only the session title and reveals actions on hover or keyboard focus 
   await page.elementLocator(row).hover();
   await expect.poll(() => style(hover).opacity).toBe("1");
   expect(measureRow()).toEqual(before);
-});
-
-it("exposes touch actions only on the open session and gives the lists a larger type scale", async () => {
-  await page.viewport(1000, 800);
-  const unrelated = {
-    id: "other",
-    name: "Other",
-    root: "/other",
-    leadWorkspaceId: "other-lead",
-    createdAt: 1,
-    objectives: [],
-  };
-  const props = {
-    ...sidebar,
-    projects: [...sidebar.projects!, unrelated, archivedProject],
-    workspaces: [
-      ...sidebar.workspaces,
-      workspace("other-lead", { cwd: "/other", projectLink: { projectId: "other", role: "lead" } }),
-      ...archivedRows,
-    ],
-  };
-  const { container, rerender } = render(sidebarView(props));
-  const row = get(container, ".task-item");
-  const root = style(document.documentElement);
-  const scale = () =>
-    ["name", "text", "meta", "tag"].map((size) =>
-      parseFloat(root.getPropertyValue(`--fs-${size}`)),
-    );
-  const desktop = scale();
-  const listText = [
-    get(row, ".task-name .clip"),
-    get(row, ".awaits-tag"),
-    get(container, ".ws-archive-toggle"),
-  ];
-  const renderedDesktop = listText.map((el) => parseFloat(style(el).fontSize));
-  const icon = get(container, ".sidebar-header .icon");
-  const desktopIcon = rect(icon).width;
-  await page.elementLocator(get(container, ".sidebar-header")).hover();
-  touch = true;
-  await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: true });
-  await page.viewport(390, 800);
-  expect(matchMedia("(hover: none)").matches).toBe(true);
-  scale().forEach((value, i) => expect(value).toBeGreaterThan(desktop[i]));
-  listText.forEach((el, i) =>
-    expect(parseFloat(style(el).fontSize)).toBeGreaterThan(renderedDesktop[i]),
-  );
-  expect(rect(icon).width).toBeGreaterThan(desktopIcon);
-  expect(rect(get(container, ".ws-group-add .icon")).width).toBe(
-    rect(get(container, ".task-delete .icon")).width,
-  );
-  expect(style(get(row, ".task-hover")).pointerEvents).toBe("none");
-  const current = get(container, ".ws-group-header.current");
-  const inactive = get(container, ".ws-group-project:not(.current)");
-  expect(style(get(current, ".ws-group-add")).opacity).toBe("1");
-  expect(style(get(current, ".task-delete")).visibility).toBe("visible");
-  for (const selector of [".ws-group-add", ".ws-group-archive"]) {
-    expect(rect(get(inactive, selector)).width).toBe(0);
-  }
-  expect(style(get(inactive, ".task-delete")).visibility).toBe("hidden");
-  fireEvent.click(get(container, ".ws-archive-toggle"));
-  expect(style(get(container, ".ws-archived-purge")).opacity).toBe("1");
-  fireEvent.click(get(container, ".ws-shelf .ws-archived-header"));
-  expect(style(get(container, 'button[title^="Bring Archived"]')).opacity).toBe("1");
-
-  rerender(sidebarView({ ...props, activeWsId: "worker" }));
-  await expect.poll(() => style(get(row, ".task-hover")).opacity).toBe("1");
-  expect(style(get(row, ".task-hover")).pointerEvents).toBe("auto");
-  rerender(sidebarView({ ...props, activeWsId: "other-lead" }));
-  expect(rect(get(current, ".ws-group-add")).width).toBe(0);
-  expect(rect(get(inactive, ".ws-group-add")).width).toBeGreaterThan(0);
-  expect(style(get(inactive, ".task-delete")).visibility).toBe("visible");
 });
 
 it("uses the sidebar type scale and hover affordance on archived project rows", async () => {
@@ -426,42 +356,139 @@ it("wraps task descriptions above their times and leaves room under the last act
   }
 });
 
-it("scrolls highlighted file and diff lines horizontally beneath stationary line numbers", async () => {
+it.each([
+  { width: 1440, height: 900, theme: "light" },
+  { width: 1440, height: 900, theme: "dark" },
+  { width: 390, height: 844, theme: "light" },
+  { width: 390, height: 844, theme: "dark" },
+])(
+  "shares syntax colors and preserves code scrolling in $theme at $width×$height",
+  async ({ width, height, theme }) => {
+    await page.viewport(width, height);
+    document.documentElement.dataset.theme = theme;
+    const code = `const sentence = ${JSON.stringify(long)};`;
+    const { container } = render(
+      <>
+        <div className="message-content" style={{ width: 320 }}>
+          <MdBlock>{`[Read more](https://example.test)\n\n\`\`\`ts\n${code}\n\`\`\``}</MdBlock>
+        </div>
+        <div className="side-panel-body" style={{ width: 320 }}>
+          <CodeView
+            content={`const n = 1;\n${code}\n`}
+            lang="typescript"
+            target={{ path: "a.ts" }}
+          />
+          <DiffView
+            lang="typescript"
+            diff={{
+              path: "a.ts",
+              diff: `@@ -98 +99 @@\n-const n = 1;\n+${code}\n`,
+              binary: false,
+              truncated: false,
+            }}
+          />
+        </div>
+      </>,
+    );
+    const root = style(document.documentElement);
+    const reference = document.createElement("span");
+    container.append(reference);
+    reference.style.color = "var(--accent-text)";
+    expect(style(get(container, ".message-content a")).color).toBe(style(reference).color);
+    reference.style.color = "var(--syntax-keyword)";
+    for (const selector of [".message-content", ".code-view", ".diff-add"]) {
+      expect(style(get(container, `${selector} .hljs-keyword`)).color).toBe(style(reference).color);
+    }
+    expect(root.colorScheme).toBe(theme);
+    for (const [view, gutter, text, highlight] of [
+      [".code-view", ".code-gutter", ".code-text", ".code-text.hljs"],
+      [".diff-view", ".diff-add .diff-gutter", ".diff-add .diff-code", ".diff-inner.hljs"],
+    ]) {
+      const scroll = get(container, view);
+      const numbers = get(scroll, gutter);
+      const line = get(scroll, text);
+      const start = rect(numbers).left;
+      const left = rect(line).left;
+      expect(scroll.scrollWidth).toBeGreaterThan(scroll.clientWidth + 200);
+      expect(style(line).whiteSpace).toBe("pre");
+      scroll.scrollLeft = 160;
+      expect(rect(line).left).toBeLessThan(left - 100);
+      expect(rect(numbers).left).toBeCloseTo(start);
+      expect(style(get(scroll, highlight)).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+    }
+    expect(get(container, ".diff-add .diff-gutter").textContent).toContain("99+");
+    expect(get(container, ".diff-del .diff-gutter").textContent).toContain("98");
+  },
+);
+
+// Headless Chromium may keep hover disabled after touch emulation is turned off.
+it("exposes touch actions only on the open session and gives the lists a larger type scale", async () => {
+  await page.viewport(1000, 800);
+  const unrelated = {
+    id: "other",
+    name: "Other",
+    root: "/other",
+    leadWorkspaceId: "other-lead",
+    createdAt: 1,
+    objectives: [],
+  };
+  const props = {
+    ...sidebar,
+    projects: [...sidebar.projects!, unrelated, archivedProject],
+    workspaces: [
+      ...sidebar.workspaces,
+      workspace("other-lead", { cwd: "/other", projectLink: { projectId: "other", role: "lead" } }),
+      ...archivedRows,
+    ],
+  };
+  const { container, rerender } = render(sidebarView(props));
+  const row = get(container, ".task-item");
+  const root = style(document.documentElement);
+  const scale = () =>
+    ["name", "text", "meta", "tag"].map((size) =>
+      parseFloat(root.getPropertyValue(`--fs-${size}`)),
+    );
+  const desktop = scale();
+  const listText = [
+    get(row, ".task-name .clip"),
+    get(row, ".awaits-tag"),
+    get(container, ".ws-archive-toggle"),
+  ];
+  const renderedDesktop = listText.map((el) => parseFloat(style(el).fontSize));
+  const icon = get(container, ".sidebar-header .icon");
+  const desktopIcon = rect(icon).width;
+  await page.elementLocator(get(container, ".sidebar-header")).hover();
+  touch = true;
+  await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: true });
   await page.viewport(390, 800);
-  const code = `const sentence = ${JSON.stringify(long)};`;
-  const { container } = render(
-    <div className="side-panel-body" style={{ width: 320 }}>
-      <CodeView content={`const n = 1;\n${code}\n`} lang="typescript" target={{ path: "a.ts" }} />
-      <DiffView
-        lang="typescript"
-        diff={{
-          path: "a.ts",
-          diff: `@@ -98 +99 @@\n-const n = 1;\n+${code}\n`,
-          binary: false,
-          truncated: false,
-        }}
-      />
-    </div>,
+  expect(matchMedia("(hover: none)").matches).toBe(true);
+  scale().forEach((value, i) => expect(value).toBeGreaterThan(desktop[i]));
+  listText.forEach((el, i) =>
+    expect(parseFloat(style(el).fontSize)).toBeGreaterThan(renderedDesktop[i]),
   );
-  expect(style(document.documentElement).colorScheme).toBe("dark");
-  const bg = style(get(container, ".side-panel-body")).backgroundColor;
-  for (const [view, gutter, text, highlight] of [
-    [".code-view", ".code-gutter", ".code-text", ".code-text.hljs"],
-    [".diff-view", ".diff-add .diff-gutter", ".diff-add .diff-code", ".diff-inner.hljs"],
-  ]) {
-    const scroll = get(container, view);
-    const numbers = get(scroll, gutter);
-    const line = get(scroll, text);
-    const start = rect(numbers).left;
-    const left = rect(line).left;
-    expect(scroll.scrollWidth).toBeGreaterThan(scroll.clientWidth + 200);
-    expect(style(line).whiteSpace).toBe("pre");
-    scroll.scrollLeft = 160;
-    expect(rect(line).left).toBeLessThan(left - 100);
-    expect(rect(numbers).left).toBeCloseTo(start);
-    const background = style(get(scroll, highlight)).backgroundColor;
-    expect(["rgba(0, 0, 0, 0)", bg]).toContain(background);
+  expect(rect(icon).width).toBeGreaterThan(desktopIcon);
+  expect(rect(get(container, ".ws-group-add .icon")).width).toBe(
+    rect(get(container, ".task-delete .icon")).width,
+  );
+  expect(style(get(row, ".task-hover")).pointerEvents).toBe("none");
+  const current = get(container, ".ws-group-header.current");
+  const inactive = get(container, ".ws-group-project:not(.current)");
+  expect(style(get(current, ".ws-group-add")).opacity).toBe("1");
+  expect(style(get(current, ".task-delete")).visibility).toBe("visible");
+  for (const selector of [".ws-group-add", ".ws-group-archive"]) {
+    expect(rect(get(inactive, selector)).width).toBe(0);
   }
-  expect(get(container, ".diff-add .diff-gutter").textContent).toContain("99+");
-  expect(get(container, ".diff-del .diff-gutter").textContent).toContain("98");
+  expect(style(get(inactive, ".task-delete")).visibility).toBe("hidden");
+  fireEvent.click(get(container, ".ws-archive-toggle"));
+  expect(style(get(container, ".ws-archived-purge")).opacity).toBe("1");
+  fireEvent.click(get(container, ".ws-shelf .ws-archived-header"));
+  expect(style(get(container, 'button[title^="Bring Archived"]')).opacity).toBe("1");
+
+  rerender(sidebarView({ ...props, activeWsId: "worker" }));
+  await expect.poll(() => style(get(row, ".task-hover")).opacity).toBe("1");
+  expect(style(get(row, ".task-hover")).pointerEvents).toBe("auto");
+  rerender(sidebarView({ ...props, activeWsId: "other-lead" }));
+  expect(rect(get(current, ".ws-group-add")).width).toBe(0);
+  expect(rect(get(inactive, ".ws-group-add")).width).toBeGreaterThan(0);
+  expect(style(get(inactive, ".task-delete")).visibility).toBe("visible");
 });

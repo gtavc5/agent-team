@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from "react";
 import type { QuotaState } from "../../../shared/quota";
 import { formatRelative } from "../format";
+import { Icon } from "../panels/Icon";
 import {
   detailWindowLabel,
   formatShortDateTime,
@@ -54,20 +55,7 @@ export function QuotaPanel({
           aria-label={quota.refreshing ? "Refreshing…" : "Refresh"}
           title={quota.refreshing ? "Refreshing…" : "Refresh quota"}
         >
-          <svg
-            className="icon"
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M20 4v5h-5M4 20v-5h5M5 9a7.5 7.5 0 0 1 13-2l2 2M4 15l2 2a7.5 7.5 0 0 0 13-2" />
-          </svg>
+          <Icon name="refresh" />
         </button>
       </header>
       {quota.rows.length > 0 && (

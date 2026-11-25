@@ -28,6 +28,7 @@ import {
   formatFullDateTime,
 } from "../format";
 import { shortModel } from "../workspace/models";
+import { agentNameColor } from "../workspace/agents";
 
 function renderMentionContent(content: string, agents: AgentInfo[]) {
   const match = content.match(/^@(\S+)(\s+|$)/);
@@ -41,7 +42,11 @@ function renderMentionContent(content: string, agents: AgentInfo[]) {
     <>
       <span
         className="mention-pill"
-        style={mentioned ? { background: mentioned.color } : undefined}
+        style={
+          mentioned
+            ? { background: `color-mix(in srgb, ${mentioned.color} 12%, transparent)` }
+            : undefined
+        }
       >
         @{mentionName}
       </span>
@@ -1399,7 +1404,7 @@ export const MessageItem = memo(function MessageItem({
                   </>
                 ) : agent ? (
                   <>
-                    <span className="message-author" style={{ color: agent.color }}>
+                    <span className="message-author" style={{ color: agentNameColor(agent.color) }}>
                       {agent.name}
                     </span>
                     {(() => {

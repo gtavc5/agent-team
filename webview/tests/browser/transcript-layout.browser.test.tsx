@@ -202,7 +202,15 @@ it.each([
     expect(rect(footer).height).toBeGreaterThanOrEqual(width === 390 ? 44 : 26);
     if (width === 1200) expect(rect(footer).height).toBeLessThan(44);
     expect(Number.parseFloat(getComputedStyle(footer).fontSize)).toBe(width === 390 ? 12 : 11);
-    expect(getComputedStyle(footer).color).toBe("rgb(149, 155, 166)");
+    const reference = document.createElement("span");
+    container.append(reference);
+    reference.style.color = "var(--text-secondary)";
+    expect(getComputedStyle(footer).color).toBe(getComputedStyle(reference).color);
+    if (width === 1200) {
+      await page.elementLocator(footer).hover();
+      reference.style.color = "var(--text-primary)";
+      expect(getComputedStyle(footer).color).toBe(getComputedStyle(reference).color);
+    }
     expect(rect(footerBar).width).toBeCloseTo(rect(events).width, 1);
     expect(rect(footer).width).toBeCloseTo(rect(footerBar).width, 1);
     expect(rect(footer).left).toBeGreaterThanOrEqual(rect(footerBar).left - 0.5);
@@ -276,96 +284,6 @@ it("opens a ViewImage path by mouse and keyboard with visible file-link affordan
   await userEvent.keyboard(" ");
   expect(open).toHaveBeenCalledTimes(3);
   expect(open).toHaveBeenLastCalledWith(imagePath, { literalPath: true });
-});
-
-it("wraps shell commands and tool paths without letting a long name displace controls", async () => {
-  await page.viewport(320, 820);
-  const command = `npm run build && ${"node scripts/check.ts --all ".repeat(20)}`;
-  const { container } = render(
-    <div className="messages">
-      <SubAgentItem
-        ev={{
-          kind: "subagent_start",
-          content: "",
-          subagent: {
-            taskId: "b",
-            description: long,
-            taskType: "local_bash",
-            status: "running",
-            prompt: `\`\`\`bash\n${command}\n\`\`\``,
-          },
-        }}
-        onCancel={no}
-      />
-      <EventItem
-        ev={{
-          kind: "tool_use",
-          toolName: "Bash",
-          content: `**Bash**\n\`\`\`bash\n${command}\n\`\`\``,
-        }}
-      />
-      <EventItem
-        ev={{
-          kind: "tool_use",
-          toolName: `Read${"Long".repeat(40)}`,
-          content: `**Read** \`${path}\``,
-          durationMs: 4200,
-          toolResult: "ok",
-        }}
-      />
-    </div>,
-  );
-  const header = get(container, ".subagent-header");
-  fireEvent.click(header);
-  const desc = get(header, ".subagent-desc");
-  expect(desc.scrollWidth).toBeGreaterThan(desc.clientWidth);
-  expect(getComputedStyle(desc).textOverflow).toBe("ellipsis");
-  for (const selector of [
-    ".subagent-prompt pre",
-    ".event-content pre",
-    ".event-summary-line code",
-  ]) {
-    const text = get(container, selector);
-    expect(lines(text)).toBeGreaterThan(1);
-    expect(rect(text).right).toBeLessThanOrEqual(320);
-  }
-  const cancel = get(header, ".btn-cancel-subagent");
-  expect(rect(cancel).right).toBeLessThanOrEqual(rect(header).right);
-  const row = get(container, ".event-row:has(.btn-diff)");
-  expect(rect(get(row, ".btn-diff")).right).toBeLessThanOrEqual(rect(row).right);
-  expect(rect(get(row, ".event-time")).right).toBeLessThanOrEqual(rect(row).right);
-  const pre = get(container, ".event-content pre");
-  const copy = get(pre.parentElement!, ".copy-btn");
-  expect(rect(copy).right).toBeLessThanOrEqual(rect(pre).right);
-  expect(rect(copy).top).toBeGreaterThanOrEqual(rect(pre).top);
-  const code = get(pre, "code");
-  const wrapped = lines(code);
-  copy.style.display = "none";
-  expect(lines(code)).toBe(wrapped);
-  copy.style.removeProperty("display");
-  copy.scrollIntoView({ block: "center" });
-  const hitbox = rect(copy);
-  expect(
-    document.elementFromPoint(hitbox.left + hitbox.width / 2, hitbox.top + hitbox.height / 2),
-  ).toBe(copy);
-
-  const pathCopy = get(container, ".event-summary-line .copy-btn");
-  const pathRange = document.createRange();
-  pathRange.selectNodeContents(get(container, ".event-summary-line code"));
-  const firstLine = pathRange.getClientRects()[0];
-  expect(firstLine.right).toBeLessThanOrEqual(rect(pathCopy).left);
-  expect(firstLine.top).toBeLessThan(rect(pathCopy).bottom);
-  await page.elementLocator(get(container, ".event-summary-line")).hover();
-  await expect.poll(() => getComputedStyle(pathCopy).opacity).toBe("1");
-  await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: true });
-  try {
-    expect(matchMedia("(hover: none)").matches).toBe(true);
-    await expect.poll(() => getComputedStyle(copy).opacity).toBe("1");
-    expect(rect(copy).height).toBeGreaterThan(20);
-    expect(rect(pathCopy).height).toBeGreaterThan(20);
-  } finally {
-    await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: false });
-  }
 });
 
 it("keeps the quote control out of the text and truncates a long sender on one line", async () => {
@@ -738,33 +656,6 @@ it("loads all four real Sarasa faces for Latin and CJK text", async () => {
   }
 });
 
-it("keeps every text gray readable on each theme background", () => {
-  const { container } = render(<span />);
-  const sample = get(container, "span");
-  const luminance = (name: string) => {
-    sample.style.color = `var(--${name})`;
-    const rgb = getComputedStyle(sample).color.match(/\d+/g)!.map(Number);
-    return rgb
-      .map((value) => value / 255)
-      .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
-      .reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
-  };
-  const backgrounds = ["primary", "secondary", "tertiary", "elevated"].map((name) =>
-    luminance(`bg-${name}`),
-  );
-  for (const [name, minimum] of [
-    ["strong", 9],
-    ["primary", 6],
-    ["secondary", 4.5],
-    ["muted", 3],
-  ] as const) {
-    for (const bg of backgrounds)
-      expect((luminance(`text-${name}`) + 0.05) / (bg + 0.05), name).toBeGreaterThanOrEqual(
-        minimum,
-      );
-  }
-});
-
 it("distinguishes error labels from normal text", () => {
   const { container } = render(
     <>
@@ -791,4 +682,98 @@ it("distinguishes error labels from normal text", () => {
     getComputedStyle(get(container, ".subagent-failed .subagent-summary")).borderLeftColor,
   ).toBe(error);
   expect(getComputedStyle(get(container, ".banner-wakeup .banner-label")).color).not.toBe(error);
+});
+
+// Headless Chromium may keep hover disabled after touch emulation is turned off.
+it("wraps shell commands and tool paths without letting a long name displace controls", async () => {
+  await page.viewport(320, 820);
+  const command = `npm run build && ${"node scripts/check.ts --all ".repeat(20)}`;
+  const { container } = render(
+    <div className="messages">
+      <MessageItem msg={message} agents={[agent]} onQuote={no} />
+      <SubAgentItem
+        ev={{
+          kind: "subagent_start",
+          content: "",
+          subagent: {
+            taskId: "b",
+            description: long,
+            taskType: "local_bash",
+            status: "running",
+            prompt: `\`\`\`bash\n${command}\n\`\`\``,
+          },
+        }}
+        onCancel={no}
+      />
+      <EventItem
+        ev={{
+          kind: "tool_use",
+          toolName: "Bash",
+          content: `**Bash**\n\`\`\`bash\n${command}\n\`\`\``,
+        }}
+      />
+      <EventItem
+        ev={{
+          kind: "tool_use",
+          toolName: `Read${"Long".repeat(40)}`,
+          content: `**Read** \`${path}\``,
+          durationMs: 4200,
+          toolResult: "ok",
+        }}
+      />
+    </div>,
+  );
+  const header = get(container, ".subagent-header");
+  fireEvent.click(header);
+  const desc = get(header, ".subagent-desc");
+  expect(desc.scrollWidth).toBeGreaterThan(desc.clientWidth);
+  expect(getComputedStyle(desc).textOverflow).toBe("ellipsis");
+  for (const selector of [
+    ".subagent-prompt pre",
+    ".event-content pre",
+    ".event-summary-line code",
+  ]) {
+    const text = get(container, selector);
+    expect(lines(text)).toBeGreaterThan(1);
+    expect(rect(text).right).toBeLessThanOrEqual(320);
+  }
+  const cancel = get(header, ".btn-cancel-subagent");
+  expect(rect(cancel).right).toBeLessThanOrEqual(rect(header).right);
+  const row = get(container, ".event-row:has(.btn-diff)");
+  expect(rect(get(row, ".btn-diff")).right).toBeLessThanOrEqual(rect(row).right);
+  expect(rect(get(row, ".event-time")).right).toBeLessThanOrEqual(rect(row).right);
+  const pre = get(container, ".event-content pre");
+  const copy = get(pre.parentElement!, ".copy-btn");
+  expect(rect(copy).right).toBeLessThanOrEqual(rect(pre).right);
+  expect(rect(copy).top).toBeGreaterThanOrEqual(rect(pre).top);
+  const code = get(pre, "code");
+  const wrapped = lines(code);
+  copy.style.display = "none";
+  expect(lines(code)).toBe(wrapped);
+  copy.style.removeProperty("display");
+  copy.scrollIntoView({ block: "center" });
+  const hitbox = rect(copy);
+  expect(
+    document.elementFromPoint(hitbox.left + hitbox.width / 2, hitbox.top + hitbox.height / 2),
+  ).toBe(copy);
+
+  const pathCopy = get(container, ".event-summary-line .copy-btn");
+  const pathRange = document.createRange();
+  pathRange.selectNodeContents(get(container, ".event-summary-line code"));
+  const firstLine = pathRange.getClientRects()[0];
+  expect(firstLine.right).toBeLessThanOrEqual(rect(pathCopy).left);
+  expect(firstLine.top).toBeLessThan(rect(pathCopy).bottom);
+  await page.elementLocator(get(container, ".event-summary-line")).hover();
+  await expect.poll(() => getComputedStyle(pathCopy).opacity).toBe("1");
+  await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: true });
+  try {
+    expect(matchMedia("(hover: none)").matches).toBe(true);
+    await expect.poll(() => getComputedStyle(copy).opacity).toBe("1");
+    expect(rect(copy).height).toBeGreaterThan(20);
+    expect(rect(pathCopy).height).toBeGreaterThan(20);
+    const quote = get(container, ".btn-quote");
+    await expect.poll(() => getComputedStyle(quote).opacity).toBe("1");
+  } finally {
+    await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  }
 });

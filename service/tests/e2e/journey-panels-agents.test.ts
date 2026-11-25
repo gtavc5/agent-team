@@ -463,3 +463,98 @@ it("uses lead and worker agent cards to manage an agent with destructive confirm
     true,
   );
 }, 45_000);
+
+it("sets the theme before app startup and preserves the workspace across theme changes", async () => {
+  await journey(async (page) => {
+    const origin = new URL(page.url()).origin;
+    const browser = page.context().browser()!;
+    for (const mobile of [false, true]) {
+      const system = mobile ? "dark" : "light";
+      const opposite = mobile ? "light" : "dark";
+      const viewport = mobile ? { width: 390, height: 844 } : { width: 1440, height: 900 };
+      const context = await browser.newContext({ viewport, colorScheme: system, hasTouch: mobile });
+      try {
+        const tab = await context.newPage();
+        const entry = "**/assets/index-*.js";
+        const bootstrap = async (theme: "light" | "dark") => {
+          let resume!: () => void;
+          const bundleReady = new Promise<void>((resolve) => {
+            resume = resolve;
+          });
+          await tab.route(entry, async (route) => {
+            await bundleReady;
+            await route.continue();
+          });
+          try {
+            await tab.goto(origin, { waitUntil: "commit" });
+            await tab.waitForFunction(
+              (value) => document.documentElement.dataset.theme === value,
+              theme,
+            );
+            expect(await tab.locator("#root .app").count()).toBe(0);
+            const early = await tab.evaluate(() => ({
+              scheme: document.documentElement.style.colorScheme,
+              chrome: document.querySelector('meta[name="theme-color"]')?.getAttribute("content"),
+            }));
+            expect(early.scheme).toBe(theme);
+            expect(early.chrome).toBe(theme === "dark" ? "#1c1c1c" : "#f2f3f5");
+          } finally {
+            resume();
+            await tab.unrouteAll({ behavior: "wait" });
+          }
+          await tab.locator(".ws-group-project").waitFor({ state: "attached" });
+        };
+        const openDrawer = async () => {
+          if (mobile) await tab.getByRole("button", { name: /^Open workspace menu/ }).click();
+        };
+        const toggle = tab.getByRole("button", { name: "Dark theme" });
+        const applied = async (theme: "light" | "dark") => {
+          await expect
+            .poll(() => toggle.getAttribute("aria-pressed"))
+            .toBe(String(theme === "dark"));
+          const colors = await tab.evaluate(() => ({
+            applied: document.documentElement.dataset.theme,
+            scheme: getComputedStyle(document.documentElement).colorScheme,
+            meta: document.querySelector('meta[name="theme-color"]')?.getAttribute("content"),
+            chrome: getComputedStyle(document.documentElement)
+              .getPropertyValue("--bg-secondary")
+              .trim(),
+          }));
+          expect(colors).toEqual({
+            applied: theme,
+            scheme: theme,
+            meta: colors.chrome,
+            chrome: colors.chrome,
+          });
+        };
+
+        await bootstrap(system);
+        await openDrawer();
+        await tab.locator(".ws-group-project").click();
+        await transcript(tab, "分成两件事");
+        await openDrawer();
+        await applied(system);
+        await tab.evaluate(() => document.fonts.ready.then(() => undefined));
+        const geometry = () =>
+          tab.evaluate(() =>
+            [".messages", ".input-row", ".ws-group-project"].map((selector) => {
+              const { width, height } = document.querySelector(selector)!.getBoundingClientRect();
+              return [width, height];
+            }),
+          );
+        const before = await geometry();
+        await tab.emulateMedia({ colorScheme: opposite });
+        await applied(opposite);
+        await toggle.click();
+        await applied(system);
+        expect(await geometry()).toEqual(before);
+        await transcript(tab, "分成两件事");
+        await bootstrap(system); // Explicit choice wins over the opposite OS setting at reload.
+        await openDrawer();
+        await applied(system);
+      } finally {
+        await context.close();
+      }
+    }
+  });
+}, 45_000);

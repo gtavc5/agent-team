@@ -146,7 +146,14 @@ it("keeps the mobile attention count through reading, peeking and resolving at 3
     }
     expect(badge()!.textContent).toBe(String(count));
     expect(badge()!.classList.contains("attention-badge-your-turn")).toBe(yourTurn);
-    if (yourTurn) expect(getComputedStyle(badge()!).color).toBe("rgb(229, 192, 123)");
+    if (yourTurn) {
+      const badgeStyle = getComputedStyle(badge()!);
+      const context = document.createElement("canvas").getContext("2d")!;
+      context.fillStyle = badgeStyle.getPropertyValue("--warning").trim();
+      const hex = context.fillStyle;
+      context.fillStyle = badgeStyle.color;
+      expect(context.fillStyle).toBe(hex);
+    }
   };
   const expectNoOverflow = () => {
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(390);

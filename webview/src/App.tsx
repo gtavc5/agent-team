@@ -1637,7 +1637,7 @@ export function App() {
                 </div>
                 <div className="workspace-info-bar">
                   <span className="ws-info-item" title={activeWs.cwd}>
-                    <span className="ws-info-icon">&#128193;</span>
+                    <Icon name="folder" />
                     <span className="ws-info-path">
                       <bdi>{activeWs.cwd}</bdi>
                     </span>
@@ -1801,7 +1801,7 @@ export function App() {
                             ) : quotedMsg.from ? (
                               "◆"
                             ) : (
-                              "👤"
+                              <Icon name="agents" />
                             )}{" "}
                             {author}
                           </span>

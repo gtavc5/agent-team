@@ -24,7 +24,6 @@ import {
   splitFileRef,
 } from "./fileRef";
 import { codeText, copyText } from "./clipboard";
-import "highlight.js/styles/github-dark.css";
 
 export function CopyButton({ text }: { text: () => string }) {
   const [copied, setCopied] = useState(false);

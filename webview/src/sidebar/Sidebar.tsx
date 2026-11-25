@@ -1,6 +1,6 @@
 import { recordTelemetry } from "../telemetry";
 import type { QuotaState } from "../../../shared/quota";
-import { memo, useState, useEffect, useId, useRef } from "react";
+import { memo, useState, useEffect, useId, useRef, useSyncExternalStore } from "react";
 import type { Workspace, Project, SystemStatus, SearchHit } from "../state/useServer";
 import {
   groupWorkspaces,
@@ -18,6 +18,34 @@ import { ConfirmDialog } from "../workspace/dialogs";
 import { QuotaPanel } from "./QuotaPanel";
 import { formatShortDateTime, quotaTone } from "./quota";
 import { describeAttention, summarizeAttention } from "./attention";
+
+interface ThemeController {
+  get: () => "light" | "dark";
+  subscribe: (listener: () => void) => () => void;
+  toggle: () => void;
+}
+
+declare global {
+  interface Window {
+    // Installed synchronously by index.html, not by isolated component mounts.
+    yaatTheme?: ThemeController;
+  }
+}
+
+function ThemeToggle({ controller }: { controller: ThemeController }) {
+  const dark = useSyncExternalStore(controller.subscribe, controller.get) === "dark";
+  return (
+    <button
+      type="button"
+      aria-label="Dark theme"
+      aria-pressed={dark}
+      title="Dark theme"
+      onClick={controller.toggle}
+    >
+      <Icon name={dark ? "moon" : "sun"} />
+    </button>
+  );
+}
 
 function gitTitle(git: { dirty: number; ahead: number; behind: number }): string {
   const parts: string[] = [];
@@ -551,6 +579,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           Workspaces {!p.connected && <span className="disconnected">offline</span>}
         </span>
         <span className="sidebar-actions">
+          {window.yaatTheme && <ThemeToggle controller={window.yaatTheme} />}
           <button title="New session" onClick={p.onCreate}>
             <Icon name="plus" />
           </button>
