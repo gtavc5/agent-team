@@ -293,7 +293,11 @@ function SessionCard({
 // An agent in a folded card: what it is doing, or how full its context is.
 function brief(a: AgentInfo, connected: boolean): string {
   if (agentState(a) !== "idle") return stateLabel(a, connected);
-  return a.context ? formatTokens(a.context.tokens) : "";
+  return a.context
+    ? `${a.context.estimated ? "~" : ""}${formatTokens(a.context.tokens)}`
+    : a.context === null
+      ? "ctx unknown"
+      : "";
 }
 
 // A folded card's background work: how much runs, and the next wake-up.
@@ -442,14 +446,16 @@ function AgentRow({
               {bg.length > 0 && state !== "waiting" && ` · ${bg.length} in background`}
             </div>
           )}
+          {ctx === null && <div className="ap-context">ctx unknown</div>}
           {ctx && pct !== null && (
             <div
               className="ap-context"
-              title={`${ctx.tokens.toLocaleString()} of ${ctx.window.toLocaleString()} tokens`}
+              title={`${ctx.estimated ? "Estimate: " : ""}${ctx.tokens.toLocaleString()} of ${ctx.window.toLocaleString()} tokens`}
             >
               <span className="ap-context-bar">
                 <span style={{ width: `${pct}%` }} className={pct >= 80 ? "high" : ""} />
               </span>
+              {ctx.estimated ? "~" : ""}
               {formatTokens(ctx.tokens)} / {formatTokens(ctx.window)}
             </div>
           )}

@@ -1,3 +1,4 @@
+import type { ContextUsage } from "../../../shared/context-usage";
 import { configureTelemetry } from "../telemetry";
 import { emptyUi, receiveUi, withoutOwner, type LiveNotice } from "./extensionUi";
 import {
@@ -87,11 +88,6 @@ export interface PrInfo {
   checks: "success" | "failure" | "pending" | null;
 }
 
-export interface ContextUsage {
-  tokens: number;
-  window: number;
-}
-
 // Thinking over a whole turn (Claude only).
 export interface ThinkingStats {
   tokens: number;
@@ -122,7 +118,7 @@ export interface StreamEvent {
   startedAt?: number;
   waitingSince?: number | null;
   tokens?: number;
-  context?: ContextUsage;
+  context?: ContextUsage | null;
   subagent?: SubAgentInfo;
   // Present on summary pages instead of the bodies.
   contentLength?: number;
@@ -286,7 +282,7 @@ export interface Message {
   fast?: boolean;
   // The model the turn ran on; an agent's model can change mid-session.
   model?: string;
-  context?: ContextUsage;
+  context?: ContextUsage | null;
   thinking?: ThinkingStats;
   // History pages arrive as summaries; full events load on first expand.
   detail?: "summary";
@@ -318,7 +314,7 @@ export interface AgentInfo {
   // Background work the agent is waiting on (background Bash, subagents,
   // Monitor); the CLI reports back on its own when it finishes.
   backgroundTasks?: BackgroundTask[];
-  // Context occupancy at the end of its last turn, when known.
+  // Context occupancy at its latest backend boundary, when known.
   context?: ContextUsage | null;
   // The scheduled wake-up it sleeps until.
   wake?: { at: number; reason: string } | null;
@@ -948,7 +944,7 @@ export function useServer() {
           const status = msg.status as Message["status"];
           const content = msg.content as string;
           const events = msg.events as StreamEvent[] | undefined;
-          const context = msg.context as ContextUsage | undefined;
+          const context = msg.context as ContextUsage | null | undefined;
           const effort = msg.effort as string | undefined;
           const thinking = msg.thinking as ThinkingStats | undefined;
           // The completion payload strips subagent transcripts, so events
@@ -971,7 +967,7 @@ export function useServer() {
                       : {}),
                     ...("steering" in msg ? { steering: msg.steering === true || undefined } : {}),
                     ...(merged ? { events: merged } : {}),
-                    ...(context ? { context } : {}),
+                    ...(context !== undefined ? { context } : {}),
                     ...(effort ? { effort } : {}),
                     ...(thinking ? { thinking } : {}),
                   };

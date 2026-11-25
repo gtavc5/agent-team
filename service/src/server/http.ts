@@ -5,6 +5,7 @@ import type * as http from "http";
 import * as path from "path";
 import { pipeline } from "stream";
 import * as zlib from "zlib";
+import { usageView } from "../usage/service";
 import type { Auth } from "./auth";
 import { formatReport, type RuntimeReport } from "../config/diagnostics";
 import { NotRegularFile, readFileView, resolveFilePath } from "../repo/files";
@@ -99,6 +100,14 @@ export class HttpHandler {
         if (!/^\d{1,3}$/.test(raw) || days < 1 || days > 365) {
           json(res, 400, { error: "days must be an integer from 1 to 365" });
         } else json(res, 200, this.telemetry.summary(days));
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/usage") {
+        void usageView(this.baseDir).then(
+          (view) => json(res, 200, view),
+          () => json(res, 503, { error: "Usage data unavailable" }),
+        );
         return;
       }
 

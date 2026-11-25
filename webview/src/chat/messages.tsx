@@ -296,7 +296,7 @@ export function chipLabelFor(toolName: string): string {
 // Effort, fast mode and context occupancy line under an agent message
 // header. Thinking time and tokens show on the blocks in the steps.
 export function MessageStatus({ msg }: { msg: Message }) {
-  if (!msg.effort && !msg.fast && !msg.context) return null;
+  if (!msg.effort && !msg.fast && msg.context === undefined) return null;
   const ctx = msg.context;
   const pct =
     ctx && ctx.window > 0 ? Math.min(100, Math.round((ctx.tokens / ctx.window) * 100)) : null;
@@ -313,15 +313,17 @@ export function MessageStatus({ msg }: { msg: Message }) {
           ⚡ fast
         </span>
       )}
+      {ctx === null && <span className="status-chip ctx-chip">ctx unknown</span>}
       {ctx && pct != null && (
         <span
           className={`status-chip ctx-chip${tone}`}
-          title={`Context: ${ctx.tokens.toLocaleString()} / ${ctx.window.toLocaleString()} tokens`}
+          title={`Context${ctx.estimated ? " estimate" : ""}: ${ctx.tokens.toLocaleString()} / ${ctx.window.toLocaleString()} tokens`}
         >
           <span className="ctx-bar">
             <span className="ctx-bar-fill" style={{ width: `${pct}%` }} />
           </span>
-          ctx {formatTokens(ctx.tokens)} / {formatTokens(ctx.window)} · {pct}%
+          ctx {ctx.estimated ? "~" : ""}
+          {formatTokens(ctx.tokens)} / {formatTokens(ctx.window)} · {pct}%
         </span>
       )}
     </div>

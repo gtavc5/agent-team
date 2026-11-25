@@ -26,6 +26,7 @@ import {
 } from "../workspace/state";
 import { loadConfig, AppConfig } from "../config/config";
 import { TelemetryStore } from "../storage/telemetry";
+import { recordJourney, recordUsage } from "../usage/ledger";
 import { ModelSelectionError, type ModelDiscoveryIssue } from "../config/model-diagnostics";
 import {
   MODEL_OPTIONS,
@@ -314,16 +315,24 @@ export class Server {
     const registry = new HostRegistry();
     for (const [id, cfg] of Object.entries(this.config.hosts)) {
       registry.register(
-        new LocalHost(id, cfg.label, {
-          pi: (s) => {
-            if (s.provider !== ACP || inspectAcpRuntime().ready) this.quota.accept(s);
+        new LocalHost(
+          id,
+          cfg.label,
+          {
+            pi: (s) => {
+              if (s.provider !== ACP || inspectAcpRuntime().ready) this.quota.accept(s);
+            },
+            piReaderReady: (providers) => this.refreshQuota({ newlyReadable: providers }),
+            codex: (limits) => {
+              if (this.codexQuota.isConfigured())
+                this.quota.accept(this.codexQuota.snapshot(limits, Date.now(), true));
+            },
           },
-          piReaderReady: (providers) => this.refreshQuota({ newlyReadable: providers }),
-          codex: (limits) => {
-            if (this.codexQuota.isConfigured())
-              this.quota.accept(this.codexQuota.snapshot(limits, Date.now(), true));
+          {
+            recordUsage: (observation) => recordUsage(this.baseDir, observation),
+            recordJourney: (event) => recordJourney(this.baseDir, event),
           },
-        }),
+        ),
       );
     }
     console.log(

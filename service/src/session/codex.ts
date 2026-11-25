@@ -1,6 +1,8 @@
+import { estimatedContext } from "../../../shared/context-usage";
 import { EventEmitter } from "events";
 import * as os from "os";
 import { z } from "zod";
+import { isTokenCount, type UsageRecorder } from "./usage-observation";
 import {
   ContextUsage,
   RunState,
@@ -45,6 +47,9 @@ import {
 // snap fixture codex/resume) and answered here. A subagent's thread does not
 // get them (codex/tools), so nothing needs refusing to subagents.
 const PANEL_NAMESPACE = "panel";
+
+type UsageThreadModel = { model?: string; modelProvider?: string };
+type OpenThreadResponse = UsageThreadModel & { thread: CodexThread };
 
 // "no rollout found for thread id …" (codex 0.153): the thread is gone from
 // ~/.codex/sessions.
@@ -123,7 +128,8 @@ export class CodexSession extends EventEmitter {
   private itemText = new Map<string, number>();
   private itemStartedAt = new Map<string, number>();
   private openTools = new Set<string>();
-  private context: ContextUsage | undefined;
+  private context: ContextUsage | null = null;
+  private turnContext: ContextUsage | null = null;
   private rateLimits: RateLimitSnapshot | null = null;
   // Codex repeats a warning on every turn (a model without metadata): each
   // is shown once.
@@ -134,7 +140,13 @@ export class CodexSession extends EventEmitter {
     { description: string; startedAt: number; lastText: string; done: boolean }
   >();
 
-  constructor(config: SessionConfig) {
+  private readonly usageThreads = new Map<string, UsageThreadModel>();
+  private readonly recordedUsageIds = new Set<string>();
+
+  constructor(
+    config: SessionConfig,
+    private readonly usageRecorder?: UsageRecorder,
+  ) {
     super();
     this.config = config;
   }
@@ -217,8 +229,8 @@ export class CodexSession extends EventEmitter {
     const transport =
       CodexSession.hooks?.transport?.(this, env) ?? spawnAppServer({ cwd: this.config.cwd, env });
     const client: AppServerClient = new AppServerClient(transport, {
-      notification: (method, params) => {
-        if (client === this.client) this.onNotification(method, params);
+      notification: (method, params, emittedAtMs) => {
+        if (client === this.client) this.onNotification(method, params, emittedAtMs);
       },
       // A process being shut down calls no panel tool any more.
       request: (method, params) =>
@@ -230,8 +242,16 @@ export class CodexSession extends EventEmitter {
     this.client = client;
     try {
       await client.initialize();
-      const threadId = await this.openThread(client);
+      const opened = await this.openThread(client);
+      const { threadId } = opened;
       if (client !== this.client) throw new Error("The app-server was replaced while starting.");
+      if (this.usageRecorder) {
+        if (this.sessionId !== threadId) this.usageThreads.clear();
+        this.usageThreads.set(threadId, {
+          model: opened.model,
+          modelProvider: opened.modelProvider,
+        });
+      }
       this.sessionId = threadId;
     } catch (e) {
       if (this.client === client) this.client = null;
@@ -255,16 +275,18 @@ export class CodexSession extends EventEmitter {
     };
   }
 
-  private async openThread(client: AppServerClient): Promise<string> {
+  private async openThread(
+    client: AppServerClient,
+  ): Promise<UsageThreadModel & { threadId: string }> {
     if (this.sessionId) {
       try {
-        await client.request("thread/resume", {
+        const res = await client.request<UsageThreadModel>("thread/resume", {
           threadId: this.sessionId,
           ...this.threadParams(),
           ...(this.panelTools && { developerInstructions: this.panelTools.instructions }),
           excludeTurns: true,
         });
-        return this.sessionId;
+        return { threadId: this.sessionId, model: res?.model, modelProvider: res?.modelProvider };
       } catch (e) {
         if (!(e instanceof RpcRequestError) || !THREAD_GONE.test(e.message)) throw e;
         this.emit("event", {
@@ -274,14 +296,14 @@ export class CodexSession extends EventEmitter {
         });
       }
     }
-    const res = await client.request<{ thread: CodexThread }>("thread/start", {
+    const res = await client.request<OpenThreadResponse>("thread/start", {
       ...this.threadParams(),
       ...(this.panelTools && {
         developerInstructions: this.panelTools.instructions,
         dynamicTools: [this.panelNamespace(this.panelTools)],
       }),
     });
-    return res.thread.id;
+    return { threadId: res.thread.id, model: res.model, modelProvider: res.modelProvider };
   }
 
   private panelNamespace(tools: PanelToolset): Record<string, unknown> {
@@ -380,6 +402,7 @@ export class CodexSession extends EventEmitter {
       content: `${error.message} Retrying in ${Math.ceil(delay / 1000)}s (${this.capacityRetries}/${delays.length}).`,
     });
     this.turnId = null;
+    this.turnContext = null;
     this.turnStarted = false;
     this.interruptSent = false;
     this.turnError = null;
@@ -531,6 +554,7 @@ export class CodexSession extends EventEmitter {
     this.generation++;
     this.busy = true;
     this.turnId = null;
+    this.turnContext = null;
     this.turnStarted = false;
     this.turnStartedAt = Date.now();
     this.interruptRequested = false;
@@ -550,6 +574,9 @@ export class CodexSession extends EventEmitter {
   // busy clears before the terminal event: the workspace moves its queue
   // on that event and checks isRunning.
   private endTurn(terminal?: StreamEvent): void {
+    if (terminal?.kind === "error" && this.turnStarted && !this.compacting)
+      terminal.context = this.turnContext;
+    if (terminal?.context !== undefined) this.context = terminal.context;
     this.busy = false;
     clearTimeout(this.capacityRetry ?? undefined);
     this.capacityRetry = null;
@@ -622,7 +649,7 @@ export class CodexSession extends EventEmitter {
     return {
       kind: "result",
       content: "",
-      context: this.context,
+      ...(!(interrupted && this.compacting) && { context: this.turnContext }),
       effort: this.effectiveEffort ?? undefined,
       ...(interrupted && { interrupted: true }),
     };
@@ -677,7 +704,11 @@ export class CodexSession extends EventEmitter {
     }
   }
 
-  private onNotification(method: string, params: Record<string, unknown>): void {
+  private onNotification(
+    method: string,
+    params: Record<string, unknown>,
+    emittedAtMs?: number,
+  ): void {
     const threadId = params.threadId as string | undefined;
     const item = params.item as ThreadItem | undefined;
     if (item?.type === "commandExecution") {
@@ -685,6 +716,24 @@ export class CodexSession extends EventEmitter {
       if (method === "item/completed") this.commandsInFlight.delete(item.id);
     }
     if (method === "turn/started" || method === "item/started") this.emit("deploy_activity");
+    if (threadId && this.usageRecorder && this.usageThreads.has(threadId)) {
+      if (
+        (method === "item/started" || method === "item/completed") &&
+        item?.type === "subAgentActivity" &&
+        typeof item.agentThreadId === "string" &&
+        item.agentThreadId &&
+        !this.usageThreads.has(item.agentThreadId)
+      ) {
+        this.usageThreads.set(item.agentThreadId, {});
+      } else if (method === "thread/settings/updated") {
+        const settings = params.threadSettings as UsageThreadModel | undefined;
+        if (settings) this.usageThreads.set(threadId, settings);
+      } else if (method === "thread/tokenUsage/updated") {
+        this.recordTokenUsage(threadId, params.turnId, params.tokenUsage, emittedAtMs);
+      } else if (item && (method === "item/started" || method === "item/completed")) {
+        this.recordUsageItem(threadId, params, item, method, emittedAtMs);
+      }
+    }
     if (threadId && threadId !== this.sessionId) {
       this.onSubagentNotification(threadId, method, params);
       return;
@@ -699,6 +748,7 @@ export class CodexSession extends EventEmitter {
         }
         clearTimeout(this.capacityRetry ?? undefined);
         this.capacityRetry = null;
+        if (this.turnId !== turn.id) this.turnContext = null;
         this.turnId = turn.id;
         this.turnStarted = true;
         this.releaseTurnWaiters();
@@ -709,10 +759,21 @@ export class CodexSession extends EventEmitter {
         this.completeTurn(params.turn as CodexTurn);
         break;
       case "item/started":
+        if (item?.type === "contextCompaction" && this.matchesTurn(params.turnId))
+          this.turnContext = null;
         this.itemStarted(params.item as ThreadItem);
         break;
       case "item/completed":
-        this.itemCompleted(params.item as ThreadItem);
+        if (item?.type === "contextCompaction") {
+          if (!this.matchesTurn(params.turnId)) break;
+          // The compacted-context update can arrive before item/completed (codex/resume).
+          this.context = this.turnContext;
+          this.emit("event", {
+            kind: "compact",
+            content: "Context compacted",
+            context: this.context,
+          });
+        } else this.itemCompleted(params.item as ThreadItem);
         break;
       case "item/agentMessage/delta":
         this.text(params.itemId as string, params.delta as string);
@@ -725,7 +786,7 @@ export class CodexSession extends EventEmitter {
         break;
       }
       case "thread/tokenUsage/updated":
-        this.noteTokens(params.tokenUsage as ThreadTokenUsage);
+        this.noteTokens(params.tokenUsage as ThreadTokenUsage, params.turnId);
         break;
       case "account/rateLimits/updated":
         this.noteRateLimits(params.rateLimits as RateLimitSnapshot);
@@ -912,9 +973,6 @@ export class CodexSession extends EventEmitter {
       case "collabAgentToolCall":
         this.toolResult(item, "done");
         break;
-      case "contextCompaction":
-        this.emit("event", { kind: "compact", content: "Context compacted" });
-        break;
     }
   }
 
@@ -989,20 +1047,103 @@ export class CodexSession extends EventEmitter {
     }
   }
 
-  // Context occupancy after each request: the last request's tokens less
-  // its reasoning, which is not kept in context, over the effective window.
-  private noteTokens(usage: ThreadTokenUsage): void {
+  private recordUsageItem(
+    sessionId: string,
+    params: Record<string, unknown>,
+    item: ThreadItem,
+    method: "item/started" | "item/completed",
+    emittedAtMs: number | undefined,
+  ): void {
+    const turnId = params.turnId;
+    if (typeof turnId !== "string" || !turnId || typeof item.id !== "string" || !item.id) return;
+    const compaction = item.type === "contextCompaction";
+    if (method !== (compaction ? "item/completed" : "item/started")) return;
+    const name = codexJourneyItemName(item);
+    if (!name) return;
+    const itemTimestamp = compaction ? params.completedAtMs : params.startedAtMs;
+    this.usageRecorder?.recordJourney({
+      id: JSON.stringify(["codex", sessionId, turnId, item.id]),
+      source: "codex",
+      sessionId,
+      turnId,
+      timestamp: nativeTimestamp(itemTimestamp) ?? nativeTimestamp(emittedAtMs),
+      kind: compaction ? "compaction" : "tool",
+      name,
+    });
+  }
+
+  private recordTokenUsage(
+    threadId: string,
+    turnId: unknown,
+    rawUsage: unknown,
+    emittedAtMs: number | undefined,
+  ): void {
+    const usage = rawUsage as Partial<ThreadTokenUsage> | undefined;
+    const last = usage?.last;
+    const checkpoint = usage?.total?.totalTokens;
+    if (typeof turnId !== "string" || !turnId || !last || !isTokenCount(checkpoint)) return;
+    const { inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens } = last;
+    if (
+      !isTokenCount(inputTokens) ||
+      !isTokenCount(cachedInputTokens) ||
+      !isTokenCount(cacheWriteInputTokens) ||
+      !isTokenCount(outputTokens) ||
+      cachedInputTokens + cacheWriteInputTokens > inputTokens ||
+      inputTokens + outputTokens === 0 ||
+      checkpoint === 0
+    )
+      return;
+
+    // In the tools recording each thread's cumulative count advances by its own last
+    // sample. Use that checkpoint only as identity, not as additive usage.
+    const id = JSON.stringify(["codex", threadId, turnId, checkpoint]);
+    if (this.recordedUsageIds.has(id)) return;
+    const { model, modelProvider } = this.usageThreads.get(threadId) ?? {};
+    this.usageRecorder?.recordUsage({
+      id,
+      source: "codex",
+      sessionId: threadId,
+      turnId,
+      unit: "inference",
+      timestamp: nativeTimestamp(emittedAtMs),
+      model: typeof model === "string" ? model : null,
+      ...(typeof modelProvider === "string" && modelProvider && { channel: modelProvider }),
+      input: inputTokens - cachedInputTokens - cacheWriteInputTokens,
+      cacheRead: cachedInputTokens,
+      cacheWrite: cacheWriteInputTokens,
+      output: outputTokens,
+      price: { kind: "unpriced", usd: null },
+    });
+    this.recordedUsageIds.add(id);
+  }
+
+  private matchesTurn(turnId: unknown): boolean {
+    return this.busy && this.turnId !== null && turnId === this.turnId;
+  }
+
+  private noteTokens(usage: ThreadTokenUsage, turnId: unknown): void {
     const last = usage.last;
     this.usage.input_tokens += last.inputTokens - last.cachedInputTokens;
     this.usage.output_tokens += last.outputTokens;
     this.usage.cache_read_tokens += last.cachedInputTokens;
     this.usage.cache_creation_tokens += last.cacheWriteInputTokens;
-    if (usage.modelContextWindow) {
-      this.context = {
-        tokens: last.totalTokens - last.reasoningOutputTokens,
-        window: usage.modelContextWindow,
-      };
-    }
+    if (!this.matchesTurn(turnId)) return;
+    const { inputTokens, outputTokens, reasoningOutputTokens } = last;
+    // Occupancy is estimated from the request input and retained output, not
+    // from billing totals. A compact-only update can have no request counts.
+    this.turnContext =
+      Number.isSafeInteger(inputTokens) &&
+      inputTokens > 0 &&
+      Number.isSafeInteger(outputTokens) &&
+      outputTokens >= 0 &&
+      Number.isSafeInteger(reasoningOutputTokens) &&
+      reasoningOutputTokens >= 0 &&
+      reasoningOutputTokens <= outputTokens
+        ? estimatedContext(
+            inputTokens + (outputTokens - reasoningOutputTokens),
+            usage.modelContextWindow,
+          )
+        : null;
   }
 
   // Updates are sparse: a missing window keeps the one seen last.
@@ -1025,6 +1166,7 @@ export class CodexSession extends EventEmitter {
       maxTokens: c.window,
       percentage: (c.tokens / c.window) * 100,
       model: this.config.model,
+      estimated: c.estimated,
     });
   }
 
@@ -1050,11 +1192,36 @@ export class CodexSession extends EventEmitter {
     };
   }
 
-  static fromState(state: SessionState): CodexSession {
-    const session = new CodexSession(state.config);
+  static fromState(state: SessionState, usageRecorder?: UsageRecorder): CodexSession {
+    const session = new CodexSession(state.config, usageRecorder);
     session.sessionId = state.sessionId;
     session.usage = { ...state.usage };
     return session;
+  }
+}
+
+function nativeTimestamp(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function codexJourneyItemName(item: ThreadItem): string | undefined {
+  switch (item.type) {
+    case "contextCompaction":
+      return "contextCompaction";
+    case "commandExecution":
+      return "Bash";
+    case "fileChange":
+      return "Edit";
+    case "mcpToolCall":
+      return `${item.server}.${item.tool}`;
+    case "dynamicToolCall":
+      return item.namespace ? `${item.namespace}.${item.tool}` : item.tool;
+    case "webSearch":
+      return "WebSearch";
+    case "imageView":
+      return "ViewImage";
+    case "collabAgentToolCall":
+      return item.tool;
   }
 }
 

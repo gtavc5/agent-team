@@ -1,9 +1,11 @@
+import { estimatedContext, type ContextUsage } from "../../../shared/context-usage";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
+import type { UsageObservation } from "../../../shared/usage";
 import type { PanelToolset } from "../project/tools";
 import { ACP_PREPARE_STEP, inspectAcpRuntime } from "./acp-readiness";
 import { applyNonInteractiveGitEnv } from "./git-env";
@@ -47,6 +49,7 @@ import { decodeExtensionUi } from "./pi-extension-ui";
 import { extractPiToolResultText, formatPiToolUse } from "./pi-tool-format";
 import { ACP } from "./quota-schema";
 import { retireOnEof } from "./retire";
+import { piUsage } from "./usage-observation";
 import { formatReportMarker } from "./types";
 import type {
   ActiveAsyncChildRecord,
@@ -75,6 +78,7 @@ import type {
 } from "./types";
 
 export interface PiSessionOptions {
+  recordUsage?: (observation: UsageObservation) => void;
   panelHttp?: PanelHttpServer;
   rpcFactory?: (options: PiRpcSpawnOptions) => PiRpcClient;
   env?: NodeJS.ProcessEnv;
@@ -444,7 +448,6 @@ interface Turn {
   replyUsage?: Json;
   finalText: string;
   error?: string;
-  contextualInput?: number;
   compact?: boolean;
 }
 
@@ -553,6 +556,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private rpc?: PiRpcClient;
   private rpcEnv?: NodeJS.ProcessEnv;
   private compactingRpc?: PiRpcClient;
+  private context: ContextUsage | null = null;
+  private contextRevision = 0;
   private compactionBoundary?: { pending?: Promise<void> };
   private starting?: Promise<void>;
   private closing?: Promise<void>;
@@ -741,21 +746,16 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     ];
   }
   getContextUsage(): Promise<Json | null> {
-    const context = object(this.stats?.contextUsage);
-    const totalTokens = num(context.tokens);
-    const maxTokens = num(context.contextWindow ?? context.window);
-    if (totalTokens === undefined || !maxTokens) return Promise.resolve(null);
-    return Promise.resolve({
-      totalTokens,
-      maxTokens,
-      percentage: (totalTokens / maxTokens) * 100,
-      model: this.model.applied,
-      apiUsage: {
-        input_tokens: this.usage.input_tokens,
-        output_tokens: this.usage.output_tokens,
-        cache_read_input_tokens: this.usage.cache_read_tokens,
+    const context = this.context;
+    return Promise.resolve(
+      context && {
+        totalTokens: context.tokens,
+        maxTokens: context.window,
+        percentage: (context.tokens / context.window) * 100,
+        model: this.model.applied,
+        estimated: context.estimated,
       },
-    });
+    );
   }
   getUsageInfo(): Promise<Json | null> {
     return Promise.resolve(
@@ -1445,7 +1445,11 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private event(event: StreamEvent): void {
     this.emit("event", event);
   }
-  private finish(turn: Turn, terminal?: StreamEvent): void {
+  private finish(
+    turn: Turn,
+    terminal?: StreamEvent,
+    contextPending?: Promise<ContextUsage | null>,
+  ): void {
     if (this.activeTurn !== turn || turn.settled) return;
     turn.settled = true;
     this.finishSteer(turn, "outcome_unknown");
@@ -1454,7 +1458,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     }
     this.emit("runState", this.runState);
     if (terminal) {
-      this.event(terminal);
+      this.emit("event", terminal, contextPending);
       if (terminal.kind === "error" && this.listenerCount("error"))
         this.emit("error", new Error(terminal.content));
       this.emit("done", terminal);
@@ -1472,6 +1476,12 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     if (!this.hasUnanchoredInput) return;
     this.hasUnanchoredInput = false;
     this.emit("session_checkpoint");
+  }
+
+  private recordAssistantUsage(msg: Json): void {
+    if (!this.options.recordUsage || !this.sessionId) return;
+    const observation = piUsage(this.sessionId, msg);
+    if (observation) this.options.recordUsage(observation);
   }
 
   private handleEvent(event: Json): void {
@@ -1524,29 +1534,29 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         const window = this.model.applied
           ? this.resolveModel(this.model.applied)?.contextWindow
           : undefined;
-        const context =
-          compacted && window !== undefined && after !== undefined
-            ? { window, tokens: after }
-            : undefined;
+        const context = compacted ? estimatedContext(after, window) : undefined;
+        if (context !== undefined) {
+          this.context = context;
+          this.contextRevision++;
+        }
         if (event.result) {
           this.stats = null;
           this.compactionBoundary = {};
           void this.syncCompactionCheckpoint(this.rpc!);
         }
-        if (compacted && turn) turn.contextualInput = undefined;
         if (manual && error) this.finish(turn, { kind: "error", content });
         else {
           this.event({
             kind: "compact",
             content,
-            ...(context && { context }),
+            ...(context !== undefined && { context }),
           });
           if (manual)
             this.finish(turn, {
               kind: "result",
               content: "",
               interrupted: event.aborted === true,
-              ...(context && { context }),
+              ...(context !== undefined && { context }),
             });
         }
       }
@@ -1617,6 +1627,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           turn.steer.observed ||=
             content === expected || !!content?.startsWith(`${expected}\n\n[Image`);
         } else if (msg.role === "assistant") {
+          this.recordAssistantUsage(msg);
           if (
             turn.steer?.observed &&
             !this.interrupting &&
@@ -1629,13 +1640,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
             .map((block) => text(block.text) ?? "")
             .join("");
           const replyUsage = object(msg.usage);
-          if (msg.usage) {
-            turn.replyUsage = replyUsage;
-            turn.contextualInput =
-              (num(replyUsage.input) ?? 0) +
-              (num(replyUsage.cacheRead) ?? 0) +
-              (num(replyUsage.cacheWrite) ?? 0);
-          }
+          if (msg.usage) turn.replyUsage = replyUsage;
           turn.error =
             msg.stopReason === "error"
               ? (text(msg.errorMessage) ?? "Pi assistant failed")
@@ -1790,40 +1795,46 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     if (rpc.pid) void this.captureDetached(rpc.pid);
     // Start bounded bookkeeping before notifying the queue; neither promise is awaited by it.
     void this.refreshCheckpoint(rpc, turn.generation);
-    void rpc
+    this.context = null;
+    const revision = ++this.contextRevision;
+    const contextPending = rpc
       .getSessionStats({ timeoutMs: this.statsTimeoutMs })
       .then((stats) => {
-        if (!this.current(turn.generation, rpc) || this.activeTurn?.id !== turn.id) return;
-        this.stats = stats;
-        const tokens = object(stats.tokens);
-        this.usage = {
-          ...this.usage,
-          input_tokens: num(tokens.input) ?? this.usage.input_tokens,
-          output_tokens: num(tokens.output) ?? this.usage.output_tokens,
-          cache_read_tokens: num(tokens.cacheRead) ?? this.usage.cache_read_tokens,
-          cache_creation_tokens: num(tokens.cacheWrite) ?? this.usage.cache_creation_tokens,
-          cost_usd: num(stats.cost) ?? this.usage.cost_usd,
-        };
-        this.emit("usage", this.usage);
+        if (!this.current(turn.generation, rpc)) return null;
+        const reported = object(stats.contextUsage);
+        const context = estimatedContext(
+          reported.tokens,
+          reported.contextWindow ?? reported.window,
+        );
+        if (this.contextRevision === revision) this.context = context;
+        if (this.activeTurn?.id === turn.id && this.contextRevision === revision) {
+          this.stats = stats;
+          const tokens = object(stats.tokens);
+          this.usage = {
+            ...this.usage,
+            input_tokens: num(tokens.input) ?? this.usage.input_tokens,
+            output_tokens: num(tokens.output) ?? this.usage.output_tokens,
+            cache_read_tokens: num(tokens.cacheRead) ?? this.usage.cache_read_tokens,
+            cache_creation_tokens: num(tokens.cacheWrite) ?? this.usage.cache_creation_tokens,
+            cost_usd: num(stats.cost) ?? this.usage.cost_usd,
+          };
+          this.emit("usage", this.usage);
+        }
+        return context;
       })
-      .catch(() => undefined);
-    const window = this.model.applied
-      ? this.resolveModel(this.model.applied)?.contextWindow
-      : undefined;
+      .catch(() => null);
     this.finish(
       turn,
       turn.error && !this.interrupting
-        ? { kind: "error", content: turn.error }
+        ? { kind: "error", content: turn.error, context: null }
         : {
             kind: "result",
             content: turn.finalText,
             effort: this.effort.applied,
             interrupted: Boolean(this.interrupting),
-            context:
-              window !== undefined && turn.contextualInput !== undefined
-                ? { window, tokens: turn.contextualInput }
-                : undefined,
+            context: null,
           },
+      contextPending,
     );
   }
 
@@ -3411,6 +3422,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     void this.interrupt();
   }
   resetContext(): void {
+    this.context = null;
+    this.contextRevision++;
     this.cancelDialogs();
     if (this.rpc) void this.retireProcess();
     this.sessionId = null;

@@ -70,6 +70,7 @@ const build = {
   // The search index runs in a worker thread of its own (history-service.ts).
   entryPoints: {
     server: "src/index.ts",
+    "usage-worker": "src/usage/worker.ts",
     "history-worker": "src/workspace/history-worker.ts",
   },
   outdir,

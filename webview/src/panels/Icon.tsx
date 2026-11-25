@@ -4,6 +4,7 @@ import table from "./vscode-icons.json";
 // panel headers and the row actions read as one family.
 export const ICONS = {
   board: "M2.5 3.5h11v9h-11zM6.2 3.5v9M9.8 3.5v9",
+  usage: "M2.5 2.5v11h11M5.5 10.5V8M8.5 10.5V5.5M11.5 10.5V3.5",
   agents: "M8 8a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM3 13.5c.6-2.2 2.6-3.5 5-3.5s4.4 1.3 5 3.5",
   files: "M4 2.5h5l3 3v8H4zM9 2.5v3h3",
   maximize: "M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10",

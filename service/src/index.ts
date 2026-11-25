@@ -1,5 +1,6 @@
 import * as path from "path";
 import { existsSync, realpathSync } from "node:fs";
+import { refreshUsage } from "./usage/service";
 import { Server } from "./server/server";
 import { doctor } from "./config/doctor";
 import { formatReport } from "./config/diagnostics";
@@ -55,7 +56,13 @@ function serve() {
     console.error("Deploy control unavailable:", error),
   );
 
+  const collect = () =>
+    void refreshUsage(baseDir).catch(() => console.warn("[usage] ACP reader unavailable"));
+  const timer = setInterval(collect, 60_000).unref();
+  collect();
+
   async function shutdown(code = 0): Promise<void> {
+    clearInterval(timer);
     await server.close();
     process.exit(code);
   }

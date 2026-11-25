@@ -32,7 +32,11 @@ export default fixture({
   verify(r) {
     const [first, compacted, last] = agentMessages(r);
     expect(first.content).toBe("ok");
-    expect(compacted.events!.filter((e) => e.kind === "compact")).toHaveLength(1);
+    // The compaction frame only populates totalTokens, not request input or output.
+    expect(compacted.events!.filter((e) => e.kind === "compact")).toEqual([
+      expect.objectContaining({ context: null }),
+    ]);
+    expect(compacted.context).toBeNull();
     expect(last.content).toBe("kiwi 4051");
     // Codex retains tool declarations in the thread. The server supplies
     // current project instructions again on resume.

@@ -17,6 +17,12 @@ export default fixture({
       expect(phase).toMatchObject({ runState: "working", terminalCount: 0 });
     expect(retry.retryBanner).toBe("Retrying (1/2 in 0s): 503 fixture service unavailable");
     expect(compacted.retryBanner).toBe(retry.retryBanner);
+    expect(compacted.contextUsage).toMatchObject({
+      totalTokens: 2209,
+      maxTokens: 272000,
+      estimated: true,
+    });
+    expect(agentMessages(r)[0].context).toBeNull();
     expect(progress.retryBanner).toBeNull();
     expect(settled).toMatchObject({
       runState: "idle",

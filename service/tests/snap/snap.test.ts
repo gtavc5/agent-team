@@ -76,10 +76,10 @@ for (const backend of ["codex", "pi"] as Backend[]) {
             backend === "pi" ? { ...m, events: m.events?.map(stripChildTranscript) } : m;
           expect(strip(client[j]), `message ${j + 1}`).toEqual(strip(expected));
           if (backend === "pi") {
-            const projection = ({ content, status, context, effort, thinking }: typeof m) => ({
+            // Asynchronous occupancy is tested through real workspace callbacks in broadcast.test.ts.
+            const projection = ({ content, status, effort, thinking }: typeof m) => ({
               content,
               status,
-              context,
               thinking,
               // Raw error events do not carry the effort from new_message.
               effort: status === "done" ? effort : undefined,

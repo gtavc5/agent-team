@@ -23,7 +23,7 @@ export default fixture({
     const [before, after] = agentMessages(r);
     expect(before.events!.find((e) => e.kind === "tool_use")?.toolResult).toBe("first\n");
     expect(after.content.trim()).toBe("first\n\nbanana");
-    expect(after.context).toEqual({ tokens: 53296, window: 258400 });
+    expect(after.context).toEqual({ tokens: 53296, window: 258400, estimated: true });
     // Steered under the turn codex runs, tagged with the panel message, a
     // tag codex echoes as the read userMessage's clientId.
     const steer = r.sent.find((s) => s.method === "turn/steer");

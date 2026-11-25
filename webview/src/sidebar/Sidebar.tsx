@@ -18,6 +18,7 @@ import { ConfirmDialog } from "../workspace/dialogs";
 import { QuotaPanel } from "./QuotaPanel";
 import { formatShortDateTime, quotaTone } from "./quota";
 import { describeAttention, summarizeAttention } from "./attention";
+import { UsageDashboard } from "../usage/UsageDashboard";
 
 interface ThemeController {
   get: () => "light" | "dark";
@@ -150,6 +151,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
   const sidebarOpen = p.sidebarOpen ?? true;
   const previousSidebarOpen = useRef(sidebarOpen);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [showUsage, setShowUsage] = useState(false);
   const deleting = p.workspaces.find((ws) => ws.id === deleteId);
   useEffect(() => {
     return () => {
@@ -589,6 +591,15 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             </button>
           )}
           <button
+            type="button"
+            title="Usage"
+            aria-label="Usage"
+            aria-haspopup="dialog"
+            onClick={() => setShowUsage(true)}
+          >
+            <Icon name="usage" />
+          </button>
+          <button
             ref={debugTrigger}
             type="button"
             className="sidebar-debug"
@@ -753,6 +764,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
         <QuotaPanel quota={p.quota} refresh={p.onRefreshQuota} now={now} connected={p.connected} />
       )}
       {p.systemStatus && <SystemStatusPanel status={p.systemStatus} />}
+      {showUsage && <UsageDashboard onClose={() => setShowUsage(false)} />}
       {deleting && (
         <ConfirmDialog
           telemetryAction="confirm.delete_session"

@@ -1,3 +1,6 @@
+import type { ContextUsage } from "../../../shared/context-usage";
+export type { ContextUsage } from "../../../shared/context-usage";
+
 export type Backend = "pi" | "codex";
 export type LegacyBackend = "claude" | "cursor" | "agy";
 export type AnyBackend = Backend | LegacyBackend;
@@ -63,9 +66,9 @@ export interface StreamEvent {
   toolName?: string;
   toolSource?: ToolSource;
   level?: NoticeLevel;
-  // On result and compact events: size of the context sent on the turn's last
-  // request (or estimated after compaction) and the model's window.
-  context?: ContextUsage;
+  // A terminal or successful compaction boundary. Null means unknown at
+  // this boundary, while omission means the event does not update occupancy.
+  context?: ContextUsage | null;
   // On result events: the effort the turn actually ran at.
   effort?: string;
   // On result events: thinking tokens and time of the turn's main loop.
@@ -106,11 +109,6 @@ export interface StreamEvent {
 // "sleeping" = a scheduled wake-up is pending. Messages can be sent in every
 // state but "working" (where they queue).
 export type RunState = "idle" | "working" | "waiting" | "sleeping";
-
-export interface ContextUsage {
-  tokens: number;
-  window: number;
-}
 
 export interface ThinkingStats {
   tokens: number;

@@ -2980,6 +2980,50 @@ button.quote-bar-content:focus-visible {
 .dialog-confirm {
   max-width: 420px;
 }
+.usage-dialog {
+  width: 640px;
+  max-width: calc(100vw - 24px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.usage-dialog .dialog-body {
+  overflow-y: auto;
+}
+.usage-dialog .dialog-title,
+.usage-dialog .dialog-actions,
+.usage-controls {
+  flex-shrink: 0;
+}
+.usage-controls {
+  display: flex;
+  gap: 8px;
+}
+.usage-controls [aria-pressed="true"] {
+  background: var(--bg-active);
+  border-color: var(--accent);
+}
+.usage-journey {
+  list-style: none;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+.usage-journey > li {
+  border-top: 1px solid var(--border);
+  padding: 10px 0;
+}
+.usage-details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 12px;
+  margin: 6px 0 0;
+}
+.usage-details dd {
+  margin: 0;
+}
+.usage-journey ul {
+  padding-inline-start: 16px;
+}
 .dialog-title {
   font-size: 15px;
   font-weight: 600;

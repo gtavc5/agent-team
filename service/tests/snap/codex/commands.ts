@@ -31,7 +31,7 @@ export default fixture({
       "line 2\nline 3\n",
     ]);
     expect(calls[3].durationMs).toBe(2853);
-    expect(m.context).toEqual({ tokens: 14448, window: 258400 });
+    expect(m.context).toEqual({ tokens: 14448, window: 258400, estimated: true });
     const start = r.sent.find((s) => s.method === "turn/start");
     expect(start?.params).toMatchObject({ serviceTier: "default", summary: "detailed" });
   },

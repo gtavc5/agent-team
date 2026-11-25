@@ -517,7 +517,7 @@ describe("the agents panel in the app", () => {
   });
 
   for (const state of ["idle", "waiting"] as const) {
-    it(`hides the live context meter on agent_updated with context: null (${state}), matching a fresh snapshot`, () => {
+    it(`shows unknown for agent_updated with context: null (${state}), matching a fresh snapshot`, () => {
       const baseAgent =
         state === "waiting"
           ? agent("kisara", {
@@ -559,12 +559,13 @@ describe("the agents panel in the app", () => {
         });
       });
 
-      expect(card().querySelector(".ap-context")).toBeNull();
+      expect(card().querySelector(".ap-context")!.textContent).toBe("ctx unknown");
       expect(card().textContent).not.toContain("96k / 1M");
       // Folded overview brief also matches the fresh snapshot.
       fireEvent.click(card().querySelector(".ap-toggle")!);
       const liveBrief = card().querySelector(".ap-brief")!.textContent;
-      if (state === "idle") expect(card().querySelector(".ap-brief-meta")!.textContent).toBe("");
+      if (state === "idle")
+        expect(card().querySelector(".ap-brief-meta")!.textContent).toBe("ctx unknown");
       else expect(liveBrief).toContain("waiting on background work");
 
       // Fresh snapshot from init renders the exact same cleared state.
@@ -576,7 +577,7 @@ describe("the agents panel in the app", () => {
       document.body.innerHTML = "";
       boot("w1", [lead, freshUsed, w2]);
       fireEvent.click(document.querySelector(".agents-chip")!);
-      expect(card().querySelector(".ap-context")).toBeNull();
+      expect(card().querySelector(".ap-context")!.textContent).toBe("ctx unknown");
       fireEvent.click(card().querySelector(".ap-toggle")!);
       expect(card().querySelector(".ap-brief")!.textContent).toBe(liveBrief);
     });

@@ -17,6 +17,7 @@ import { ensureWebviewBuilt } from "../../../scripts/bench-demo";
 import { seedDemo, type SeedDemoResult } from "../../../scripts/seed-demo";
 import { Server } from "../../src/server/server";
 import * as codex from "../../src/session/codex";
+import { recordUsage } from "../../src/usage/ledger";
 import { LocalHost } from "../../src/session/host";
 
 const alpha = "journey/alpha";
@@ -140,6 +141,38 @@ const transcript = (page: Page, marker: string) =>
   page.locator(".messages", { hasText: marker }).waitFor();
 const worker = (page: Page, name: string) => page.locator(".task-item", { hasText: name });
 const card = (page: Page, name: string) => page.getByRole("region", { name, exact: true });
+
+it("opens the usage ledger and reopens the same observation after reload", async () => {
+  await journey(
+    async (page) => {
+      for (const reload of [false, true]) {
+        if (reload) await page.reload();
+        await page.getByRole("button", { name: "Usage", exact: true }).click();
+        const dashboard = page.getByRole("dialog", { name: "Usage dashboard" });
+        await dashboard.getByRole("button", { name: "Journey", exact: true }).click();
+        await dashboard.getByText("offline-acceptance-model", { exact: true }).waitFor();
+        await dashboard
+          .getByText(/143,166 cache read/)
+          .first()
+          .waitFor();
+      }
+    },
+    ({ baseDir }) =>
+      recordUsage(baseDir, {
+        source: "acp",
+        unit: "inference",
+        id: "70",
+        sessionId: "offline-acp",
+        timestamp: 1795578754153,
+        model: "offline-acceptance-model",
+        input: 23325,
+        cacheRead: 143166,
+        cacheWrite: 0,
+        output: 207,
+        price: { kind: "unpriced", usd: null },
+      }),
+  );
+}, 45_000);
 
 it("browses workspace files, quotes real selected lines, and recovers from a missing file", async () => {
   await journey(
@@ -360,7 +393,9 @@ it("uses lead and worker agent cards to manage an agent with destructive confirm
       const fold = mobile.getByRole("button", { name: "Fold mobile panels", exact: true });
       const unfold = mobile.getByRole("button", { name: "Unfold mobile panels", exact: true });
       await unfold.click();
-      const usage = mobile.locator(".ap-context");
+      const usage = mobile
+        .locator(".ap-agent", { has: page.getByText("Perseus", { exact: true }) })
+        .locator(".ap-context");
       await usage.waitFor();
       expect(await usage.textContent()).toMatch(/\S+ \/ 1M/);
       await fold.click();
@@ -434,7 +469,7 @@ it("uses lead and worker agent cards to manage an agent with destructive confirm
       await clear.click();
       await clearDialog.getByRole("button", { name: "Clear context", exact: true }).click();
       await transcript(page, "Perseus context cleared");
-      await usage.waitFor({ state: "hidden" });
+      await expect.poll(() => usage.textContent()).toBe("ctx unknown");
 
       const remove = mobile.getByRole("button", { name: "Remove Journey reviewer", exact: true });
       const removeDialog = page.getByRole("dialog", { name: "Remove Journey reviewer?" });

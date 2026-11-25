@@ -63,6 +63,7 @@ function harness(
     delayedQuota?: boolean;
     retire?: { trailing?: object };
     holdPromptReply?: boolean;
+    contextUsage?: { tokens: number | null; contextWindow: number };
     enabledModels?: string[];
     startupModel?: { provider: string; id: string };
     models?: Array<{
@@ -203,7 +204,7 @@ function harness(
             respond(frame, {
               tokens: { input: 99, output: 7 },
               cost: 3,
-              contextUsage: { tokens: null, contextWindow: 100 },
+              contextUsage: override.contextUsage ?? { tokens: null, contextWindow: 100 },
             });
             break;
           default:
@@ -838,6 +839,7 @@ describe("PiSession dispatch and stream state", () => {
 
   it("updates live and restored workspace context occupancy after manual /compact with estimatedTokensAfter", async () => {
     const h = harness({
+      contextUsage: { tokens: 312_900, contextWindow: 1_048_576 },
       models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
     });
     const updated: Array<{ context: { tokens: number; window: number } | null }> = [];
@@ -863,7 +865,13 @@ describe("PiSession dispatch and stream state", () => {
     c.event({ type: "agent_end", messages: [] });
     c.event({ type: "agent_settled", aborted: false });
     await first;
-    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 312_760, window: 1_048_576 });
+    await vi.waitFor(() =>
+      expect(ws.getInfo().agents[0].context).toEqual({
+        tokens: 312_900,
+        window: 1_048_576,
+        estimated: true,
+      }),
+    );
 
     // Manual /compact reports estimatedTokensAfter; both live and restored state must drop to it.
     updated.length = 0;
@@ -887,9 +895,17 @@ describe("PiSession dispatch and stream state", () => {
     c.respond(compactFrame, compactResult);
     await compacting;
 
-    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 33_812, window: 1_048_576 });
-    expect(updated.at(-1)?.context).toEqual({ tokens: 33_812, window: 1_048_576 });
-    expect(ws.getMessages().at(-1)?.context).toEqual({ tokens: 33_812, window: 1_048_576 });
+    expect(ws.getInfo().agents[0].context).toEqual({
+      tokens: 33_812,
+      window: 1_048_576,
+      estimated: true,
+    });
+    expect(updated.at(-1)?.context).toEqual({ tokens: 33_812, window: 1_048_576, estimated: true });
+    expect(ws.getMessages().at(-1)?.context).toEqual({
+      tokens: 33_812,
+      window: 1_048_576,
+      estimated: true,
+    });
 
     const restored = Workspace.fromState(ws.getState(), registry, {
       onNewMessage: () => {},
@@ -897,11 +913,16 @@ describe("PiSession dispatch and stream state", () => {
       onMessageDone: () => {},
     });
     restored.setMessages(structuredClone(ws.getMessages()));
-    expect(restored.getInfo().agents[0].context).toEqual({ tokens: 33_812, window: 1_048_576 });
+    expect(restored.getInfo().agents[0].context).toEqual({
+      tokens: 33_812,
+      window: 1_048_576,
+      estimated: true,
+    });
   });
 
   it("clears stale pre-compaction context when /compact has no token estimate and stops pre-compaction fallback on reload", async () => {
     const h = harness({
+      contextUsage: { tokens: 312_900, contextWindow: 1_048_576 },
       models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
     });
     const updated: Array<{ context: { tokens: number; window: number } | null }> = [];
@@ -926,7 +947,13 @@ describe("PiSession dispatch and stream state", () => {
     c.event({ type: "agent_end", messages: [] });
     c.event({ type: "agent_settled", aborted: false });
     await first;
-    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 312_760, window: 1_048_576 });
+    await vi.waitFor(() =>
+      expect(ws.getInfo().agents[0].context).toEqual({
+        tokens: 312_900,
+        window: 1_048_576,
+        estimated: true,
+      }),
+    );
 
     // A failed compact keeps the existing context intact.
     const failed = ws.sendMessage("/compact", agent.id);
@@ -942,7 +969,11 @@ describe("PiSession dispatch and stream state", () => {
     });
     c.respond(failFrame, undefined, false);
     await failed;
-    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 312_760, window: 1_048_576 });
+    expect(ws.getInfo().agents[0].context).toEqual({
+      tokens: 312_900,
+      window: 1_048_576,
+      estimated: true,
+    });
 
     // A successful compact without estimatedTokensAfter clears stale context both live and after reload.
     updated.length = 0;
@@ -975,6 +1006,44 @@ describe("PiSession dispatch and stream state", () => {
     });
     restored.setMessages(structuredClone(ws.getMessages()));
     expect(restored.getInfo().agents[0].context).toBeNull();
+  });
+
+  it("keeps missing terminal context unknown when earlier Pi stats arrive late", async () => {
+    const h = harness();
+    const { ws, registry } = workspaceFor(h, {});
+    const agent = ws.addAgent("Pi", "mock/test", "", "", { backend: "pi" });
+    await ws.sendMessage("first", agent.id);
+    const c = h.clients[0];
+    let resolveFirst!: (stats: Record<string, unknown>) => void;
+    vi.spyOn(c.rpc, "getSessionStats")
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ tokens: { input: 123, output: 45, total: 168 } });
+    c.event(piFrame("message_end", { role: "assistant" }));
+    c.event(piFrame("agent_settled"));
+    const firstReply = ws.getMessages().at(-1)!;
+    expect(firstReply.context).toBeNull();
+
+    await ws.sendMessage("second", agent.id);
+    c.event(piFrame("message_end", { role: "assistant" }));
+    c.event(piFrame("agent_settled"));
+    const secondReply = ws.getMessages().at(-1)!;
+    resolveFirst({ contextUsage: { tokens: 17, contextWindow: 100 } });
+    await vi.waitFor(() =>
+      expect(firstReply.context).toEqual({ tokens: 17, window: 100, estimated: true }),
+    );
+    expect(secondReply.context).toBeNull();
+    expect(ws.getInfo().agents[0].context).toBeNull();
+    expect(await h.session.getContextUsage()).toBeNull();
+    await ws.sendMessage("/context", agent.id);
+    expect(ws.getMessages().at(-1)?.content).toContain("**Occupancy:** Unknown");
+    expect(
+      Workspace.fromState(structuredClone(ws.getState()), registry).getInfo().agents[0].context,
+    ).toBeNull();
   });
 
   it("does not restore pre-compaction context at turn settlement after threshold auto-compaction", async () => {
@@ -1011,16 +1080,17 @@ describe("PiSession dispatch and stream state", () => {
         aborted: false,
         willRetry: false,
       });
+      expect(ws.getInfo().agents[0].context).toEqual(
+        estimatedTokensAfter === undefined
+          ? null
+          : { tokens: estimatedTokensAfter, window: 1_048_576, estimated: true },
+      );
       c.event({ type: "agent_end", messages: [] });
       c.event({ type: "agent_settled", aborted: false });
       await turn;
 
-      const expected =
-        estimatedTokensAfter !== undefined
-          ? { tokens: estimatedTokensAfter, window: 1_048_576 }
-          : null;
-      expect(ws.getInfo().agents[0].context).toEqual(expected);
-      expect(ws.getMessages().at(-1)?.context).toEqual(expected ?? undefined);
+      expect(ws.getInfo().agents[0].context).toBeNull();
+      expect(ws.getMessages().at(-1)?.context).toBeNull();
 
       const restored = Workspace.fromState(ws.getState(), registry, {
         onNewMessage: () => {},
@@ -1028,13 +1098,14 @@ describe("PiSession dispatch and stream state", () => {
         onMessageDone: () => {},
       });
       restored.setMessages(structuredClone(ws.getMessages()));
-      expect(restored.getInfo().agents[0].context).toEqual(expected);
+      expect(restored.getInfo().agents[0].context).toBeNull();
     }
   });
 
   it("preserves out-of-turn compaction estimates and clears across workspace reload", async () => {
     for (const estimatedTokensAfter of [22_500, undefined]) {
       const h = harness({
+        contextUsage: { tokens: 201_500, contextWindow: 1_048_576 },
         models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
       });
       const { ws, registry } = workspaceFor(h, {});
@@ -1056,7 +1127,13 @@ describe("PiSession dispatch and stream state", () => {
       c.event({ type: "agent_end", messages: [] });
       c.event({ type: "agent_settled", aborted: false });
       await first;
-      expect(ws.getInfo().agents[0].context).toEqual({ tokens: 201_000, window: 1_048_576 });
+      await vi.waitFor(() =>
+        expect(ws.getInfo().agents[0].context).toEqual({
+          tokens: 201_500,
+          window: 1_048_576,
+          estimated: true,
+        }),
+      );
 
       // Idle out-of-turn compaction (no active turn).
       c.event({ type: "compaction_start", reason: "threshold" });
@@ -1075,7 +1152,7 @@ describe("PiSession dispatch and stream state", () => {
 
       const expected =
         estimatedTokensAfter !== undefined
-          ? { tokens: estimatedTokensAfter, window: 1_048_576 }
+          ? { tokens: estimatedTokensAfter, window: 1_048_576, estimated: true }
           : null;
       expect(ws.getInfo().agents[0].context).toEqual(expected);
       expect(ws.lastTurns()[0]?.replies.every((m) => m.kind === "agent")).toBe(true);
@@ -1115,7 +1192,11 @@ describe("PiSession dispatch and stream state", () => {
       aborted: false,
       willRetry: false,
     });
-    expect(ws.getInfo().agents[0].context).toEqual({ tokens: 40_000, window: 1_048_576 });
+    expect(ws.getInfo().agents[0].context).toEqual({
+      tokens: 40_000,
+      window: 1_048_576,
+      estimated: true,
+    });
 
     // Second compaction lacks an estimate: must clear live context immediately.
     c.event({ type: "compaction_start", reason: "overflow" });
@@ -1127,7 +1208,7 @@ describe("PiSession dispatch and stream state", () => {
       willRetry: false,
     });
     expect(ws.getInfo().agents[0].context).toBeNull();
-    expect(ws.getMessages().at(-1)?.context).toBeUndefined();
+    expect(ws.getMessages().at(-1)?.context).toBeNull();
 
     // Error settlement and reload must keep context cleared.
     c.event({
@@ -1139,7 +1220,7 @@ describe("PiSession dispatch and stream state", () => {
     await turn;
 
     expect(ws.getInfo().agents[0].context).toBeNull();
-    expect(ws.getMessages().at(-1)?.context).toBeUndefined();
+    expect(ws.getMessages().at(-1)?.context).toBeNull();
 
     const restored = Workspace.fromState(ws.getState(), registry, {
       onNewMessage: () => {},
@@ -1422,7 +1503,7 @@ describe("PiSession dispatch and stream state", () => {
     expect(h.events.filter((e) => e.level === "warning")).toEqual([]);
   });
 
-  it("canonicalizes bare model IDs so context window, thinking levels, and optionsPending stay accurate", async () => {
+  it("canonicalizes bare model IDs so thinking levels and optionsPending stay accurate", async () => {
     const h = harness({
       config: { model: "mock/large" },
       startupModel: { provider: "mock", id: "large" },
@@ -1449,17 +1530,9 @@ describe("PiSession dispatch and stream state", () => {
     expect(h.session.getAvailableThinkingLevels("mock/small")).toEqual(["low", "high"]);
     expect(h.session.getAvailableThinkingLevels("mock/large")).toBeUndefined();
 
-    // Next turn emits the switched model's contextWindow without re-sending set_model.
+    // A subsequent turn does not redundantly re-send set_model.
     await h.session.send("check context");
     expect(h.clients[0].wire.filter((f) => f.type === "set_model")).toHaveLength(1);
-    const { event } = h.clients[0];
-    event({ type: "agent_start" });
-    event(piFrame("message_end", { role: "assistant" }));
-    event(piFrame("agent_settled"));
-    expect(h.events.at(-1)).toMatchObject({
-      kind: "result",
-      context: { tokens: 412, window: 272_000 },
-    });
   });
 
   it.each(["startup", "idle"])(
@@ -1587,7 +1660,7 @@ describe("PiSession dispatch and stream state", () => {
       { kind: "retry", content: "Retrying (1/2 in 1s): 503 fixture service unavailable" },
       { kind: "retry", content: "Retrying (2/2 in 2s): 503 fixture service unavailable" },
       { kind: "retry", content: "" },
-      { kind: "error", content: "503 final failure" },
+      { kind: "error", content: "503 final failure", context: null },
     ]);
     expect(h.done).toHaveBeenCalledTimes(1);
   });
@@ -2070,7 +2143,7 @@ describe("PiSession dispatch and stream state", () => {
     expect(events.at(-1)).toMatchObject({
       kind: "result",
       content: "xxxxx",
-      context: { tokens: 412, window: 100 },
+      context: null,
     });
     expect(session.usage.input_tokens).toBe(412);
     await vi.waitFor(() => expect(session.usage.input_tokens).toBe(99));

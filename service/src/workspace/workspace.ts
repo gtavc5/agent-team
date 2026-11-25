@@ -74,7 +74,7 @@ export interface Message {
   fast?: boolean;
   // Agent replies: the model the turn ran on (an agent's model can change).
   model?: string;
-  context?: ContextUsage;
+  context?: ContextUsage | null;
   // Thinking tokens and time of the turn, when the backend reports them.
   thinking?: ThinkingStats;
   // "summary" when the events carry only chips/counts (history pages); the
@@ -107,7 +107,7 @@ export interface AgentRuntimeInfo extends AgentInfo {
   fast: boolean;
   // Background work the agent is waiting on (see RunState "waiting").
   backgroundTasks: BackgroundTask[];
-  // Context occupancy at the end of its last turn, when known.
+  // Context occupancy at its latest backend boundary, when known.
   context: ContextUsage | null;
   // A scheduled wake-up it is sleeping until.
   wake: { at: number; reason: string } | null;
@@ -226,6 +226,7 @@ export interface AgentEntry {
   runState?: RunState;
   // Context at the end of the last turn; undefined until looked up.
   lastContext?: ContextUsage | null;
+  contextRevision?: number;
   // The message the agent got last, and the last one from another session
   // (the same record while nothing came after it).
   input?: TurnInput;
@@ -715,7 +716,7 @@ export class Workspace {
       timestamp: Date.now(),
       status: "done",
       ...(extra?.events && { events: extra.events }),
-      ...(extra?.context && { context: extra.context }),
+      ...(extra?.context !== undefined && { context: extra.context }),
     };
     this.pushMessage(msg);
   }
@@ -860,8 +861,38 @@ export class Workspace {
     return null;
   }
 
-  private createEventHandler(agentId: string): (event: StreamEvent) => void {
-    return (event: StreamEvent) => {
+  private updateLastContext(entry: AgentEntry, context: ContextUsage | null): number {
+    entry.lastContext = context;
+    const revision = (entry.contextRevision ?? 0) + 1;
+    entry.contextRevision = revision;
+    this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
+    return revision;
+  }
+
+  private recordTerminalContext(
+    entry: AgentEntry,
+    msg: Message,
+    context: ContextUsage | null | undefined,
+    pending?: Promise<ContextUsage | null>,
+  ): void {
+    if (context === undefined) return;
+    msg.context = context;
+    const revision = this.updateLastContext(entry, context);
+    if (!pending) return;
+    // Pi reads terminal stats without delaying settlement or queue delivery.
+    void pending.then((reported) => {
+      if (!reported || this.agents.get(entry.info.id) !== entry) return;
+      if (!this.messagesLoaded && !this.cb?.ensureLoaded?.(this)) return;
+      const stored = this.findMessage(msg.id);
+      if (!stored) return;
+      stored.context = reported;
+      if (entry.contextRevision === revision) this.updateLastContext(entry, reported);
+      this.finished(stored.id, stored.status, stored.content, stored.events, { context: reported });
+    });
+  }
+
+  private createEventHandler(agentId: string) {
+    return (event: StreamEvent, contextPending?: Promise<ContextUsage | null>) => {
       const entry = this.agents.get(agentId);
       if (!entry) return;
 
@@ -927,13 +958,12 @@ export class Workspace {
           return;
         }
         if (event.kind === "notice" || event.kind === "compact" || event.kind === "retry") {
-          if (isCompactedEvent(event)) {
-            entry.lastContext = event.context ?? null;
-            this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
+          if (event.kind === "compact" && event.context !== undefined) {
+            this.updateLastContext(entry, event.context);
             this.pushSystemMessage(event.content, {
               agentId,
               events: [event],
-              ...(event.context && { context: event.context }),
+              context: event.context,
             });
             return;
           }
@@ -1005,19 +1035,12 @@ export class Workspace {
           clearLiveTiming(entry.currentMsg);
           // The retry succeeded; "API retry 2/10 in 5s" is no longer true.
           clearRetry(entry.currentMsg);
-          if (event.context) {
-            entry.currentMsg.context = event.context;
-            entry.lastContext = event.context;
-            this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
-          } else if (isCompactedMessage(entry.currentMsg) && !entry.currentMsg.context) {
-            entry.lastContext = null;
-            this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
-          }
+          this.recordTerminalContext(entry, entry.currentMsg, event.context, contextPending);
           if (event.effort) entry.currentMsg.effort = event.effort;
           if (event.thinking) entry.currentMsg.thinking = event.thinking;
-          const contextPatch = event.context ?? entry.currentMsg.context;
+          const contextPatch = entry.currentMsg.context;
           const patch = {
-            ...(contextPatch && { context: contextPatch }),
+            ...(contextPatch !== undefined && { context: contextPatch }),
             ...(event.effort && { effort: event.effort }),
             ...(event.thinking && { thinking: event.thinking }),
           };
@@ -1047,10 +1070,7 @@ export class Workspace {
         if (entry.retryPending && answered(msg)) entry.lastEnvelope = undefined;
         msg.status = "error";
         clearLiveTiming(msg);
-        if (isCompactedMessage(msg) && !msg.context) {
-          entry.lastContext = null;
-          this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
-        }
+        this.recordTerminalContext(entry, msg, event.context, contextPending);
         event.contentOffset = msg.content.length;
         msg.events!.push(event);
         this.streamed(msg, event);
@@ -1059,7 +1079,7 @@ export class Workspace {
           "error",
           msg.content,
           msg.events,
-          msg.context ? { context: msg.context } : undefined,
+          msg.context !== undefined ? { context: msg.context } : undefined,
         );
         this.finishReply(entry);
       } else if (event.kind === "subagent_progress" || event.kind === "subagent_done") {
@@ -1114,10 +1134,9 @@ export class Workspace {
             ? Math.min(Math.max(0, event.contentOffset), msg.content.length)
             : msg.content.length;
         msg.events!.push(event);
-        if (isCompactedEvent(event)) {
+        if (event.kind === "compact" && event.context !== undefined) {
           msg.context = event.context;
-          entry.lastContext = event.context ?? null;
-          this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
+          this.updateLastContext(entry, event.context);
         }
         this.streamed(msg, event);
       }
@@ -1397,12 +1416,7 @@ export class Workspace {
       );
     }
     if (text === "/context") {
-      return (
-        agent.session
-          .getContextUsage?.()
-          .then((data) => (data ? formatContextUsage(data) : NO_ACTIVE_SESSION)) ??
-        NO_ACTIVE_SESSION
-      );
+      return formatContextUsage(this.lastContext(agent), agent.info.model);
     }
     if (text === "/effort" || text.startsWith("/effort ")) {
       return this.handleEffortCommand(text.slice("/effort".length).trim(), agent);
@@ -2605,7 +2619,6 @@ export class Workspace {
     if (this.dispatchHeld(entry)) return false;
     if (this.hasWork(entry) && entry.input) entry.input.stopped = "user";
     this.dropRetry(entry);
-    entry.lastContext = null;
     if (entry.session.resetContext) entry.session.resetContext();
     else {
       entry.session.abort();
@@ -2620,8 +2633,11 @@ export class Workspace {
       duration_ms: 0,
     };
     this.settleStale(entry);
-    this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
-    this.pushSystemMessage(`${entry.info.avatar} **${entry.info.name}** context cleared`);
+    this.updateLastContext(entry, null);
+    this.pushSystemMessage(`${entry.info.avatar} **${entry.info.name}** context cleared`, {
+      agentId,
+      context: null,
+    });
     return true;
   }
 
@@ -2646,9 +2662,8 @@ export class Workspace {
     };
   }
 
-  // From the newest reply that recorded one; an unloaded history (archived)
-  // leaves it unknown, and a compaction without a post-compaction estimate
-  // stops the scan so pre-compaction occupancy never resurfaces.
+  // A null boundary stops the search for older occupancy. Older histories
+  // recorded successful compaction as a banner without an explicit null.
   private lastContext(a: AgentEntry): ContextUsage | null {
     if (a.lastContext !== undefined) return a.lastContext;
     if (!this.messagesLoaded) return null;
@@ -2656,8 +2671,11 @@ export class Workspace {
     for (let i = this.messages.length - 1; i >= 0 && !found; i--) {
       const m = this.messages[i];
       if (m.agentId !== a.info.id) continue;
-      if (m.context) found = m.context;
-      else if (isCompactedMessage(m)) break;
+      if (m.context !== undefined) {
+        found = m.context;
+        break;
+      }
+      if (isCompactedMessage(m)) break;
     }
     a.lastContext = found;
     return found;
@@ -2957,43 +2975,14 @@ function formatUsageInfo(data: Record<string, unknown>): string {
   return lines.join("\n");
 }
 
-function formatContextUsage(data: Record<string, unknown>): string {
-  const total = data.totalTokens as number | undefined;
-  const max = data.maxTokens as number | undefined;
-  const pct = data.percentage as number | undefined;
-  const model = data.model as string | undefined;
-  const categories = data.categories as Array<Record<string, unknown>> | undefined;
-
-  const lines: string[] = ["## Context Usage"];
-  if (model) lines.push(`**Model:** ${model}`);
-  if (total != null && max != null) {
-    const bar = renderBar(pct ?? (total / max) * 100);
-    lines.push(
-      `**Tokens:** ${(total / 1000).toFixed(1)}k / ${(max / 1000).toFixed(1)}k ${bar} ${(pct ?? 0).toFixed(1)}%`,
-    );
-  }
-
-  if (categories?.length) {
-    lines.push("", "| Category | Tokens | % |", "|---|---:|---:|");
-    for (const c of categories) {
-      const name = c.name as string;
-      const tokens = c.tokens as number;
-      const share = max ? ((tokens / max) * 100).toFixed(1) : "—";
-      lines.push(`| ${name} | ${(tokens / 1000).toFixed(1)}k | ${share}% |`);
-    }
-  }
-
-  const api = data.apiUsage as Record<string, number> | undefined;
-  if (api) {
-    lines.push("", "### API Usage (this session)");
-    lines.push(`- **Input:** ${(api.input_tokens / 1000).toFixed(1)}k`);
-    lines.push(`- **Output:** ${(api.output_tokens / 1000).toFixed(1)}k`);
-    if (api.cache_read_input_tokens)
-      lines.push(`- **Cache read:** ${(api.cache_read_input_tokens / 1000).toFixed(1)}k`);
-    if (api.cache_creation_input_tokens)
-      lines.push(`- **Cache write:** ${(api.cache_creation_input_tokens / 1000).toFixed(1)}k`);
-  }
-
+function formatContextUsage(context: ContextUsage | null, model: string): string {
+  const lines = ["## Context Usage", `**Model:** ${model}`];
+  if (!context) return [...lines, "**Occupancy:** Unknown"].join("\n");
+  const { tokens, window, estimated } = context;
+  const pct = (tokens / window) * 100;
+  lines.push(
+    `**Tokens${estimated ? " (estimate)" : ""}:** ${(tokens / 1000).toFixed(1)}k / ${(window / 1000).toFixed(1)}k ${renderBar(pct)} ${pct.toFixed(1)}%`,
+  );
   return lines.join("\n");
 }
 

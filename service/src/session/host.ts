@@ -21,6 +21,7 @@ import { ReadOnlyLegacySession } from "./legacy";
 import { PanelHttpServer } from "./panel-http";
 import { PiSession } from "./pi";
 import type { PanelToolset } from "../project/tools";
+import type { UsageRecorder } from "./usage-observation";
 
 export interface BoundarySteer {
   envelope: PromptEnvelope;
@@ -123,6 +124,7 @@ export class LocalHost implements Host {
       piReaderReady: (providers: string[]) => void;
       codex: (limits: RateLimitSnapshot) => void;
     },
+    private readonly usageRecorder?: UsageRecorder,
   ) {
     this.id = id;
     this.label = label;
@@ -154,9 +156,12 @@ export class LocalHost implements Host {
     if (this.closing) throw new Error("LocalHost is closing");
     let session: HostSessionHandle;
     if (config.backend === "codex") {
-      session = new CodexSession(config);
+      session = new CodexSession(config, this.usageRecorder);
     } else if (config.backend === "pi") {
-      session = new PiSession({ ...config, agentId }, { panelHttp: this.getPanelHttp() });
+      session = new PiSession(
+        { ...config, agentId },
+        { panelHttp: this.getPanelHttp(), recordUsage: this.usageRecorder?.recordUsage },
+      );
     } else {
       throw new Error(`Backend "${config.backend ?? "unknown"}" cannot create new sessions`);
     }
@@ -195,11 +200,11 @@ export class LocalHost implements Host {
     if (this.closing) throw new Error("LocalHost is closing");
     let session: HostSessionHandle;
     if (state.config.backend === "codex") {
-      session = CodexSession.fromState(state);
+      session = CodexSession.fromState(state, this.usageRecorder);
     } else if (state.config.backend === "pi") {
       session = PiSession.fromState(
         { ...state, config: { ...state.config, agentId } },
-        { panelHttp: this.getPanelHttp() },
+        { panelHttp: this.getPanelHttp(), recordUsage: this.usageRecorder?.recordUsage },
       );
     } else {
       session = new ReadOnlyLegacySession(state);

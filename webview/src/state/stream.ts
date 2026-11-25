@@ -80,7 +80,6 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
   };
 
   let context = m.context;
-  let contextChanged = false;
 
   for (const ev of evts) {
     if (clearsRetry(ev) && events.some((e) => e.kind === "retry")) {
@@ -129,17 +128,11 @@ export function applyEventsToMessage(m: Message, evts: StreamEvent[]): Message {
       finishSubagent(events, ev, taskId);
       continue;
     }
-    if (ev.kind === "compact" && /^Context compacted\b/.test(ev.content)) {
-      context = ev.context;
-      contextChanged = true;
-    }
+    if (ev.kind === "compact" && ev.context !== undefined) context = ev.context;
     events.push(ev);
   }
   const next: Message = { ...withoutLiveTiming(m), content, events, ...live };
-  if (contextChanged) {
-    if (context) next.context = context;
-    else delete next.context;
-  }
+  if (context !== undefined) next.context = context;
   return next;
 }
 

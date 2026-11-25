@@ -21,8 +21,14 @@ import { HistoryService } from "../../src/workspace/history-service";
 import { CodexSession } from "../../src/session/codex";
 import type { RpcMessage, Transport } from "../../src/session/codex-rpc";
 import { LocalHost, HostRegistry, type HostSessionHandle } from "../../src/session/host";
+import type { UsageRecorder } from "../../src/session/usage-observation";
 import type { PanelToolset } from "../../src/project/tools";
-import { Workspace, type Message, type WorkspaceCallbacks } from "../../src/workspace/workspace";
+import {
+  Workspace,
+  type Message,
+  type WorkspaceCallbacks,
+  type WorkspaceState,
+} from "../../src/workspace/workspace";
 import { applyEventsToMessage } from "../../../webview/src/state/stream";
 
 import {
@@ -78,6 +84,7 @@ export async function loadFixture(backend: Backend, name: string): Promise<Fixtu
 
 export interface Replay extends BaseReplay {
   sessions: HostSessionHandle[];
+  workspaceState: WorkspaceState;
 }
 
 async function flush(): Promise<void> {
@@ -186,8 +193,9 @@ function makeWorkspace(
     onStreamEvent: () => {},
     onMessageDone: () => {},
   },
+  usageRecorder?: UsageRecorder,
 ) {
-  const host = new SnapHost("local", "Local");
+  const host = new SnapHost("local", "Local", undefined, usageRecorder);
   const registry = new HostRegistry();
   registry.register(host);
   const ws = new Workspace("ws", "t", "p", "local", RECORD_CWD, registry, cb);
@@ -215,10 +223,11 @@ export async function replay(
   rec: Recording,
   fixture: Fixture,
   cb?: WorkspaceCallbacks,
+  usageRecorder?: UsageRecorder,
 ): Promise<Replay> {
-  if (backend === "pi") return replayPi(rec, fixture, cb);
+  if (backend === "pi") return replayPi(rec, fixture, cb, usageRecorder);
   const model = rec.header.model || DEFAULT_MODEL[backend];
-  const { ws, host } = makeWorkspace(model, fixture.effort, cb);
+  const { ws, host } = makeWorkspace(model, fixture.effort, cb, usageRecorder);
   const tools = fixture.tools ? panelTools(fixture.tools, fixture.instructions) : null;
   for (const entry of ws.agents.values()) entry.session.setPanelTools?.(tools);
   const events: StreamEvent[] = [];
@@ -281,6 +290,7 @@ export async function replay(
 
   return {
     messages: ws.messages,
+    workspaceState: ws.getState(),
     events,
     states,
     limits,
@@ -521,6 +531,7 @@ async function replayPi(
   rec: Recording,
   fixture: Fixture,
   cb?: WorkspaceCallbacks,
+  usageRecorder?: UsageRecorder,
 ): Promise<Replay> {
   const base = Date.parse(rec.header.recordedAt) - (rec.entries.at(-1)?.t ?? 0);
   if (vi.isFakeTimers()) vi.setSystemTime(base);
@@ -562,6 +573,7 @@ async function replayPi(
           { ...config, agentId, piAgentDir: dir, uploadsDir },
           {
             panelHttp: panel,
+            recordUsage: usageRecorder?.recordUsage,
             rpcFactory: player.connect,
             readyTimeoutMs: 1500,
             // RPC is replayed; readiness needs an executable but never launches it.
@@ -684,7 +696,16 @@ async function replayPi(
     await player.finish();
     await Promise.all(running);
     project?.verify();
-    return { messages: ws.messages, events, states, sessions, limits: [], sent: [], pi };
+    return {
+      messages: ws.messages,
+      workspaceState: ws.getState(),
+      events,
+      states,
+      sessions,
+      limits: [],
+      sent: [],
+      pi,
+    };
   } finally {
     try {
       await Promise.all(sessions.map((s) => s.dispose(1000)));

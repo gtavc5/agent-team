@@ -748,6 +748,21 @@ describe("message status row and timestamps", () => {
     expect(container.querySelector(".message-status")!.textContent).not.toContain("effort");
   });
 
+  it("labels a context estimate and clears it on an explicit unknown boundary", () => {
+    const { container, rerender } = render(
+      <MessageItem
+        msg={{ ...base, context: { tokens: 449, window: 272000, estimated: true } }}
+        agents={[agent]}
+      />,
+    );
+    expect(container.querySelector(".ctx-chip")?.getAttribute("title")).toBe(
+      "Context estimate: 449 / 272,000 tokens",
+    );
+    rerender(<MessageItem msg={{ ...base, context: null }} agents={[agent]} />);
+    expect(container.querySelector(".ctx-chip")?.textContent).toBe("ctx unknown");
+    expect(container.querySelector(".ctx-bar")).toBeNull();
+  });
+
   it("keeps thinking time and tokens out of the header", () => {
     const { container } = render(
       <MessageItem
