@@ -302,7 +302,7 @@ export async function replay(
 // A real PiRpcClient reads LF-delimited stdout and writes to a controlled stdin.
 // Only startup replies are supplied by the player; turn traffic is tape-ordered.
 // This does not launch Pi or verify extension registration in a real process.
-class PiRpcPlayer {
+export class PiRpcPlayer {
   readonly sent: PiFrame[] = [];
   readonly connections: Array<{ restored: boolean }> = [];
   private readonly written: PiFrame[] = [];

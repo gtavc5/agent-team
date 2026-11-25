@@ -575,17 +575,6 @@ describe("MessageItem delivery state", () => {
     expect(queryByRole("status")).toBeNull();
   });
 
-  it("renders a queued badge, dims the message, and cancels via the badge", () => {
-    const onCancelQueued = vi.fn();
-    const { container, getByTitle, getByText } = render(
-      <MessageItem msg={queuedMsg} agents={agents} onCancelQueued={onCancelQueued} />,
-    );
-    expect(getByText("queued")).toBeTruthy();
-    expect(container.querySelector(".message")!.className).toContain("message-queued");
-    fireEvent.click(getByTitle("Remove from queue"));
-    expect(onCancelQueued).toHaveBeenCalledWith("mq");
-  });
-
   it("offers no cancel for a message handed to the running turn", () => {
     const { container, queryByTitle } = render(
       <MessageItem

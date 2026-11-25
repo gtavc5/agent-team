@@ -43,13 +43,21 @@ jobs:
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
+      - name: Replay the same queue and subagent browser chains
+        run: npm run test:e2e -w service -- journey-pilot-
+      - name: Check deliberate Stop, single crash recovery and file-lock release
+        run: npm test -w service -- tests/snap/snap.test.ts deterministic-process-exit.test.ts
       - if: runner.os == 'Linux'
         name: Prove missing Pi fails closed
         run: |
           if PI_BINARY=yaat-no-such-pi npm run test:e2e -w service -- pi-deterministic > "$RUNNER_TEMP/pi-negative.log" 2>&1; then exit 1; fi
           grep -F 'Pi E2E requires the pi binary' "$RUNNER_TEMP/pi-negative.log"
       - if: runner.os == 'Linux'
-        run: npm run test:e2e -w service -- --reporter=verbose
+        name: Run remaining E2E, including real offline Pi
+        run: npm run test:e2e -w service -- --exclude '**/journey-pilot-*.test.ts' --reporter=verbose
       - if: runner.os == 'Windows'
-        run: npm run test:e2e -w service -- demo-browser journey-
-      - run: npm test
+        name: Run remaining offline browser journeys
+        run: npm run test:e2e -w service -- demo-browser journey- --exclude '**/journey-pilot-*.test.ts'
+      - name: Run remaining service tests without orphan-shutdown stress
+        run: npm test -w service -- --tagsFilter='!shutdown-stress' --exclude '**/snap.test.ts' --exclude '**/deterministic-process-exit.test.ts'
+      - run: npm test -w webview

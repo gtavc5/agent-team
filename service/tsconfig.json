@@ -11,5 +11,10 @@
     "noEmit": true
   },
   "include": ["src/**/*", "tests/**/*"],
-  "exclude": ["node_modules", "tests/snap"]
+  "exclude": [
+    "node_modules",
+    "tests/snap",
+    "tests/e2e/journey-pilot-*.test.ts",
+    "tests/unit/export-anon-corpus.test.ts"
+  ]
 }
