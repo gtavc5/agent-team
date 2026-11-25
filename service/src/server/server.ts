@@ -1166,6 +1166,8 @@ export class Server {
         presets.some(
           (preset, i) =>
             preset.name !== previousPresets[i].name ||
+            preset.model !== previousPresets[i].model ||
+            preset.effort !== previousPresets[i].effort ||
             preset.when_to_use !== previousPresets[i].when_to_use,
         )
       ) {

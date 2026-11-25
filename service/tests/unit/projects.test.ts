@@ -295,7 +295,14 @@ describe("panel tool arguments", () => {
     },
   );
 
-  it("shows preset dispatch hints only in the lead's start_session description", () => {
+  it("guides the lead to choose worker presets and override defaults when needed", () => {
+    const { instructions } = leadToolset(api, project, "/notes", ["m"]);
+    expect(instructions).toContain(
+      "Choose a preset whose defaults and dispatch hints fit the task's complexity, domain and parallel load. Override model or effort when needed; do not default every worker to the same model.",
+    );
+  });
+
+  it("shows selectable preset defaults and dispatch hints in the lead's start_session description", () => {
     const scoutHint = "Map unfamiliar repositories before implementation";
     const reviewHint = "Audit diffs for correctness regressions";
     const lead = leadToolset(
@@ -304,18 +311,27 @@ describe("panel tool arguments", () => {
       "/notes",
       ["m"],
       [
-        { name: "Scout", when_to_use: scoutHint },
-        { name: "Reviewer", when_to_use: reviewHint },
-        { name: "Plain" },
+        { name: "Perseus", model: "openai-codex/gpt-6.2-sol", effort: "medium" },
+        { name: "Scout", model: "provider/scout", when_to_use: scoutHint },
+        { name: "Reviewer", effort: "high", when_to_use: reviewHint },
         { name: "Blank", when_to_use: "   " },
+        { name: "Duplicate", model: "provider/hidden", when_to_use: "Hidden hint" },
+        { name: "Duplicate", effort: "hidden effort" },
       ],
     );
     const description = byName(lead).start_session.description;
     expect(description).toContain(
+      'Presets: "Perseus" (openai-codex/gpt-6.2-sol, effort medium), "Scout" (provider/scout), "Reviewer" (effort high), "Blank".',
+    );
+    for (const hidden of ['"Duplicate"', "provider/hidden", "hidden effort", "Hidden hint"]) {
+      expect(description).not.toContain(hidden);
+    }
+    expect(description).toContain(
       `Dispatch hints: "Scout": ${scoutHint}; "Reviewer": ${reviewHint}.`,
     );
     expect(description).not.toContain("Blank:");
-    expect(lead.instructions).not.toContain("Dispatch hints");
+    expect(lead.instructions).not.toContain(scoutHint);
+    expect(lead.instructions).not.toContain(reviewHint);
 
     const withoutHints = byName(
       leadToolset(api, project, "/notes", ["m"], [{ name: "Scout" }, { name: "Reviewer" }]),
@@ -474,7 +490,9 @@ describe("ProjectManager", () => {
       effort: undefined,
     });
     const tool = session(lead).panelTools!.tools.find((t) => t.name === "start_session")!;
-    expect(tool.description).toContain('Presets: "Perseus", "Scout", "Ayanami"');
+    expect(tool.description).toContain(
+      `Presets: "Perseus" (gpt-6-astra, effort ultra), "Scout" (${kimi}, effort low), "Ayanami" (${kimi}, effort max).`,
+    );
   });
 
   it("rejects unknown and ambiguous preset names and unavailable preset models before creation", async () => {
@@ -501,7 +519,7 @@ describe("ProjectManager", () => {
     );
     expect(createWorkspace).not.toHaveBeenCalled();
     const tool = session(lead).panelTools!.tools.find((t) => t.name === "start_session")!;
-    expect(tool.description).toContain('Presets: "Offline".');
+    expect(tool.description).toContain('Presets: "Offline" (mock/offline).');
     expect(tool.description).not.toContain('"Scout"');
   });
 

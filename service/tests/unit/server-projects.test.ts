@@ -1146,6 +1146,38 @@ describe("server restart with projects", () => {
     }
   });
 
+  it.each([
+    ["model", 'model="mock/second"', 'Presets: "One" (mock/second, effort low).'],
+    ["effort", 'effort="high"', 'Presets: "One" (mock/first, effort high).'],
+  ])(
+    "refreshes existing lead tools when only a preset's %s changes",
+    async (field, value, expected) => {
+      const setPanelTools = vi.spyOn(TestSession.prototype, "setPanelTools");
+      const startSessionDescription = () =>
+        setPanelTools.mock.calls
+          .map(([set]) => set?.tools.find((tool) => tool.name === "start_session")?.description)
+          .filter((description) => description !== undefined)
+          .at(-1);
+      const { base, web } = seed();
+      const config = path.join(base, "config.toml");
+      const source =
+        '[[agent_presets]]\nname="One"\ncolor="blue"\navatar="1"\nmodel="mock/first"\neffort="low"';
+      fs.writeFileSync(config, source);
+      const { stop } = await start(base, web);
+      try {
+        expect(startSessionDescription()).toContain('Presets: "One" (mock/first, effort low).');
+        const previous = field === "model" ? 'model="mock/first"' : 'effort="low"';
+        fs.writeFileSync(config, source.replace(previous, value));
+        await vi.waitFor(() => expect(startSessionDescription()).toContain(expected), {
+          timeout: 3500,
+        });
+      } finally {
+        await stop();
+        fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
+      }
+    },
+  );
+
   it("refreshes start_session models on unstarted/idle leads and defers running leads until idle", async () => {
     vi.spyOn(LocalHost.prototype, "discoverPiModels").mockResolvedValue([
       {

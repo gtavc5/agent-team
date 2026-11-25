@@ -221,12 +221,15 @@ function languageInstructions(language?: string): string[] {
     : [];
 }
 
-export function selectablePresetNames(names: string[]): string {
+function uniquePresetNames(names: string[]): string[] {
   const counts = new Map<string, number>();
   for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
-  return [...counts]
-    .filter(([, count]) => count === 1)
-    .map(([name]) => JSON.stringify(name))
+  return [...counts].filter(([, count]) => count === 1).map(([name]) => name);
+}
+
+export function selectablePresetNames(names: string[]): string {
+  return uniquePresetNames(names)
+    .map((name) => JSON.stringify(name))
     .join(", ");
 }
 
@@ -235,28 +238,29 @@ export function leadToolset(
   project: Project,
   notesDir: string,
   models: string[],
-  agentPresets: Array<Pick<AgentPreset, "name" | "when_to_use">> = [],
+  agentPresets: Array<Pick<AgentPreset, "name" | "model" | "effort" | "when_to_use">> = [],
   language?: string,
 ): PanelToolset {
   const id = project.id;
-  const presets = selectablePresetNames(agentPresets.map((preset) => preset.name));
-  const presetCounts = new Map<string, number>();
-  for (const preset of agentPresets)
-    presetCounts.set(preset.name, (presetCounts.get(preset.name) ?? 0) + 1);
-  const dispatchHints = agentPresets
-    .flatMap((preset) => {
-      const hint = preset.when_to_use?.trim();
-      // Duplicate names are ambiguous and omitted from the selectable presets too.
-      return hint && presetCounts.get(preset.name) === 1
-        ? [`${JSON.stringify(preset.name)}: ${hint}`]
-        : [];
+  const uniqueNames = new Set(uniquePresetNames(agentPresets.map((preset) => preset.name)));
+  const selectablePresets = agentPresets.filter((preset) => uniqueNames.has(preset.name));
+  const presets = selectablePresets
+    .map(({ name, model, effort }) => {
+      const defaults = [model, effort && `effort ${effort}`].filter(Boolean).join(", ");
+      return `${JSON.stringify(name)}${defaults ? ` (${defaults})` : ""}`;
+    })
+    .join(", ");
+  const dispatchHints = selectablePresets
+    .flatMap(({ name, when_to_use }) => {
+      const hint = when_to_use?.trim();
+      return hint ? [`${JSON.stringify(name)}: ${hint}`] : [];
     })
     .join("; ");
   return {
     instructions: [
       `You are the lead agent of the project "${project.name}" (${project.root ? `repository ${project.root}` : "no Git repository"}).`,
       ...languageInstructions(language),
-      "You keep the whole project in view: from the board and the sessions you discuss with the user what to do. Start worker sessions (start_session) only when the user asks for it: for a piece of work the user decided on, with its objective and task, or for a topic the user wants to go into in depth (then its task says what to discuss, and that it starts no work on its own). A worker is a separate session the user opens and talks to directly. Give it a complete, self-contained task.",
+      "You keep the whole project in view: from the board and the sessions you discuss with the user what to do. Start worker sessions (start_session) only when the user asks for it: for a piece of work the user decided on, with its objective and task, or for a topic the user wants to go into in depth (then its task says what to discuss, and that it starts no work on its own). A worker is a separate session the user opens and talks to directly. Give it a complete, self-contained task. Choose a preset whose defaults and dispatch hints fit the task's complexity, domain and parallel load. Override model or effort when needed; do not default every worker to the same model.",
       [
         "Once a worker is started, step back: tell the user which session to talk to, and leave that conversation to them. A worker decides what it can itself and asks the user, in its own session, what is theirs to decide; do not answer for the user, relay, chase or poll. Message a worker (message_session) only when the user asks you to, to pass on what reached you from outside its session (another project's request, say), or to retry a failed turn as below.",
         "Worker sessions report back; their messages reach you prefixed [From session …]: finished (its tasks on the board move to review) or, rarely, progress that changes the plan. Take a finished report as you would a subagent's result: when it shows the work is done, mark the tasks done (dropped when the user called the work off), delete the objective once all its work is done, and tell the user in a sentence; when it says something was replaced, check the board keeps nothing about the old one. Read the session (read_session) or the changes only when something in it is unclear or risky. When something looks missing or wrong, tell the user what: they take it up with the worker. Bring a progress report to the user only when it changes the plan.",
