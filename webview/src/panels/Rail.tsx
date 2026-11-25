@@ -1,4 +1,5 @@
 import { Icon, type IconName } from "./Icon";
+import { telemetryTarget } from "../telemetryEvents";
 
 export interface RailItem {
   id: string;
@@ -10,6 +11,7 @@ export interface RailItem {
   // Opens a page over everything rather than a panel beside the chat.
   page?: boolean;
   quiet?: boolean;
+  telemetry?: Parameters<typeof telemetryTarget>[0];
   onClick: () => void;
 }
 
@@ -25,6 +27,7 @@ export function Rail({ items, className }: { items: RailItem[]; className: strin
           aria-label={i.label}
           aria-pressed={i.active}
           title={i.label}
+          {...telemetryTarget(i.telemetry)}
           onClick={i.onClick}
         >
           <Icon name={i.icon} />

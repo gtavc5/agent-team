@@ -99,9 +99,22 @@ describe("server telemetry", () => {
     expect(files()).toEqual([]);
   });
 
-  it("accepts only enumerated chat actions", async () => {
+  it("accepts enumerated chat, trace, and workspace actions without changing older names", async () => {
     const api = await start(true);
-    const actions = ["chat.file_link", "chat.send", "chat.stop"] as const;
+    const actions = [
+      "chat.file_link",
+      "chat.send",
+      "chat.stop",
+      "chat.jump_latest",
+      "chat.cancel_queued",
+      "chat.cancel_wakeup",
+      "trace.step_toggle",
+      "trace.subagent_toggle",
+      "trace.tool_toggle",
+      "trace.load_details",
+      "workspace.archive",
+      "workspace.restore",
+    ] as const satisfies readonly TelemetryEvent["action"][];
     const events = actions.map((action) => ({ ...event(Date.now(), "trigger"), action }));
     expect((await api.post({ tab_run_id: run, events })).status).toBe(204);
     const invalid = { ...events[0], action: "chat.unknown" };

@@ -232,10 +232,15 @@ function collectToolChips(chipElements: Element[]): {
   };
 }
 
+function transcriptItems(scroller: Element): Element[] {
+  const contents = directChild(scroller, "messages-content") ?? scroller;
+  return [...contents.children].filter((c) => !c.classList.contains("history-hint"));
+}
+
 export function collectActiveTurn(root: ParentNode = document): ActiveTurnDiagnostics | undefined {
   let match: { el: Element; index: number; siblingCount: number } | null = null;
   for (const list of root.querySelectorAll(".messages")) {
-    const items = [...list.children].filter((c) => !c.classList.contains("history-hint"));
+    const items = transcriptItems(list);
     for (let i = 0; i < items.length; i++) {
       if (isActiveTurnElement(items[i])) {
         match = { el: items[i], index: i, siblingCount: items.length };
@@ -363,7 +368,7 @@ const TOOL_PAYLOAD_SELECTOR = [
 export function trimmedHtml(maxMessages = 3): string {
   const clone = document.documentElement.cloneNode(true) as HTMLElement;
   for (const list of clone.querySelectorAll(".messages")) {
-    const items = [...list.children].filter((c) => !c.classList.contains("history-hint"));
+    const items = transcriptItems(list);
     const keep = new Set<Element>(items.slice(Math.max(0, items.length - maxMessages)));
     const activeItems = items.filter(isActiveTurnElement);
     for (const active of activeItems.slice(

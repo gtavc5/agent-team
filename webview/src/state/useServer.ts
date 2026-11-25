@@ -1,6 +1,7 @@
 import type { SubagentStatus } from "../../../shared/subagent-status";
 import type { ContextUsage } from "../../../shared/context-usage";
-import { configureTelemetry } from "../telemetry";
+import { configureTelemetry, recordTelemetry } from "../telemetry";
+import type { TelemetryAction } from "../../../shared/telemetry";
 import { emptyUi, receiveUi, withoutOwner, type LiveNotice } from "./extensionUi";
 import {
   sameAgent,
@@ -480,6 +481,29 @@ function resolveWsUrl(): string {
 }
 
 export type SendOutcome = "not_sent" | "rejected" | "accepted" | "unknown";
+
+function wsTelemetryAction(data: { type: string; force?: unknown }): TelemetryAction | undefined {
+  switch (data.type) {
+    case "send_message":
+      return "chat.send";
+    case "interrupt":
+    case "abort":
+    case "cancel_subagent":
+      return "chat.stop";
+    case "cancel_queued":
+      return "chat.cancel_queued";
+    case "cancel_wakeup":
+      return "chat.cancel_wakeup";
+    case "load_message_details":
+      return "trace.load_details";
+    case "archive_workspace":
+      return "workspace.archive";
+    case "unarchive_workspace":
+      return "workspace.restore";
+    case "refresh_quota":
+      return data.force === true ? "quota.refresh" : undefined;
+  }
+}
 
 export function useServer() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -1268,19 +1292,29 @@ export function useServer() {
     if (detailRefetchRef.current.size > 0) flushDetailRefetches();
   }, [workspaces, flushDetailRefetches]);
 
-  const send = useCallback((data: unknown): boolean => {
-    if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
-    wsRef.current.send(JSON.stringify(data));
-    return true;
-  }, []);
+  const send = useCallback(
+    (data: { type: string; [key: string]: unknown }, userIntent = false): boolean => {
+      if (userIntent) {
+        const action = wsTelemetryAction(data);
+        if (action) recordTelemetry(action);
+      }
+      if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
+      wsRef.current.send(JSON.stringify(data));
+      return true;
+    },
+    [],
+  );
 
   const refreshQuota = useCallback(
     (force = true, providers?: readonly string[]) =>
-      send({
-        type: "refresh_quota",
+      send(
+        {
+          type: "refresh_quota",
+          force,
+          ...(providers ? { providers: [...providers] } : {}),
+        },
         force,
-        ...(providers ? { providers: [...providers] } : {}),
-      }),
+      ),
     [send],
   );
 
@@ -1471,9 +1505,11 @@ export function useServer() {
     ),
     loadMessageDetails: useCallback(
       (wsId: string, messageId: string) =>
-        send({ type: "load_message_details", workspaceId: wsId, messageId }),
+        send({ type: "load_message_details", workspaceId: wsId, messageId }, true),
       [send],
     ),
+    // An open trace can refetch as new events arrive. Its toggle is tracked
+    // at the UI, not here at the effect-driven request.
     loadSubagentEvents: useCallback(
       (wsId: string, messageId: string, taskId: string) =>
         send({ type: "load_subagent_events", workspaceId: wsId, messageId, taskId }),
@@ -1495,12 +1531,13 @@ export function useServer() {
       (wsId: string, agentId: string, taskId: string) => {
         if (wsId === "replay-demo") {
           // Demo workspace exists only client-side; emulate the stop locally.
+          recordTelemetry("chat.stop");
           void import("../dev/replayFixture").then(({ cancelDemoSubagent }) =>
             cancelDemoSubagent(handleServerMessage, taskId),
           );
           return;
         }
-        send({ type: "cancel_subagent", workspaceId: wsId, agentId, taskId });
+        send({ type: "cancel_subagent", workspaceId: wsId, agentId, taskId }, true);
       },
       [send, handleServerMessage],
     ),
@@ -1535,7 +1572,7 @@ export function useServer() {
     ),
     cancelQueued: useCallback(
       (wsId: string, messageId: string) =>
-        send({ type: "cancel_queued", workspaceId: wsId, messageId }),
+        send({ type: "cancel_queued", workspaceId: wsId, messageId }, true),
       [send],
     ),
     searchServer: useCallback((query: string) => send({ type: "search", query }), [send]),
@@ -1565,11 +1602,12 @@ export function useServer() {
         target?: string,
         images?: Array<{ name: string; url: string }>,
         quote?: { messageId: string; agentId: string | null; content: string },
+        source?: "composer",
       ): Promise<SendOutcome> => {
         if (probeRef.current) await new Promise<void>((r) => probeWaitersRef.current.push(r));
         const data = { type: "send_message", workspaceId: wsId, content, target, images, quote };
         const outcome = !sendReceiptRef.current
-          ? send(data)
+          ? send(data, source === "composer")
             ? "unknown"
             : "not_sent"
           : await new Promise<SendOutcome>((resolve) => {
@@ -1581,7 +1619,7 @@ export function useServer() {
                 resolve(result);
               };
               sendWaitersRef.current.set(requestId, finish);
-              if (!send({ ...data, requestId })) finish("not_sent");
+              if (!send({ ...data, requestId }, source === "composer")) finish("not_sent");
             });
         if (outcome === "unknown")
           setLastError("Delivery is unconfirmed. Check the conversation before sending again.");
@@ -1597,18 +1635,22 @@ export function useServer() {
       [send],
     ),
     abort: useCallback(
-      (wsId: string, agentId?: string) => send({ type: "abort", workspaceId: wsId, agentId }),
+      (wsId: string, agentId?: string) => send({ type: "abort", workspaceId: wsId, agentId }, true),
       [send],
     ),
-    // Stop the running turn only; background tasks and wake-ups go on.
+    // One stop intent may fan out to several running turns; tasks and wake-ups go on.
     interrupt: useCallback(
-      (wsId: string, agentId?: string) => send({ type: "interrupt", workspaceId: wsId, agentId }),
+      (wsId: string, agentIds?: string[]) => {
+        for (const [i, agentId] of (agentIds ?? [undefined]).entries()) {
+          send({ type: "interrupt", workspaceId: wsId, agentId }, i === 0);
+        }
+      },
       [send],
     ),
     markSeen: useCallback((wsId: string) => send({ type: "mark_seen", workspaceId: wsId }), [send]),
     cancelWakeup: useCallback(
       (wsId: string, agentId: string) =>
-        send({ type: "cancel_wakeup", workspaceId: wsId, agentId }),
+        send({ type: "cancel_wakeup", workspaceId: wsId, agentId }, true),
       [send],
     ),
     clearContext: useCallback(
@@ -1618,11 +1660,11 @@ export function useServer() {
     ),
     restartServer: useCallback(() => send({ type: "restart_server" }), [send]),
     archiveWorkspace: useCallback(
-      (wsId: string) => send({ type: "archive_workspace", workspaceId: wsId }),
+      (wsId: string) => send({ type: "archive_workspace", workspaceId: wsId }, true),
       [send],
     ),
     unarchiveWorkspace: useCallback(
-      (wsId: string) => send({ type: "unarchive_workspace", workspaceId: wsId }),
+      (wsId: string) => send({ type: "unarchive_workspace", workspaceId: wsId }, true),
       [send],
     ),
     setReporting: useCallback(

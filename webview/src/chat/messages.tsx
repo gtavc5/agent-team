@@ -10,6 +10,7 @@ import {
   createContext,
   useContext,
 } from "react";
+import { telemetryTarget } from "../telemetryEvents";
 import type { ReactNode } from "react";
 import type { Message, MessageOrigin, AgentInfo, StreamEvent } from "../state/useServer";
 import { hasOutstandingSubagents, timelineBlocks, type TimelineBlock } from "./events";
@@ -501,12 +502,21 @@ export const EventItem = memo(function EventItem({
           </span>
         )}
         {hasHiddenBody && (
-          <button className="btn-inline" onClick={toggleBody}>
+          <button
+            className="btn-inline"
+            {...telemetryTarget("trace.tool_toggle")}
+            onClick={toggleBody}
+          >
             {bodyOpen ? "Hide" : "Details"}
           </button>
         )}
         {(isResult || hasResult) && (
-          <button className="btn-inline btn-diff" aria-expanded={resultOpen} onClick={toggleResult}>
+          <button
+            className="btn-inline btn-diff"
+            aria-expanded={resultOpen}
+            {...telemetryTarget("trace.tool_toggle")}
+            onClick={toggleResult}
+          >
             {isResult ? (resultOpen ? "Hide" : "Show") : resultOpen ? "Hide result" : "Result"} ·{" "}
             {resultLabel(resultLen)}
           </button>
@@ -525,6 +535,7 @@ export const EventItem = memo(function EventItem({
       {(bodyMissing || (toolBodyMissing && !bodyOpen)) && (
         <div
           className="event-content event-placeholder"
+          {...telemetryTarget("trace.tool_toggle")}
           onClick={isResult ? toggleResult : toggleBody}
         >
           {formatSize(bodyMissing ? (ev.contentLength ?? 0) : bodyLen)} · tap to load
@@ -614,10 +625,24 @@ function useBottomCollapse(open: boolean, close: () => void) {
   };
 }
 
-function BottomCollapse({ onClick, label }: { onClick: () => void; label: string }) {
+function BottomCollapse({
+  onClick,
+  label,
+  action,
+}: {
+  onClick: () => void;
+  label: string;
+  action: "trace.step_toggle" | "trace.subagent_toggle";
+}) {
   return (
     <div className="trace-collapse-footer">
-      <button type="button" className="trace-collapse" onClick={onClick} aria-label={label}>
+      <button
+        type="button"
+        className="trace-collapse"
+        {...telemetryTarget(action)}
+        onClick={onClick}
+        aria-label={label}
+      >
         <span aria-hidden="true">▴</span> Collapse
       </button>
     </div>
@@ -686,12 +711,18 @@ export const SubAgentItem = memo(function SubAgentItem({
   const role = sa.description || "Subagent";
   return (
     <div className={`subagent-item subagent-${status}`}>
-      <div className="subagent-header" ref={bottom.header} onClick={handleToggle}>
+      <div
+        className="subagent-header"
+        ref={bottom.header}
+        {...telemetryTarget("trace.subagent_toggle")}
+        onClick={handleToggle}
+      >
         <button
           type="button"
           className="events-toggle trace-header-toggle"
           ref={bottom.toggle}
           aria-expanded={open}
+          {...telemetryTarget("trace.subagent_toggle")}
           aria-label={`${open ? "Collapse" : "Expand"} subagent: ${role}`}
         >
           {open ? "▾" : "▸"}
@@ -767,7 +798,13 @@ export const SubAgentItem = memo(function SubAgentItem({
             </div>
           )}
           {usageStr && <div className="subagent-usage">{usageStr}</div>}
-          {hasBody && <BottomCollapse onClick={bottom.collapse} label="Collapse subagent trace" />}
+          {hasBody && (
+            <BottomCollapse
+              onClick={bottom.collapse}
+              label="Collapse subagent trace"
+              action="trace.subagent_toggle"
+            />
+          )}
         </div>
       )}
     </div>
@@ -906,6 +943,7 @@ function StepBox({
       <div
         className={`step-header${hasBody ? "" : " step-header-static"}`}
         ref={bottom.header}
+        {...telemetryTarget(hasBody ? "trace.step_toggle" : undefined)}
         onClick={hasBody ? toggle : undefined}
       >
         {hasBody ? (
@@ -914,6 +952,7 @@ function StepBox({
             className="events-toggle trace-header-toggle"
             ref={bottom.toggle}
             aria-expanded={open}
+            {...telemetryTarget("trace.step_toggle")}
             aria-label={open ? "Collapse steps" : "Expand steps"}
           >
             {open ? "▾" : "▸"}
@@ -928,7 +967,11 @@ function StepBox({
       {open && (
         <div className="events-list">
           {items}
-          <BottomCollapse onClick={bottom.collapse} label="Collapse step trace" />
+          <BottomCollapse
+            onClick={bottom.collapse}
+            label="Collapse step trace"
+            action="trace.step_toggle"
+          />
         </div>
       )}
     </div>

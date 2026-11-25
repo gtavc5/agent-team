@@ -267,10 +267,13 @@ to YAAT maintainers or third parties; v1 has no external upload or sharing featu
 Events contain a timestamp, an ephemeral random token per page load, a narrow or
 wide layout flag, and a fixed action and outcome. They never contain chat text,
 prompts, search terms, file paths, or user, project, workspace or session IDs.
-Actions cover panel navigation, changes of active workspace, sidebar search focus
-and archive toggles, manual quota refresh, add dialogs, and explicit open/confirm/cancel
-for clearing context, removing an agent, or deleting a session. Chat actions count
-file preview, send, and stop requests, not successful reads, delivery, or stops.
+Actions cover panel navigation, workspace switches and archive/restore, sidebar
+search focus and archive toggles, manual quota refresh, add dialogs, and explicit
+open/confirm/cancel for clearing context, removing an agent, or deleting a session.
+Chat actions include Jump to latest, trace toggles, and file preview, send, and
+stop requests. A trace toggle and an explicit detail request are distinct actions;
+automatic synchronization and trace refreshes are excluded. Request events do not
+imply successful reads, delivery, or stops.
 
 Inspect the local JSON at `/api/telemetry/summary?days=30` (uses the panel's
 existing login). It includes counts by layout, action and outcome, common

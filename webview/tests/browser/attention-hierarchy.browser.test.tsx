@@ -233,6 +233,102 @@ it.each([
   },
 );
 
+const painted = () =>
+  new Promise<void>((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+  );
+
+it.each([1280, 390])(
+  "keeps transcript width and settles a collapsed trace without a scroll event at %ipx",
+  async (width) => {
+    await page.viewport(width, 720);
+    const view = mount();
+    const { sock } = connect([lead]);
+    sendPage(sock, lead.id, [
+      frame(1, {
+        content: "Short reply",
+        events: [
+          {
+            kind: "subagent_start",
+            content: "",
+            subagent: {
+              taskId: "trace",
+              description: "Reviewer",
+              status: "completed",
+              summary: "A line of trace details.\n\n".repeat(80),
+            },
+          },
+        ],
+      }),
+    ]);
+    const scroller = get(".messages");
+    const geometry = () => [
+      scroller.clientWidth,
+      scroller.getBoundingClientRect().width,
+      get(".message").getBoundingClientRect().right,
+    ];
+    const jump = () => view.queryByRole("button", { name: /Jump to latest/ });
+    await painted();
+    expect(getComputedStyle(scroller).scrollbarGutter).toBe("stable");
+    expect(scroller.scrollHeight).toBe(scroller.clientHeight);
+    const collapsed = geometry();
+    fireEvent.click(view.getByRole("button", { name: "Expand subagent: Reviewer" }));
+    await painted();
+    expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight + 150);
+    expect(geometry()).toEqual(collapsed);
+    expect(scroller.scrollWidth).toBeLessThanOrEqual(scroller.clientWidth);
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width);
+
+    scroller.scrollTop = 20;
+    await expect.poll(jump).not.toBeNull();
+    scroller.scrollTop = 0;
+    await painted();
+    expect(jump()).not.toBeNull();
+    const scroll = vi.fn();
+    scroller.addEventListener("scroll", scroll);
+    fireEvent.click(view.getByRole("button", { name: "Collapse subagent: Reviewer" }));
+    await expect.poll(jump).toBeNull();
+    expect(scroller.scrollTop).toBe(0);
+    expect(scroller.scrollHeight).toBe(scroller.clientHeight);
+    expect(geometry()).toEqual(collapsed);
+    expect(scroll).not.toHaveBeenCalled();
+  },
+);
+
+it("keeps the empty workspace prompt vertically centered in the scroller", async () => {
+  await page.viewport(1280, 800);
+  mount();
+  const { sock } = connect([lead]);
+  sendPage(sock, lead.id, []);
+  await painted();
+  const scroller = get(".messages");
+  const padding = getComputedStyle(scroller);
+  expect(get(".messages .empty-state").getBoundingClientRect().height).toBeCloseTo(
+    scroller.clientHeight - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom),
+    0,
+  );
+});
+
+it("reattaches at the bottom when the viewport grows without scrolling", async () => {
+  await page.viewport(1280, 420);
+  const view = mount();
+  const { sock } = connect([lead]);
+  sendPage(sock, lead.id, [frame(1, { content: "A transcript paragraph.\n\n".repeat(20) })]);
+  const scroller = get(".messages");
+  const jump = () => view.queryByRole("button", { name: /Jump to latest/ });
+  await painted();
+  expect(scroller.scrollTop).toBeGreaterThan(8);
+  scroller.scrollTop = 0;
+  await expect.poll(jump).not.toBeNull();
+  const scroll = vi.fn();
+  scroller.addEventListener("scroll", scroll);
+  await page.viewport(1280, 1200);
+  await expect.poll(jump).toBeNull();
+  expect(scroller.scrollTop).toBe(0);
+  expect(scroller.scrollHeight).toBe(scroller.clientHeight);
+  expect(scroll).not.toHaveBeenCalled();
+});
+
 it("restores A's exact reading anchor after sending in B, without following new A messages", async () => {
   await page.viewport(1280, 800);
   const view = mount("A");
@@ -260,8 +356,26 @@ it("restores A's exact reading anchor after sending in B, without following new 
   fireEvent.click(row("A")!);
   sendPage(sock, a.id, [...history, frame(30)]);
   expect(offset()).toBeCloseTo(original, 0);
-  receive({ type: "new_message", workspaceId: "A", message: frame(31) });
+  receive({
+    type: "new_message",
+    workspaceId: "A",
+    message: frame(31, { status: "streaming", content: "" }),
+  });
+  const beforeGrowth = scroller().scrollHeight;
+  receive({
+    type: "stream_event",
+    workspaceId: "A",
+    messageId: "m31",
+    event: { kind: "text_delta", content: "Growing reply.\n\n".repeat(80) },
+  });
+  await expect.poll(() => scroller().scrollHeight).toBeGreaterThan(beforeGrowth);
+  await painted();
   expect(offset()).toBeCloseTo(original, 0);
+  expect(view.queryByRole("button", { name: /Jump to latest/ })).not.toBeNull();
+  const snapshot = collectSnapshot();
+  expect(snapshot.activeTurn?.id).toBe("msg-m31");
+  expect(snapshot.html).toContain('id="msg-m31"');
+  expect(snapshot.html).not.toContain('id="msg-m10"');
 
   // A newer snapshot no longer overlaps the previously loaded window.
   // The original anchor must survive replacement, not just live appends.

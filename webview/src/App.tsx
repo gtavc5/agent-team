@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { recordTelemetry } from "./telemetry";
+import { recordTelemetryEvent, telemetryTarget } from "./telemetryEvents";
 import { PHONE } from "./viewport/facts";
 import {
   AUTO_RELOAD,
@@ -377,9 +378,7 @@ export function App() {
   const [filesWidth, setFilesWidth] = useSavedWidth("filesPanelWidth");
   const togglePanel = useCallback(
     (id: PanelId) => {
-      const closing = openPanel === id;
-      recordTelemetry(closing ? "panel.close" : id === "changes" ? "panel.diff" : `panel.${id}`);
-      setOpenPanel(closing ? null : id);
+      setOpenPanel(openPanel === id ? null : id);
       setMaxFor(null);
     },
     [openPanel],
@@ -569,10 +568,8 @@ export function App() {
             icon: "board" as const,
             page: true,
             active: boardProjectId === activeProject.id,
-            onClick: () => {
-              recordTelemetry("panel.board");
-              setBoardProjectId(activeProject.id);
-            },
+            telemetry: "panel.board" as const,
+            onClick: () => setBoardProjectId(activeProject.id),
           },
         ]
       : []),
@@ -584,6 +581,7 @@ export function App() {
       badge:
         panelSessions.filter((w) => sessionState(w) === "working").length +
         workCount(panelSessions),
+      telemetry: openPanel === "agents" ? "panel.close" : "panel.agents",
       onClick: () => togglePanel("agents"),
     },
     {
@@ -591,6 +589,7 @@ export function App() {
       label: "Files",
       icon: "files" as const,
       active: openPanel === "files",
+      telemetry: openPanel === "files" ? "panel.close" : "panel.files",
       onClick: () => togglePanel("files"),
     },
     {
@@ -599,6 +598,7 @@ export function App() {
       quiet: true,
       icon: "changes" as const,
       active: openPanel === "changes",
+      telemetry: openPanel === "changes" ? "panel.close" : "panel.diff",
       onClick: () => togglePanel("changes"),
     },
   ];
@@ -689,7 +689,6 @@ export function App() {
   );
   const stopTask = useCallback(
     (wsId: string, agentId: string, taskId: string) => {
-      recordTelemetry("chat.stop");
       cancelSubagent(wsId, agentId, taskId);
     },
     [cancelSubagent],
@@ -762,17 +761,7 @@ export function App() {
     },
     [onSelectWorkspace],
   );
-  const stopTurns = useCallback(
-    (wsId: string, agentIds?: string[]) => {
-      recordTelemetry("chat.stop");
-      if (agentIds) {
-        for (const id of agentIds) interrupt(wsId, id);
-      } else {
-        interrupt(wsId);
-      }
-    },
-    [interrupt],
-  );
+
   const agentActions = useMemo<AgentsPanelActions>(
     () => ({
       onOpen: (id) => {
@@ -780,7 +769,7 @@ export function App() {
         if (window.matchMedia?.(PHONE).matches) setOpenPanel(null);
         openWorkspace(id);
       },
-      onStop: stopTurns,
+      onStop: interrupt,
       onArchive: (id) => archiveWorkspace(id),
       onRestore: (id) => unarchiveWorkspace(id),
       onSetReporting: (id, reports) => setReporting(id, reports),
@@ -795,14 +784,11 @@ export function App() {
       onSetEffort: (id, agentId, effort) => void sendMessage(id, `/effort ${effort}`, agentId),
       onStopTask: stopTask,
       onCancelWake: (id, agentId) => cancelWakeup(id, agentId),
-      onStopAll: (id) => {
-        recordTelemetry("chat.stop");
-        abort(id);
-      },
+      onStopAll: (id) => abort(id),
     }),
     [
       openWorkspace,
-      stopTurns,
+      interrupt,
       archiveWorkspace,
       unarchiveWorkspace,
       setReporting,
@@ -832,13 +818,6 @@ export function App() {
     recordTelemetry("dialog.add_project", "open");
     setShowCreateProject(true);
   }, []);
-  const onRefreshQuota = useCallback<typeof refreshQuota>(
-    (force, providers) => {
-      if (force) recordTelemetry("quota.refresh");
-      return refreshQuota(force, providers);
-    },
-    [refreshQuota],
-  );
   const onReplayDemo = useCallback(() => {
     const wsId = startReplayDemo();
     selectWorkspace(wsId);
@@ -1069,6 +1048,8 @@ export function App() {
     const jumpTop = jumpScrollTopRef.current;
     jumpScrollTopRef.current = null;
     if (jumpTop === el.scrollTop || readingSession.current !== activeWsIdRef.current) return;
+    const moved = el.scrollTop !== lastScrollTopRef.current;
+    const wasFollowing = stuckToBottomRef.current;
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (distFromBottom <= 8) stuckToBottomRef.current = true;
     else if (el.scrollTop < lastScrollTopRef.current || distFromBottom > 150) {
@@ -1076,7 +1057,7 @@ export function App() {
     }
     lastScrollTopRef.current = el.scrollTop;
     setFollowing(stuckToBottomRef.current);
-    saveReadingPosition();
+    if (moved || wasFollowing !== stuckToBottomRef.current) saveReadingPosition();
     onMessagesScroll();
   }, [measureAnchorOffset, onMessagesScroll, saveReadingPosition]);
 
@@ -1088,24 +1069,35 @@ export function App() {
     const el = messagesContainerRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     let height = el.clientHeight;
+    let range = el.scrollHeight - height;
     const ro = new ResizeObserver(() => {
-      // At the end in the old box (content that grew meanwhile, a box the
-      // reader opened, says not); a pixel short is settleScroller's nudge.
-      const wasAtEnd = el.scrollHeight - el.scrollTop - height <= 8;
-      const shrank = el.clientHeight < height;
-      height = el.clientHeight;
-      if (
-        shrank &&
-        stuckToBottomRef.current &&
-        wasAtEnd &&
-        el.scrollHeight - el.scrollTop - el.clientHeight > 1
-      ) {
-        el.scrollTop = el.scrollHeight;
+      const nextHeight = el.clientHeight;
+      const nextRange = el.scrollHeight - nextHeight;
+      const gap = nextRange - el.scrollTop;
+      if (readingSession.current === activeWsIdRef.current) {
+        // A collapse or taller viewport can reach the end without a scroll
+        // event. Never reattach a historical reader because content grew.
+        if (!stuckToBottomRef.current && nextRange < range && gap <= 8) {
+          stuckToBottomRef.current = true;
+          lastScrollTopRef.current = el.scrollTop;
+          setFollowing(true);
+          saveReadingPosition();
+        } else if (
+          stuckToBottomRef.current &&
+          nextHeight < height &&
+          el.scrollHeight - el.scrollTop - height <= 8 &&
+          gap > 1
+        ) {
+          el.scrollTop = el.scrollHeight;
+        }
       }
+      height = nextHeight;
+      range = nextRange;
     });
     ro.observe(el);
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
     return () => ro.disconnect();
-  }, [activeWs?.id]);
+  }, [activeWs?.id, saveReadingPosition]);
 
   // Follow the conversation while the reader is at the bottom: a new
   // message scrolls into view, a streaming one keeps the end pinned. Only
@@ -1421,7 +1413,6 @@ export function App() {
       return;
     }
     sendingRef.current = true;
-    recordTelemetry("chat.send");
     setSending(true);
     let outcome: Awaited<ReturnType<typeof sendMessage>>;
     try {
@@ -1446,6 +1437,7 @@ export function App() {
         quotedMsg
           ? { messageId: quotedMsg.id, agentId: quotedMsg.agentId, content: quotedMsg.content }
           : undefined,
+        "composer",
       );
     } finally {
       sendingRef.current = false;
@@ -1568,7 +1560,12 @@ export function App() {
 
   return (
     <SessionLinkContext.Provider value={sessionLinks}>
-      <div className="app" ref={appRef}>
+      <div
+        className="app"
+        ref={appRef}
+        onClickCapture={recordTelemetryEvent}
+        onFocusCapture={recordTelemetryEvent}
+      >
         {notice && (
           <div className="info-toast" role="status" onClick={() => setNotice(null)} title="Dismiss">
             {notice}
@@ -1610,7 +1607,7 @@ export function App() {
             searchQuery={searchQuery}
             searchHits={searchHits}
             quota={quota}
-            onRefreshQuota={onRefreshQuota}
+            onRefreshQuota={refreshQuota}
             systemStatus={systemStatus}
             onSelect={onSelectWorkspace}
             onDelete={onDeleteWorkspace}
@@ -1649,6 +1646,7 @@ export function App() {
                     className="agents-chip"
                     aria-pressed={openPanel === "agents"}
                     title="Agents and sessions"
+                    {...telemetryTarget(openPanel === "agents" ? "panel.close" : "panel.agents")}
                     onClick={() => togglePanel("agents")}
                   >
                     <span className="agents-chip-avatars">
@@ -1729,94 +1727,101 @@ export function App() {
                 ref={messagesContainerRef}
                 onScroll={onMessagesScrollTrack}
               >
-                <FileOpenContext.Provider value={fileOpener(activeWs.id)}>
-                  <LocalDayProvider>
-                    {(() => {
-                      const msgs = activeWs.messages;
-                      const total = msgs.length;
-                      if (!activeWs.messagesLoaded) {
-                        return (
-                          <HistoryHint hasMore={false} loading={false} loaded={false} count={0} />
+                <div className="messages-content">
+                  <FileOpenContext.Provider value={fileOpener(activeWs.id)}>
+                    <LocalDayProvider>
+                      {(() => {
+                        const msgs = activeWs.messages;
+                        const total = msgs.length;
+                        if (!activeWs.messagesLoaded) {
+                          return (
+                            <HistoryHint hasMore={false} loading={false} loaded={false} count={0} />
+                          );
+                        }
+                        if (total === 0) {
+                          return (
+                            <div className="empty-state">
+                              {activeWs.agents.length === 0
+                                ? "Add an agent to get started."
+                                : "Send a message to start working."}
+                            </div>
+                          );
+                        }
+                        const streamingAgentIds = new Set(
+                          msgs
+                            .filter((msg) => msg.kind === "agent" && msg.status === "streaming")
+                            .map((msg) => msg.agentId),
                         );
-                      }
-                      if (total === 0) {
                         return (
-                          <div className="empty-state">
-                            {activeWs.agents.length === 0
-                              ? "Add an agent to get started."
-                              : "Send a message to start working."}
-                          </div>
+                          <>
+                            <HistoryHint
+                              hasMore={!!activeWs.hasMore}
+                              loading={!!activeWs.loadingOlder}
+                              loaded
+                              count={total}
+                            />
+                            {msgs.map((msg, i) => {
+                              const prev = i > 0 ? msgs[i - 1] : null;
+                              const compact =
+                                !!prev &&
+                                msg.kind === "agent" &&
+                                prev.kind === "agent" &&
+                                !!msg.turnId &&
+                                msg.turnId === prev.turnId;
+                              const item = (
+                                <MessageItem
+                                  user={user}
+                                  msg={msg}
+                                  agents={
+                                    msg.status === "streaming" ? activeWs.agents : settledAgents
+                                  }
+                                  compact={compact}
+                                  highlight={msg.id === highlightMsgId}
+                                  hasStreamingReply={
+                                    msg.status === "starting" &&
+                                    !!msg.queuedFor &&
+                                    streamingAgentIds.has(msg.queuedFor)
+                                  }
+                                  onStartingRow={onStartingRow}
+                                  onQuote={handleQuote}
+                                  onJumpToMessage={jumpToMessageInActiveWs}
+                                  onLoadSubagentEvents={onLoadSubagentEvents}
+                                  onCancelSubagent={onCancelSubagent}
+                                  onCancelQueued={onCancelQueued}
+                                  onLoadDetails={onLoadDetails}
+                                  onOpenWorkspace={openWorkspace}
+                                />
+                              );
+                              const from = msg.from?.workspaceId;
+                              return (
+                                <MessageBoundary key={msg.id} messageId={msg.id}>
+                                  {from && from !== activeWs.id && workspaceIds.has(from) ? (
+                                    <FileOpenContext.Provider value={fileOpener(from)}>
+                                      {item}
+                                    </FileOpenContext.Provider>
+                                  ) : (
+                                    item
+                                  )}
+                                </MessageBoundary>
+                              );
+                            })}
+                          </>
                         );
-                      }
-                      const streamingAgentIds = new Set(
-                        msgs
-                          .filter((msg) => msg.kind === "agent" && msg.status === "streaming")
-                          .map((msg) => msg.agentId),
-                      );
-                      return (
-                        <>
-                          <HistoryHint
-                            hasMore={!!activeWs.hasMore}
-                            loading={!!activeWs.loadingOlder}
-                            loaded
-                            count={total}
-                          />
-                          {msgs.map((msg, i) => {
-                            const prev = i > 0 ? msgs[i - 1] : null;
-                            const compact =
-                              !!prev &&
-                              msg.kind === "agent" &&
-                              prev.kind === "agent" &&
-                              !!msg.turnId &&
-                              msg.turnId === prev.turnId;
-                            const item = (
-                              <MessageItem
-                                user={user}
-                                msg={msg}
-                                agents={
-                                  msg.status === "streaming" ? activeWs.agents : settledAgents
-                                }
-                                compact={compact}
-                                highlight={msg.id === highlightMsgId}
-                                hasStreamingReply={
-                                  msg.status === "starting" &&
-                                  !!msg.queuedFor &&
-                                  streamingAgentIds.has(msg.queuedFor)
-                                }
-                                onStartingRow={onStartingRow}
-                                onQuote={handleQuote}
-                                onJumpToMessage={jumpToMessageInActiveWs}
-                                onLoadSubagentEvents={onLoadSubagentEvents}
-                                onCancelSubagent={onCancelSubagent}
-                                onCancelQueued={onCancelQueued}
-                                onLoadDetails={onLoadDetails}
-                                onOpenWorkspace={openWorkspace}
-                              />
-                            );
-                            const from = msg.from?.workspaceId;
-                            return (
-                              <MessageBoundary key={msg.id} messageId={msg.id}>
-                                {from && from !== activeWs.id && workspaceIds.has(from) ? (
-                                  <FileOpenContext.Provider value={fileOpener(from)}>
-                                    {item}
-                                  </FileOpenContext.Provider>
-                                ) : (
-                                  item
-                                )}
-                              </MessageBoundary>
-                            );
-                          })}
-                        </>
-                      );
-                    })()}
-                  </LocalDayProvider>
-                </FileOpenContext.Provider>
+                      })()}
+                    </LocalDayProvider>
+                  </FileOpenContext.Provider>
+                </div>
                 <div aria-hidden="true" />
               </div>
 
               <div className="input-area">
                 {!following && activeWs.messagesLoaded && (
-                  <button type="button" className="jump-latest" onClick={jumpToLatest}>
+                  <button
+                    type="button"
+                    className="jump-latest"
+                    {...telemetryTarget("chat.jump_latest")}
+                    onClick={jumpToLatest}
+                  >
                     Jump to latest ↓
                   </button>
                 )}
@@ -1988,7 +1993,7 @@ export function App() {
                     <StopControl
                       key={activeWs.id}
                       busyAgents={busyAgents}
-                      onStop={(agentIds) => stopTurns(activeWs.id, agentIds)}
+                      onStop={(agentIds) => interrupt(activeWs.id, agentIds)}
                     />
                   )}
                   {showPrimary && (

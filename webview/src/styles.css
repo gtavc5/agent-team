@@ -1448,6 +1448,7 @@ button {
 .messages {
   flex: 1;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   /* overflow-y:auto alone makes the x axis auto too: one unbreakable path
      in any message and the whole transcript pans sideways on a phone. Code
      blocks and tables scroll inside their own wrappers. */
@@ -1455,6 +1456,14 @@ button {
   padding: 12px 0 16px;
   display: flex;
   flex-direction: column;
+}
+.messages-content {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+}
+.messages-content:has(> .empty-state) {
+  flex: 1;
 }
 .message {
   display: flex;

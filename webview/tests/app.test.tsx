@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
-import { render, act, fireEvent, screen, within } from "@testing-library/react";
+import { render, renderHook, act, fireEvent, screen, within } from "@testing-library/react";
 import { App, uploadImage } from "../src/App";
 import * as format from "../src/format";
 import * as telemetry from "../src/telemetry";
-import { AUTO_RELOAD, type AgentInfo, type Message } from "../src/state/useServer";
+import { AUTO_RELOAD, useServer, type AgentInfo, type Message } from "../src/state/useServer";
 
 import { FakeSocket } from "./fakeSocket";
 
@@ -196,6 +196,66 @@ describe("render cost of a live transcript", () => {
     });
     expect(timeEl().textContent).toBe(format.formatShortDateTime(todayTs));
     expect(timeEl().getAttribute("title")).toBe(format.formatFullDateTime(todayTs));
+  });
+});
+
+describe("UI telemetry middleware", () => {
+  it("delegates only the closest allowed click or focus action", () => {
+    const record = vi.spyOn(telemetry, "recordTelemetry");
+    boot([]);
+    const rail = document.querySelector('.side-rail [aria-label="Changes"]')!;
+    fireEvent.click(rail.querySelector("svg")!);
+    fireEvent.click(rail.querySelector("svg")!);
+    const search = screen.getByPlaceholderText("Search messages…");
+    fireEvent.click(search);
+    fireEvent.focus(search);
+    for (const invalid of ["workspace-secret", "chat.send", "trace.tool_toggle/secret"]) {
+      rail.setAttribute("data-telemetry", invalid);
+      fireEvent.click(rail);
+    }
+    const target = document.createElement("div");
+    target.setAttribute("data-telemetry", "trace.subagent_toggle");
+    const cancel = document.createElement("button");
+    target.append(cancel);
+    document.querySelector(".app")!.append(target);
+    fireEvent.click(cancel);
+    fireEvent.click(target);
+    target.remove();
+    expect(record.mock.calls).toEqual([
+      ["panel.diff"],
+      ["panel.close"],
+      ["sidebar.search"],
+      ["trace.subagent_toggle"],
+    ]);
+  });
+
+  it("records user dispatch once and excludes automatic quota, paging, and trace hydration", () => {
+    const record = vi.spyOn(telemetry, "recordTelemetry");
+    const { result } = renderHook(useServer);
+    const sock = FakeSocket.instances.at(-1)!;
+    openSocket(sock, [AGENT]);
+    act(() => {
+      result.current.refreshQuota(false, ["provider"]);
+      result.current.loadMessages("w1", 123);
+      result.current.markSeen("w1");
+      result.current.loadSubagentEvents("w1", "message-private", "task-private");
+    });
+    expect(record).not.toHaveBeenCalled();
+    act(() => {
+      result.current.refreshQuota(true, ["provider"]);
+      result.current.loadMessageDetails("w1", "message-private");
+      result.current.archiveWorkspace("w1");
+      result.current.unarchiveWorkspace("w1");
+      result.current.interrupt("w1", ["private-1", "private-2"]);
+    });
+    expect(sock.frames().filter(({ type }) => type === "interrupt")).toHaveLength(2);
+    expect(record.mock.calls).toEqual([
+      ["quota.refresh"],
+      ["trace.load_details"],
+      ["workspace.archive"],
+      ["workspace.restore"],
+      ["chat.stop"],
+    ]);
   });
 });
 
@@ -627,7 +687,7 @@ describe("files panel", () => {
       await act(async () => {});
       expect(lastFetch()).toBe(`api/file?ws=w1&path=${encodeURIComponent(path)}&literal=1`);
       expect(panel()!.querySelector(".fp-btn[href]")?.getAttribute("href")).toContain("&literal=1");
-      expect(record.mock.calls).toEqual([["chat.file_link"]]);
+      expect(record.mock.calls).toEqual([["trace.step_toggle"], ["chat.file_link"]]);
     },
   );
 

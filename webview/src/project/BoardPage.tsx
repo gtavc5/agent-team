@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { recordTelemetry } from "../telemetry";
+import { telemetryTarget } from "../telemetryEvents";
 import type {
   IssueModule,
   IssueModules,
@@ -248,7 +248,6 @@ export const BoardPage = memo(function BoardPage({
     returnScroll.current = null;
   }, [mode]);
   const choose = (m: typeof mode) => {
-    if (m !== mode) recordTelemetry(m === "objectives" ? "panel.board" : `panel.${m}`);
     setFileFrom(null);
     returnScroll.current = null;
     setMode(m);
@@ -369,12 +368,17 @@ export const BoardPage = memo(function BoardPage({
             </span>
           )}
           <div className="bp-views bp-modes" role="group" aria-label="Show">
-            <button aria-pressed={mode === "objectives"} onClick={() => choose("objectives")}>
+            <button
+              aria-pressed={mode === "objectives"}
+              {...telemetryTarget(mode !== "objectives" ? "panel.board" : undefined)}
+              onClick={() => choose("objectives")}
+            >
               Objectives
             </button>
             <button
               className="bp-mode-secondary"
               aria-pressed={showIssues}
+              {...telemetryTarget(!showIssues ? "panel.issues" : undefined)}
               onClick={() => choose("issues")}
             >
               Issues{openIssues > 0 && <span className="bp-count">{openIssues}</span>}
@@ -382,6 +386,7 @@ export const BoardPage = memo(function BoardPage({
             <button
               className="bp-mode-secondary"
               aria-pressed={showNotes}
+              {...telemetryTarget(!showNotes ? "panel.notes" : undefined)}
               onClick={() => choose("notes")}
             >
               Notes
