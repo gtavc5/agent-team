@@ -302,6 +302,30 @@ describe("panel tool arguments", () => {
     );
   });
 
+  it("separates discussion from confirmed execution routing while keeping anti-relay boundaries", () => {
+    const { instructions } = leadToolset(api, project, "/notes", ["m"]);
+    expect(instructions).toContain("discussion alone starts no work");
+    expect(instructions).toContain("once the user explicitly asks you to do or rework something");
+    expect(instructions).toContain(
+      "Good — do it directly: read-only checks, board or notes updates, obvious few-line edits in one file",
+    );
+    expect(instructions).toContain("work the user explicitly asks you to do yourself");
+    expect(instructions).toContain(
+      "Good — delegate: multi-file changes or bug fixes, isolated worktrees, full test suites, slow verification, visual checks, or review rework",
+    );
+    expect(instructions).toContain(
+      "Prefer message_session to an idle, lead-dispatchable worker whose context fits (check project_status); otherwise use start_session",
+    );
+    expect(instructions).toContain(
+      'because you already have context or "only a few steps remain."',
+    );
+    expect(instructions).toContain("stop immediately and hand off to a worker");
+    expect(instructions).toContain("do not answer for the user, relay, chase or poll");
+    expect(instructions).toContain(
+      "Never dispatch to a worker the user owns, took over, stopped, or is awaited by",
+    );
+  });
+
   it("shows selectable preset defaults and dispatch hints in the lead's start_session description", () => {
     const scoutHint = "Map unfamiliar repositories before implementation";
     const reviewHint = "Audit diffs for correctness regressions";
@@ -1516,6 +1540,72 @@ describe("message_session and read_session", () => {
     ]);
   });
 
+  it("drops a queued Lead follow-up when the user stops a non-steering worker", async () => {
+    useFakeTimers();
+    try {
+      const { create, call, session, workers } = setup();
+      const { lead } = create("clice");
+      await call(lead, "start_session", { title: "w", cwd: "wt", task: "first task" });
+      const [worker] = workers();
+      const s = session(worker);
+      vi.spyOn(s, "abort").mockImplementation(() => {
+        s.isRunning = false;
+      });
+      expect(
+        await call(lead, "message_session", { session_id: worker.id, message: "tests too" }),
+      ).toBe('Sent to "w" (queued: it is busy).');
+      expect(worker.getMessages().find((m) => m.content === "tests too")?.status).toBe("queued");
+
+      worker.abortAll();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(worker.getMessages().some((m) => m.content === "tests too")).toBe(false);
+      expect(s.sent).toEqual(["[From the project lead]\n\nfirst task"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])(
+    "persists a user interrupt and drops the Lead follow-up (steered: %s)",
+    async (steering) => {
+      useFakeTimers();
+      try {
+        const { create, call, session, workers, registry, base } = setup();
+        const { lead } = create("clice");
+        await call(lead, "start_session", { title: "w", cwd: "wt", task: "first task" });
+        const [worker] = workers();
+        const [entry] = worker.agents.values();
+        const s = session(worker);
+        if (steering) Object.assign(s, { steer: () => Promise.resolve(true) });
+        await call(lead, "message_session", { session_id: worker.id, message: "tests too" });
+        await vi.advanceTimersByTimeAsync(0);
+        const followUp = worker.getMessages().find((m) => m.content === "tests too")!;
+        expect(followUp.status).toBe("queued");
+        expect(Boolean(followUp.steering)).toBe(steering);
+        saveWorkspace(base, worker.getState(), "all");
+        saveIndex(base, [worker.id]);
+        const cb = (worker as unknown as { cb: { onSaveNow?: () => void } }).cb;
+        cb.onSaveNow = () => void saveWorkspace(base, worker.getState(), worker.takeChanged());
+        Object.assign(s, {
+          interrupt: () => {
+            s.isRunning = false;
+            if (steering) s.emit("unread", [followUp.id]);
+            s.emit("event", { kind: "result", content: "", interrupted: true });
+            return Promise.resolve(true);
+          },
+        });
+        await worker.interruptAgent(entry.info.id);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(s.sent).toEqual(["[From the project lead]\n\nfirst task"]);
+        const restored = Workspace.fromState(loadAll(base)[0], registry);
+        expect(restored.getMessages().some((m) => m.id === followUp.id)).toBe(false);
+        expect(restored.lastDelivered()[0].stopped).toBe("user");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("go into a Codex worker's running turn, and its stop takes back what the model had not read", async () => {
     const { create, call, session, workers } = setup();
     const { lead } = create("clice");
@@ -1588,6 +1678,303 @@ describe("message_session and read_session", () => {
     expect(out).toContain("x".repeat(3000) + " …(truncated)");
     const last1 = await call(lead, "read_session", { session_id: worker.id, last: 1 });
     expect(last1.split("\n").filter((l) => l.startsWith("--- "))).toHaveLength(1);
+  });
+
+  it("shows linked tasks and lead-dispatchability in project_status across worker states", async () => {
+    useFakeTimers();
+    try {
+      const { create, call, workers, endTurn, session, manager } = setup();
+      const { lead } = create("clice");
+      await withTask(call, lead);
+      await call(lead, "start_session", {
+        title: "modules",
+        cwd: "wt",
+        task: "implement modules",
+        objective_id: "core/modules",
+        task_id: "t1",
+      });
+      const [worker] = workers();
+      const lineOf = async (id: string) =>
+        (await call(lead, "project_status")).split("\n").find((l) => l.startsWith(`- ${id} `))!;
+
+      // Working on linked task: lead-dispatchable, shows objective and task state.
+      expect(await lineOf(worker.id)).toContain("working; lead-dispatchable");
+      expect(await lineOf(worker.id)).toContain("tasks: core/modules (t1 [doing])");
+
+      // Initial task ended without finish_task: waits for user.
+      session(worker).emit("event", { kind: "text_delta", content: "Which std?" });
+      endTurn(worker);
+      expect(await lineOf(worker.id)).toContain("idle; not lead-dispatchable (waiting for user)");
+
+      // User writes directly: user took over.
+      await worker.sendMessage("Use C++20.");
+      expect(await lineOf(worker.id)).toContain("not lead-dispatchable (user took over)");
+
+      // Worker calls finish_task and ends turn: handed back to lead, task in review.
+      await call(worker, "finish_task", { summary: "done" });
+      endTurn(worker);
+      expect(await lineOf(worker.id)).toContain("idle; lead-dispatchable");
+      expect(await lineOf(worker.id)).toContain("tasks: core/modules (t1 [review])");
+
+      // Rework dispatched and then stopped by user: not dispatchable.
+      await vi.advanceTimersByTimeAsync(START_SPACING_MS);
+      await call(lead, "message_session", { session_id: worker.id, message: "redo part 2" });
+      worker.abortAll();
+      expect(await lineOf(worker.id)).toContain("not lead-dispatchable (stopped by user)");
+
+      // Reporting switched off: user's own.
+      manager.setReporting(worker.id, false);
+      const ownLine = await lineOf(worker.id);
+      expect(ownLine).toContain("(the user's own: does not report to you)");
+      expect(ownLine).toContain("not lead-dispatchable (user's own)");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("enforces ownership and dispatchability server-side on message_session and stop_session", async () => {
+    useFakeTimers();
+    try {
+      const { create, call, workers, endTurn, session, restart, host, base, manager } = setup();
+      const { lead } = create("clice");
+      await call(lead, "start_session", { title: "w", cwd: "wt", task: "first pass" });
+      let [worker] = workers();
+
+      // Waiting for user (ended opening task without finish_task): refused.
+      session(worker).emit("event", { kind: "text_delta", content: "Which option?" });
+      endTurn(worker);
+      await expect(
+        call(lead, "message_session", { session_id: worker.id, message: "option A" }),
+      ).rejects.toThrow("waiting for the user");
+
+      // User replies directly without finish_task: user took over, both message and stop refused.
+      await worker.sendMessage("option A");
+      await expect(
+        call(lead, "message_session", { session_id: worker.id, message: "also do B" }),
+      ).rejects.toThrow("taken over by the user");
+      await expect(call(lead, "stop_session", { session_id: worker.id })).rejects.toThrow(
+        "taken over by the user",
+      );
+      const dialog = {
+        workspaceId: worker.id,
+        agentId: worker.resolveAgent()!.info.id,
+        processGeneration: 1,
+        requestId: "confirm-1",
+      };
+      session(worker).emit("ui_dialog_request", dialog);
+      expect(worker.hasPendingDialogs).toBe(true);
+      await expect(call(lead, "stop_session", { session_id: worker.id })).rejects.toThrow(
+        "taken over by the user",
+      );
+      session(worker).emit("ui_dialog_resolved", dialog);
+      endTurn(worker);
+      // Takeover still blocks across a restart.
+      worker = restart(worker);
+      session(worker).setPanelTools(manager.toolsFor(worker));
+      await expect(
+        call(lead, "message_session", { session_id: worker.id, message: "also do B" }),
+      ).rejects.toThrow("taken over by the user");
+      // Archived while taken over (messages unloaded from memory): refused without unarchiving.
+      historyOf(base).save(
+        worker.id,
+        worker.getMessages(),
+        new Set(worker.getMessages().map((m) => m.id)),
+      );
+      expect(host.archiveWorkspace(worker)).toBe(true);
+      worker.setMessages([]);
+      worker.messagesLoaded = false;
+      const archivedLine = (await call(lead, "project_status"))
+        .split("\n")
+        .find((line) => line.startsWith(`- ${worker.id} `));
+      expect(archivedLine).toContain("not lead-dispatchable (user took over)");
+      expect(worker.messagesLoaded).toBe(false);
+      await expect(
+        call(lead, "message_session", { session_id: worker.id, message: "rework" }),
+      ).rejects.toThrow("taken over by the user");
+      expect(worker.isArchived).toBe(true);
+      expect(host.restoreWorkspace(worker)).toBe(true);
+
+      // User asks worker to finish and it calls finish_task: handed back to lead across restart.
+      await worker.sendMessage("wrap up");
+      await call(worker, "finish_task", { summary: "finished" });
+      endTurn(worker);
+      worker = restart(worker);
+      session(worker).setPanelTools(manager.toolsFor(worker));
+      await vi.advanceTimersByTimeAsync(START_SPACING_MS);
+      expect(
+        await call(lead, "message_session", {
+          session_id: worker.id,
+          message: "rework per review",
+        }),
+      ).toBe('Sent to "w".');
+
+      // Lead's own stop_session does not lock lead out of follow-up dispatch.
+      await call(lead, "stop_session", { session_id: worker.id });
+      session(worker).isRunning = false;
+      await vi.advanceTimersByTimeAsync(START_SPACING_MS);
+      expect(
+        await call(lead, "message_session", { session_id: worker.id, message: "revised rework" }),
+      ).toBe('Sent to "w".');
+
+      // User stops the turn: lead is barred from messaging it.
+      worker.abortAll();
+      session(worker).isRunning = false;
+      await expect(
+        call(lead, "message_session", { session_id: worker.id, message: "keep going" }),
+      ).rejects.toThrow("stopped by the user");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("marks an archived worker without loaded history or a persisted blocker as unknown", async () => {
+    const { create, call, workers, endTurn, host, store } = setup();
+    const { lead } = create("clice");
+    await call(lead, "start_session", { title: "w", cwd: "wt", task: "first pass" });
+    const [worker] = workers();
+    endTurn(worker);
+    expect(host.archiveWorkspace(worker)).toBe(true);
+    store(worker, worker.getMessages());
+    expect(worker.messagesLoaded).toBe(false);
+
+    const line = (await call(lead, "project_status"))
+      .split("\n")
+      .find((row) => row.startsWith(`- ${worker.id} `));
+    expect(line).toContain("dispatchability unknown (archived; checked on load)");
+    expect(line).not.toContain("lead-dispatchable");
+    expect(worker.messagesLoaded).toBe(false);
+  });
+
+  it("does not hand back a new user turn when draining an older offline finish report", async () => {
+    const { create, call, workers, endTurn, host, manager, session } = setup();
+    const { lead, project } = create("clice");
+    await call(lead, "start_session", { title: "w", cwd: "wt", task: "first pass" });
+    const [worker] = workers();
+    host.isLeadOnline = () => false;
+    expect(await call(worker, "finish_task", { summary: "first pass done" })).toBe(
+      "Report saved for the offline lead.",
+    );
+    expect(lead.getMessages().some((m) => m.from?.workspaceId === worker.id)).toBe(false);
+    endTurn(worker);
+    await worker.sendMessage("Look at this with me.");
+    expect(session(worker).sent.at(-1)).toBe("Look at this with me.");
+
+    host.isLeadOnline = () => true;
+    await manager.drainInbox(project.id);
+    expect(lead.getMessages()).toContainEqual(
+      expect.objectContaining({ content: "Finished:\n\nfirst pass done" }),
+    );
+    await expect(
+      call(lead, "message_session", { session_id: worker.id, message: "rework" }),
+    ).rejects.toThrow("taken over by the user");
+  });
+
+  it("preserves a user stop after an offline finish on the same turn, including unloaded status", async () => {
+    const { create, call, workers, host, manager, session, store, restart } = setup();
+    const { lead, project } = create("clice");
+    await call(lead, "start_session", { title: "w", cwd: "wt", task: "first pass" });
+    let [worker] = workers();
+    host.isLeadOnline = () => false;
+    await call(worker, "finish_task", { summary: "first pass done" });
+    vi.spyOn(session(worker), "abort").mockImplementation(() => {
+      session(worker).isRunning = false;
+    });
+    worker.abortAll();
+
+    host.isLeadOnline = () => true;
+    await manager.drainInbox(project.id);
+    await expect(
+      call(lead, "message_session", { session_id: worker.id, message: "rework" }),
+    ).rejects.toThrow("stopped by the user");
+    expect(host.archiveWorkspace(worker)).toBe(true);
+    store(worker, worker.getMessages());
+    worker = restart(worker);
+    expect(worker.messagesLoaded).toBe(false);
+    expect(await call(lead, "project_status")).toContain(
+      "archived; not lead-dispatchable (stopped by user)",
+    );
+  });
+
+  it("keeps the user stop after handing back a user turn and restarting with history", async () => {
+    const { create, call, workers, session, endTurn, restart } = setup();
+    const { lead } = create("clice");
+    await call(lead, "start_session", { title: "w", cwd: "wt", task: "first pass" });
+    const [worker] = workers();
+    session(worker).emit("event", { kind: "text_delta", content: "Which option?" });
+    endTurn(worker);
+    await worker.sendMessage("Use option A.");
+    const s = session(worker);
+    s.emit("event", {
+      kind: "tool_use",
+      toolName: "mcp__panel__finish_task",
+      toolUseId: "ft-user",
+      content: "**finish_task**",
+    });
+    await call(worker, "finish_task", { summary: "done" });
+    worker.abortAll();
+    const assertStopped = (w: Workspace) =>
+      expect(
+        call(lead, "message_session", { session_id: w.id, message: "rework" }),
+      ).rejects.toThrow("stopped by the user");
+    await assertStopped(worker);
+    const restored = restart(worker);
+    expect(restored.messagesLoaded).toBe(true);
+    await assertStopped(restored);
+  });
+
+  it("counts a slash prompt sent to the backend, but not a local command, as a takeover", async () => {
+    const { create, call, workers, session, endTurn } = setup();
+    const { lead } = create("clice");
+    await call(lead, "start_session", { title: "w", cwd: "wt", task: "first pass" });
+    const [worker] = workers();
+    endTurn(worker);
+    await worker.sendMessage("Wrap up the first pass.");
+    const s = session(worker);
+    s.emit("event", {
+      kind: "tool_use",
+      toolName: "mcp__panel__finish_task",
+      toolUseId: "ft-first",
+      content: "**finish_task**",
+    });
+    await call(worker, "finish_task", { summary: "done" });
+    endTurn(worker);
+    await worker.sendMessage("/usage");
+    expect(s.sent.at(-1)).toBe("Wrap up the first pass.");
+    expect(await call(lead, "project_status")).toContain("idle; lead-dispatchable");
+
+    await worker.sendMessage("/backend-prompt");
+    expect(s.sent.at(-1)).toBe("/backend-prompt");
+    await expect(call(lead, "stop_session", { session_id: worker.id })).rejects.toThrow(
+      "taken over by the user",
+    );
+  });
+
+  it("protects a queued user turn even if another agent reports after it was queued", async () => {
+    const { create, call, workers, host, session } = setup();
+    const { lead } = create("clice");
+    await call(lead, "start_session", { title: "w", cwd: "wt", task: "first pass" });
+    const [worker] = workers();
+    host.addAgent(worker, "Allen", "gpt-6-astra", "b", "c");
+    const [, allen] = worker.agents.values();
+    await worker.sendMessage("Stop after the first pass.");
+    expect(worker.getMessages().at(-1)?.status).toBe("queued");
+    await worker.sendMessage("@Allen recap the work");
+    const second = allen.session as FakeSession;
+    second.emit("event", {
+      kind: "tool_use",
+      toolName: "mcp__panel__finish_task",
+      toolUseId: "ft-allen",
+      content: "**finish_task**",
+    });
+    await second
+      .panelTools!.tools.find((t) => t.name === "finish_task")!
+      .handler({ summary: "done" });
+    expect(session(worker).sent).toHaveLength(1);
+    await expect(call(lead, "stop_session", { session_id: worker.id })).rejects.toThrow(
+      "taken over by the user",
+    );
+    await expect(
+      call(lead, "message_session", { session_id: worker.id, message: "rework" }),
+    ).rejects.toThrow("taken over by the user");
   });
 });
 
@@ -1867,6 +2254,8 @@ describe("worker tasks held back for spacing", () => {
       const { w1, lead, call, session, endTurn, workers } = await twoStarts();
       await vi.advanceTimersByTimeAsync(START_SPACING_MS);
       const w0 = workers().find((w) => w.name === "w0")!;
+      await call(w0, "finish_task", { summary: "first done" });
+      await call(w1, "finish_task", { summary: "second done" });
       endTurn(w0);
       endTurn(w1);
       await vi.advanceTimersByTimeAsync(START_SPACING_MS);
@@ -2172,7 +2561,7 @@ describe("a worker that goes idle without reporting", () => {
   it("tells how a failed turn ended, and leaves one the user stopped to them", async () => {
     useFakeTimers();
     try {
-      const { w, say, told, settle, session, endTurn, ask, state } = await started();
+      const { w, say, told, settle, session, ask } = await started();
       say("Working on it");
       session(w).isRunning = false;
       session(w).emit("event", { kind: "error", content: "API Error: 529 overloaded" });
@@ -2187,27 +2576,29 @@ describe("a worker that goes idle without reporting", () => {
       w.abortAll();
       await settle();
       expect(w.lastDelivered()[0]).toMatchObject({ stopped: "user", answered: true });
+      expect(told()).toHaveLength(1);
 
       // Stopped while it waited on a background task, its turn long over.
-      await ask("run the benchmark");
-      say("Started it in the background.");
-      state("waiting");
-      endTurn(w);
-      w.abortAll();
-      state("idle");
-      await settle();
-      expect(w.lastDelivered()[0]).toMatchObject({ stopped: "user", answered: true });
+      const bg = await started();
+      bg.say("Started it in the background.");
+      bg.state("waiting");
+      bg.endTurn(bg.w);
+      bg.w.abortAll();
+      bg.state("idle");
+      await bg.settle();
+      expect(bg.w.lastDelivered()[0]).toMatchObject({ stopped: "user", answered: true });
+      expect(bg.told()).toEqual([]);
 
       // Context cleared under a background task: a stop too.
-      await ask("profile it");
-      say("Profiling in the background.");
-      state("waiting");
-      endTurn(w);
-      w.clearContext([...w.agents.keys()][0]);
-      state("idle");
-      await settle();
-      expect(told()).toHaveLength(1);
-      expect(w.lastDelivered()[0].answered).toBe(true);
+      const cleared = await started();
+      cleared.say("Profiling in the background.");
+      cleared.state("waiting");
+      cleared.endTurn(cleared.w);
+      cleared.w.clearContext([...cleared.w.agents.keys()][0]);
+      cleared.state("idle");
+      await cleared.settle();
+      expect(cleared.told()).toEqual([]);
+      expect(cleared.w.lastDelivered()[0].answered).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -2258,22 +2649,26 @@ describe("a worker that goes idle without reporting", () => {
       expect(w.lastDelivered()[0].answered).toBe(true);
 
       // A failed turn too: the user is there to see it.
-      await ask("and push it");
-      session(w).isRunning = false;
-      session(w).emit("event", { kind: "error", content: "API Error: 529 overloaded" });
-      await w.sendMessage("what happened?");
-      endTurn(w);
-      await settle();
-      expect(told()).toEqual([]);
-      expect(w.lastDelivered()[0]).toMatchObject({ since: true, answered: true });
+      const failed = await started();
+      failed.session(failed.w).isRunning = false;
+      failed.session(failed.w).emit("event", {
+        kind: "error",
+        content: "API Error: 529 overloaded",
+      });
+      await failed.w.sendMessage("what happened?");
+      failed.endTurn(failed.w);
+      await failed.settle();
+      expect(failed.told()).toEqual([]);
+      expect(failed.w.lastDelivered()[0]).toMatchObject({ since: true, answered: true });
 
       // A command the panel answers itself runs no turn.
-      await ask("which branch?");
-      say("main");
-      endTurn(w);
-      await w.sendMessage("/usage");
-      await settle();
-      expect(told()).toEqual([note("its turn ended", "which branch?", "main")]);
+      const slash = await started();
+      await slash.askNext("which branch?");
+      slash.say("main");
+      slash.endTurn(slash.w);
+      await slash.w.sendMessage("/usage");
+      await slash.settle();
+      expect(slash.told()).toEqual([note("its turn ended", "which branch?", "main")]);
     } finally {
       vi.useRealTimers();
     }
@@ -2379,7 +2774,7 @@ describe("a worker that goes idle without reporting", () => {
   it("carries on a turn a restart cut off, a shutdown or a crash, without the lead", async () => {
     useFakeTimers();
     try {
-      const { w, say, told, settle, restart, manager, ask, session, endTurn } = await started();
+      const { w, say, told, settle, restart, manager, session, endTurn } = await started();
       say("Halfway through");
       w.abortAll("restart");
       let back = restart(w);
@@ -2406,16 +2801,17 @@ describe("a worker that goes idle without reporting", () => {
 
       // The lead's later question, cut off by a crash mid-turn, goes on too,
       // and its answer reaches the lead as the answer to the question.
-      await ask("which commit?");
-      say("Looking", back);
-      back = restart(back);
-      manager.recheckWorkers();
-      await settle();
-      expect(session(back).sent).toEqual([CARRY_ON]);
-      say("abc123", back);
-      endTurn(back);
-      await settle();
-      expect(told()).toEqual([note("its turn ended", "which commit?", "abc123")]);
+      const follow = await started();
+      await follow.askNext("which commit?");
+      follow.say("Looking");
+      const resumed = follow.restart(follow.w);
+      follow.manager.recheckWorkers();
+      await follow.settle();
+      expect(follow.session(resumed).sent).toEqual([CARRY_ON]);
+      follow.say("abc123", resumed);
+      follow.endTurn(resumed);
+      await follow.settle();
+      expect(follow.told()).toEqual([note("its turn ended", "which commit?", "abc123")]);
     } finally {
       vi.useRealTimers();
     }
@@ -2700,6 +3096,7 @@ describe("a worker that goes idle without reporting", () => {
 
       // What it answers the lead later is the lead's.
       await w.sendMessage("thanks");
+      await call(w, "finish_task", { summary: "all set" });
       await askNext("is it pushed?");
       say("yes");
       endTurn(w);

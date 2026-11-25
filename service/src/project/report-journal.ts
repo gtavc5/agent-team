@@ -23,6 +23,7 @@ export interface FrozenTaskTransition {
 
 export interface FrozenReportPlan {
   answeredInputIds: string[];
+  finishedInputIds?: string[];
   contextWrite: FrozenContextWrite | null;
   taskTransitions: FrozenTaskTransition[];
 }

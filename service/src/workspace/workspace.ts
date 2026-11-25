@@ -238,8 +238,9 @@ export interface AgentEntry {
 export interface TurnInput {
   id: string;
   replies: string[];
-  stopped?: "user" | "restart";
+  stopped?: "user" | "restart" | "lead";
   answered?: boolean;
+  finished?: boolean;
   // Background work or a wake-up was still to come: a crash cuts it off.
   waiting?: boolean;
 }
@@ -510,8 +511,9 @@ export class Workspace {
     agentId: string;
     input: Message;
     replies: Message[];
-    stopped?: "user" | "restart";
+    stopped?: "user" | "restart" | "lead";
     answered: boolean;
+    finished: boolean;
     since: boolean;
   }> {
     const out = [];
@@ -526,7 +528,8 @@ export class Workspace {
         replies,
         stopped: d.stopped,
         answered: !!d.answered,
-        since: a.input !== d,
+        finished: !!d.finished,
+        since: a.input !== d && !a.input?.finished,
       });
     }
     return out;
@@ -541,7 +544,8 @@ export class Workspace {
     agentId: string;
     input: Message;
     replies: Message[];
-    stopped?: "user" | "restart";
+    stopped?: "user" | "restart" | "lead";
+    finished?: boolean;
   }> {
     const out = [];
     for (const [agentId, a] of this.agents) {
@@ -550,7 +554,7 @@ export class Workspace {
         const input = this.messages.find((m) => m.id === t.id);
         if (!input) continue;
         const replies = this.messages.filter((m) => t.replies.includes(m.id));
-        out.push({ agentId, input, replies, stopped: t.stopped });
+        out.push({ agentId, input, replies, stopped: t.stopped, finished: t.finished });
         continue;
       }
       const typed = (idx: number) => {
@@ -599,6 +603,44 @@ export class Workspace {
     for (const a of this.agents.values()) {
       if (a.delivered?.id === messageId) a.delivered.answered = true;
     }
+  }
+
+  // Active turn input IDs across agents, captured when finish_task runs so
+  // replaying an offline report never hands back a newer user-owned turn.
+  currentInputIds(): string[] {
+    const ids = new Set<string>();
+    for (const a of this.agents.values()) {
+      const id = a.input?.id ?? a.delivered?.id;
+      if (id) ids.add(id);
+    }
+    return [...ids];
+  }
+
+  // A successful finish_task handed the reporting turn back to the lead.
+  markFinished(inputIds: readonly string[]): void {
+    for (const a of this.agents.values()) {
+      const turn = a.input ?? a.delivered;
+      // Replay may see the same input after the user stopped it. A report
+      // already applied to that input cannot release it again.
+      if (!turn || turn.finished || !inputIds.includes(turn.id)) continue;
+      turn.finished = true;
+      if (turn.stopped === "user") delete turn.stopped;
+      if (a.delivered) {
+        a.delivered.finished = true;
+        if (a.delivered.stopped === "user") delete a.delivered.stopped;
+      }
+    }
+  }
+
+  // Ownership blockers readable from persisted agent state even when an
+  // archived workspace's messages are not loaded in memory.
+  persistedOwnershipBlocker(): "taken_over" | "user_stopped" | null {
+    for (const a of this.agents.values()) {
+      const d = a.delivered;
+      if (d && a.input !== d && !a.input?.finished) return "taken_over";
+      if (d?.stopped === "user" || a.input?.stopped === "user") return "user_stopped";
+    }
+    return null;
   }
 
   takeChanged(): Set<string> {
@@ -948,12 +990,12 @@ export class Workspace {
           entry.session.getState().config.backend === "codex"
         )
           this.ensureAgentMsg(entry);
+        if (event.interrupted && entry.input) entry.input.stopped = "user";
         if (entry.currentMsg) {
           // Defense in depth: a turn that ends with neither text nor any
           // visible event is a failure (CLI crash, network drop, spawn
           // problem) — render a diagnostic instead of a silent empty bubble.
           if (event.interrupted) {
-            if (entry.input) entry.input.stopped = "user";
             entry.currentMsg.content = withInterrupted(entry.currentMsg.content);
           } else if (!entry.currentMsg.content.trim() && !(entry.currentMsg.events ?? []).length) {
             entry.currentMsg.content =
@@ -995,6 +1037,7 @@ export class Workspace {
           }
         }
         this.finishReply(entry);
+        if (event.interrupted && this.projectLink?.role === "worker") this.cb?.onSaveNow?.();
       } else if (event.kind === "error") {
         // The error is an event (rendered as a red banner where it
         // happened); appending it to the text as well showed it twice.
@@ -1804,12 +1847,16 @@ export class Workspace {
 
   // Steered messages a turn ended without reading: the queue's again, and
   // it runs them next; the lead's, once the session no longer reports to
-  // it, are dropped.
+  // it or is taken over / stopped by the user, are dropped.
   private unread(ids: string[]): void {
     const back = this.messages.filter((m) => m.steering && ids.includes(m.id));
     for (const m of back) {
       delete m.steering;
-      if (this.projectLink?.unreported && (m.from?.role === "lead" || m.from?.role === "panel")) {
+      const entry = m.queuedFor ? this.agents.get(m.queuedFor) : undefined;
+      if (
+        (m.from?.role === "lead" || m.from?.role === "panel") &&
+        (this.projectLink?.unreported || (entry && this.leadBlockedOnAgent(entry)))
+      ) {
         this.messages.splice(this.messages.indexOf(m), 1);
         this.cb?.onMessageRemoved?.(this.id, m.id);
       } else {
@@ -2241,6 +2288,32 @@ export class Workspace {
     this.dequeueNext(agentId);
   }
 
+  // Whether the lead has lost dispatch rights on this worker agent (unreported,
+  // taken over by a direct user turn/queue, or stopped by the user).
+  private leadBlockedOnAgent(entry: AgentEntry): boolean {
+    if (this.projectLink?.role !== "worker") return false;
+    if (this.projectLink.unreported) return true;
+    const d = entry.delivered;
+    if (d && entry.input !== d && !entry.input?.finished) return true;
+    if (d?.stopped === "user" || entry.input?.stopped === "user") return true;
+    return this.messages.some((m) => m.status === "queued" && m.kind === "user" && !m.from);
+  }
+
+  private dropQueuedLeadFor(agentId: string): void {
+    if (this.projectLink?.role !== "worker") return;
+    const queued = this.messages.filter(
+      (m) =>
+        m.status === "queued" &&
+        m.queuedFor === agentId &&
+        (m.from?.role === "lead" || m.from?.role === "panel"),
+    );
+    for (const m of queued) {
+      if (this.cancelQueued(m.id, true)) {
+        this.cb?.onMessageRemoved?.(this.id, m.id);
+      }
+    }
+  }
+
   // Runs whenever an agent becomes idle: promote the oldest queued message
   // for that agent and dispatch its stored prompt.
   dequeueNext(agentId: string): void {
@@ -2253,9 +2326,23 @@ export class Workspace {
     )
       return;
     if (this.held(entry)) return;
-    const msg = this.messages.find(
-      (m) => m.status === "queued" && m.queuedFor === agentId && !m.steering,
-    );
+    let msg: Message | undefined;
+    while (true) {
+      const candidate = this.messages.find(
+        (m) => m.status === "queued" && m.queuedFor === agentId && !m.steering,
+      );
+      if (!candidate) break;
+      if (
+        (candidate.from?.role === "lead" || candidate.from?.role === "panel") &&
+        this.leadBlockedOnAgent(entry)
+      ) {
+        if (!this.cancelQueued(candidate.id)) break;
+        this.cb?.onMessageRemoved?.(this.id, candidate.id);
+        continue;
+      }
+      msg = candidate;
+      break;
+    }
     if (!msg) {
       // After the queue, as the CLI orders its own wake-ups.
       const wake = entry.session.wakeDue ? entry.session.takeWake?.() : null;
@@ -2411,17 +2498,26 @@ export class Workspace {
     if (!entry) return;
     const busy = this.hasWork(entry);
     this.cancelOpeningPrompt(entry, "Cancelled by user");
+    this.dropQueuedLeadFor(agentId);
     entry.session.abort();
     this.finalizeAbort(entry, busy);
+    if (this.projectLink?.role === "worker") this.cb?.onSaveNow?.();
   }
 
-  abortAll(by: "user" | "restart" = "user"): void {
+  abortAll(by: "user" | "restart" | "lead" = "user"): void {
     for (const entry of this.agents.values()) {
       const busy = this.hasWork(entry);
-      if (by === "user") this.cancelOpeningPrompt(entry, "Cancelled by user");
+      if (by !== "restart") {
+        this.cancelOpeningPrompt(
+          entry,
+          by === "lead" ? "Cancelled by project lead" : "Cancelled by user",
+        );
+      }
+      if (by === "user") this.dropQueuedLeadFor(entry.info.id);
       entry.session.abort();
       this.finalizeAbort(entry, busy, by);
     }
+    if (by === "user" && this.projectLink?.role === "worker") this.cb?.onSaveNow?.();
   }
 
   // A turn, background task or wake-up that a stop would cut short.
@@ -2451,13 +2547,20 @@ export class Workspace {
       return;
     }
     this.settleStale(entry);
-    const inputBefore = entry.input?.id;
+    const inputBefore = entry.input;
     const msgBefore = entry.currentMsg?.id;
+    if (this.projectLink?.role === "worker") {
+      // Codex can return unread steers before its interrupted result, and
+      // Pi can stop before producing any result. Fence both before the call.
+      this.dropQueuedLeadFor(agentId);
+      if (session.isRunning && inputBefore) inputBefore.stopped = "user";
+      this.cb?.onSaveNow?.();
+    }
     if (
       session.isRunning &&
       !(await session.interrupt()) &&
       session.isRunning &&
-      entry.input?.id === inputBefore &&
+      entry.input === inputBefore &&
       entry.currentMsg?.id === msgBefore
     ) {
       this.abortAgent(agentId);
@@ -2479,9 +2582,13 @@ export class Workspace {
     return null;
   }
 
-  private finalizeAbort(entry: AgentEntry, busy: boolean, by: "user" | "restart" = "user"): void {
+  private finalizeAbort(
+    entry: AgentEntry,
+    busy: boolean,
+    by: "user" | "restart" | "lead" = "user",
+  ): void {
     if (busy && entry.input) entry.input.stopped = by;
-    if (by === "user") this.dropRetry(entry);
+    if (by !== "restart") this.dropRetry(entry);
     if (entry.currentMsg && entry.currentMsg.status === "streaming") {
       entry.currentMsg.content = withInterrupted(entry.currentMsg.content);
       this.settle(entry.currentMsg);
@@ -2592,7 +2699,11 @@ export class Workspace {
           ...a.info,
           session: a.session.getState(),
           ...(a.delivered && {
-            delivered: { ...a.delivered, ...(a.input !== a.delivered && { since: true }) },
+            delivered: {
+              ...a.delivered,
+              ...(a.input?.finished && a.input.stopped === "user" && { stopped: "user" }),
+              ...(a.input !== a.delivered && !a.input?.finished && { since: true }),
+            },
           }),
           ...(a.retryPending && { pausedUntil: a.pausedUntil, lastEnvelope: a.lastEnvelope }),
         };
@@ -2694,7 +2805,7 @@ export class Workspace {
       });
       if (agentState.delivered) {
         const { since, waiting, ...delivered } = agentState.delivered;
-        if (waiting || cut.has(delivered.replies[delivered.replies.length - 1])) {
+        if (!delivered.stopped && (waiting || cut.has(delivered.replies.at(-1)!))) {
           delivered.stopped = "restart";
         }
         const entry = ws.agents.get(agentState.id)!;
