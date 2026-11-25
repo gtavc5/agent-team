@@ -5,6 +5,9 @@ import {
   STALE_MS,
   archivedWorkspaces,
   isArchived,
+  initialIdleWorkers,
+  archivedFolderLabel,
+  IDLE_FOLD_MS,
 } from "../src/sidebar/groups";
 import { Workspace } from "../src/state/useServer";
 
@@ -122,6 +125,82 @@ describe("archived workspaces", () => {
     const b = { ...ws("b", "/repo/y", NOW - 1000), archivedAt: NOW };
     expect(archivedWorkspaces([a, b]).map((w) => w.id)).toEqual(["b", "a"]);
     expect(groupWorkspaces([a, b])).toEqual([]);
+  });
+});
+
+describe("initial idle worker folding", () => {
+  const project = {
+    id: "p1",
+    name: "clice",
+    root: "/repo/clice",
+    leadWorkspaceId: "lead",
+    createdAt: 0,
+    objectives: [],
+  };
+  const lead = {
+    ...ws("lead", "/repo/clice", NOW),
+    projectLink: { projectId: "p1", role: "lead" as const },
+  };
+  const worker = (id: string, at: number, lastResult?: "done") => ({
+    ...ws(id, "/repo/clice-wt-1", at),
+    projectLink: { projectId: "p1", role: "worker" as const },
+    ...(lastResult && { lastResult }),
+  });
+  const folded = (workers: Workspace[]) =>
+    initialIdleWorkers(groupWorkspaces([lead, ...workers], [project])[0], null, NOW);
+
+  it("folds done workers immediately and quiet null-result workers at one hour", () => {
+    expect(IDLE_FOLD_MS).toBe(60 * 60 * 1000);
+    expect(STALE_MS).toBe(3 * 86_400_000);
+    expect(
+      folded([
+        worker("done-fresh", NOW - 1000, "done"),
+        worker("fresh", NOW - IDLE_FOLD_MS + 1),
+        worker("boundary", NOW - IDLE_FOLD_MS),
+        worker("old", NOW - IDLE_FOLD_MS - 1),
+      ]),
+    ).toEqual(["done-fresh", "boundary", "old"]);
+  });
+
+  it("uses latest activity and never folds the active or attention worker", () => {
+    const active = worker("active", NOW - IDLE_FOLD_MS);
+    const attention = { ...worker("attention", NOW - IDLE_FOLD_MS), awaitsUser: true };
+    const freshActivity = worker("fresh-activity", NOW - IDLE_FOLD_MS);
+    freshActivity.lastMessageAt = NOW - 1000;
+    expect(folded([attention, freshActivity])).toEqual([]);
+    expect(
+      initialIdleWorkers(groupWorkspaces([lead, active], [project])[0], active.id, NOW),
+    ).toEqual([]);
+  });
+});
+
+describe("archived folder labels", () => {
+  const project = {
+    id: "p1",
+    name: "clice",
+    root: "/repo/clice",
+    leadWorkspaceId: "lead",
+    createdAt: 0,
+    objectives: [],
+  };
+  const label = (cwd: string) => archivedFolderLabel(ws("old", cwd, NOW), project);
+
+  it("suppresses the root, descendants, and project worktree paths", () => {
+    expect(label("/repo/clice")).toBeNull();
+    expect(label("/repo/clice/")).toBeNull();
+    expect(label("/repo/clice/packages/app")).toBeNull();
+    expect(label("/repo/clice-wt-1")).toBeNull();
+    expect(label("/repo/clice-wt-1/packages/app")).toBeNull();
+    expect(label("/home/u/worktrees/clice-wt-2")).toBeNull();
+  });
+
+  it("keeps genuinely external folders and similarly prefixed projects", () => {
+    expect(label("/repo/clice-next")).toBe("clice-next");
+    expect(label("/wt/clice-x")).toBe("clice-x");
+    expect(label("/home/u/worktrees/other-wt-1")).toBe("other-wt-1");
+    expect(label("/repo/clice-wt-")).toBe("clice-wt-");
+    expect(label("/home/u/worktrees/clice-wt-")).toBe("clice-wt-");
+    expect(archivedFolderLabel(ws("old", "/external", NOW))).toBe("external");
   });
 });
 

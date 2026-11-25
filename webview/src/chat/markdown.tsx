@@ -71,6 +71,8 @@ function ScrollTable({ node: _node, ...props }: ComponentProps<"table"> & ExtraP
 
 // Inside a link, code is part of the link's text, not a reference of its own.
 const InLink = createContext(false);
+// A local link already supplies the code element for its label.
+const InCodeLink = createContext(false);
 
 // Where it is given (the board's objective details), the ids of the
 // project's issues named in text link to the issue.
@@ -264,7 +266,7 @@ export function FileRefCode({
         open(target);
       }}
     >
-      {children}
+      <InCodeLink.Provider value={true}>{children}</InCodeLink.Provider>
     </code>
   );
 }
@@ -292,7 +294,9 @@ function Link({ href, children, node: _node, ...rest }: ComponentProps<"a"> & Ex
           {children}
         </FileRefCode>
       ) : (
-        <code title={href}>{children}</code>
+        <code title={href}>
+          <InCodeLink.Provider value={true}>{children}</InCodeLink.Provider>
+        </code>
       )}
     </InLink.Provider>
   );
@@ -302,7 +306,9 @@ function Link({ href, children, node: _node, ...rest }: ComponentProps<"a"> & Ex
 function InlineCode({ children, node: _node, ...rest }: ComponentProps<"code"> & ExtraProps) {
   const openable = useOpenable();
   const inLink = useContext(InLink);
+  const inCodeLink = useContext(InCodeLink);
   const text = typeof children === "string" ? children : null;
+  if (inCodeLink) return <>{children}</>;
   if (
     openable &&
     !inLink &&
@@ -511,7 +517,9 @@ function InlineLink({ href, children }: ComponentProps<"a">) {
   return (
     <InLink.Provider value={true}>
       {target && openable?.(target) ? (
-        <FileRefCode target={target}>{children}</FileRefCode>
+        <FileRefCode target={target} className="inline-code">
+          {children}
+        </FileRefCode>
       ) : (
         children
       )}
@@ -523,7 +531,9 @@ function InlineCodeText({ children }: { children?: ReactNode }) {
   const paths = useProsePaths();
   const openable = useOpenable();
   const inLink = useContext(InLink);
+  const inCodeLink = useContext(InCodeLink);
   const text = typeof children === "string" ? children : null;
+  if (inCodeLink) return <>{children}</>;
   return paths && openable && !inLink && text && parseFileRef(text) && openable(text) ? (
     <FileRefCode target={text} className="inline-code">
       {children}

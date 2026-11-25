@@ -511,6 +511,7 @@ export function useServer() {
   // By project; a project with no issues has no entry.
   const [issues, setIssues] = useState<Record<string, IssueModules>>({});
   const [connected, setConnected] = useState(false);
+  const [snapshotReady, setSnapshotReady] = useState(false);
   const [user, setUser] = useState(DEFAULT_USER);
   const [presets, setPresets] = useState<AgentPreset[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -706,6 +707,7 @@ export function useServer() {
           if (msg.hosts) setHosts(msg.hosts as HostInfo[]);
           setProjects((msg.projects as Project[] | undefined) ?? []);
           setIssues((msg.issues as Record<string, IssueModules> | undefined) ?? {});
+          setSnapshotReady(true);
           break;
         }
 
@@ -1320,6 +1322,7 @@ export function useServer() {
 
   const connect = useCallback((): WebSocket => {
     configureTelemetry(false);
+    setSnapshotReady(false);
     const ws = new WebSocket(resolveWsUrl());
     failPendingSends();
     wsRef.current = ws;
@@ -1408,6 +1411,7 @@ export function useServer() {
       });
       setSystemStatus(MOCK_SYSTEM_STATUS);
       setConnected(true);
+      setSnapshotReady(true);
       return;
     }
     if (useReplay) {
@@ -1466,6 +1470,7 @@ export function useServer() {
     projects,
     issues,
     connected,
+    snapshotReady,
     user,
     presets,
     models,

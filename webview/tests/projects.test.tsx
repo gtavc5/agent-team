@@ -354,7 +354,13 @@ describe("archives in the sidebar", () => {
       ...over,
     });
   const props = (over: Partial<SidebarProps> = {}): SidebarProps => ({
-    workspaces: [lead, worker, archived("old-a"), archived("old-b", { cwd: "/wt/clice-x" })],
+    workspaces: [
+      lead,
+      worker,
+      archived("old-a"),
+      archived("old-b", { cwd: "/wt/clice-x" }),
+      archived("old-c", { cwd: "/repo/clice-wt-1" }),
+    ],
     projects: [project],
     activeWsId: "lead",
     connected: true,
@@ -389,12 +395,18 @@ describe("archives in the sidebar", () => {
     // Folded, the row is just its name: the count and Clear come with the list.
     expect(toggle.textContent).toBe("▸Archived");
     fireEvent.click(toggle);
-    expect(toggle.querySelector(".ws-group-count")!.textContent).toBe("2");
-    expect(names(container)).toEqual(["modules", "old-a", "old-b"]);
-    // A session in a worktree names its folder.
+    expect(toggle.querySelector(".ws-group-count")!.textContent).toBe("3");
+    expect(names(container)).toEqual(["modules", "old-a", "old-b", "old-c"]);
+    // Only a genuinely external folder repeats its basename. Project worktrees
+    // keep their full cwd on the row tooltip without a redundant second line.
     expect(
       [...container.querySelectorAll(".task-item-archived .task-meta")].map((e) => e.textContent),
     ).toEqual(["clice-x"]);
+    const worktree = [...container.querySelectorAll<HTMLElement>(".task-item-archived")].find(
+      (row) => row.textContent?.includes("old-c"),
+    )!;
+    expect(worktree.title).toBe("/repo/clice-wt-1");
+    expect(worktree.querySelector(".task-meta")).toBeNull();
     fireEvent.click(getByTitle("Delete the archived sessions of clice"));
     expect(p.onPurgeArchived).toHaveBeenCalledWith("p1");
   });

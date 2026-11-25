@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { page, cdp, userEvent } from "vitest/browser";
 import type {} from "@vitest/browser-playwright";
 import { App } from "../../src/App";
+import { FOLDED_IDLE_STORAGE_KEY } from "../../src/sidebar/Sidebar";
 import { collectSnapshot, SNAPSHOT_SELECTORS } from "../../src/dev/debugSnapshot";
 import type { AgentInfo, Message, Project, Workspace } from "../../src/state/useServer";
 import { FakeSocket } from "../fakeSocket";
@@ -115,7 +116,8 @@ it.each([
     expect(order()).toEqual(["Running", "Result", "Asking"]);
     expect(cue("Asking")).toBe("Your turn");
     expect(row("Read and idle")).toBeNull();
-    const idleToggle = view.getByRole("button", { name: "Idle (1)" });
+    const idleToggle = view.getByRole("button", { name: "Show 1 folded session" });
+    expect(idleToggle.textContent).toContain("... (1)");
     expect(idleToggle.getAttribute("aria-expanded")).toBe("false");
     expect(idleToggle.textContent).toContain("▸");
     expect(document.body.textContent).not.toContain("Idle / Done");
@@ -212,7 +214,7 @@ it.each([
     expect(document.querySelectorAll(".ws-idle-row")).toHaveLength(1);
     fireEvent.click(view.getByRole("button", { name: "Fold (+1)" }));
     expect(order()).toEqual(["Result", "Asking"]);
-    const foldedToggle = view.getByRole("button", { name: "Idle (2)" });
+    const foldedToggle = view.getByRole("button", { name: "Show 2 folded sessions" });
     expect(foldedToggle.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(foldedToggle);
     expect(foldedToggle.getAttribute("aria-expanded")).toBe("true");
@@ -232,6 +234,18 @@ it.each([
     );
   },
 );
+
+it("prunes a saved fold after an authoritative empty init, not before it", async () => {
+  await page.viewport(1280, 800);
+  localStorage.setItem(FOLDED_IDLE_STORAGE_KEY, JSON.stringify(["deleted"]));
+  mount();
+  const sock = FakeSocket.instances.at(-1)!;
+  expect(JSON.parse(localStorage.getItem(FOLDED_IDLE_STORAGE_KEY)!)).toEqual(["deleted"]);
+  act(() => sock.open());
+  expect(JSON.parse(localStorage.getItem(FOLDED_IDLE_STORAGE_KEY)!)).toEqual(["deleted"]);
+  act(() => sock.receive({ type: "init", workspaces: [], projects: [], config }));
+  expect(localStorage.getItem(FOLDED_IDLE_STORAGE_KEY)).toBeNull();
+});
 
 const painted = () =>
   new Promise<void>((resolve) =>
@@ -543,10 +557,10 @@ it("keeps 307px project headers readable with right-aligned status, centered Arc
     expect(rect(header()).right - rect(status()).right).toBeLessThanOrEqual(10);
   }
 
-  // Case 3: When idle.length === 0 && foldable.length > 0, show compact Fold idle (M)
-  // that folds into ▸ Idle (M), and verify one-click Archive on eligible worker rows.
+  // Case 3: When idle.length === 0 && foldable.length > 0, show compact Fold (M)
+  // that folds into ▸ ... (M), and verify one-click Archive on eligible worker rows.
   load([makeLead(), idleWorker, runningWorker]);
-  const foldIdleBtn = view.getByRole("button", { name: "Fold idle (1)" });
+  const foldIdleBtn = view.getByRole("button", { name: "Fold (1)" });
   expect(foldIdleBtn).toBeTruthy();
 
   // Running worker must NOT offer Archive session; idle worker MUST.
@@ -560,9 +574,9 @@ it("keeps 307px project headers readable with right-aligned status, centered Arc
     workspaceId: "Worker Idle",
   });
 
-  // Clicking Fold idle (1) collapses into ▸ Idle (1).
+  // Clicking Fold (1) collapses into ▸ ... (1).
   fireEvent.click(foldIdleBtn);
-  expect(view.getByRole("button", { name: "Idle (1)" })).toBeTruthy();
+  expect(view.getByRole("button", { name: "Show 1 folded session" })).toBeTruthy();
   expect(view.queryByRole("button", { name: /^Fold (?:idle|\(\+)/ })).toBeNull();
 });
 

@@ -961,6 +961,54 @@ describe("read state shared by every device", () => {
 describe("debug strip", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("captures with Alt+Shift+S without opening the strip or moving focus", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "api/diagnostics") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ issues: [] }) });
+      }
+      if (url === "debug/snapshot") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ path: "/tmp/shortcut-snapshot.json" }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    boot([settled(1)]);
+    await act(async () => {});
+    composer().focus();
+    const uploads = () => fetchMock.mock.calls.filter(([url]) => url === "debug/snapshot").length;
+    for (const init of [
+      { code: "KeyS", altKey: true },
+      { code: "KeyS", shiftKey: true },
+      { code: "KeyS", altKey: true, shiftKey: true, ctrlKey: true },
+      { code: "KeyS", altKey: true, shiftKey: true, metaKey: true },
+      { code: "KeyA", altKey: true, shiftKey: true },
+    ]) {
+      fireEvent.keyDown(document, init);
+    }
+    expect(uploads()).toBe(0);
+    expect(fireEvent.keyDown(document, { code: "KeyS", altKey: true, shiftKey: true })).toBe(false);
+    expect(uploads()).toBe(1);
+    expect(document.querySelector(".sidebar-debug-strip")).toBeNull();
+    expect(document.activeElement).toBe(composer());
+    // A layout's letter S works too; code KeyS still covers Alt-transformed key values.
+    fireEvent.keyDown(composer(), { code: "Semicolon", key: "s", altKey: true, shiftKey: true });
+    expect(uploads()).toBe(2);
+    expect(document.activeElement).toBe(composer());
+    fireEvent.keyDown(document, { code: "KeyS", altKey: true, shiftKey: true, repeat: true });
+    expect(uploads()).toBe(2);
+    await act(async () => {});
+    expect(document.querySelector(".info-toast")!.textContent).toBe(
+      "Snapshot saved: /tmp/shortcut-snapshot.json",
+    );
+    fireEvent.click(document.querySelector(".sidebar-debug")!);
+    expect(
+      document.querySelector('[aria-label="Capture debug snapshot"]')!.getAttribute("title"),
+    ).toBe("Capture debug snapshot (Alt+Shift+S)");
+  });
+
   it("shows uploading, saved, and failed toast feedback on explicit Snapshot clicks and keeps strip open on desktop Demo", async () => {
     let resolveUpload!: (res: {
       ok: boolean;

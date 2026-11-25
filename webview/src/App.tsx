@@ -160,6 +160,7 @@ export function App() {
     projects,
     issues,
     connected,
+    snapshotReady,
     user,
     presets,
     models,
@@ -240,6 +241,27 @@ export function App() {
       },
     );
   }, []);
+  useEffect(() => {
+    const shortcut = (e: KeyboardEvent) => {
+      if (
+        e.defaultPrevented ||
+        e.isComposing ||
+        e.repeat ||
+        !e.altKey ||
+        !e.shiftKey ||
+        e.ctrlKey ||
+        e.metaKey ||
+        (e.code !== "KeyS" && e.key.toLowerCase() !== "s")
+      ) {
+        return;
+      }
+      e.preventDefault();
+      // takeSnapshot already reports upload failure in the App toast.
+      void takeSnapshot().catch(() => {});
+    };
+    document.addEventListener("keydown", shortcut);
+    return () => document.removeEventListener("keydown", shortcut);
+  }, [takeSnapshot]);
 
   // Server errors (busy agent, cancel failures...) were previously only
   // logged to the console; surface them as a dismissible toast.
@@ -1602,6 +1624,7 @@ export function App() {
             projects={projects}
             activeWsId={activeWsId}
             connected={connected}
+            snapshotReady={snapshotReady}
             sidebarOpen={sidebarOpen}
             groupOverrides={groupOverrides}
             searchQuery={searchQuery}

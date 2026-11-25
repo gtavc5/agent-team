@@ -15,6 +15,7 @@ import {
   groupWorkspaces,
   isGroupExpanded,
   archivedWorkspaces,
+  archivedFolderLabel,
   canFoldWorker,
   initialIdleWorkers,
   workspaceStatus,
@@ -91,6 +92,28 @@ function statusDotClass(state: GroupStatus): string {
 
 const STATUS_COLORS = { danger: "var(--error)", warn: "var(--warning)", normal: "var(--accent)" };
 
+export const FOLDED_IDLE_STORAGE_KEY = "sidebarFoldedIdle";
+
+function readFoldedWorkerIds(): ReadonlySet<string> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(FOLDED_IDLE_STORAGE_KEY) ?? "[]");
+    return new Set(
+      Array.isArray(saved) ? saved.filter((id): id is string => typeof id === "string") : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function writeFoldedWorkerIds(ids: ReadonlySet<string>): void {
+  try {
+    if (ids.size) localStorage.setItem(FOLDED_IDLE_STORAGE_KEY, JSON.stringify([...ids]));
+    else localStorage.removeItem(FOLDED_IDLE_STORAGE_KEY);
+  } catch {
+    // Private mode: the choice lasts for this mount.
+  }
+}
+
 function StatusBar({ label, pct, extra }: { label: string; pct: number; extra?: string }) {
   return (
     <div className="status-item">
@@ -137,6 +160,8 @@ export interface SidebarProps {
   projects?: Project[];
   activeWsId: string | null;
   connected: boolean;
+  // True after an authoritative init, including one with zero workspaces.
+  snapshotReady?: boolean;
   // Mobile keeps the drawer mounted while it is translated off screen.
   sidebarOpen?: boolean;
   groupOverrides: Record<string, boolean>;
@@ -170,6 +195,7 @@ export interface SidebarProps {
 
 export const Sidebar = memo(function Sidebar(p: SidebarProps) {
   const now = p.now ?? Date.now();
+  const snapshotReady = p.snapshotReady ?? p.workspaces.length > 0;
   const debug = new URLSearchParams(window.location.search).get("debug") === "1";
   const [debugOpen, setDebugOpen] = useState(debug);
   const [health, setHealth] = useState<"unknown" | "healthy" | "unhealthy">("unknown");
@@ -325,28 +351,46 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
     () => groupWorkspaces(p.workspaces, p.projects),
     [p.workspaces, p.projects],
   );
+  const manualFolded = useRef<ReadonlySet<string> | null>(null);
+  if (manualFolded.current === null) manualFolded.current = readFoldedWorkerIds();
   const [foldedIdle, setFoldedIdle] = useState<ReadonlySet<string>>(
-    () => new Set(groups.flatMap((g) => initialIdleWorkers(g, p.activeWsId, now))),
+    () =>
+      new Set([
+        ...manualFolded.current!,
+        ...(snapshotReady ? groups.flatMap((g) => initialIdleWorkers(g, p.activeWsId, now)) : []),
+      ]),
   );
   const [showIdle, setShowIdle] = useState<ReadonlySet<string>>(new Set());
-  const bootstrapped = useRef(groups.length > 0);
+  const bootstrapped = useRef(snapshotReady && groups.length > 0);
   const expandedDefaults = useRef(new Map<string, boolean>());
   useLayoutEffect(() => {
-    if (!bootstrapped.current && groups.length) {
-      bootstrapped.current = true;
-      setFoldedIdle(new Set(groups.flatMap((g) => initialIdleWorkers(g, p.activeWsId, now))));
-    } else {
-      // A visible worker never folds itself after settling. Once promoted,
-      // it stays in the main list until the reader explicitly folds it.
+    const bootstrap = snapshotReady && !bootstrapped.current && groups.length > 0;
+    if (bootstrap) bootstrapped.current = true;
+    // Only an authoritative init (including an empty one) may prune storage.
+    if (snapshotReady) {
+      const eligible = new Set(
+        groups
+          .filter((g) => g.project && g.project.archivedAt == null)
+          .flatMap((g) => g.workspaces)
+          .filter((w) => canFoldWorker(w, p.activeWsId))
+          .map((w) => w.id),
+      );
+      const automatic = bootstrap
+        ? groups.flatMap((g) => initialIdleWorkers(g, p.activeWsId, now))
+        : [];
+      // Reconcile before every read and write so another tab's fold is not
+      // replaced by this mount's cached set.
+      const durable = readFoldedWorkerIds();
+      manualFolded.current = durable;
       setFoldedIdle((prev) => {
-        const promoted = p.workspaces.filter(
-          (w) => prev.has(w.id) && !canFoldWorker(w, p.activeWsId),
-        );
-        if (!promoted.length) return prev;
-        const next = new Set(prev);
-        for (const w of promoted) next.delete(w.id);
-        return next;
+        const next = new Set([...prev, ...durable, ...automatic].filter((id) => eligible.has(id)));
+        return next.size === prev.size && [...next].every((id) => prev.has(id)) ? prev : next;
       });
+      const next = new Set([...durable].filter((id) => eligible.has(id)));
+      if (next.size !== durable.size) {
+        manualFolded.current = next;
+        writeFoldedWorkerIds(next);
+      }
     }
     for (const g of groups) {
       if (!expandedDefaults.current.has(g.key) || g.workspaces.some((w) => w.id === p.activeWsId)) {
@@ -361,7 +405,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
         );
       }
     }
-  }, [groups, p.workspaces, p.activeWsId, now]);
+  }, [groups, p.workspaces, p.activeWsId, now, snapshotReady]);
   const archived = archivedWorkspaces(p.workspaces, p.projects);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const activeIsArchived = archived.some((w) => w.id === p.activeWsId);
@@ -411,7 +455,6 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
   // A group's archived sessions, folded until asked for (or one is open).
   const archiveList = (g: WorkspaceGroup, list: Workspace[]) => {
     const open = openArchives.has(g.key) || list.some((w) => w.id === p.activeWsId);
-    const root = g.project?.root;
     return (
       <>
         <div
@@ -437,13 +480,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             </button>
           )}
         </div>
-        {open &&
-          list.map((w) =>
-            archivedItem(
-              w,
-              w.cwd === root ? null : (w.cwd.split("/").filter(Boolean).pop() ?? w.cwd),
-            ),
-          )}
+        {open && list.map((w) => archivedItem(w, archivedFolderLabel(w, g.project)))}
       </>
     );
   };
@@ -466,7 +503,10 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
     const past = g.archived.filter((w) => w !== lead);
     const attention = summarizeAttention(g.workspaces, null, g.project ? [g.project] : []);
     const summary = attentionBreakdown(attention);
-    const idle = items.filter((w) => foldedIdle.has(w.id) && canFoldWorker(w, p.activeWsId));
+    const idle =
+      !shelf && g.project
+        ? items.filter((w) => foldedIdle.has(w.id) && canFoldWorker(w, p.activeWsId))
+        : [];
     const visible = items.filter((w) => !idle.includes(w));
     const foldable =
       !shelf && g.project ? visible.filter((w) => canFoldWorker(w, p.activeWsId)) : [];
@@ -478,6 +518,13 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
         return next;
       });
     const foldIdle = () => {
+      const manual = new Set([
+        ...readFoldedWorkerIds(),
+        ...manualFolded.current!,
+        ...foldable.map((w) => w.id),
+      ]);
+      manualFolded.current = manual;
+      writeFoldedWorkerIds(manual);
       setFoldedIdle((prev) => new Set([...prev, ...foldable.map((w) => w.id)]));
       setShowIdle((prev) => {
         const next = new Set(prev);
@@ -707,12 +754,14 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
                     type="button"
                     className="ws-idle-toggle"
                     aria-expanded={idleOpen}
+                    aria-label={`${idleOpen ? "Hide" : "Show"} ${idle.length} folded session${idle.length === 1 ? "" : "s"}`}
+                    title={`${idleOpen ? "Hide" : "Show"} ${idle.length} folded session${idle.length === 1 ? "" : "s"}`}
                     onClick={toggleIdle}
                   >
                     <span className="events-toggle" aria-hidden="true">
                       {idleOpen ? "▾" : "▸"}
                     </span>
-                    <span className="ws-idle-label">Idle ({idle.length})</span>
+                    <span className="ws-idle-label">... ({idle.length})</span>
                   </button>
                   {foldable.length > 0 && (
                     <button
@@ -733,7 +782,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             ) : foldable.length > 0 ? (
               <div className="ws-idle-row">
                 <button type="button" className="ws-idle-toggle" onClick={foldIdle}>
-                  Fold idle ({foldable.length})
+                  Fold ({foldable.length})
                 </button>
               </div>
             ) : null}
@@ -828,7 +877,8 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             className="sidebar-debug-action"
             aria-label="Capture debug snapshot"
             aria-busy={snapshotBusy}
-            title={snapshotBusy ? "Saving debug snapshot…" : "Capture debug snapshot"}
+            title={snapshotBusy ? "Saving debug snapshot…" : "Capture debug snapshot (Alt+Shift+S)"}
+            aria-keyshortcuts="Alt+Shift+S"
             disabled={snapshotBusy}
             onMouseDown={(e) => e.preventDefault()}
             onClick={saveSnapshot}

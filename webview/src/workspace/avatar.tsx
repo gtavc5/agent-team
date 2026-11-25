@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import type { AgentInfo } from "../state/useServer";
 
 export function isImageAvatar(avatar: string): boolean {
@@ -25,13 +26,16 @@ export function Avatar({
   const isImg = isImageAvatar(avatar);
   return (
     <div
-      className="agent-avatar"
-      style={{
-        width: size,
-        height: size,
-        background: isImg ? "transparent" : color,
-        fontSize: size * 0.5,
-      }}
+      className={`agent-avatar${size <= 16 ? " agent-avatar-small" : ""}`}
+      style={
+        {
+          "--avatar-color": color,
+          width: size,
+          height: size,
+          background: isImg ? "transparent" : color,
+          fontSize: size * 0.5,
+        } as CSSProperties
+      }
       title={title ?? name}
     >
       {isImg ? (

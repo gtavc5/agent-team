@@ -38,7 +38,10 @@
   --photo-overlay: rgb(22 25 31 / 76%);
   --on-photo: #ffffff;
   --bg-hover: color-mix(in srgb, var(--text-primary) 5%, transparent);
+  --bg-hover-strong: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  --bg-hover-row: color-mix(in srgb, var(--text-primary) 5%, var(--bg-secondary));
   --bg-active: color-mix(in srgb, var(--accent) 10%, transparent);
+  --bg-highlight: color-mix(in srgb, var(--accent) 22%, transparent);
   --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
   --success-soft: color-mix(in srgb, var(--success) 10%, transparent);
   --warning-soft: color-mix(in srgb, var(--warning) 10%, transparent);
@@ -97,6 +100,9 @@
   --backdrop: rgb(14 14 14 / 54%);
   --shadow-ink: #101010;
   --shadow-strength: 42%;
+  --bg-hover: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  --bg-hover-strong: color-mix(in srgb, var(--text-primary) 13%, transparent);
+  --bg-hover-row: color-mix(in srgb, var(--text-primary) 8%, var(--bg-secondary));
 }
 
 @media (max-width: 768px), (max-height: 500px) {
@@ -336,7 +342,10 @@ button {
   width: 14px;
   height: 14px;
 }
-.ws-group-add .icon,
+.ws-group-add .icon {
+  width: 10px;
+  height: 10px;
+}
 .task-archive .icon,
 .task-delete .icon {
   width: 12px;
@@ -573,7 +582,7 @@ button {
   opacity: 1;
 }
 .ws-group-header:hover {
-  --row-bg: color-mix(in srgb, var(--text-primary) 5%, var(--bg-secondary));
+  --row-bg: var(--bg-hover-row);
   background: var(--bg-hover);
 }
 .ws-group-header.active {
@@ -720,7 +729,7 @@ button {
 }
 .ws-group-add:hover {
   color: var(--text-primary);
-  background: var(--bg-elevated);
+  background: var(--bg-hover-strong);
 }
 .ws-group-attention {
   min-width: 0;
@@ -765,6 +774,18 @@ button {
 .ws-idle-toggle .events-toggle {
   flex-shrink: 0;
   color: var(--text-muted);
+  opacity: 0;
+  transition: opacity var(--motion-quick) ease-out;
+}
+.ws-idle-row:hover .ws-idle-toggle .events-toggle,
+.ws-idle-row:focus-within .ws-idle-toggle .events-toggle,
+.ws-idle-toggle[aria-expanded="true"] .events-toggle {
+  opacity: 1;
+}
+@media (hover: none) {
+  .ws-idle-toggle .events-toggle {
+    opacity: 1;
+  }
 }
 .ws-idle-label {
   min-width: 0;
@@ -798,7 +819,7 @@ button {
 .ws-idle-fold:hover {
   color: var(--text-primary);
   border-color: var(--border-strong);
-  background: var(--bg-elevated);
+  background: var(--bg-hover-strong);
 }
 @media (max-width: 767px), (pointer: coarse) {
   .ws-idle-toggle {
@@ -825,6 +846,7 @@ button {
 .task-item {
   position: relative;
   --row-bg: var(--bg-secondary);
+  min-height: 28px;
   padding: 5px 8px 5px 10px;
   margin: 1px 0 1px 4px;
   cursor: pointer;
@@ -835,7 +857,7 @@ button {
   min-width: 0;
 }
 .task-item:hover {
-  --row-bg: color-mix(in srgb, var(--text-primary) 5%, var(--bg-secondary));
+  --row-bg: var(--bg-hover-row);
   background: var(--bg-hover);
 }
 .task-item.active {
@@ -908,6 +930,7 @@ button {
   position: absolute;
   top: 3px;
   right: 6px;
+  min-height: 18px;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1027,12 +1050,12 @@ button {
   opacity: 1;
 }
 .task-archive:hover {
-  color: var(--accent-text);
-  background: var(--bg-hover);
+  color: var(--accent-hover);
+  background: var(--bg-hover-strong);
 }
 .task-delete:hover {
   color: var(--error);
-  background: var(--bg-hover);
+  background: var(--bg-hover-strong);
 }
 
 /* Archived section: folded, dimmed, with a purge action. */
@@ -1064,6 +1087,7 @@ button {
 .ws-archived-purge:hover {
   color: var(--error);
   border-color: var(--error);
+  background: var(--bg-hover-strong);
 }
 .task-item-archived .task-name {
   color: var(--text-muted);
@@ -1112,8 +1136,9 @@ button {
   opacity: 1;
 }
 .ws-group-pill:hover {
-  color: var(--accent-text);
+  color: var(--accent-hover);
   border-color: var(--accent);
+  background: var(--bg-hover-strong);
 }
 /* Touch has no hover: the group's actions show, the open project's × too;
    a new session, or archiving, is offered only in the open session's
@@ -1429,6 +1454,12 @@ button {
   justify-content: center;
   flex-shrink: 0;
   line-height: 1;
+  box-shadow: 0 0 0 1.5px
+    color-mix(in srgb, var(--avatar-color, var(--border)) 40%, var(--text-muted));
+}
+.agent-avatar-small {
+  box-shadow: 0 0 0 1px
+    color-mix(in srgb, var(--avatar-color, var(--border)) 30%, var(--text-muted));
 }
 .avatar-user {
   width: 32px;
@@ -1441,6 +1472,7 @@ button {
   justify-content: center;
   font-size: 14px;
   font-weight: 600;
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--accent) 35%, var(--border));
 }
 
 /* ---- Messages ----------------------------------------------------------- */
@@ -1480,7 +1512,7 @@ button {
 }
 @keyframes highlight-fade {
   0% {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--bg-highlight);
   }
   100% {
     background: transparent;
@@ -1715,6 +1747,15 @@ button {
   line-height: 1.5;
 }
 .message-content pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+}
+/* A link or another component may already supply the code chip. */
+code code,
+.message-content code code,
+.event-content code code {
   background: none;
   border: none;
   padding: 0;

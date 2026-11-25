@@ -19,9 +19,11 @@ import {
   StreamingMdBlock,
   markdownBlocks,
   loadMath,
+  ProsePathContext,
 } from "../src/chat/markdown";
 import { MessageItem } from "../src/chat/messages";
 import type { AgentInfo, Message } from "../src/state/useServer";
+import { FileOpenContext } from "../src/chat/fileRef";
 
 const agents: AgentInfo[] = [
   { id: "a1", name: "Alice", model: "m", avatar: "🤖", color: "#888", isDefault: true },
@@ -43,6 +45,27 @@ describe("links in agent markdown", () => {
     const path = container.querySelector("code")!;
     expect(path.textContent).toBe("ASTImporter.cpp:514");
     expect(path.title).toBe("/home/u/llvm/ASTImporter.cpp:514");
+  });
+
+  it("uses one code box for backticked file-ref labels and keeps web code inside its anchor", () => {
+    const open = vi.fn();
+    const { container } = render(
+      <FileOpenContext.Provider value={open}>
+        <MdBlock>
+          {
+            "[`initialIdleWorkers()`](file:///repo/groups.ts#L133-L146) and [`docs`](https://example.test)"
+          }
+        </MdBlock>
+      </FileOpenContext.Provider>,
+    );
+    const local = container.querySelector<HTMLElement>("code.file-ref")!;
+    expect(local.textContent).toBe("initialIdleWorkers()");
+    expect(local.querySelector("code")).toBeNull();
+    expect(container.querySelectorAll("code code")).toHaveLength(0);
+    expect(local.title).toBe("/repo/groups.ts#L133-L146");
+    const external = container.querySelector("a")!;
+    expect(external.href).toBe("https://example.test/");
+    expect(external.querySelector("code")?.textContent).toBe("docs");
   });
 });
 
@@ -322,6 +345,19 @@ describe("markdown in a row", () => {
     expect(html("std::vector<int> **x**")).toBe("std::vector&lt;int&gt; <strong>x</strong>");
     expect(html("**bold** start")).toBe("<strong>bold</strong> start");
     expect(html("first<br>second")).toBe("first\nsecond");
+  });
+
+  it("keeps one inline-code box on a backticked local link", () => {
+    const { container } = render(
+      <FileOpenContext.Provider value={vi.fn()}>
+        <ProsePathContext.Provider value={() => true}>
+          <InlineMd>{"[`initialIdleWorkers()`](/repo/groups.ts#L133-L146)"}</InlineMd>
+        </ProsePathContext.Provider>
+      </FileOpenContext.Provider>,
+    );
+    const ref = container.querySelector<HTMLElement>("code.file-ref.inline-code")!;
+    expect(ref.textContent).toBe("initialIdleWorkers()");
+    expect(ref.querySelector("code")).toBeNull();
   });
 });
 
