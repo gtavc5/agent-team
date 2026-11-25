@@ -842,7 +842,7 @@ describe("PiSession dispatch and stream state", () => {
       contextUsage: { tokens: 312_900, contextWindow: 1_048_576 },
       models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
     });
-    const updated: Array<{ context: { tokens: number; window: number } | null }> = [];
+    const updated: Array<{ context: { tokens: number; window: number } | null | undefined }> = [];
     const { ws, registry } = workspaceFor(h, {
       onAgentUpdated: (_wsId, agent) => updated.push({ context: agent.context }),
     });
@@ -925,7 +925,7 @@ describe("PiSession dispatch and stream state", () => {
       contextUsage: { tokens: 312_900, contextWindow: 1_048_576 },
       models: [{ provider: "mock", id: "test", contextWindow: 1_048_576 }],
     });
-    const updated: Array<{ context: { tokens: number; window: number } | null }> = [];
+    const updated: Array<{ context: { tokens: number; window: number } | null | undefined }> = [];
     const { ws, registry } = workspaceFor(h, {
       onAgentUpdated: (_wsId, agent) => updated.push({ context: agent.context }),
     });

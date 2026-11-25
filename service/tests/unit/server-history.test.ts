@@ -362,7 +362,7 @@ describe("a real server saving histories", () => {
   });
 
   for (const state of ["idle", "waiting"] as const) {
-    it(`broadcasts agent_updated with context: null on clear_context (${state}) so live and fresh clients match`, async () => {
+    it(`omits context on clear_context (${state}) so live and fresh clients match`, async () => {
       const { base, web } = seed([
         ws("ws-a", [
           msg("u1", "first", 1000, { kind: "user", agentId: null }),
@@ -419,7 +419,16 @@ describe("a real server saving histories", () => {
         const liveUpdate = frames
           .slice(beforeClear)
           .find((f) => f.type === "agent_updated" && f.workspaceId === "ws-a")!;
-        expect(liveUpdate.agent).toMatchObject({ context: null, state, busy: false });
+        expect(liveUpdate.agent).toMatchObject({ state, busy: false });
+        expect(liveUpdate.agent).not.toHaveProperty("context");
+        const clearMessage = frames
+          .slice(beforeClear)
+          .find(
+            (f) =>
+              f.type === "new_message" &&
+              (f.message as Message).content.includes("context cleared"),
+          )!;
+        expect(clearMessage.message).not.toHaveProperty("context");
 
         freshWs = new WebSocket(`ws://127.0.0.1:${port}/`);
         const freshFrames: Array<Record<string, unknown>> = [];
@@ -437,4 +446,76 @@ describe("a real server saving histories", () => {
       }
     });
   }
+
+  it("omits context for fresh and archived workspaces, including loaded archived history", async () => {
+    const { base, web } = seed([
+      ws("ws-fresh", []),
+      ws("ws-archived", [msg("a1", "reply", 1001, { context: null })], 5),
+    ]);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { port, frames, send, stop } = await start(base, web);
+    let freshWs: WebSocket | undefined;
+    try {
+      const init = frames.find((f) => f.type === "init") as {
+        workspaces: Array<{ id: string; agents: Array<Record<string, unknown>> }>;
+      };
+      for (const id of ["ws-fresh", "ws-archived"]) {
+        const agent = init.workspaces.find((w) => w.id === id)!.agents[0];
+        expect(agent.context).toBeUndefined();
+        expect(agent).not.toHaveProperty("context");
+      }
+
+      send({ type: "open_workspace", workspaceId: "ws-archived" });
+      await until(
+        () =>
+          frames.some((f) => f.type === "workspace_messages" && f.workspaceId === "ws-archived"),
+        "archived history loaded",
+      );
+      freshWs = new WebSocket(`ws://127.0.0.1:${port}/`);
+      const freshFrames: Array<Record<string, unknown>> = [];
+      freshWs.on("message", (raw: Buffer) => freshFrames.push(JSON.parse(raw.toString()) as never));
+      await until(() => freshFrames.some((f) => f.type === "init"), "fresh archived client init");
+      const freshInit = freshFrames.find((f) => f.type === "init") as {
+        workspaces: Array<{ id: string; agents: Array<Record<string, unknown>> }>;
+      };
+      const archived = freshInit.workspaces.find((w) => w.id === "ws-archived")!.agents[0];
+      expect(archived.context).toBeUndefined();
+      expect(archived).not.toHaveProperty("context");
+    } finally {
+      freshWs?.close();
+      await stop();
+    }
+  });
+
+  it("re-sends context occupancy after an archived workspace is reloaded", async () => {
+    const { base, web } = seed([
+      ws("ws-a", [msg("a1", "reply", 1001, { context: { tokens: 96_000, window: 1_000_000 } })]),
+    ]);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { frames, send, stop } = await start(base, web);
+    try {
+      send({ type: "archive_workspace", workspaceId: "ws-a" });
+      await until(
+        () => frames.some((f) => f.type === "workspace_archived" && f.workspaceId === "ws-a"),
+        "archived",
+      );
+      const beforeRestore = frames.length;
+      send({ type: "unarchive_workspace", workspaceId: "ws-a" });
+      await until(
+        () =>
+          frames
+            .slice(beforeRestore)
+            .some((f) => f.type === "agent_updated" && f.workspaceId === "ws-a"),
+        "restored agent snapshot",
+      );
+      const restored = frames
+        .slice(beforeRestore)
+        .find((f) => f.type === "agent_updated" && f.workspaceId === "ws-a")!;
+      expect(restored.agent).toMatchObject({
+        context: { tokens: 96_000, window: 1_000_000 },
+      });
+    } finally {
+      await stop();
+    }
+  });
 });

@@ -653,6 +653,31 @@ describe("per-message effort and context", () => {
     expect(restored.getInfo(false).agents[0].context).toEqual({ tokens: 42000, window: 200000 });
     expect(patches).toContainEqual({ context: { tokens: 42000, window: 200000 } });
   });
+
+  it("distinguishes absent fresh and unloaded context from explicit unknown occupancy", async () => {
+    const { ws, emit, session } = makeWorkspace();
+    const fresh = ws.getInfo(false).agents[0];
+    expect(fresh.context).toBeUndefined();
+    expect(fresh).not.toHaveProperty("context");
+
+    await ws.sendMessage("hi");
+    emit({ kind: "result", content: "", context: null });
+    session.isRunning = false;
+    expect(ws.getInfo(false).agents[0].context).toBeNull();
+
+    // Browsing an archived history loads it but must not expose occupancy.
+    ws.archivedAt = 1;
+    const archived = ws.getInfo(false).agents[0];
+    expect(archived.context).toBeUndefined();
+    expect(archived).not.toHaveProperty("context");
+    ws.archivedAt = null;
+    expect(ws.getInfo(false).agents[0].context).toBeNull();
+
+    ws.unloadMessages();
+    const unloaded = ws.getInfo(false).agents[0];
+    expect(unloaded.context).toBeUndefined();
+    expect(unloaded).not.toHaveProperty("context");
+  });
 });
 
 describe("agent run state on the wire", () => {
@@ -1035,14 +1060,21 @@ describe("interrupting a workspace", () => {
     const entry = ws.agents.get(agentInfo.id)!;
     expect(ws.agentInfo(entry).context).toEqual({ tokens: 42000, window: 200000 });
     expect(ws.clearContext(agentInfo.id)).toBe(true);
-    expect(ws.agentInfo(entry).context).toBeNull();
+    expect(ws.agentInfo(entry).context).toBeUndefined();
+    expect(ws.agentInfo(entry)).not.toHaveProperty("context");
   });
 
-  it("emits agent_updated with context: null on clearContext, and refuses while running", async () => {
-    const updates: Array<{ context: unknown; state: unknown; busy: unknown }> = [];
+  it("omits context on clearContext, and refuses while running", async () => {
+    const updates: Array<{ context: unknown; hasContext: boolean; state: unknown; busy: unknown }> =
+      [];
     const { ws, session, agentInfo } = makeWorkspace("gpt-5.6-terra", {
       onAgentUpdated: (_wsId, agent) =>
-        updates.push({ context: agent.context, state: agent.state, busy: agent.busy }),
+        updates.push({
+          context: agent.context,
+          hasContext: Object.hasOwn(agent, "context"),
+          state: agent.state,
+          busy: agent.busy,
+        }),
     });
     await ws.sendMessage("hi");
     session.emit("event", {
@@ -1059,13 +1091,15 @@ describe("interrupting a workspace", () => {
     expect(updates).toEqual([]);
     expect(ws.getInfo(false).agents[0].context).toEqual({ tokens: 96_000, window: 1_000_000 });
 
-    // Clears context when idle and broadcasts context: null immediately.
+    // Clears context when idle and broadcasts the omitted value immediately.
     session.isRunning = false;
     expect(ws.clearContext(agentInfo.id)).toBe(true);
-    expect(updates).toEqual([{ context: null, state: "idle", busy: false }]);
-    expect(ws.getInfo(false).agents[0].context).toBeNull();
+    expect(updates).toEqual([
+      { context: undefined, hasContext: false, state: "idle", busy: false },
+    ]);
+    expect(ws.getInfo(false).agents[0].context).toBeUndefined();
 
-    // Also broadcasts context: null when cleared while waiting (non-running).
+    // Also omits context when cleared while waiting (non-running).
     await ws.sendMessage("again");
     session.emit("event", {
       kind: "result",
@@ -1076,8 +1110,73 @@ describe("interrupting a workspace", () => {
     session.emit("runState", "waiting");
     updates.length = 0;
     expect(ws.clearContext(agentInfo.id)).toBe(true);
-    expect(updates).toEqual([{ context: null, state: "waiting", busy: false }]);
-    expect(ws.getInfo(false).agents[0].context).toBeNull();
+    expect(updates).toEqual([
+      { context: undefined, hasContext: false, state: "waiting", busy: false },
+    ]);
+    expect(ws.getInfo(false).agents[0].context).toBeUndefined();
+  });
+
+  it("keeps clear absent after late stats and leaves another agent unchanged", async () => {
+    const { ws, agentInfo, session, host } = makeWorkspace();
+    const other = ws.addAgent("B", "gpt-5.6-terra", "B", "#999", { backend: "codex" });
+    const otherSession = host.lastSession!;
+    await ws.sendMessage("first", agentInfo.id);
+    let resolveStats!: (context: { tokens: number; window: number }) => void;
+    const stats = new Promise<{ tokens: number; window: number }>((resolve) => {
+      resolveStats = resolve;
+    });
+    session.emit("event", { kind: "result", content: "", context: null }, stats);
+    session.isRunning = false;
+    const clearedReply = ws.messages.find((m) => m.kind === "agent" && m.agentId === agentInfo.id)!;
+
+    await ws.sendMessage("second", other.id);
+    otherSession.emit("event", {
+      kind: "result",
+      content: "",
+      context: { tokens: 12_000, window: 200_000 },
+    });
+    otherSession.isRunning = false;
+    expect(ws.clearContext(agentInfo.id)).toBe(true);
+
+    resolveStats({ tokens: 42_000, window: 200_000 });
+    await vi.waitFor(() =>
+      expect(clearedReply.context).toEqual({ tokens: 42_000, window: 200_000 }),
+    );
+    const live = Object.fromEntries(ws.getInfo(false).agents.map((a) => [a.id, a]));
+    expect(live[agentInfo.id].context).toBeUndefined();
+    expect(live[agentInfo.id]).not.toHaveProperty("context");
+    expect(live[other.id].context).toEqual({ tokens: 12_000, window: 200_000 });
+    expect(ws.messages.at(-1)).not.toHaveProperty("context");
+
+    const registry = new HostRegistry();
+    registry.register(new FakeHost());
+    const restored = Workspace.fromState(ws.getState(), registry);
+    const fresh = Object.fromEntries(restored.getInfo(false).agents.map((a) => [a.id, a]));
+    expect(fresh[agentInfo.id].context).toBeUndefined();
+    expect(fresh[agentInfo.id]).not.toHaveProperty("context");
+    expect(fresh[other.id].context).toEqual({ tokens: 12_000, window: 200_000 });
+  });
+
+  it("restores absent context after clear, including a legacy null clear marker", async () => {
+    const { ws, emit, agentInfo, session } = makeWorkspace();
+    await ws.sendMessage("hi");
+    emit({ kind: "result", content: "", context: { tokens: 42_000, window: 200_000 } });
+    session.isRunning = false;
+    expect(ws.clearContext(agentInfo.id)).toBe(true);
+    expect(ws.messages.at(-1)).not.toHaveProperty("context");
+
+    const state = ws.getState();
+    const legacyClear = state.messages!.find((m) => m.content.includes("context cleared"))!;
+    legacyClear.context = null;
+    const registry = new HostRegistry();
+    registry.register(new FakeHost());
+    const restored = Workspace.fromState(state, registry);
+    const fresh = restored.getInfo(false).agents[0];
+    expect(fresh.context).toBeUndefined();
+    expect(fresh).not.toHaveProperty("context");
+
+    await restored.sendMessage("/context", agentInfo.id);
+    expect(restored.getMessages().at(-1)?.content).toContain("**Occupancy:** Empty");
   });
 
   it("renders a turn the backend reports as interrupted like a stop", async () => {

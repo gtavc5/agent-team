@@ -218,6 +218,26 @@ describe("AgentsPanel", () => {
     expect(context.getAttribute("title")).toBe("Estimate: 225,000 of 1,000,000 tokens");
   });
 
+  it("hides context for fresh agents and unloaded archived snapshots", () => {
+    const { container } = render(
+      <AgentsPanel
+        sessions={[ws("fresh"), ws("archived", { archivedAt: 1 })]}
+        project={undefined}
+        activeWsId="fresh"
+        connected
+        models={[]}
+        actions={actions()}
+        overview
+      />,
+    );
+    expect(container.querySelectorAll(".ap-context")).toHaveLength(0);
+    expect(container.textContent).not.toContain("ctx unknown");
+    expect([...container.querySelectorAll(".ap-brief-meta")].map((el) => el.textContent)).toEqual([
+      "",
+      "",
+    ]);
+  });
+
   it("writes a task's markdown out: its code and bold, its lines run together", () => {
     const md: Project = {
       ...project,
@@ -547,6 +567,70 @@ describe("the agents panel in the app", () => {
   });
 
   for (const state of ["idle", "waiting"] as const) {
+    it(`clears stale context when agent_updated omits it (${state}), matching a fresh snapshot`, () => {
+      const baseAgent =
+        state === "waiting"
+          ? agent("kisara", {
+              state: "waiting",
+              busy: false,
+              backgroundTasks: [
+                { id: "bg-1", type: "bash", description: "sleep 10", since: NOW - 1000 },
+              ],
+              context: { tokens: 96_000, window: 1_000_000 },
+            })
+          : agent("kisara", { context: { tokens: 96_000, window: 1_000_000 } });
+      const clearedAgent = { ...baseAgent };
+      delete clearedAgent.context;
+      const used = ws("w1", {
+        name: "modules",
+        projectLink: { projectId: "p1", role: "worker" },
+        agents: [baseAgent],
+      });
+      const sock = boot("w1", [lead, used, w2]);
+      fireEvent.click(document.querySelector(".agents-chip")!);
+      const card = () => document.querySelector('[aria-label="modules"]')!;
+      expect(card().textContent).toContain("96k / 1M");
+
+      act(() => {
+        sock.receive({ type: "agent_updated", workspaceId: "w1", agent: clearedAgent });
+        sock.receive({
+          type: "new_message",
+          workspaceId: "w1",
+          message: {
+            id: "sys-1",
+            kind: "system",
+            agentId: "kisara",
+            content: "A **kisara** context cleared",
+            timestamp: NOW,
+            status: "done",
+          },
+        });
+      });
+
+      expect(card().querySelector(".ap-context")).toBeNull();
+      expect(card().textContent).not.toContain("96k / 1M");
+      expect(card().textContent).not.toContain("ctx unknown");
+      fireEvent.click(card().querySelector(".ap-toggle")!);
+      const liveBrief = card().querySelector(".ap-brief")!.textContent;
+      if (state === "idle") expect(card().querySelector(".ap-brief-meta")!.textContent).toBe("");
+      else expect(liveBrief).toContain("waiting on background work");
+
+      const freshUsed = ws("w1", {
+        name: "modules",
+        projectLink: { projectId: "p1", role: "worker" },
+        agents: [clearedAgent],
+      });
+      document.body.innerHTML = "";
+      boot("w1", [lead, freshUsed, w2]);
+      fireEvent.click(document.querySelector(".agents-chip")!);
+      expect(card().querySelector(".ap-context")).toBeNull();
+      expect(card().textContent).not.toContain("ctx unknown");
+      fireEvent.click(card().querySelector(".ap-toggle")!);
+      expect(card().querySelector(".ap-brief")!.textContent).toBe(liveBrief);
+    });
+  }
+
+  for (const state of ["idle", "waiting"] as const) {
     it(`shows unknown for agent_updated with context: null (${state}), matching a fresh snapshot`, () => {
       const baseAgent =
         state === "waiting"
@@ -575,18 +659,6 @@ describe("the agents panel in the app", () => {
           workspaceId: "w1",
           agent: { ...baseAgent, context: null },
         });
-        sock.receive({
-          type: "new_message",
-          workspaceId: "w1",
-          message: {
-            id: "sys-1",
-            kind: "system",
-            agentId: null,
-            content: "A **kisara** context cleared",
-            timestamp: NOW,
-            status: "done",
-          },
-        });
       });
 
       expect(card().querySelector(".ap-context")!.textContent).toBe("ctx unknown");
@@ -612,6 +684,35 @@ describe("the agents panel in the app", () => {
       expect(card().querySelector(".ap-brief")!.textContent).toBe(liveBrief);
     });
   }
+
+  it("hides unloaded context on archive and accepts the restored agent snapshot", () => {
+    const baseAgent = agent("kisara", { context: null });
+    const used = ws("w1", {
+      name: "modules",
+      projectLink: { projectId: "p1", role: "worker" },
+      agents: [baseAgent],
+    });
+    const sock = boot("w1", [lead, used, w2]);
+    fireEvent.click(document.querySelector(".agents-chip")!);
+    const card = () => document.querySelector('[aria-label="modules"]')!;
+    expect(card().querySelector(".ap-context")!.textContent).toBe("ctx unknown");
+
+    act(() =>
+      sock.receive({ type: "workspace_archived", workspaceId: "w1", archivedAt: NOW + 1000 }),
+    );
+    expect(card().querySelector(".ap-context")).toBeNull();
+    expect(card().textContent).not.toContain("ctx unknown");
+
+    act(() => {
+      sock.receive({ type: "workspace_unarchived", workspaceId: "w1" });
+      sock.receive({
+        type: "agent_updated",
+        workspaceId: "w1",
+        agent: { ...baseAgent, context: { tokens: 96_000, window: 1_000_000 } },
+      });
+    });
+    expect(card().querySelector(".ap-context")!.textContent).toBe("96k / 1M");
+  });
 
   it("ignores legacy account updates and offers no account control", () => {
     const sock = boot(

@@ -109,8 +109,9 @@ export interface AgentRuntimeInfo extends AgentInfo {
   fast: boolean;
   // Background work the agent is waiting on (see RunState "waiting").
   backgroundTasks: BackgroundTask[];
-  // Context occupancy at its latest backend boundary, when known.
-  context: ContextUsage | null;
+  // Context occupancy at its latest backend boundary. Undefined means there
+  // is no occupancy to show (fresh, cleared, or an archived/unloaded history).
+  context?: ContextUsage | null;
   // A scheduled wake-up it is sleeping until.
   wake: { at: number; reason: string } | null;
 }
@@ -229,8 +230,10 @@ export interface AgentEntry {
   runState?: RunState;
   lastStreamAt?: number;
   retryLabel?: string;
-  // Context at the end of the last turn; undefined until looked up.
+  // Context at the latest boundary; the cache flag distinguishes an
+  // intentionally absent value from one that has not been resolved yet.
   lastContext?: ContextUsage | null;
+  hasCachedContext?: boolean;
   contextRevision?: number;
   // The message the agent got last, and the last one from another session
   // (the same record while nothing came after it).
@@ -903,8 +906,9 @@ export class Workspace {
     return null;
   }
 
-  private updateLastContext(entry: AgentEntry, context: ContextUsage | null): number {
+  private updateLastContext(entry: AgentEntry, context: ContextUsage | null | undefined): number {
     entry.lastContext = context;
+    entry.hasCachedContext = true;
     const revision = (entry.contextRevision ?? 0) + 1;
     entry.contextRevision = revision;
     this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
@@ -2684,10 +2688,9 @@ export class Workspace {
       duration_ms: 0,
     };
     this.settleStale(entry);
-    this.updateLastContext(entry, null);
+    this.updateLastContext(entry, undefined);
     this.pushSystemMessage(`${entry.info.avatar} **${entry.info.name}** context cleared`, {
       agentId,
-      context: null,
     });
     return true;
   }
@@ -2698,6 +2701,7 @@ export class Workspace {
 
   agentInfo(a: AgentEntry): AgentRuntimeInfo {
     const state = a.session.getState();
+    const context = this.lastContext(a);
     return {
       ...a.info,
       canSwitchBackend: this.canSwitchBackend(a, state),
@@ -2710,27 +2714,35 @@ export class Workspace {
       effortLevels: this.effortLevels(a, a.info.model) ?? [],
       fast: Boolean(state.config.fast),
       backgroundTasks: a.session.backgroundTaskList ?? [],
-      context: this.lastContext(a),
+      ...(context !== undefined && { context }),
       wake: a.session.wake ?? null,
     };
   }
 
-  // A null boundary stops the search for older occupancy. Older histories
-  // recorded successful compaction as a banner without an explicit null.
-  private lastContext(a: AgentEntry): ContextUsage | null {
-    if (a.lastContext !== undefined) return a.lastContext;
-    if (!this.messagesLoaded) return null;
-    let found: ContextUsage | null = null;
-    for (let i = this.messages.length - 1; i >= 0 && !found; i--) {
+  // Undefined hides occupancy for fresh, cleared, and archived histories.
+  // Null is an explicitly unknown backend boundary: both it and compaction
+  // stop the search so older occupancy never resurfaces.
+  private lastContext(a: AgentEntry): ContextUsage | null | undefined {
+    if (this.isArchived || !this.messagesLoaded) return undefined;
+    if (a.hasCachedContext) return a.lastContext;
+    let found: ContextUsage | null | undefined;
+    for (let i = this.messages.length - 1; i >= 0; i--) {
       const m = this.messages[i];
       if (m.agentId !== a.info.id) continue;
+      // Older clear markers carried context: null. They mean absent, not an
+      // unknown turn boundary, regardless of what older messages recorded.
+      if (isContextClearedMessage(m)) break;
       if (m.context !== undefined) {
         found = m.context;
         break;
       }
-      if (isCompactedMessage(m)) break;
+      if (isCompactedMessage(m)) {
+        found = null;
+        break;
+      }
     }
     a.lastContext = found;
+    a.hasCachedContext = true;
     return found;
   }
 
@@ -3052,9 +3064,10 @@ function formatUsageInfo(data: Record<string, unknown>): string {
   return lines.join("\n");
 }
 
-function formatContextUsage(context: ContextUsage | null, model: string): string {
+function formatContextUsage(context: ContextUsage | null | undefined, model: string): string {
   const lines = ["## Context Usage", `**Model:** ${model}`];
-  if (!context) return [...lines, "**Occupancy:** Unknown"].join("\n");
+  if (context === undefined) return [...lines, "**Occupancy:** Empty"].join("\n");
+  if (context === null) return [...lines, "**Occupancy:** Unknown"].join("\n");
   const { tokens, window, estimated } = context;
   const pct = (tokens / window) * 100;
   lines.push(
@@ -3071,6 +3084,10 @@ function renderBar(pct: number): string {
 // A turn the user stopped keeps what it said, marked.
 function withInterrupted(content: string): string {
   return content ? `${content}\n\n*\\[interrupted\\]*` : "*\\[interrupted\\]*";
+}
+
+function isContextClearedMessage(msg: Message): boolean {
+  return msg.kind === "system" && msg.content.endsWith(" context cleared");
 }
 
 function isCompactedEvent(event: StreamEvent): boolean {

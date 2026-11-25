@@ -1638,10 +1638,10 @@ export class Server {
     ws.archivedAt = null;
     this.persistWorkspaceNow(ws.id);
     this.broadcastUI({ type: "workspace_unarchived", workspaceId: ws.id });
+    // Loading history can change both backend switching and occupancy.
     for (const entry of ws.agents.values()) {
       const agent = ws.agentInfo(entry);
-      if (agent.canSwitchBackend)
-        this.broadcastUI({ type: "agent_updated", workspaceId: ws.id, agent });
+      this.broadcastUI({ type: "agent_updated", workspaceId: ws.id, agent });
     }
     try {
       this.projects.restored(ws);

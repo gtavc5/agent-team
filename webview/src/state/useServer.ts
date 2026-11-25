@@ -916,6 +916,7 @@ export function useServer() {
                         ? {
                             ...a,
                             ...agent,
+                            context: agent.context,
                             lastStreamAt: agent.lastStreamAt,
                             retryLabel: agent.retryLabel,
                           }
@@ -1097,7 +1098,14 @@ export function useServer() {
           setWorkspaces((prev) =>
             prev.map((w) =>
               w.id === wsId
-                ? { ...w, archivedAt, messages: [], messagesLoaded: false, hasMore: false }
+                ? {
+                    ...w,
+                    archivedAt,
+                    agents: w.agents.map((a) => ({ ...a, context: undefined })),
+                    messages: [],
+                    messagesLoaded: false,
+                    hasMore: false,
+                  }
                 : w,
             ),
           );
