@@ -200,7 +200,7 @@ describe("panel tool arguments", () => {
       ["workerReport", "ws-w", "done", true, {}, undefined],
       ["currentTask", "ws-w", undefined],
     ]);
-    expect(set.instructions).not.toContain("Write user-facing");
+    expect(set.instructions).not.toContain("Write chat messages addressed to the user");
     expect(set.instructions).toContain("not yours to look at");
     for (const word of [
       "/notes",
@@ -287,9 +287,9 @@ describe("panel tool arguments", () => {
       ]) {
         if (language)
           expect(text).toContain(
-            `Write user-facing replies, questions and summaries in ${language}. Keep code, identifiers, commit messages and repository files in English.`,
+            `Write chat messages addressed to the user, including questions and summaries, in ${language}. Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English. Preserve quoted user text, identifiers, paths, and error messages verbatim.`,
           );
-        else expect(text).not.toContain("Write user-facing");
+        else expect(text).not.toContain("Write chat messages addressed to the user");
       }
       expect(byName(set).start_session.description).toContain("a worktree, reused");
     },

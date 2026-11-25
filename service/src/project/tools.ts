@@ -216,7 +216,7 @@ const ISSUES =
 function languageInstructions(language?: string): string[] {
   return language
     ? [
-        `Write user-facing replies, questions and summaries in ${language}. Keep code, identifiers, commit messages and repository files in English.`,
+        `Write chat messages addressed to the user, including questions and summaries, in ${language}. Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English. Preserve quoted user text, identifiers, paths, and error messages verbatim.`,
       ]
     : [];
 }
