@@ -3,7 +3,7 @@ import * as path from "path";
 import { formatReportMarker, type MessageStatus, type PromptEnvelope } from "../session/types";
 import { writeAtomicJson } from "../storage/atomic-write";
 
-export type ReportKind = "final" | "progress";
+export type ReportKind = "final" | "progress" | "failure";
 export type ReportBoardState = "not_applicable" | "pending" | "applied";
 export type ReportLeadDeliveryState =
   "pending" | "enqueued" | "dispatching" | "sent_to_pi" | "outcome_unknown" | "error" | "settled";

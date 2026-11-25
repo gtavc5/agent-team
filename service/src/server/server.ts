@@ -120,6 +120,7 @@ export class Server {
   private pendingWork = 0;
   private bootFence?: string;
   private restored = false;
+  private recoveryReady = false;
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private sendOrder = new Map<string, Promise<void>>();
   private uploadsDir: string;
@@ -1097,6 +1098,7 @@ export class Server {
   private removeWorkspace(workspaceId: string): void {
     const ws = this.workspaces.get(workspaceId);
     if (!ws) return;
+    this.projects.recovery.cancel(ws);
     this.cancelWorkspaceRetries(ws);
     void ws.dispose();
     const timer = this.persistTimers.get(workspaceId);
@@ -1484,6 +1486,8 @@ export class Server {
 
     this.projects.archiveShelved();
     this.projects.recheckWorkers();
+    this.recoveryReady = true;
+    for (const w of this.workspaces.values()) this.projects.recovery.restore(w);
     const archived = [...this.workspaces.values()].filter((w) => w.isArchived).length;
     console.log(`Restored ${this.workspaces.size} workspace(s), ${archived} archived`);
   }
@@ -1543,6 +1547,7 @@ export class Server {
   private projectHost(): ProjectHost {
     return {
       dispatchAllowed: () => this.dispatchAllowed,
+      recoveryReady: () => this.recoveryReady,
       workspaces: () => this.workspaces.values(),
       workspace: (id) => this.workspaces.get(id),
       createWorkspace: (name, cwd, link) => this.makeWorkspace(name, cwd, undefined, link),
@@ -1993,6 +1998,10 @@ export class Server {
           this.flushPendingLeadTools(ws);
         }
       },
+      onLeadTerminal: (w, agentId, reply, interrupted) =>
+        this.projects.recovery.terminal(w, agentId, reply, interrupted),
+      onLeadStop: (w, agentId) => this.projects.recovery.stop(w, agentId),
+      prepareManualInput: (w, agentId, pair) => this.projects.recovery.manual(w, agentId, pair),
       onSaveNow: () => this.persistWorkspaceNow(id),
       canDequeue: () => this.restored,
       canDispatch: (w) => this.dispatchAllowed && !this.isProjectSealed(w),
@@ -2055,6 +2064,7 @@ export class Server {
 
   private async closeOnce(): Promise<void> {
     this.closing = true;
+    this.projects.recovery.close();
     this.telemetry.close();
     if (this.bootFence) fs.unwatchFile(this.bootFence);
     this.quota.stop();

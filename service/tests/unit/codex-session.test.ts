@@ -1,16 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { z } from "zod";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readLifecycle } from "../../src/usage/lifecycle";
 import { codexFields, withId } from "./fixtures/codex-wire";
 import { CodexSession } from "../../src/session/codex";
-import type { RpcMessage, ThreadItem, Transport } from "../../src/session/codex-rpc";
+import type { RpcMessage, ThreadItem, Transport, UserInput } from "../../src/session/codex-rpc";
 import type { StreamEvent } from "../../src/session/types";
 import { HostRegistry, LocalHost } from "../../src/session/host";
-import { Workspace } from "../../src/workspace/workspace";
-import { summarizeMessage } from "../../src/workspace/summary";
+import { Workspace, type WorkspaceCallbacks } from "../../src/workspace/workspace";
+import { summarizeMessage, toWireMessage } from "../../src/workspace/summary";
 import type { PanelToolset } from "../../src/project/tools";
 
 // An in-memory `codex app-server`: answers the session's requests from
@@ -169,6 +169,224 @@ function makeSession(config: Partial<ConstructorParameters<typeof CodexSession>[
 const echoTools = (handler: (args: Record<string, unknown>) => Promise<string>): PanelToolset => ({
   instructions: "You are a session of the project.",
   tools: [{ name: "echo", description: "Echo the text.", shape: { text: z.string() }, handler }],
+});
+
+describe("CodexSession automatic recovery continuation", () => {
+  type RecordedUserItem = {
+    type: "userMessage";
+    id: string;
+    clientId: string;
+    content: UserInput[];
+  };
+  type RecordedHistoryReply = { result: { data: Array<{ items: RecordedUserItem[] }> } };
+  const [firstPage, emptyPage] = readFileSync(
+    join(__dirname, "fixtures/codex-recovery-history.jsonl"),
+    "utf8",
+  )
+    .trim()
+    .split("\n")
+    .slice(1)
+    .map((line) => (JSON.parse(line) as RecordedHistoryReply).result);
+  const userItem = firstPage.data[0].items[0];
+  const text = userItem.content[0].text;
+  const networkFailure = {
+    message: "Provider disconnected",
+    codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+    additionalDetails: null,
+  };
+  const batch = (id = userItem.clientId, supersedes: string[] = [], delta?: string) => ({
+    inputId: id,
+    reportId: id,
+    trigger: "system" as const,
+    text,
+    recovery: { outageId: "outage", supersedes, delta },
+  });
+  const next = (delta = "") => batch("retry-2", [userItem.clientId], delta);
+
+  async function startFailedBatch(session: CodexSession) {
+    await session.send(batch());
+    server.startTurn();
+    server.item("started", userItem, "thr_1", "turn_1");
+    server.item("completed", userItem, "thr_1", "turn_1");
+  }
+
+  it("reuses retained input for successive exact failed batches, without a second user item", async () => {
+    const { session } = makeSession();
+    await startFailedBatch(session);
+    expect(server.sent("turn/start")[0]).toMatchObject({
+      input: userItem.content,
+      clientUserMessageId: userItem.clientId,
+    });
+    server.completeTurn("failed", networkFailure);
+    server.handlers["thread/turns/list"] = () => firstPage;
+    const onBeforeWrite = vi.fn();
+    await expect(session.send(next(), { onBeforeWrite })).resolves.toBeUndefined();
+    expect(onBeforeWrite).toHaveBeenCalledOnce();
+    expect(server.sent("turn/start")[1]).toMatchObject({ threadId: "thr_1", input: [] });
+    expect(server.sent("turn/start")[1]).not.toHaveProperty("clientUserMessageId");
+    server.startTurn();
+    server.completeTurn("failed", networkFailure);
+    server.handlers["thread/turns/list"] = () => emptyPage;
+    await session.send(batch("retry-3", [userItem.clientId, "retry-2"], ""));
+    expect(server.sent("turn/start")[2]).toMatchObject({ threadId: "thr_1", input: [] });
+    expect(server.sent("thread/turns/list")).toEqual(
+      Array(2).fill({
+        threadId: "thr_1",
+        limit: 1,
+        itemsView: "full",
+      }),
+    );
+    expect(server.sent("thread/rollback")).toEqual([]);
+    expect(server.sent("thread/fork")).toEqual([]);
+  });
+
+  it("resumes after a service restart and adds only the new report notices", async () => {
+    const { session } = makeSession();
+    await startFailedBatch(session);
+    expect(session.getState()).not.toHaveProperty("codexRecoveryProof");
+    server.completeTurn("failed", networkFailure);
+    const saved = structuredClone(session.getState());
+    expect(JSON.stringify(saved)).not.toContain(text);
+    await session.dispose();
+    const restored = CodexSession.fromState(saved);
+    server.handlers["thread/turns/list"] = () => firstPage;
+    const delta = "A new report must not be dropped.";
+    const retry = next(delta);
+    retry.text += `\n${delta}`;
+    await restored.send(retry, {
+      onBeforeWrite: () => expect(restored.getState()).not.toHaveProperty("codexRecoveryProof"),
+    });
+    expect(server.sent("thread/resume")).toEqual([expect.objectContaining({ threadId: "thr_1" })]);
+    const newItem = {
+      ...userItem,
+      id: "delta-item",
+      clientId: retry.inputId,
+      content: [{ type: "text", text: delta, text_elements: [] }],
+    };
+    expect(server.sent("turn/start")[1]).toMatchObject({
+      threadId: "thr_1",
+      clientUserMessageId: retry.inputId,
+      input: newItem.content,
+    });
+    server.startTurn();
+    server.item("completed", newItem, "thr_1", "turn_2");
+    server.completeTurn("failed", networkFailure);
+    server.handlers["thread/turns/list"] = () => ({
+      ...emptyPage,
+      data: [{ ...emptyPage.data[0], items: [newItem] }],
+    });
+    await restored.send(batch("retry-3", [userItem.clientId, retry.inputId], ""));
+    expect(server.sent("turn/start")[2]).toMatchObject({ input: [] });
+  });
+
+  it("does not create a thread when the saved recovery thread is gone", async () => {
+    const { session } = makeSession();
+    await startFailedBatch(session);
+    server.completeTurn("failed", networkFailure);
+    await session.dispose();
+    const restored = CodexSession.fromState(session.getState());
+    server.handlers["thread/resume"] = () => {
+      throw new Error("no rollout found for thread id thr_1");
+    };
+    const onBeforeWrite = vi.fn();
+    await expect(restored.send(next(), { onBeforeWrite })).resolves.toMatchObject({
+      disposition: "rejected",
+    });
+    expect(server.sent("thread/start")).toHaveLength(1);
+    expect(server.turns()).toBe(1);
+    expect(onBeforeWrite).not.toHaveBeenCalled();
+    expect(restored.getState()).not.toHaveProperty("codexRecoveryProof");
+  });
+
+  it("does not preserve recovery proof across a lost turn/start response", async () => {
+    const { session } = makeSession();
+    await startFailedBatch(session);
+    server.completeTurn("failed", networkFailure);
+    server.handlers["thread/turns/list"] = () => firstPage;
+    server.hold.add("turn/start");
+    const onBeforeWrite = vi.fn();
+    const sending = expect(session.send(next(), { onBeforeWrite })).rejects.toThrow(
+      "connection lost",
+    );
+    await vi.waitFor(() => expect(server.turns()).toBe(2));
+    server.startTurn();
+    server.exit("connection lost");
+    await sending;
+    expect(onBeforeWrite).toHaveBeenCalledOnce();
+    expect(session.getState()).not.toHaveProperty("codexRecoveryProof");
+  });
+
+  it.each([
+    "missing delta",
+    "closed",
+    "wrong tail",
+    "read error",
+    "generic error",
+    "output",
+    "tool",
+  ])("does not claim or replay automatic recovery with %s evidence", async (scenario) => {
+    const { session } = makeSession();
+    await startFailedBatch(session);
+    if (scenario === "output") {
+      server.notify("item/agentMessage/delta", {
+        threadId: "thr_1",
+        turnId: "turn_1",
+        itemId: "out",
+        delta: "partial output",
+      });
+    }
+    if (scenario === "tool") {
+      server.item("started", { type: "commandExecution", id: "tool" }, "thr_1", "turn_1");
+    }
+    if (scenario === "generic error") {
+      server.notify("error", {
+        threadId: "thr_1",
+        turnId: "turn_1",
+        willRetry: true,
+        error: networkFailure,
+      });
+    }
+    if (scenario === "closed") server.exit("connection lost");
+    else
+      server.completeTurn(
+        "failed",
+        scenario === "generic error"
+          ? { ...networkFailure, codexErrorInfo: "other" }
+          : networkFailure,
+      );
+    server.handlers["thread/turns/list"] = () => {
+      if (scenario === "read error") throw new Error("Cannot read turns");
+      return scenario === "wrong tail" ? emptyPage : firstPage;
+    };
+    const onBeforeWrite = vi.fn();
+    const retry = scenario === "missing delta" ? batch("retry-2", [userItem.clientId]) : next();
+    await expect(session.send(retry, { onBeforeWrite })).resolves.toMatchObject({
+      disposition: "rejected",
+      error: expect.stringContaining("cannot safely continue") as string,
+    });
+    expect(onBeforeWrite).not.toHaveBeenCalled();
+    expect(server.turns()).toBe(1);
+    expect(session.isRunning).toBe(false);
+  });
+
+  it("forwards a paired manual turn as new notices and human text, without gating on automatic proof", async () => {
+    const { session } = makeSession();
+    await startFailedBatch(session);
+    server.completeTurn("failed", networkFailure);
+    const pair = {
+      ...next("A new report"),
+      panelContext: "A new report",
+      inputId: "user-command",
+      trigger: "user" as const,
+      text: "Do this next",
+    };
+    await session.send(pair);
+    expect(server.sent("turn/start")[1].input).toEqual([
+      { type: "text", text: pair.panelContext, text_elements: [] },
+      { type: "text", text: pair.text, text_elements: [] },
+    ]);
+    expect(server.sent("thread/turns/list")).toEqual([]);
+  });
 });
 
 describe("codex app-server session", () => {
@@ -482,6 +700,28 @@ describe("codex app-server session", () => {
     };
     expect(await session.steer("late", "m3")).toBe(false);
   });
+
+  it.each([
+    {
+      message: "Provider interrupted",
+      info: { responseStreamDisconnected: { httpStatusCode: null } },
+      expected: true,
+    },
+    { message: "OAuth /token failed: socket hang up", info: null, expected: true },
+    { message: "OAuth /token failed: HTTP 403: socket hang up", info: null, expected: undefined },
+    { message: "503 Service Unavailable", info: null, expected: undefined },
+  ])(
+    "classifies transport on the Codex terminal error: %j",
+    async ({ message, info, expected }) => {
+      const { session, events } = makeSession();
+      await session.send("hi");
+      server.startTurn();
+      server.completeTurn("failed", { message, codexErrorInfo: info, additionalDetails: null });
+      const terminal = events.at(-1);
+      expect(terminal?.kind).toBe("error");
+      expect(terminal?.networkFailure).toBe(expected);
+    },
+  );
 
   it("shows a retried error as a retry and a usage limit by its spent window", async () => {
     const { session, events } = makeSession();
@@ -1011,6 +1251,79 @@ describe("codex steering through the workspace", () => {
       expect(ws.messages.filter((m) => m.kind === "agent")).toHaveLength(1);
     },
   );
+
+  it("queues paired panel context and user text as one Codex turn and two transcript rows", async () => {
+    const registry = new HostRegistry();
+    registry.register(new LocalHost("local", "Local"));
+    const prepareManualInput = vi
+      .fn<NonNullable<WorkspaceCallbacks["prepareManualInput"]>>()
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce({
+        panelContext: {
+          reportId: "outage-batch",
+          text: "Panel recovery details.",
+          recovery: { outageId: "outage-batch", supersedes: ["prior-attempt"] },
+        },
+        stage: () => {},
+        rollback: () => {},
+        committed: () => {},
+      });
+    const onReportDeliveryState = vi.fn<NonNullable<WorkspaceCallbacks["onReportDeliveryState"]>>();
+    const live: ReturnType<typeof toWireMessage>[] = [];
+    const ws = new Workspace("ws", "t", "p", "local", "/tmp", registry, {
+      onNewMessage: (_ws, msg) => live.push(toWireMessage(msg)),
+      onStreamEvent: () => {},
+      onMessageDone: () => {},
+      prepareManualInput,
+      onReportDeliveryState,
+    });
+    const agent = ws.addAgent("A", "gpt-6-astra", "🤖", "#888", { backend: "codex" });
+    await ws.sendMessage("First");
+    server.startTurn();
+    userMessage("first-user", null);
+    const inbox = ws.ensureReportQueued(
+      "inbox-msg",
+      agent.id,
+      { inputId: "inbox-msg", reportId: "inbox-report", text: "Queued report" },
+      { workspaceId: "worker", name: "Worker", role: "worker" },
+      "Queued report",
+    );
+    await ws.sendMessage("Please continue.");
+
+    expect(prepareManualInput.mock.calls.at(-1)).toEqual([ws, agent.id, true]);
+    expect(server.sent("turn/steer")).toEqual([]);
+    const rows = live.slice(-2);
+    expect(rows).toMatchObject([
+      { kind: "user", content: "Panel recovery details.", from: { role: "panel" }, status: "done" },
+      { kind: "user", content: "Please continue.", status: "queued", queuedFor: agent.id },
+    ]);
+    expect(rows[1]).not.toHaveProperty("from");
+    expect(rows[1]).not.toHaveProperty("queuedEnvelope");
+    expect(ws.findMessage(rows[1].id)?.queuedEnvelope?.recovery).toEqual({
+      outageId: "outage-batch",
+      supersedes: ["prior-attempt"],
+    });
+    expect(ws.getInfo().messages.slice(-2).map(toWireMessage)).toEqual(rows);
+    expect(onReportDeliveryState.mock.calls).toEqual([["outage-batch", "enqueued"]]);
+
+    server.completeTurn();
+    await vi.waitFor(() => expect(server.turns()).toBe(2));
+    expect(inbox.status).toBe("queued");
+    expect(server.sent("turn/start")[1].input).toEqual([
+      { type: "text", text: "Panel recovery details.", text_elements: [] },
+      { type: "text", text: "Please continue.", text_elements: [] },
+    ]);
+    await vi.waitFor(() => expect(ws.findMessage(rows[1].id)?.status).toBe("done"));
+    server.startTurn();
+    userMessage("paired-user", null);
+    server.completeTurn();
+    expect(onReportDeliveryState.mock.calls.map(([id, state]) => [id, state])).toEqual([
+      ["outage-batch", "enqueued"],
+      ["outage-batch", "dispatching"],
+      ["outage-batch", "sent_to_pi"],
+      ["outage-batch", "settled"],
+    ]);
+  });
 
   it("steers a message into the running turn and answers it in a reply of its own", async () => {
     const ws = makeWorkspace();

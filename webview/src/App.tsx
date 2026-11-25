@@ -1294,7 +1294,7 @@ export function App() {
   const hasAgents = (activeWs?.agents.length ?? 0) > 0;
 
   // The agent a Send would go to: first @mention in the draft, else the
-  // default agent. The primary button morphs to Stop while it is busy.
+  // default agent. Recovery can be stopped without making Send queue.
   const [mentionTarget, setMentionTarget] = useState<string | null>(null);
   const targetAgent = useMemo(() => {
     if (!activeWs || activeWs.agents.length === 0) return null;
@@ -1305,8 +1305,10 @@ export function App() {
     return activeWs.agents.find((a) => a.isDefault) ?? activeWs.agents[0];
   }, [activeWs, mentionTarget]);
   const targetBusy = !!targetAgent && agentQueues(targetAgent);
-  const busyAgents = connected
-    ? (activeWs?.agents.filter((a) => agentQueues(a) || (a.busy && a.lastStreamAt != null)) ?? [])
+  const stoppableAgents = connected
+    ? (activeWs?.agents.filter(
+        (a) => a.networkWaiting || agentQueues(a) || (a.busy && a.lastStreamAt != null),
+      ) ?? [])
     : [];
 
   useEffect(() => {
@@ -2074,7 +2076,7 @@ export function App() {
                   {!projectSealed && (
                     <StopControl
                       key={activeWs.id}
-                      busyAgents={busyAgents}
+                      busyAgents={stoppableAgents}
                       onStop={(agentIds) => interrupt(activeWs.id, agentIds)}
                     />
                   )}

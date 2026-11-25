@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { isOutstandingSubagentStatus } from "../../../shared/subagent-status";
 import { applyExtensionUi } from "../../../shared/extension-ui";
+import { classifyProbeDelivery } from "../project/network-failure";
 import { hasPersistedPiReport, validatePiAttachments } from "../session/pi";
 import {
   SessionConfig,
@@ -102,6 +103,7 @@ export interface AgentInfo {
 export interface AgentRuntimeInfo extends AgentInfo {
   canSwitchBackend: boolean;
   busy: boolean;
+  networkWaiting: boolean;
   state: RunState;
   activity: string | null;
   lastStreamAt?: number;
@@ -123,6 +125,7 @@ export interface AgentState extends AgentInfo {
   session: SessionState;
   // AgentEntry.delivered, and whether the agent got another message since.
   delivered?: TurnInput & { since?: boolean };
+  pendingTurnFailures?: PendingTurnFailure[];
   // A rate-limit pause still to be retried, with the prompt the retry sends.
   pausedUntil?: number;
   lastEnvelope?: PromptEnvelope;
@@ -153,6 +156,14 @@ export interface MessageOrigin {
   role: "lead" | "worker" | "peer" | "panel";
   // The sender's project, for a peer.
   projectId?: string;
+}
+
+function isInboxReport(msg: Message): boolean {
+  return !!msg.queuedEnvelope?.reportId && msg.queuedEnvelope.panelContext === undefined;
+}
+
+function pairedPanelMessageId(userMessageId: string): string {
+  return `${userMessageId}:panel`;
 }
 
 function inputTrigger(input?: Message): InputTrigger {
@@ -193,6 +204,7 @@ export interface WorkspaceInfo {
 }
 
 export interface WorkspaceState {
+  leadOutage?: import("../project/lead-recovery").LeadOutage;
   id: string;
   name: string;
   project: string;
@@ -225,6 +237,7 @@ export interface AgentEntry {
     replied: boolean;
   };
   recoveringDispatching?: boolean;
+  networkWaiting?: boolean;
   activeReportId?: string;
   // Last prompt dispatched to the session — the retry unit for rate limits.
   lastEnvelope?: PromptEnvelope;
@@ -247,12 +260,19 @@ export interface AgentEntry {
   // (the same record while nothing came after it).
   input?: TurnInput;
   delivered?: TurnInput;
+  pendingTurnFailures?: PendingTurnFailure[];
+}
+
+interface PendingTurnFailure {
+  inputId: string;
+  replyId: string;
 }
 
 // A message an agent got and the turns it drove: their replies (a wake-up's
 // included, not a local command's), what cut the latest short, and whether
 // its sender has heard what came of it.
 export interface TurnInput {
+  recovery?: true;
   id: string;
   replies: string[];
   stopped?: "user" | "restart" | "lead";
@@ -260,6 +280,17 @@ export interface TurnInput {
   finished?: boolean;
   // Background work or a wake-up was still to come: a crash cuts it off.
   waiting?: boolean;
+}
+
+export interface ManualInputAdmission {
+  panelContext?: {
+    reportId: string;
+    text: string;
+    recovery: NonNullable<PromptEnvelope["recovery"]>;
+  };
+  stage(): void;
+  rollback(): void;
+  committed(): void;
 }
 
 export interface WorkspaceCallbacks {
@@ -283,9 +314,21 @@ export interface WorkspaceCallbacks {
       steering?: boolean;
     },
   ) => void;
+  onLeadTerminal?: (
+    workspace: Workspace,
+    agentId: string,
+    reply: Message,
+    interrupted: boolean,
+  ) => void;
+  onLeadStop?: (workspace: Workspace, agentId?: string) => void;
   onAgentBusy?: (wsId: string, agentId: string, streamAt: number) => void;
   onAgentIdle?: (wsId: string, agentId: string) => void;
   onSaveNow?: () => void;
+  prepareManualInput?: (
+    workspace: Workspace,
+    agentId: string,
+    pair: boolean,
+  ) => ManualInputAdmission | undefined;
   onReportDeliveryState?: (
     reportId: string,
     state: "enqueued" | "dispatching" | "sent_to_pi" | "outcome_unknown" | "error" | "settled",
@@ -453,6 +496,7 @@ export function applyInnerEvent(saEvents: StreamEvent[], innerEvent: StreamEvent
 }
 
 export class Workspace {
+  leadOutage?: WorkspaceState["leadOutage"];
   id: string;
   name: string;
   project: string;
@@ -635,10 +679,24 @@ export class Workspace {
     return out;
   }
 
+  pendingTurnFailures(): PendingTurnFailure[] {
+    return [...this.agents.values()].flatMap((a) => a.pendingTurnFailures ?? []);
+  }
+
+  clearTurnFailure(replyId: string): void {
+    for (const a of this.agents.values()) {
+      if (a.pendingTurnFailures)
+        a.pendingTurnFailures = a.pendingTurnFailures.filter(
+          (failure) => failure.replyId !== replyId,
+        );
+    }
+  }
+
   // Archived: no retry is left to run, and nobody waits on a word from it.
   settleForArchive(): void {
     for (const a of this.agents.values()) {
       this.dropRetry(a);
+      a.pendingTurnFailures = undefined;
       if (a.delivered) a.delivered.answered = true;
     }
   }
@@ -647,6 +705,7 @@ export class Workspace {
   // the lead sent is not run.
   dropLeadRetries(): void {
     for (const a of this.agents.values()) {
+      a.pendingTurnFailures = undefined;
       const from = this.messages.find((m) => m.id === a.input?.id)?.from?.role;
       if (from !== "lead" && from !== "panel") continue;
       this.dropRetry(a);
@@ -1103,6 +1162,21 @@ export class Workspace {
         if (enrichment) return;
       }
 
+      const batch = this.leadOutage?.agentId === agentId && this.leadOutage.batch;
+      if (
+        batch &&
+        (entry.openingPrompt?.envelope.reportId === batch.id ||
+          entry.activeReportId === batch.id) &&
+        (event.kind === "tool_use" ||
+          event.kind === "tool_result" ||
+          event.kind === "subagent_start" ||
+          ((event.kind === "text_delta" ||
+            event.kind === "text" ||
+            event.kind === "thinking_delta" ||
+            event.kind === "thinking") &&
+            event.content.length > 0))
+      )
+        batch.progress = true;
       if (event.kind === "thinking_tokens" && !entry.currentMsg) return;
       // Pi can report an option reset before writing the prompt. It is not
       // output from the turn, and the prompt may be handled without a turn.
@@ -1241,6 +1315,7 @@ export class Workspace {
             entry.currentMsg.events,
             Object.keys(patch).length ? patch : undefined,
           );
+          this.cb?.onLeadTerminal?.(this, entry.info.id, entry.currentMsg, !!event.interrupted);
           // A turn the model answered while a retry waits (a wake-up, a
           // task's report): the limit is over. That turn saw the cut prompt,
           // so the retry carries on rather than sending it again, and now.
@@ -1254,7 +1329,25 @@ export class Workspace {
       } else if (event.kind === "error") {
         // The error is an event (rendered as a red banner where it
         // happened); appending it to the text as well showed it twice.
+        // A late process diagnostic after an already settled turn is not
+        // another failed turn. A usage-limit error awaiting retry is not final.
+        const activeTurn =
+          entry.currentMsg ||
+          (entry.openingPrompt ? !entry.openingPrompt.replied : entry.lastStreamAt != null);
+        const input = entry.input;
         const msg = this.ensureAgentMsg(entry);
+        const from = input && this.findMessage(input.id)?.from;
+        const failedWorkerTurn =
+          activeTurn &&
+          input &&
+          !input.stopped &&
+          !entry.retryPending &&
+          this.projectLink?.role === "worker" &&
+          !this.projectLink.unreported &&
+          (from?.role === "lead" || from?.role === "panel");
+        if (failedWorkerTurn) {
+          (entry.pendingTurnFailures ??= []).push({ inputId: input.id, replyId: msg.id });
+        }
         clearRetry(msg);
         // The model saw the prompt a waiting retry would send: it carries on.
         if (entry.retryPending && answered(msg)) entry.lastEnvelope = undefined;
@@ -1272,7 +1365,9 @@ export class Workspace {
           msg.events,
           msg.context !== undefined ? { context: msg.context } : undefined,
         );
+        this.cb?.onLeadTerminal?.(this, entry.info.id, msg, false);
         this.finishReply(entry);
+        if (failedWorkerTurn) this.cb?.onSaveNow?.();
       } else if (event.kind === "subagent_progress" || event.kind === "subagent_done") {
         const msg = this.ensureAgentMsg(entry);
         this.handleSubagentOnMsg(msg, event);
@@ -1339,6 +1434,7 @@ export class Workspace {
     // A terminal event can arrive before send() has resolved. Leave the
     // input fenced until its receipt arrives, then notify idle after settlement.
     if (entry.openingPrompt?.input) return;
+    if (entry.session.getState().config.backend === "codex") this.settleActiveReport(entry);
     entry.openingPrompt = undefined;
     this.endedTurn(entry);
     setTimeout(() => this.afterTurn(entry.info.id), 0);
@@ -1412,12 +1508,7 @@ export class Workspace {
       const entry = this.agents.get(agentId);
       if (!entry) return;
       this.acceptDispatch(entry, event.inputId);
-      if (entry.activeReportId) {
-        this.cb?.onReportDeliveryState?.(entry.activeReportId, "settled", {
-          settledAt: Date.now(),
-        });
-        entry.activeReportId = undefined;
-      }
+      this.settleActiveReport(entry);
     });
     session.on("extension_ui", ({ processGeneration, change }: ExtensionUiEvent) => {
       const entry = this.agents.get(agentId);
@@ -1912,8 +2003,17 @@ export class Workspace {
     // would only hold their message up: it goes in its place.
     if (!agent.lastEnvelope) this.dropRetry(agent);
     const retried = agent.retryPending && !agent.session.isRunning && this.retryLast(agent.info.id);
-    const busy = retried || this.dispatchHeld(agent) || this.held(agent) || this.hasQueued(agent);
-    const steering = busy && !retried && this.steerable(agent);
+    // Leave backend slash handling intact, including cold Pi extension commands
+    // whose names may not be available yet and /compact's separate RPC.
+    const admission = this.cb?.prepareManualInput?.(
+      this,
+      agent.info.id,
+      !cleanContent.trimStart().startsWith("/"),
+    );
+    const paired = admission?.panelContext;
+    const busy =
+      retried || this.dispatchHeld(agent) || this.held(agent) || this.hasQueued(agent, !!paired);
+    const steering = !paired && !this.leadOutage && busy && !retried && this.steerable(agent);
     const userMsg: Message = {
       id: genId("msg"),
       kind: "user",
@@ -1926,7 +2026,11 @@ export class Workspace {
       queuedFor: agent.info.id,
       ...(steering && { steering: true }),
     };
-    this.enqueue(userMsg, { inputId: userMsg.id, text: prompt, attachmentIds });
+    this.enqueueManualInput(
+      userMsg,
+      { inputId: userMsg.id, text: prompt, attachmentIds },
+      admission,
+    );
     if (steering) {
       const steeringPrompt = this.steer(agent, userMsg);
       onAccepted?.();
@@ -1969,6 +2073,7 @@ export class Workspace {
       this.agents.get(agentId)?.session === session &&
       this.isWritable() &&
       this.cb?.canDequeue?.() !== false &&
+      !this.leadOutage &&
       !this.held(entry) &&
       !entry.openingPrompt &&
       !entry.recoveringDispatching;
@@ -1977,7 +2082,14 @@ export class Workspace {
       (item) => item.queuedFor === agentId && item.status === "queued",
     );
     const envelope = msg?.queuedEnvelope;
-    if (!msg || !envelope || envelope.reportId || envelope.text.trimStart().startsWith("/")) return;
+    if (
+      !msg ||
+      !envelope ||
+      envelope.reportId ||
+      envelope.panelContext !== undefined ||
+      envelope.text.trimStart().startsWith("/")
+    )
+      return;
     return {
       envelope: { ...envelope, trigger: inputTrigger(msg) },
       claim: () => {
@@ -2049,6 +2161,7 @@ export class Workspace {
     // The model has seen every prompt so far: a usage limit from here on
     // is retried by carrying on, not by sending one of them again.
     if (!entry.retryPending) entry.lastEnvelope = undefined;
+    if (!msg.from) entry.pendingTurnFailures = undefined;
     entry.input = { id: msg.id, replies: [] };
     if (msg.from) entry.delivered = entry.input;
     entry.currentMsg = this.makeAgentMsg(agentId);
@@ -2096,8 +2209,8 @@ export class Workspace {
     const waiting = this.messages.some(
       (m) => m.status === "queued" && m.queuedFor === agent.info.id && !m.steering,
     );
-    const queued = this.dispatchHeld(agent) || paused || waiting;
-    const steering = queued && this.steerable(agent);
+    const queued = !!this.leadOutage || this.dispatchHeld(agent) || paused || waiting;
+    const steering = !this.leadOutage && queued && this.steerable(agent);
     const msg: Message = {
       id: genId("msg"),
       kind: "user",
@@ -2129,12 +2242,14 @@ export class Workspace {
   ): Promise<void> {
     const envelope =
       typeof prompt === "string" ? { inputId: genId("input"), text: prompt } : prompt;
+    const outage = envelope.recovery ? this.leadOutage : undefined;
     const opening = { envelope, input, writeClaimed: false, replied: false };
     agent.openingPrompt = opening;
     agent.lastEnvelope = envelope.reportId ? undefined : envelope;
     if (input) {
       input.queuedEnvelope ??= envelope;
-      agent.input = { id: input.id, replies: [] };
+      if (!input.from) agent.pendingTurnFailures = undefined;
+      agent.input = { id: input.id, replies: [], ...(envelope.recovery && { recovery: true }) };
       if (input.from) agent.delivered = agent.input;
     }
     if (agent.currentMsg) this.settle(agent.currentMsg);
@@ -2143,7 +2258,10 @@ export class Workspace {
     agent.retryLabel = undefined;
     const backend = agent.session.getState().config.backend;
     // Pi compaction is a standalone command, not a new model turn.
-    const standaloneCompact = backend === "pi" && /^\/compact(?:\s|$)/.test(envelope.text.trim());
+    const standaloneCompact =
+      backend === "pi" &&
+      envelope.panelContext === undefined &&
+      /^\/compact(?:\s|$)/.test(envelope.text.trim());
     this.beganTurn(agent, !standaloneCompact);
 
     try {
@@ -2161,6 +2279,15 @@ export class Workspace {
           onBeforeWrite: (attempt) => {
             this.assertWritable();
             if (agent.openingPrompt !== opening) throw new Error("Prompt dispatch cancelled");
+            if (
+              outage &&
+              (this.leadOutage !== outage ||
+                !outage.batch ||
+                outage.batch.id !== envelope.reportId ||
+                (!outage.batch.manual && Date.now() >= outage.deadline))
+            ) {
+              throw new Error("Outage recovery cancelled before sending");
+            }
             if (!input) {
               this.cb?.onSaveNow?.();
               opening.writeClaimed = true;
@@ -2192,7 +2319,11 @@ export class Workspace {
         return;
       }
       if (receipt?.disposition === "rejected") {
-        if (receipt.retryable && input) {
+        if (
+          receipt.retryable &&
+          input &&
+          !(envelope.reportId && envelope.reportId === this.leadOutage?.batch?.id)
+        ) {
           this.requeueReport(input);
           agent.openingPrompt = undefined;
           this.settleIdleReply(agent);
@@ -2204,6 +2335,7 @@ export class Workspace {
         const handled = receipt?.disposition === "handled";
         this.acceptDispatch(agent, envelope.inputId, !handled);
         if (handled) agent.activeReportId = undefined;
+        if (backend === "codex" && !agent.session.isRunning) this.settleActiveReport(agent);
         this.settleIdleReply(agent);
       }
     } catch (err) {
@@ -2228,21 +2360,68 @@ export class Workspace {
     this.finished(msg.id, msg.status, msg.content);
   }
 
-  private enqueue(msg: Message, envelope: PromptEnvelope): void {
+  private enqueueManualInput(
+    msg: Message,
+    envelope: PromptEnvelope,
+    admission?: ManualInputAdmission,
+  ): void {
+    const paired = admission?.panelContext;
+    this.enqueue(
+      msg,
+      paired
+        ? {
+            ...envelope,
+            panelContext: paired.text,
+            reportId: paired.reportId,
+            recovery: paired.recovery,
+          }
+        : envelope,
+      admission,
+    );
+  }
+
+  private enqueue(msg: Message, envelope: PromptEnvelope, admission?: ManualInputAdmission): void {
     this.assertWritable();
     msg.queuedEnvelope = envelope;
-    this.messages.push(msg);
-    this.touch([msg.id]);
+    const panelMessage: Message | undefined =
+      envelope.panelContext === undefined
+        ? undefined
+        : {
+            id: pairedPanelMessageId(msg.id),
+            kind: "user",
+            agentId: null,
+            content: envelope.panelContext,
+            timestamp: msg.timestamp,
+            status: "done",
+            from: { workspaceId: this.id, name: "Outage report", role: "panel" },
+          };
+    const messages = panelMessage ? [panelMessage, msg] : [msg];
+    this.messages.push(...messages);
+    this.touch(messages.map((message) => message.id));
+    admission?.stage();
     try {
       this.cb?.onSaveNow?.();
     } catch (error) {
-      const idx = this.messages.lastIndexOf(msg);
-      if (idx >= 0) this.messages.splice(idx, 1);
-      this.changed.delete(msg.id);
+      for (const message of messages) {
+        const idx = this.messages.lastIndexOf(message);
+        if (idx >= 0) this.messages.splice(idx, 1);
+        this.changed.delete(message.id);
+      }
+      try {
+        admission?.rollback();
+      } catch (rollbackError) {
+        console.error(
+          `[workspace] ${this.id}: could not persist manual input rollback`,
+          rollbackError,
+        );
+      }
       throw error;
     }
+    admission?.committed();
     if (msg.timestamp > this.lastActivityAt) this.lastActivityAt = msg.timestamp;
-    this.cb?.onNewMessage(this.id, msg);
+    if (panelMessage && envelope.reportId)
+      this.cb?.onReportDeliveryState?.(envelope.reportId, "enqueued");
+    for (const message of messages) this.cb?.onNewMessage(this.id, message);
   }
 
   private completeDispatch(
@@ -2285,6 +2464,14 @@ export class Workspace {
     setTimeout(() => this.dequeueNext(entry.info.id), 0);
   }
 
+  private settleActiveReport(entry: AgentEntry): void {
+    if (!entry.activeReportId) return;
+    this.cb?.onReportDeliveryState?.(entry.activeReportId, "settled", {
+      settledAt: Date.now(),
+    });
+    entry.activeReportId = undefined;
+  }
+
   private failDispatch(
     entry: AgentEntry,
     msg: Message | undefined,
@@ -2324,6 +2511,61 @@ export class Workspace {
     return this.messages.find((msg) => msg.id === id);
   }
 
+  findRecoveryInput(reportId: string): Message | undefined {
+    return this.messages.find(
+      (m) => (m.dispatchAttempt?.reportId ?? m.queuedEnvelope?.reportId) === reportId,
+    );
+  }
+
+  settleRecoveryOnHold(row: Message, restoring: boolean): void {
+    if (row.status === "queued" || row.status === "starting")
+      this.completeDispatch(
+        row,
+        "error",
+        restoring
+          ? "Server restarted before recovery dispatch"
+          : "Recovery stopped before dispatch",
+      );
+    else if (restoring && row.status === "dispatching")
+      this.completeDispatch(row, "outcome_unknown");
+  }
+
+  unsentInboxRow(id: string): boolean {
+    const m = this.findMessage(id);
+    return !!m && m.status === "queued" && !m.steering && !m.dispatchAttempt && isInboxReport(m);
+  }
+
+  finishBatchedRow(id: string, status: "done" | "outcome_unknown"): void {
+    if (this.unsentInboxRow(id)) this.completeDispatch(this.findMessage(id)!, status);
+  }
+
+  recoveryAvailability(agentId: string): "unavailable" | "blocked" | "ready" {
+    const entry = this.agents.get(agentId);
+    if (!entry || this.disposed) return "unavailable";
+    return !this.isWritable() || this.dispatchHeld(entry) || this.held(entry) ? "blocked" : "ready";
+  }
+
+  startRecovery(
+    agentId: string,
+    reportId: string,
+    text: string,
+    recovery: NonNullable<PromptEnvelope["recovery"]>,
+  ): void {
+    const entry = this.agents.get(agentId)!;
+    const envelope = { inputId: reportId, reportId, text, recovery };
+    const msg: Message = {
+      id: reportId,
+      kind: "user",
+      agentId: null,
+      status: "starting",
+      timestamp: Date.now(),
+      content: text,
+      from: { workspaceId: this.id, name: "Network recovery", role: "panel" },
+    };
+    this.enqueue(msg, envelope);
+    void this.dispatchPrompt(entry, envelope, msg);
+  }
+
   ensureReportQueued(
     id: string,
     agentId: string,
@@ -2356,7 +2598,9 @@ export class Workspace {
 
   settleStartingOnRestore(): void {
     for (const msg of this.messages) {
-      if (msg.status === "starting")
+      // Recovery restore settles the batch and its unwritten input together.
+      const batch = this.leadOutage?.batch;
+      if (msg.status === "starting" && !(batch && msg.queuedEnvelope?.reportId === batch.id))
         this.completeDispatch(msg, "error", "Server restarted before sending the message");
     }
   }
@@ -2411,7 +2655,7 @@ export class Workspace {
             attempt.beforeLeafId,
             attempt.reportId,
           );
-          found = result?.found === true && !result.anchorMissing;
+          found = classifyProbeDelivery({ result }) === "delivered";
         } catch {
           /* No positive proof: never resend. */
         }
@@ -2429,8 +2673,13 @@ export class Workspace {
     }
   }
 
-  private hasQueued(agent: AgentEntry): boolean {
-    return this.messages.some((msg) => msg.status === "queued" && msg.queuedFor === agent.info.id);
+  private hasQueued(agent: AgentEntry, skipInboxReports = false): boolean {
+    return this.messages.some(
+      (msg) =>
+        msg.status === "queued" &&
+        msg.queuedFor === agent.info.id &&
+        (!skipInboxReports || !isInboxReport(msg)),
+    );
   }
 
   private dispatchHeld(agent: AgentEntry): boolean {
@@ -2541,11 +2790,18 @@ export class Workspace {
     )
       return;
     if (this.held(entry)) return;
+    const pending = (m: Message) => m.status === "queued" && m.queuedFor === agentId && !m.steering;
+    const paired = this.messages.find(
+      (m) => pending(m) && m.queuedEnvelope?.panelContext !== undefined,
+    );
+    if (
+      this.leadOutage &&
+      !(paired && this.leadOutage.batch?.id === paired.queuedEnvelope?.reportId)
+    )
+      return;
     let msg: Message | undefined;
     while (true) {
-      const candidate = this.messages.find(
-        (m) => m.status === "queued" && m.queuedFor === agentId && !m.steering,
-      );
+      const candidate = paired ?? this.messages.find(pending);
       if (!candidate) break;
       if (
         (candidate.from?.role === "lead" || candidate.from?.role === "panel") &&
@@ -2662,6 +2918,12 @@ export class Workspace {
     );
     if (idx < 0) return false;
     const [removed] = this.messages.splice(idx, 1);
+    if (removed.queuedEnvelope?.panelContext !== undefined) {
+      const panelId = pairedPanelMessageId(removed.id);
+      const panelIndex = this.messages.findIndex((msg) => msg.id === panelId);
+      if (panelIndex >= 0) this.messages.splice(panelIndex, 1);
+      this.cb?.onMessageRemoved?.(this.id, panelId);
+    }
     const reportId = removed.queuedEnvelope?.reportId ?? removed.dispatchAttempt?.reportId;
     if (reportId) {
       this.cb?.onSaveNow?.();
@@ -2693,7 +2955,12 @@ export class Workspace {
     const prompt = `[Forwarded message from ${author.name}]:\n\n${original.content}`;
     if (!agent.lastEnvelope) this.dropRetry(agent);
     const retried = agent.retryPending && !agent.session.isRunning && this.retryLast(agent.info.id);
-    const busy = retried || this.dispatchHeld(agent) || this.held(agent) || this.hasQueued(agent);
+    const admission = this.cb?.prepareManualInput?.(this, agent.info.id, true);
+    const busy =
+      retried ||
+      this.dispatchHeld(agent) ||
+      this.held(agent) ||
+      this.hasQueued(agent, !!admission?.panelContext);
     const userMsg: Message = {
       id: genId("msg"),
       kind: "user",
@@ -2704,7 +2971,7 @@ export class Workspace {
       forwardRef,
       queuedFor: agent.info.id,
     };
-    this.enqueue(userMsg, { inputId: userMsg.id, text: prompt });
+    this.enqueueManualInput(userMsg, { inputId: userMsg.id, text: prompt }, admission);
     if (busy) return;
 
     await this.dispatchPrompt(agent, userMsg.queuedEnvelope!, userMsg);
@@ -2717,9 +2984,22 @@ export class Workspace {
     return entry.session.stopTask(taskId);
   }
 
+  isNetworkWaiting(agentId: string): boolean {
+    return this.agents.get(agentId)?.networkWaiting ?? false;
+  }
+
+  // Recovery is stoppable, but is not a running turn and does not hold dispatch.
+  setNetworkWaiting(agentId: string, waiting: boolean): void {
+    const entry = this.agents.get(agentId);
+    if (!entry || this.isNetworkWaiting(agentId) === waiting) return;
+    entry.networkWaiting = waiting;
+    this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
+  }
+
   abortAgent(agentId: string): void {
     const entry = this.agents.get(agentId);
     if (!entry) return;
+    this.cb?.onLeadStop?.(this, agentId);
     const busy = this.hasWork(entry);
     this.cancelOpeningPrompt(entry, "Cancelled by user");
     this.dropQueuedLeadFor(agentId);
@@ -2729,6 +3009,7 @@ export class Workspace {
   }
 
   abortAll(by: "user" | "restart" | "lead" = "user"): void {
+    if (by === "user") this.cb?.onLeadStop?.(this);
     for (const entry of this.agents.values()) {
       const busy = this.hasWork(entry);
       if (by !== "restart") {
@@ -2760,6 +3041,7 @@ export class Workspace {
   async interruptAgent(agentId: string): Promise<void> {
     const entry = this.agents.get(agentId);
     if (!entry) return;
+    this.cb?.onLeadStop?.(this, agentId);
     this.dropRetry(entry);
     const session = entry.session;
     if (
@@ -2777,6 +3059,7 @@ export class Workspace {
       // Codex can return unread steers before its interrupted result, and
       // Pi can stop before producing any result. Fence both before the call.
       this.dropQueuedLeadFor(agentId);
+      entry.pendingTurnFailures = undefined;
       if (session.isRunning && inputBefore) inputBefore.stopped = "user";
       this.cb?.onSaveNow?.();
     }
@@ -2802,6 +3085,7 @@ export class Workspace {
     const refused = entry.session.cancelWake();
     if (refused) return refused;
     if (entry.input) entry.input.stopped = "user";
+    entry.pendingTurnFailures = undefined;
     this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
     return null;
   }
@@ -2812,7 +3096,10 @@ export class Workspace {
     by: "user" | "restart" | "lead" = "user",
   ): void {
     if (busy && entry.input) entry.input.stopped = by;
-    if (by !== "restart") this.dropRetry(entry);
+    if (by !== "restart") {
+      entry.pendingTurnFailures = undefined;
+      this.dropRetry(entry);
+    }
     if (entry.currentMsg && entry.currentMsg.status === "streaming") {
       entry.currentMsg.content = withInterrupted(entry.currentMsg.content);
       this.settle(entry.currentMsg);
@@ -2828,6 +3115,7 @@ export class Workspace {
     if (!entry) return false;
     if (this.dispatchHeld(entry)) return false;
     if (this.hasWork(entry) && entry.input) entry.input.stopped = "user";
+    entry.pendingTurnFailures = undefined;
     this.dropRetry(entry);
     if (entry.session.resetContext) entry.session.resetContext();
     else {
@@ -2861,6 +3149,7 @@ export class Workspace {
       ...a.info,
       canSwitchBackend: this.canSwitchBackend(a, state),
       busy: a.session.isRunning || !!a.openingPrompt,
+      networkWaiting: a.networkWaiting ?? false,
       state: this.agentState(a),
       activity: a.activity ?? null,
       ...(a.lastStreamAt != null && { lastStreamAt: a.lastStreamAt }),
@@ -2938,6 +3227,7 @@ export class Workspace {
       hostId: this.hostId,
       cwd: this.cwd,
       normalizedCwd: this.normalizedCwd,
+      ...(this.leadOutage && { leadOutage: this.leadOutage }),
       agents: [...this.agents.values()].map((a) => {
         return {
           ...a.info,
@@ -2949,6 +3239,7 @@ export class Workspace {
               ...(a.input !== a.delivered && !a.input?.finished && { since: true }),
             },
           }),
+          ...(a.pendingTurnFailures?.length && { pendingTurnFailures: a.pendingTurnFailures }),
           ...(a.retryPending && { pausedUntil: a.pausedUntil, lastEnvelope: a.lastEnvelope }),
         };
       }),
@@ -2986,6 +3277,7 @@ export class Workspace {
     ws.createdAt = state.createdAt;
     ws.archivedAt = state.archivedAt ?? null;
     ws.projectLink = state.projectLink;
+    ws.leadOutage = state.leadOutage;
     // Old unread counts included input, placeholders, and system messages.
     ws.unseen = state.attention?.unread ?? 0;
     ws.lastResult = state.attention?.lastResult;
@@ -3054,6 +3346,7 @@ export class Workspace {
           agentState.lastEnvelope ??
           (legacyPrompt != null ? { inputId: genId("input"), text: legacyPrompt } : undefined),
         retryPending: agentState.pausedUntil !== undefined,
+        pendingTurnFailures: agentState.pendingTurnFailures,
       });
       if (agentState.delivered) {
         const { since, waiting, ...delivered } = agentState.delivered;

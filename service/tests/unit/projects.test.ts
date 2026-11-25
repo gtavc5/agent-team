@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { z } from "zod";
 import { ProjectStore } from "../../src/project/store";
+import { ReportJournalStore } from "../../src/project/report-journal";
 import {
   languageInstructions,
   leadToolset,
@@ -2585,7 +2586,7 @@ describe("a worker that goes idle without reporting", () => {
       session(w).emit("event", { kind: "error", content: "API Error: 529 overloaded" });
       await settle();
       expect(told()).toEqual([
-        note("its turn failed: API Error: 529 overloaded", "do it", "Working on it"),
+        'Worker turn failed on your message "do it".\n\nError: API Error: 529 overloaded\n\nIts last reply:\n\nWorking on it',
       ]);
 
       await ask("try again");
@@ -2622,7 +2623,7 @@ describe("a worker that goes idle without reporting", () => {
     }
   });
 
-  it("tells a stopped turn that a wake-up then carried on as ended, and keeps the reply past a stray error", async () => {
+  it("does not treat a stray process diagnostic after a successful wake-up as a failed turn", async () => {
     useFakeTimers();
     try {
       const { w, say, told, settle, session, endTurn, state } = await started();
@@ -2637,9 +2638,7 @@ describe("a worker that goes idle without reporting", () => {
       // The CLI dies afterwards with an error of its own.
       session(w).emit("event", { kind: "error", content: "[Claude error] exited" });
       await settle();
-      expect(told()).toEqual([
-        note("its turn failed: [Claude error] exited", "do it", "Build passed."),
-      ]);
+      expect(told()).toEqual([]);
     } finally {
       vi.useRealTimers();
     }
@@ -2946,6 +2945,130 @@ describe("a worker that goes idle without reporting", () => {
       vi.useRealTimers();
     }
   });
+
+  it("journals each terminal failure while the lead is offline, even after finish_task", async () => {
+    useFakeTimers();
+    try {
+      const {
+        w,
+        lead,
+        project,
+        host,
+        call,
+        ask,
+        told,
+        settle,
+        session,
+        restart,
+        manager,
+        base,
+        registry,
+        workspaces,
+      } = await started();
+      const fail = (worker: Workspace, content: string) => {
+        session(worker).isRunning = false;
+        session(worker).emit("event", { kind: "error", content });
+      };
+      const journal = () =>
+        new ReportJournalStore().load(new ProjectStore(base).projectDir(project.id));
+      await ask("check the release");
+      host.isLeadOnline = () => false;
+      await call(w, "finish_task", { summary: "The patch is ready" });
+      session(w).emit("event", {
+        kind: "tool_use",
+        toolName: "bash",
+        toolUseId: "check",
+        content: "**bash**",
+      });
+      session(w).emit("event", {
+        kind: "tool_result",
+        toolUseId: "check",
+        content: "exit status 2",
+        isError: true,
+      });
+      fail(w, "Provider unavailable");
+      await vi.advanceTimersByTimeAsync(0);
+      fail(w, "Connection lost");
+      // A duplicate-looking idle error is not another turn.
+      fail(w, "Connection lost");
+      const pending = w.getState();
+      const back = restart(w);
+      manager.recheckWorkers();
+      await settle();
+      expect(told()).toEqual([]);
+      expect(journal().map((r) => r.kind)).toEqual(["final", "failure", "failure"]);
+      expect(journal()[1]).toMatchObject({
+        boardState: "not_applicable",
+        leadDelivery: { state: "pending" },
+      });
+      expect(journal()[1].payload.text).toContain(
+        "Last tool: bash (reported an error) — exit status 2",
+      );
+      // Simulate the journal commit surviving while the worker's cleanup did not.
+      const stale = Workspace.fromState(pending, registry);
+      workspaces.set(w.id, stale);
+      await back.dispose();
+      manager.recheckWorkers();
+      await settle();
+      expect(journal().map((r) => r.kind)).toEqual(["final", "failure", "failure"]);
+      host.isLeadOnline = () => true;
+      await manager.drainInbox(project.id);
+      expect(told()).toHaveLength(3);
+      expect(told()[1]).toContain("Error: Provider unavailable");
+      expect(told()[2]).toContain('Worker turn failed on your message "check the release".');
+      expect(told()[2]).toContain("Error: Connection lost");
+      expect(told()[2]).not.toContain("Last tool:");
+      expect(lead.getMessages().filter((m) => m.from?.role === "panel")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("journals distinct failed wake-up turns on the same input without retrying the worker", async () => {
+    useFakeTimers();
+    try {
+      const { w, say, state, told, settle, session, manager } = await started();
+      const sent = [...session(w).sent];
+      say("first attempt");
+      session(w).isRunning = false;
+      session(w).emit("event", { kind: "error", content: "Connection lost" });
+      await settle();
+      state("working");
+      say("wake-up output");
+      session(w).emit("event", { kind: "error", content: "Connection lost" });
+      state("idle");
+      await settle();
+      expect(told()).toHaveLength(2);
+      expect(told()[0]).toContain("first attempt");
+      expect(told()[1]).toContain("wake-up output");
+      manager.workerIdle(w);
+      await settle();
+      expect(told()).toHaveLength(2);
+      expect(session(w).sent).toEqual(sent);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["stop", "archive", "disable reporting"])(
+    "does not journal a terminal failure if the worker is subject to %s before settling",
+    async (action) => {
+      useFakeTimers();
+      try {
+        const { w, lead, call, told, settle, session, manager } = await started();
+        session(w).isRunning = false;
+        session(w).emit("event", { kind: "error", content: "Network disconnected" });
+        if (action === "stop") w.abortAll();
+        else if (action === "archive") await call(lead, "archive_session", { session_id: w.id });
+        else manager.setReporting(w.id, false);
+        await settle();
+        expect(told()).toEqual([]);
+        expect(w.pendingTurnFailures()).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("waits for a rate-limit retry still to run, however late it is", async () => {
     useFakeTimers();

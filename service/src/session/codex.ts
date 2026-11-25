@@ -1,10 +1,12 @@
 import { lifecycleWriter } from "../usage/lifecycle";
 import { estimatedContext } from "../../../shared/context-usage";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "events";
 import * as os from "os";
 import { z } from "zod";
 import { isTokenCount, type UsageRecorder } from "./usage-observation";
 import {
+  type CodexRecoveryProof,
   ContextUsage,
   RunState,
   StreamEvent,
@@ -34,9 +36,11 @@ import {
   type ThreadTokenUsage,
   type Transport,
   type TurnError,
+  type UserInput,
 } from "./codex-rpc";
 import { applyNonInteractiveGitEnv } from "./git-env";
 import type { PanelToolset } from "../project/tools";
+import { classifyNetworkFailure } from "../project/network-failure";
 import {
   codexContextWindow,
   codexFastTier,
@@ -58,6 +62,47 @@ type ChildLifecycle = ModelLifecycle & { turnId?: string };
 
 type UsageThreadModel = { model?: string; modelProvider?: string };
 type OpenThreadResponse = UsageThreadModel & { thread: CodexThread };
+
+type RecoveryAttempt = {
+  outageId: string;
+  inputId: string;
+  textHash: string | null;
+  userItemId?: string;
+  acknowledgedTurnId?: string;
+};
+
+const codexRecoveryProof = z.strictObject({
+  outageId: z.string().min(1),
+  inputId: z.string().min(1),
+  threadId: z.string().min(1),
+  turnId: z.string().min(1),
+  userItem: z.strictObject({ id: z.string().min(1), textHash: z.hash("sha256") }).nullable(),
+});
+
+const RECOVERY_REJECTED: SendReceipt = {
+  disposition: "rejected",
+  error: "Codex recovery was not sent: cannot safely continue the exact previous failed batch.",
+};
+
+function recoveryTextHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function matchesRecoveryUserItem(item: ThreadItem, inputId: string, textHash: string): boolean {
+  if (
+    item.type !== "userMessage" ||
+    item.clientId !== inputId ||
+    !Array.isArray(item.content) ||
+    item.content.length !== 1
+  )
+    return false;
+  const text = item.content[0] as UserInput | null;
+  return (
+    text?.type === "text" &&
+    typeof text.text === "string" &&
+    recoveryTextHash(text.text) === textHash
+  );
+}
 
 // "no rollout found for thread id …" (codex 0.153): the thread is gone from
 // ~/.codex/sessions.
@@ -128,6 +173,9 @@ export class CodexSession extends EventEmitter {
   private capacityRetry: NodeJS.Timeout | null = null;
   private capacityRetries = 0;
   private compacting = false;
+  private recoveryAttempt: RecoveryAttempt | null = null;
+  // Only settled proof survives process replacement, and reuse still requires a history read.
+  private recoveryProof: CodexRecoveryProof | null = null;
   // The turn was started with a prompt: its first userMessage item is that
   // prompt, any later one a message steered in.
   private awaitingPrompt = false;
@@ -222,12 +270,12 @@ export class CodexSession extends EventEmitter {
     return applyNonInteractiveGitEnv(codexProcessEnv());
   }
 
-  private connect(): Promise<AppServerClient> {
+  private connect(requireExistingThread = false): Promise<AppServerClient> {
     if (this.client && !this.client.closed && !this.connecting) {
       return Promise.resolve(this.client);
     }
     if (!this.connecting) {
-      const opening = this.open();
+      const opening = this.open(requireExistingThread);
       this.connecting = opening;
       void opening
         .finally(() => {
@@ -238,7 +286,7 @@ export class CodexSession extends EventEmitter {
     return this.connecting;
   }
 
-  private async open(): Promise<AppServerClient> {
+  private async open(requireExistingThread: boolean): Promise<AppServerClient> {
     const key = this.launchKey();
     const env = this.env();
     const transport =
@@ -257,7 +305,7 @@ export class CodexSession extends EventEmitter {
     this.client = client;
     try {
       await client.initialize();
-      const opened = await this.openThread(client);
+      const opened = await this.openThread(client, requireExistingThread);
       const { threadId } = opened;
       if (client !== this.client) throw new Error("The app-server was replaced while starting.");
       if (this.usageRecorder || this.lifecycle) {
@@ -295,18 +343,27 @@ export class CodexSession extends EventEmitter {
 
   private async openThread(
     client: AppServerClient,
+    requireExistingThread: boolean,
   ): Promise<UsageThreadModel & { threadId: string }> {
-    if (this.sessionId) {
+    const threadId = this.sessionId;
+    if (threadId) {
       try {
-        const res = await client.request<UsageThreadModel>("thread/resume", {
-          threadId: this.sessionId,
+        const res = await client.request<OpenThreadResponse>("thread/resume", {
+          threadId,
           ...this.threadParams(),
           ...(this.panelTools && { developerInstructions: this.panelTools.instructions }),
           excludeTurns: true,
         });
-        return { threadId: this.sessionId, model: res?.model, modelProvider: res?.modelProvider };
+        if (requireExistingThread && res?.thread?.id !== threadId)
+          throw new Error("Could not verify the resumed Codex thread for recovery");
+        return { threadId, model: res?.model, modelProvider: res?.modelProvider };
       } catch (e) {
-        if (!(e instanceof RpcRequestError) || !THREAD_GONE.test(e.message)) throw e;
+        if (
+          requireExistingThread ||
+          !(e instanceof RpcRequestError) ||
+          !THREAD_GONE.test(e.message)
+        )
+          throw e;
         this.emit("event", {
           kind: "notice",
           level: "warning",
@@ -314,6 +371,7 @@ export class CodexSession extends EventEmitter {
         });
       }
     }
+    if (requireExistingThread) throw new Error("Missing Codex thread for recovery");
     const res = await client.request<OpenThreadResponse>("thread/start", {
       ...this.threadParams(),
       ...(this.panelTools && {
@@ -356,8 +414,34 @@ export class CodexSession extends EventEmitter {
   async send(input: string | PromptEnvelope, hooks?: SendHooks): Promise<SendReceipt | void> {
     if (this.busy) throw new Error("Session is busy");
     const message = typeof input === "string" ? input : input.text;
-    const compact = message.trim() === "/compact";
-    this.beginTurn(!compact);
+    const panelContext = typeof input === "string" ? undefined : input.panelContext;
+    const compact = panelContext === undefined && message.trim() === "/compact";
+    // Paired manual input is a fresh human turn. Workspace supplies only
+    // new panel context, so send both items as supplied without a proof gate.
+    const recovery =
+      typeof input !== "string" &&
+      panelContext === undefined &&
+      input.trigger === "system" &&
+      input.inputId === input.reportId
+        ? input.recovery
+        : undefined;
+    const previous = recovery?.supersedes.length ? this.recoveryProof : null;
+    let texts = panelContext === undefined ? [message] : [panelContext, message];
+    if (recovery?.supersedes.length) {
+      if (
+        !previous ||
+        previous.threadId !== this.sessionId ||
+        previous.outageId !== recovery.outageId ||
+        recovery.supersedes.at(-1) !== previous.inputId ||
+        typeof recovery.delta !== "string" ||
+        compact
+      ) {
+        return RECOVERY_REJECTED;
+      }
+      texts = recovery.delta ? [recovery.delta] : [];
+    } else if (recovery?.delta !== undefined) return RECOVERY_REJECTED;
+    if (!previous) this.recoveryProof = null;
+    this.beginTurn(!compact && texts.length > 0);
     this.inputTrigger = typeof input === "string" ? "user" : (input.trigger ?? "user");
     this.rootLifecycle.trigger = this.inputTrigger;
     this.compacting = compact;
@@ -367,9 +451,29 @@ export class CodexSession extends EventEmitter {
     let writeClaimed = false;
     try {
       if (this.client && this.launched !== this.launchKey()) this.closeProcess();
-      const client = await this.connect();
+      const client = await this.connect(!!previous);
       if (generation !== this.generation)
         return { disposition: "rejected", error: "Codex dispatch cancelled" };
+      if (previous) {
+        const safe = await this.isLastFailedRecovery(client, previous).catch(() => false);
+        if (
+          !safe ||
+          this.recoveryProof !== previous ||
+          client !== this.client ||
+          client.closed ||
+          this.sessionId !== previous.threadId ||
+          generation !== this.generation ||
+          !this.busy ||
+          this.turnId ||
+          this.interruptRequested
+        ) {
+          if (this.recoveryProof === previous) this.recoveryProof = null;
+          if (generation === this.generation && this.busy && !this.turnId) this.endTurn();
+          return RECOVERY_REJECTED;
+        }
+        // Workspace persists this consumed proof before it allows the write.
+        this.recoveryProof = null;
+      }
       hooks?.onBeforeWrite?.({
         inputId: typeof input === "string" ? "codex" : input.inputId,
         reportId: typeof input === "string" ? undefined : input.reportId,
@@ -383,11 +487,19 @@ export class CodexSession extends EventEmitter {
       if (compact) {
         await client.request("thread/compact/start", { threadId });
       } else {
-        await this.startTurn(client, message, generation);
+        if (recovery && typeof input !== "string") {
+          this.recoveryAttempt = {
+            outageId: recovery.outageId,
+            inputId: input.inputId,
+            textHash: texts.length ? recoveryTextHash(texts[0]) : null,
+          };
+        }
+        await this.startTurn(client, texts, generation, this.recoveryAttempt);
       }
     } catch (e) {
+      if (previous && this.recoveryProof === previous) this.recoveryProof = null;
       if (generation === this.generation && this.busy) {
-        this.failTurn(`[Codex error] ${e instanceof Error ? e.message : String(e)}`);
+        this.failTurn(e instanceof Error ? e.message : String(e));
       }
       if (hooks) {
         // A negative RPC response is definitive. A lost response after the
@@ -399,12 +511,45 @@ export class CodexSession extends EventEmitter {
     }
   }
 
-  private async startTurn(client: AppServerClient, text: string, generation: number) {
+  private async isLastFailedRecovery(
+    client: AppServerClient,
+    proof: CodexRecoveryProof,
+  ): Promise<boolean> {
+    const page = await client.request<{
+      data: Array<CodexTurn & { items: ThreadItem[]; itemsView: string }>;
+    }>("thread/turns/list", { threadId: proof.threadId, limit: 1, itemsView: "full" });
+    if (!Array.isArray(page?.data) || page.data.length !== 1) return false;
+    const [last] = page.data;
+    if (
+      last?.id !== proof.turnId ||
+      last.status !== "failed" ||
+      last.itemsView !== "full" ||
+      !Array.isArray(last.items)
+    )
+      return false;
+    if (!proof.userItem) return last.items.length === 0;
+    const [item] = last.items;
+    return (
+      last.items.length === 1 &&
+      item?.id === proof.userItem.id &&
+      matchesRecoveryUserItem(item, proof.inputId, proof.userItem.textHash)
+    );
+  }
+
+  private async startTurn(
+    client: AppServerClient,
+    texts: string[],
+    generation: number,
+    recovery: RecoveryAttempt | null = null,
+  ) {
     const res = await client.request<{ turn: CodexTurn }>("turn/start", {
       threadId: this.sessionId,
-      input: [{ type: "text", text, text_elements: [] }],
+      ...(recovery?.textHash && { clientUserMessageId: recovery.inputId }),
+      input: texts.map((text) => ({ type: "text", text, text_elements: [] })),
       ...this.turnParams(),
     });
+    if (recovery && recovery === this.recoveryAttempt && res.turn.status === "inProgress")
+      recovery.acknowledgedTurnId = res.turn.id;
     if (generation === this.generation && !this.turnId && res.turn.status === "inProgress") {
       this.turnId = res.turn.id;
       this.releaseTurnWaiters();
@@ -446,11 +591,11 @@ export class CodexSession extends EventEmitter {
       if (generation === this.generation && !this.turnId) {
         this.inputTrigger = "retry";
         this.rootLifecycle.trigger = "retry";
-        await this.startTurn(client, CAPACITY_CONTINUE, generation);
+        await this.startTurn(client, [CAPACITY_CONTINUE], generation);
       }
     } catch (e) {
       if (generation === this.generation && this.busy) {
-        this.failTurn(`[Codex error] ${e instanceof Error ? e.message : String(e)}`);
+        this.failTurn(e instanceof Error ? e.message : String(e));
       }
     }
   }
@@ -472,6 +617,7 @@ export class CodexSession extends EventEmitter {
       return false;
     }
     // Before the request: its userMessage item can come before the answer.
+    this.recoveryAttempt = null;
     this.steers.push(inputId);
     this.steerTriggers.set(inputId, trigger);
     try {
@@ -527,6 +673,7 @@ export class CodexSession extends EventEmitter {
   // workspace closes its message itself.
   abort(): void {
     this.generation++;
+    if (this.busy) this.recoveryProof = null;
     this.closeProcess();
     if (this.busy) this.endTurn();
   }
@@ -570,10 +717,11 @@ export class CodexSession extends EventEmitter {
 
   private onClose(client: AppServerClient, reason: string): void {
     if (client !== this.client) return;
+    if (this.busy) this.recoveryProof = null;
     this.client = null;
     this.stopSubagents();
     this.commandsInFlight.clear();
-    if (this.busy) this.failTurn(`[Codex error] ${reason}`);
+    if (this.busy) this.failTurn(reason);
   }
 
   private beginTurn(withPrompt: boolean): void {
@@ -586,6 +734,7 @@ export class CodexSession extends EventEmitter {
     this.interruptRequested = false;
     this.interruptSent = false;
     this.turnError = null;
+    this.recoveryAttempt = null;
     this.capacityRetries = 0;
     this.compacting = false;
     this.awaitingPrompt = withPrompt;
@@ -607,6 +756,7 @@ export class CodexSession extends EventEmitter {
       terminal.context = this.turnContext;
     if (terminal?.context !== undefined) this.context = terminal.context;
     this.busy = false;
+    this.recoveryAttempt = null;
     clearTimeout(this.capacityRetry ?? undefined);
     this.capacityRetry = null;
     this.turnId = null;
@@ -620,9 +770,10 @@ export class CodexSession extends EventEmitter {
     this.emit("runState", "idle");
   }
 
-  private failTurn(content: string): void {
+  private failTurn(message: string): void {
     this.closeTools("(stopped)");
-    this.endTurn({ kind: "error", content });
+    // Process/RPC failures do not establish what the remote model or its tools did.
+    this.endTurn({ kind: "error", content: `[Codex error] ${message}` });
   }
 
   // Calls the turn left without a completion: an interrupted command gets
@@ -661,13 +812,47 @@ export class CodexSession extends EventEmitter {
     }
     if (turn.status === "failed") {
       const error = turn.error ?? this.turnError;
+      const recovery = this.recoveryAttempt;
+      this.recoveryAttempt = null;
+      if (
+        recovery &&
+        this.client &&
+        this.sessionId &&
+        this.turnStarted &&
+        turn.id === recovery.acknowledgedTurnId &&
+        (recovery.textHash === null || recovery.userItemId) &&
+        !this.interruptRequested &&
+        turn.error &&
+        classifyNetworkFailure({
+          backend: "codex",
+          codexErrorInfo: turn.error.codexErrorInfo,
+          errorMessage: turn.error.message,
+        }) === "transient"
+      ) {
+        this.recoveryProof = {
+          outageId: recovery.outageId,
+          inputId: recovery.inputId,
+          threadId: this.sessionId,
+          turnId: turn.id,
+          userItem:
+            recovery.textHash && recovery.userItemId
+              ? { id: recovery.userItemId, textHash: recovery.textHash }
+              : null,
+        };
+      }
       this.closeTools("(stopped)");
       if (error?.codexErrorInfo === "usageLimitExceeded") {
         this.endTurn(this.refused(error));
         return;
       }
       if (error?.codexErrorInfo === "serverOverloaded" && this.retryAfterCapacity(error)) return;
-      this.endTurn({ kind: "error", content: `[Codex error] ${errorText(error?.message)}` });
+      this.endTurn(
+        codexTerminalError(
+          `[Codex error] ${errorText(error?.message)}`,
+          error?.message,
+          error?.codexErrorInfo ?? this.turnError?.codexErrorInfo,
+        ),
+      );
       return;
     }
     this.closeTools("(no result)");
@@ -684,6 +869,7 @@ export class CodexSession extends EventEmitter {
     };
   }
 
+  // Quota has its own native reset/future account-failover path, not network backoff.
   // A turn the usage limit refused (codex/usage-limit): the limit's window
   // and reset come in the account/rateLimits/updated sent just before.
   private refused(error: TurnError): StreamEvent {
@@ -704,6 +890,8 @@ export class CodexSession extends EventEmitter {
   }
 
   private onRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
+    this.recoveryAttempt = null;
+    this.recoveryProof = null;
     if (method === "item/tool/call") {
       this.panelCalls++;
       this.emit("deploy_activity");
@@ -743,6 +931,9 @@ export class CodexSession extends EventEmitter {
     const child = threadId && !root ? this.childLifecycles.get(threadId) : undefined;
     const lifecycle = this.lifecycle ? (root ? this.rootLifecycle : child) : undefined;
     const item = params.item as ThreadItem | undefined;
+    if (this.recoveryAttempt || this.recoveryProof) {
+      this.observeRecovery(method, params, root, item);
+    }
     const isDelta =
       method === "item/agentMessage/delta" || method === "item/reasoning/summaryTextDelta";
     const step = lifecycle?.step;
@@ -878,6 +1069,49 @@ export class CodexSession extends EventEmitter {
           });
         }
         break;
+    }
+  }
+
+  private observeRecovery(
+    method: string,
+    params: Record<string, unknown>,
+    root: boolean,
+    item: ThreadItem | undefined,
+  ): void {
+    const attempt = this.recoveryAttempt;
+    if (method === "turn/started") {
+      this.recoveryProof = null;
+      if (!root || this.turnStarted) this.recoveryAttempt = null;
+      return;
+    }
+    if (
+      root &&
+      attempt &&
+      attempt.textHash !== null &&
+      this.matchesTurn(params.turnId) &&
+      (method === "item/started" || method === "item/completed") &&
+      item &&
+      matchesRecoveryUserItem(item, attempt.inputId, attempt.textHash) &&
+      (!attempt.userItemId || attempt.userItemId === item.id)
+    ) {
+      attempt.userItemId = item.id;
+      return;
+    }
+    const status = params.status as { type?: unknown } | undefined;
+    if (method === "thread/status/changed" && root && status?.type === "active") {
+      this.recoveryProof = null;
+    }
+    const usage = params.tokenUsage as ThreadTokenUsage | undefined;
+    if (
+      method.startsWith("item/") ||
+      method.startsWith("rawResponseItem/") ||
+      method === "turn/plan/updated" ||
+      method === "turn/diff/updated" ||
+      (method === "thread/tokenUsage/updated" &&
+        (usage?.last?.outputTokens !== 0 || usage?.last?.reasoningOutputTokens !== 0))
+    ) {
+      this.recoveryAttempt = null;
+      this.recoveryProof = null;
     }
   }
 
@@ -1410,6 +1644,7 @@ export class CodexSession extends EventEmitter {
       sessionId: this.sessionId,
       config: { ...this.config },
       usage: { ...this.usage },
+      ...(this.recoveryProof && { codexRecoveryProof: structuredClone(this.recoveryProof) }),
     };
   }
 
@@ -1417,6 +1652,9 @@ export class CodexSession extends EventEmitter {
     const session = new CodexSession(state.config, usageRecorder);
     session.sessionId = state.sessionId;
     session.usage = { ...state.usage };
+    const proof = codexRecoveryProof.safeParse(state.codexRecoveryProof);
+    if (proof.success && proof.data.threadId === state.sessionId)
+      session.recoveryProof = proof.data;
     return session;
   }
 }
@@ -1450,6 +1688,16 @@ export function codexProcessEnv(overrides?: Record<string, string>): NodeJS.Proc
   const env = { ...process.env, ...overrides };
   if (env.OPENAI_API_KEY && !env.CODEX_API_KEY) env.CODEX_API_KEY = env.OPENAI_API_KEY;
   return env;
+}
+
+function codexTerminalError(
+  content: string,
+  errorMessage?: string,
+  codexErrorInfo?: TurnError["codexErrorInfo"],
+): StreamEvent {
+  const transient =
+    classifyNetworkFailure({ backend: "codex", codexErrorInfo, errorMessage }) === "transient";
+  return { kind: "error", content, ...(transient && { networkFailure: true }) };
 }
 
 // A backend error codex passes on as the response body: its message.

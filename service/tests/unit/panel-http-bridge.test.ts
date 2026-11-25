@@ -39,7 +39,11 @@ import {
 
 const piRequire = createRequire(localPiSdkAnchor ?? __filename);
 const subagents = localPiBinary && discoverLocalPiPackages().piSubagentsRoot;
-import piPanelBridge from "../../src/session/pi-panel-bridge";
+import { hasPersistedPiReport } from "../../src/session/pi";
+import piPanelBridge, {
+  encodePiPairedPrompt,
+  PI_PANEL_CONTEXT_TYPE,
+} from "../../src/session/pi-panel-bridge";
 const { Value } = piRequire("typebox/value") as typeof import("typebox/value");
 
 const servers: PanelHttpServer[] = [];
@@ -287,6 +291,7 @@ interface RealPiFixture {
   server: PanelHttpServer;
   client: PiRpcClient;
   key: string;
+  token: string;
 }
 
 function userEntry(id: string, parentId: string | null, text: string): Record<string, unknown> {
@@ -433,7 +438,7 @@ async function startRealPi(options: {
   expect(JSON.stringify(report).length).toBeLessThan(2_000);
   const state = await client.getState();
   expect(state.sessionId).toBe(report.sessionProof.sessionId);
-  return { report, state, server, client, key };
+  return { report, state, server, client, key, token };
 }
 
 it.skipIf(!localPiBinary)(
@@ -524,6 +529,57 @@ describe.skipIf(!localPiBinary)("real Pi panel bridge gate", () => {
     },
     30_000,
   );
+
+  it("unwraps a paired RPC prompt into separate user and panel context entries in one real Pi turn", async () => {
+    const directory = temporaryDirectory("panel-pi-paired-");
+    const fixture = await startRealPi({
+      additionalExtension: writeSyntheticProviderObserver(directory),
+      extraEnv: { YAAT_TEST_BEFORE_SNAPSHOT: path.join(directory, "before.json") },
+    });
+    await fixture.client.setModel("panel-test", "synthetic");
+    const reportId = "outage-batch";
+    const userText = "Please continue.\nThis is the user's message.";
+    const panelContext = "Outage report:\nThe connector has recovered.";
+    const events: string[] = [];
+    fixture.client.on("event", (event: { type: string }) => events.push(event.type));
+    const prompt = encodePiPairedPrompt({ reportId, userText, panelContext }, fixture.token);
+    await expect(fixture.client.prompt(prompt)).resolves.toMatchObject({ disposition: "started" });
+    await waitUntil(() => events.includes("agent_settled"));
+    expect(events.filter((event) => event === "agent_start")).toHaveLength(1);
+    const file = fixture.state.sessionFile!;
+    const records = fs
+      .readFileSync(file, "utf8")
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type: string; message?: { role: string } });
+    expect(records.filter((entry) => entry.message?.role === "user")).toMatchObject([
+      { message: { content: [{ type: "text", text: userText }] } },
+    ]);
+    expect(records.filter((entry) => entry.type === "custom_message")).toMatchObject([
+      {
+        customType: PI_PANEL_CONTEXT_TYPE,
+        content: panelContext,
+        details: { reportId },
+      },
+    ]);
+    await expect(
+      fixture.server.probeDispatchedReport(fixture.key, null, reportId),
+    ).resolves.toMatchObject({ found: true, anchorMissing: false });
+    expect(
+      hasPersistedPiReport(
+        {
+          reportId,
+          inputId: "msg",
+          generation: 1,
+          beforeLeafId: null,
+          beforeEntryCount: 0,
+          startedAt: 0,
+          piSession: { id: fixture.state.sessionId, file },
+        },
+        fixture.report.sessionProof.cwd,
+      ),
+    ).toBe(true);
+  }, 30_000);
 
   it("handles /quota without a turn and posts its snapshot through the real bridge", async () => {
     const directory = temporaryDirectory("panel-pi-quota-");

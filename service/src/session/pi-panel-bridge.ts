@@ -1,9 +1,49 @@
 import { CONFIGURED_EVENT, piSnapshotSchema, REFRESH_EVENT, SNAPSHOT_EVENT } from "./quota-schema";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { Type, type TSchema } from "typebox";
+import {
+  authenticatePiRecoveryMessage,
+  projectPiRecoveryContext,
+  type PiContextMessage,
+} from "./pi-recovery-context";
+
+const PREFIX = "[yaat-paired-prompt]";
+export const PI_PANEL_CONTEXT_TYPE = "yaat-panel-context";
+
+interface PairedPrompt {
+  userText: string;
+  panelContext: string;
+  reportId: string;
+}
+
+function signature(payload: string, token: string): string {
+  return createHmac("sha256", token).update(payload).digest("hex");
+}
+
+// Pi RPC accepts only one text prompt. The bridge unwraps this carrier before
+// Pi creates messages, and the route token prevents ordinary input from posing as the panel.
+export function encodePiPairedPrompt(prompt: PairedPrompt, token: string): string {
+  const payload = JSON.stringify(prompt);
+  return `${PREFIX}${signature(payload, token)}${payload}`;
+}
+
+function decodePiPairedPrompt(text: string, token: string): PairedPrompt | undefined {
+  if (!text.startsWith(PREFIX)) return;
+  const mac = text.slice(PREFIX.length, PREFIX.length + 64);
+  const payload = text.slice(PREFIX.length + 64);
+  if (!/^[0-9a-f]{64}$/.test(mac)) return;
+  if (!timingSafeEqual(Buffer.from(mac), Buffer.from(signature(payload, token)))) return;
+  const prompt = JSON.parse(payload) as PairedPrompt;
+  if (
+    typeof prompt?.userText === "string" &&
+    typeof prompt.panelContext === "string" &&
+    typeof prompt.reportId === "string"
+  )
+    return prompt;
+}
 
 type JsonObject = Record<string, unknown>;
 type Unsubscribe = () => void;
@@ -15,6 +55,8 @@ interface SessionEntry {
   firstKeptEntryId?: string;
   tokensBefore?: number;
   summary?: string;
+  customType?: string;
+  details?: unknown;
   message?: {
     role?: string;
     content?: unknown;
@@ -45,7 +87,18 @@ interface PromptOptions {
 }
 
 interface BeforeAgentStartEvent {
+  messageType?: "user" | "custom";
+  prompt?: string;
   systemPromptOptions?: PromptOptions;
+}
+
+interface BeforeAgentStartResult {
+  message: {
+    customType: string;
+    content: string;
+    display: boolean;
+    details: { reportId: string };
+  };
 }
 
 interface ToolInfo {
@@ -73,6 +126,16 @@ interface PiExtensionApi {
   };
   on(event: "session_start", handler: (event: unknown, ctx: ExtensionContext) => void): Unsubscribe;
   on(
+    event: "message_end",
+    handler: (event: { message: PiContextMessage }) => { message: PiContextMessage } | undefined,
+  ): Unsubscribe;
+  on(
+    event: "context",
+    handler: (event: {
+      messages: PiContextMessage[];
+    }) => { messages: PiContextMessage[] } | undefined,
+  ): Unsubscribe;
+  on(
     event: "turn_end",
     handler: (
       event: { outcome: string; context: { pendingMessages: unknown[] } },
@@ -80,8 +143,18 @@ interface PiExtensionApi {
     ) => Promise<void>,
   ): Unsubscribe;
   on(
+    event: "input",
+    handler: (event: {
+      text: string;
+      source: string;
+    }) => { action: "transform"; text: string } | undefined,
+  ): Unsubscribe;
+  on(
     event: "before_agent_start",
-    handler: (event: BeforeAgentStartEvent, ctx: ExtensionContext) => void | Promise<void>,
+    handler: (
+      event: BeforeAgentStartEvent,
+      ctx: ExtensionContext,
+    ) => Promise<BeforeAgentStartResult | void>,
   ): Unsubscribe;
   on(
     event: "session_shutdown",
@@ -282,8 +355,14 @@ function probeDispatchedInputs(
   }
   const marker = `[agent-team:report:${reportId}]`;
   for (const entry of branch.slice(start)) {
-    if (entry.type !== "message" || entry.message?.role !== "user") continue;
-    if (textContent(entry.message.content).includes(marker)) {
+    if (
+      (entry.type === "custom_message" &&
+        entry.customType === PI_PANEL_CONTEXT_TYPE &&
+        asObject(entry.details).reportId === reportId) ||
+      (entry.type === "message" &&
+        entry.message?.role === "user" &&
+        textContent(entry.message.content).includes(marker))
+    ) {
       return { found: true, anchorMissing: false, matchedEntryId: entry.id };
     }
   }
@@ -683,6 +762,16 @@ export default function piPanelBridge(pi: PiExtensionApi): void {
     })().catch(() => undefined);
   });
 
+  pi.on("message_end", ({ message }) => {
+    const authenticated = authenticatePiRecoveryMessage(message, panelToken);
+    if (authenticated) return { message: authenticated };
+  });
+
+  pi.on("context", (event) => {
+    const messages = projectPiRecoveryContext(event.messages);
+    if (messages) return { messages };
+  });
+
   pi.on("turn_end", async (event, ctx) => {
     // ACP tool continuations need not start a new provider request with Pi's updated context.
     if (
@@ -704,17 +793,41 @@ export default function piPanelBridge(pi: PiExtensionApi): void {
     }).catch(() => undefined);
   });
 
+  let pairedPrompt: ReturnType<typeof decodePiPairedPrompt>;
+  pi.on("input", (event) => {
+    pairedPrompt =
+      event.source === "rpc" ? decodePiPairedPrompt(event.text, panelToken) : undefined;
+    if (pairedPrompt) return { action: "transform", text: pairedPrompt.userText };
+  });
+
   pi.on("before_agent_start", async (event) => {
-    const latest = await fetchToolset();
+    const paired = pairedPrompt;
+    pairedPrompt = undefined;
+    const context =
+      paired && event.messageType === "user" && event.prompt === paired.userText
+        ? {
+            message: {
+              customType: PI_PANEL_CONTEXT_TYPE,
+              content: paired.panelContext,
+              display: true,
+              details: { reportId: paired.reportId },
+            },
+          }
+        : undefined;
+    const latest = await fetchToolset().catch((error: unknown) => {
+      if (context) return currentToolset;
+      throw error;
+    });
     if (stopped || latest.version === currentToolset.version) {
       if (event.systemPromptOptions?.sections) {
         if (currentToolset.instructions) {
           event.systemPromptOptions.sections.agent_team_panel = currentToolset.instructions;
         } else delete event.systemPromptOptions.sections.agent_team_panel;
       }
-      return;
+      return context;
     }
     applyToolset(latest, event);
+    return context;
   });
 
   pi.on("session_shutdown", () => {

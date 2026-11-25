@@ -3,7 +3,13 @@ import { render, renderHook, act, fireEvent, screen, within } from "@testing-lib
 import { App, uploadImage } from "../src/App";
 import * as format from "../src/format";
 import * as telemetry from "../src/telemetry";
-import { AUTO_RELOAD, useServer, type AgentInfo, type Message } from "../src/state/useServer";
+import {
+  AUTO_RELOAD,
+  useServer,
+  type AgentInfo,
+  type Message,
+  type Workspace,
+} from "../src/state/useServer";
 
 import { FakeSocket } from "./fakeSocket";
 
@@ -50,6 +56,7 @@ function openSocket(
   agents: AgentInfo[],
   others: string[] = [],
   sendReceipt = false,
+  projectLink?: Workspace["projectLink"],
 ) {
   const workspace = (id: string, name: string) => ({
     id,
@@ -60,6 +67,7 @@ function openSocket(
     agents,
     messages: [],
     createdAt: 1,
+    projectLink,
   });
   act(() => sock.open());
   sock.receive({
@@ -79,11 +87,17 @@ function openSocket(
 // App connected to workspace w1 with `messages` as its newest page.
 function boot(
   messages: Message[],
-  { agents = [AGENT], hasMore = false, others = [] as string[], sendReceipt = false } = {},
+  {
+    agents = [AGENT],
+    hasMore = false,
+    others = [] as string[],
+    sendReceipt = false,
+    projectLink = undefined as Workspace["projectLink"],
+  } = {},
 ) {
   render(<App />);
   const sock = FakeSocket.instances.at(-1)!;
-  openSocket(sock, agents, others, sendReceipt);
+  openSocket(sock, agents, others, sendReceipt, projectLink);
   sock.receive({ type: "workspace_messages", workspaceId: "w1", messages, hasMore });
   frame();
   return sock;
@@ -264,6 +278,42 @@ describe("UI telemetry middleware", () => {
 });
 
 describe("composer", () => {
+  it.each(["agent_updated", "init"])(
+    "keeps Stop and Send available for a network-waiting Lead from %s",
+    async (projection) => {
+      const agent: AgentInfo = { ...AGENT, busy: false, state: "idle", networkWaiting: false };
+      const waiting = { ...agent, networkWaiting: true };
+      const sock = boot([], {
+        agents: [projection === "init" ? waiting : agent],
+        projectLink: { projectId: "p1", role: "lead" },
+      });
+      const update = (agent: AgentInfo) =>
+        sock.receive({ type: "agent_updated", workspaceId: "w1", agent });
+      const composerStop = () => screen.queryByRole("button", { name: "Stop Alice" });
+      if (projection === "agent_updated") {
+        expect(composerStop()).toBeNull();
+        update(waiting);
+      }
+      fireEvent.click(composerStop()!);
+      openAgents();
+      const panelStop = () => screen.queryByRole("button", { name: "Stop" });
+      fireEvent.click(panelStop()!);
+      expect(sock.frames().filter(({ type }) => type === "interrupt")).toEqual([
+        { type: "interrupt", workspaceId: "w1", agentId: agent.id },
+        { type: "interrupt", workspaceId: "w1" },
+      ]);
+      fireEvent.change(composer(), { target: { value: "Manual message" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await act(async () => {});
+      expect(sock.frames().filter(({ type }) => type === "send_message")).toMatchObject([
+        { workspaceId: "w1", content: "Manual message" },
+      ]);
+      update(agent);
+      expect(composerStop()).toBeNull();
+      expect(panelStop()).toBeNull();
+    },
+  );
+
   it("records only validated composer submissions from Enter and the button", async () => {
     const record = vi.spyOn(telemetry, "recordTelemetry");
     const sock = boot([], { sendReceipt: true });

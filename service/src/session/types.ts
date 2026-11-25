@@ -64,6 +64,8 @@ export type NoticeLevel = "info" | "notice" | "warning" | "error" | "schedule" |
 export interface StreamEvent {
   kind: StreamEventKind;
   content: string;
+  // Confirmed transient transport on a terminal error; not delivery proof.
+  networkFailure?: true;
   // Tool name for tool_use events (the content is the formatted markdown).
   toolName?: string;
   toolSource?: ToolSource;
@@ -171,7 +173,10 @@ export interface PromptEnvelope {
   inputId: string;
   text: string;
   attachmentIds?: string[];
+  panelContext?: string;
   reportId?: string;
+  // For later native Codex attempts, delta is only new panel context (empty if unchanged).
+  recovery?: { outageId: string; supersedes: string[]; delta?: string };
 }
 
 export interface DispatchAttempt {
@@ -320,6 +325,14 @@ export interface PersistedSessionAnchor {
   entryCount: number;
 }
 
+export interface CodexRecoveryProof {
+  outageId: string;
+  inputId: string;
+  threadId: string;
+  turnId: string;
+  userItem: { id: string; textHash: string } | null;
+}
+
 export interface SessionState {
   sessionId: string | null;
   config: SessionConfig;
@@ -333,6 +346,8 @@ export interface SessionState {
   // Directly verified on disk; independent of turn or dispatch completion.
   persistedSessionAnchor?: PersistedSessionAnchor;
   hasConfirmedTurns?: boolean;
+  // Observed settled admission; Codex must independently confirm the latest failed turn.
+  codexRecoveryProof?: CodexRecoveryProof;
   desiredModel?: string;
   desiredEffort?: string;
   activeAsyncRuns?: ActiveAsyncRunRecord[];
