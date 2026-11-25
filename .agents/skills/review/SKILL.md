@@ -14,6 +14,8 @@ description: Use before committing a non-trivial change or when asked for an ind
 3. **Request read-only findings.** Ask the reviewer to inspect the diff and relevant surrounding code, without editing, committing, or starting other agents. Return findings directly to the parent, ranked by severity, each with `file:line`, the failing input or scenario, observed versus required behavior, and a minimal reproduction or test suggestion. Return “no findings” if none.
 4. **Verify in the parent.** Treat every finding as a hypothesis. Inspect the cited path, exercise the smallest reproducer or replay the relevant fixture, and compare the result to the requirement. Fix confirmed defects, add regression coverage where appropriate, and rerun affected checks. Do not automatically run a second full review for verified localized fixes; run a follow-up review on the incremental diff (plus necessary context) only when fixes introduce new risk or invalidate prior review conclusions.
 
+Use the final verification rule in [AGENTS.md](../../../AGENTS.md) after review findings are resolved.
+
 Report all three categories (use “none” for empty sections):
 
 - **confirmed** — finding, reproduction evidence, fix and validation result.

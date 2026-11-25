@@ -153,14 +153,19 @@ With pixi, `pixi run serve` builds and starts in one step.
 ```bash
 pixi run dev-webview         # Vite dev server with HMR
 npm run check                # tsc (strict) + ESLint + prettier, zero tolerance
-npm test                     # service + webview (Vitest, no browser)
+npm test                     # service + webview unit tests (Vitest, no browser)
+npm run test:fast            # smaller service + webview suites
 npm run fmt                  # prettier
 ```
 
 For layout changes, install Playwright's Chromium (`npx playwright install chromium`,
 or `npx playwright install --with-deps chromium` on Linux if system libraries are missing).
-Run `npm run test:browser` for headless geometry tests, or `npm run test:slow` for the
-full local checks, unit tests, and browser suite before committing or pushing.
+Run `npm run test:browser` for headless geometry tests or `npm run test:slow` for
+local checks, unit, browser, and end-to-end tests. Pass a file filter to a workspace
+command (for example, `npm test -w service -- tests/unit/issues.test.ts`). Set
+`VERBOSE=1` or pass `-- --reporter=verbose` for Vitest's detailed output. The
+`test:fast` timing note uses a 15-second budget per workspace; set
+`YAAT_FAST_BUDGET_MS` to override it without changing the test exit status.
 
 To try the UI without touching your own data, seed a demo — a project with a
 lead, workers, history and a board; no session is started — into a separate

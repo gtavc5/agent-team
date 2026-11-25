@@ -6,7 +6,7 @@ import { configDefaults, defineConfig } from "vitest/config";
 // Uses exclude-based filtering so parallel test refactors/renames stay compatible.
 export default defineConfig({
   test: {
-    include: ["tests/**/*.test.ts"],
+    include: ["tests/**/*.test.{ts,mjs}"],
     exclude: [
       ...configDefaults.exclude,
       "tests/e2e/**",

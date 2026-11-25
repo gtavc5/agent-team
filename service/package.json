@@ -5,9 +5,9 @@
   "scripts": {
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "test": "vitest run",
-    "test:fast": "vitest run --config vitest.fast.config.mjs",
-    "test:e2e": "vitest run --config vitest.e2e.config.mjs",
+    "test": "node ../scripts/run-tests.mjs service unit",
+    "test:fast": "node ../scripts/run-tests.mjs service fast",
+    "test:e2e": "node ../scripts/run-tests.mjs service e2e",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json"
   },
