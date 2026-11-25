@@ -337,6 +337,7 @@ button {
   height: 14px;
 }
 .ws-group-add .icon,
+.task-archive .icon,
 .task-delete .icon {
   width: 12px;
   height: 12px;
@@ -543,20 +544,20 @@ button {
   margin-bottom: 4px;
 }
 .ws-group-header {
+  position: relative;
+  --row-bg: var(--bg-secondary);
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px 4px;
+  padding: 5px 8px;
   cursor: pointer;
   user-select: none;
   font-size: var(--fs-name);
   font-weight: 600;
   color: var(--text-primary);
   min-width: 0;
+  min-height: 28px;
   border-radius: var(--radius);
-}
-.ws-group-header.active {
-  background: var(--bg-active);
 }
 .ws-group-toggle {
   padding: 0;
@@ -567,20 +568,24 @@ button {
   cursor: pointer;
 }
 .ws-group-header:hover .task-delete,
+.ws-group-actions:focus-within .task-delete,
 .ws-group-header .task-delete:focus-visible {
   opacity: 1;
 }
 .ws-group-header:hover {
+  --row-bg: color-mix(in srgb, var(--text-primary) 5%, var(--bg-secondary));
   background: var(--bg-hover);
 }
-.ws-group-header .events-toggle,
-.ws-group-header .streaming-dot {
-  flex-shrink: 0;
+.ws-group-header.active {
+  --row-bg: color-mix(in srgb, var(--accent) 10%, var(--bg-secondary));
+  background: var(--bg-active);
 }
 .ws-group-header .events-toggle {
+  flex-shrink: 0;
   color: var(--text-muted);
 }
 .ws-group-label {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -602,13 +607,96 @@ button {
   font-family: var(--font-mono);
   font-size: var(--fs-tag);
   font-weight: 400;
-  /* Only the room the name leaves. */
-  flex: 1 1 0;
+  /* Shrinks before the project name does. */
+  flex: 0 4 auto;
   min-width: 0;
-  max-width: 40%;
+  max-width: 35%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.ws-group-status {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 0 auto;
+  max-width: 52%;
+}
+.ws-group-status:has(.session-silence-quiet) {
+  max-width: none;
+}
+.ws-group-status:empty {
+  display: none;
+}
+.ws-group-status .ws-group-count {
+  margin-left: 0;
+}
+.ws-group-header .session-silence {
+  flex: 0 1 auto;
+  max-width: 100%;
+}
+.ws-group-header .session-silence-quiet,
+.task-item .session-silence-quiet {
+  position: relative;
+  flex: 0 0 auto;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  border-radius: var(--radius-sm);
+}
+.session-silence-quiet:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.session-silence-tip {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  font-size: var(--fs-tag);
+  line-height: 1.2;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+/* Project header actions stay out of flex flow while hidden so they never
+   reserve dead width; on hover or focus they enter flow beside the status so
+   badges like Quiet remain visible and hit-testable for their tooltips. */
+.ws-group-actions {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+}
+.ws-group-header:hover .ws-group-actions,
+.ws-group-actions:focus-within {
+  position: static;
+  margin-left: auto;
+  flex-shrink: 0;
+  opacity: 1;
+  pointer-events: auto;
+}
+.ws-group-header:hover .ws-group-status:not(:empty) + .ws-group-actions,
+.ws-group-status:not(:empty) + .ws-group-actions:focus-within {
+  margin-left: 0;
+}
+.ws-group-header:hover .ws-group-status:not(:has(.session-silence-quiet)),
+.ws-group-header:has(.ws-group-actions:focus-within)
+  .ws-group-status:not(:has(.session-silence-quiet)) {
+  flex: 0 1 auto;
 }
 .ws-group-add {
   display: inline-flex;
@@ -616,7 +704,6 @@ button {
   justify-content: center;
   padding: 0;
   flex-shrink: 0;
-  margin-left: auto;
   width: 18px;
   height: 18px;
   border: none;
@@ -627,6 +714,7 @@ button {
   opacity: 0;
 }
 .ws-group-header:hover .ws-group-add,
+.ws-group-actions:focus-within .ws-group-add,
 .ws-group-add:focus-visible {
   opacity: 1;
 }
@@ -634,25 +722,36 @@ button {
   color: var(--text-primary);
   background: var(--bg-elevated);
 }
-.ws-group-add + .ws-group-count,
-.ws-group-add + .ws-group-attention {
-  margin-left: 0;
-}
 .ws-group-attention {
-  max-width: 64%;
+  min-width: 0;
+  flex: 0 1 auto;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--fs-tag);
   font-weight: 600;
 }
+.ws-idle-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 1px 0 1px 4px;
+  border-radius: var(--radius);
+}
+.ws-idle-row:hover {
+  background: var(--bg-hover);
+}
 .ws-idle-toggle {
-  display: block;
-  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
   min-height: 24px;
-  padding: 2px 10px;
+  padding: 3px 8px 3px 10px;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
@@ -660,9 +759,46 @@ button {
   text-align: left;
   cursor: pointer;
 }
-.ws-idle-toggle:hover,
 .ws-idle-toggle:focus-visible {
   background: var(--bg-hover);
+}
+.ws-idle-toggle .events-toggle {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.ws-idle-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-idle-fold {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  margin-right: 6px;
+  padding: 0 6px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--fs-tag);
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+.ws-idle-row:hover .ws-idle-fold,
+.ws-idle-row:focus-within .ws-idle-fold,
+.ws-idle-fold:focus-visible {
+  opacity: 1;
+}
+.ws-idle-fold:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: var(--bg-elevated);
 }
 @media (max-width: 767px), (pointer: coarse) {
   .ws-idle-toggle {
@@ -719,8 +855,17 @@ button {
   opacity: 0.5;
 }
 .task-status.running {
-  background: var(--text-secondary);
-  opacity: 0.75;
+  background: var(--accent);
+  opacity: 1;
+  animation: pulse 1.5s infinite;
+}
+.task-status.waiting {
+  background: var(--purple);
+  opacity: 1;
+  animation: pulse 1.5s infinite;
+}
+.task-status.waiting.sleeping {
+  animation: none;
 }
 .ws-group-header .task-status {
   margin-top: 0;
@@ -757,7 +902,7 @@ button {
   font-size: var(--fs-meta);
   color: var(--text-muted);
 }
-/* A session row's time and ×: over the end of its name while the row is
+/* A session row's time and actions: over the end of its name while the row is
    hovered (or open, on touch), so nothing moves and the name has the row. */
 .task-hover {
   position: absolute;
@@ -765,7 +910,7 @@ button {
   right: 6px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   padding-left: 18px;
   background: linear-gradient(to right, transparent, var(--row-bg) 16px);
   opacity: 0;
@@ -784,6 +929,13 @@ button {
   .task-item.active .task-hover {
     opacity: 1;
     pointer-events: auto;
+  }
+  .task-item.active:has(.session-attention, .session-silence) .task-hover {
+    position: static;
+    align-self: center;
+    flex-shrink: 0;
+    padding-left: 0;
+    background: none;
   }
 }
 .task-meta {
@@ -820,11 +972,21 @@ button {
 .attention-unread {
   color: var(--accent-text);
 }
-.task-item:has(.session-attention, .session-silence) {
-  padding-inline-end: 27px;
-}
 .task-item:has(.session-attention, .session-silence) .task-hover .task-time {
   display: none;
+}
+.task-item:has(.session-attention, .session-silence) .task-hover:not(:has(button)) {
+  display: none;
+}
+/* On rows carrying attention or silence cues, share the row with hover/focus
+   actions instead of overlaying or hiding the cue so Quiet tooltips stay reachable. */
+.task-item:has(.session-attention, .session-silence):hover .task-hover,
+.task-item:has(.session-attention, .session-silence) .task-hover:focus-within {
+  position: static;
+  align-self: center;
+  flex-shrink: 0;
+  padding-left: 0;
+  background: none;
 }
 .attention-badge {
   display: inline-flex;
@@ -846,6 +1008,7 @@ button {
   background: var(--warning-soft);
   color: var(--warning);
 }
+.task-archive,
 .task-delete {
   display: inline-flex;
   align-items: center;
@@ -859,8 +1022,13 @@ button {
   opacity: 0;
   flex-shrink: 0;
 }
+.task-hover .task-archive,
 .task-hover .task-delete {
   opacity: 1;
+}
+.task-archive:hover {
+  color: var(--accent-text);
+  background: var(--bg-hover);
 }
 .task-delete:hover {
   color: var(--error);
@@ -921,11 +1089,15 @@ button {
   opacity: 1;
 }
 .ws-group-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+  height: 18px;
   font: inherit;
   font-size: var(--fs-tag);
   font-weight: 500;
-  line-height: 15px;
+  line-height: 1;
   padding: 0 6px;
   color: var(--text-secondary);
   background: none;
@@ -935,6 +1107,7 @@ button {
   opacity: 0;
 }
 .ws-group-header:hover .ws-group-pill,
+.ws-group-actions:focus-within .ws-group-pill,
 .ws-group-pill:focus-visible {
   opacity: 1;
 }
@@ -946,9 +1119,23 @@ button {
    a new session, or archiving, is offered only in the open session's
    group. A hidden one takes no tap. */
 @media (hover: none) {
+  .ws-group-actions {
+    position: static;
+    margin-left: auto;
+    opacity: 1;
+    pointer-events: auto;
+    flex-shrink: 0;
+  }
+  .ws-group-status:not(:empty) + .ws-group-actions {
+    margin-left: 0;
+  }
+  .ws-group-header.current .ws-group-status:not(:has(.session-silence-quiet)) {
+    flex: 0 1 auto;
+  }
   .ws-group-pill,
   .ws-group-header.current .ws-group-add,
   .ws-archived-purge,
+  .ws-idle-fold,
   .ws-group-header.active .task-delete {
     opacity: 1;
   }
@@ -1077,6 +1264,9 @@ button {
 .agent-status-dot.agent-status-waiting {
   background: var(--purple);
   animation: pulse 1.5s infinite;
+}
+.agent-status-dot.agent-status-sleeping {
+  background: var(--purple);
 }
 .workspace-info-bar {
   display: flex;
@@ -2240,9 +2430,6 @@ button.action-target:hover {
 .banner-text h3 {
   font-size: 12.5px;
   margin: 8px 0 2px;
-}
-.agent-status-dot.agent-status-sleeping {
-  background: var(--purple);
 }
 
 /* ---- Subagents ---------------------------------------------------------- */
@@ -3941,6 +4128,7 @@ button.quote-bar-content:focus-visible {
     right: 6px;
   }
   .ws-group-add .icon,
+  .task-archive .icon,
   .task-delete .icon {
     width: 14px;
     height: 14px;
@@ -6202,7 +6390,10 @@ button.quote-bar-content:focus-visible {
   background: var(--accent);
   animation: pulse 1.5s infinite;
 }
-.ap-dot.ss-waiting,
+.ap-dot.ss-waiting {
+  background: var(--purple);
+  animation: pulse 1.5s infinite;
+}
 .ap-dot.ss-sleeping {
   background: var(--purple);
 }
@@ -6986,6 +7177,7 @@ button.quote-bar-content:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   /* Keep status marks and labels visible without pulsing or spinning. */
   .task-status.running,
+  .task-status.waiting,
   .agent-status-dot.agent-status-busy,
   .agent-status-dot.agent-status-waiting,
   .pr-checks-pending,
@@ -6994,6 +7186,7 @@ button.quote-bar-content:focus-visible {
   .subagent-icon-running,
   .spinner,
   .ap-dot.ss-working,
+  .ap-dot.ss-waiting,
   .sidebar-debug-strip,
   .sidebar.sidebar-open,
   .stop-actions,

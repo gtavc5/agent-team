@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { Workspace } from "../state/useServer";
 import { agentQueues } from "../workspace/agents";
 
-export const SILENCE_MS = 15_000;
+export const SILENCE_MS = 120_000;
 
 // A timestamp comes from the same turn stream on a fresh snapshot and live.
 // Do not invent a start time from when the browser opened the session.
@@ -15,18 +15,47 @@ export function StreamSilence({ workspace }: { workspace: Workspace }) {
 }
 
 function ElapsedSilence({ since, queued }: { since: number; queued: React.ReactNode }) {
-  const [, tick] = useState(0);
+  const [ticks, tick] = useState(0);
+  const [focused, setFocused] = useState(false);
+  const tipId = useId();
   const elapsed = Date.now() - since;
-  const next = elapsed < SILENCE_MS ? SILENCE_MS - elapsed : 1000 - (elapsed % 1000);
+  const quiet = elapsed >= SILENCE_MS;
   useEffect(() => {
-    const timer = setTimeout(() => tick((n) => n + 1), next);
+    if (quiet) return;
+    // Schedule one wake-up for crossing SILENCE_MS; re-arm only if the timer fired early.
+    const remaining = Math.max(0, SILENCE_MS - (Date.now() - since));
+    const timer = setTimeout(() => tick((n) => n + 1), remaining);
     return () => clearTimeout(timer);
-  });
-  if (elapsed < SILENCE_MS) return queued;
-  const label = `No new events for ${Math.floor(elapsed / 1000)}s`;
+  }, [since, quiet, ticks]);
+  useEffect(() => {
+    if (!quiet) setFocused(false);
+  }, [quiet]);
+  if (!quiet) return queued;
+  const detail = `No new events for ${Math.floor(elapsed / 1000)}s`;
+  const refresh = () => tick((n) => n + 1);
   return (
-    <span className="session-silence" title={label}>
-      {label}
+    <span
+      className="session-silence session-silence-quiet"
+      tabIndex={0}
+      title={detail}
+      aria-label={`Quiet: ${detail}`}
+      aria-describedby={focused ? tipId : undefined}
+      onPointerEnter={refresh}
+      onFocus={() => {
+        refresh();
+        setFocused(true);
+      }}
+      onBlur={() => setFocused(false)}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") e.currentTarget.blur();
+      }}
+    >
+      Quiet
+      {focused && (
+        <span id={tipId} role="tooltip" className="session-silence-tip">
+          {detail}
+        </span>
+      )}
     </span>
   );
 }

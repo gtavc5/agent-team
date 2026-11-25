@@ -1,0 +1,266 @@
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Sidebar, type SidebarProps } from "../src/sidebar/Sidebar";
+import { SILENCE_MS, StreamSilence } from "../src/sidebar/StreamSilence";
+import type { AgentInfo, Project, Workspace } from "../src/state/useServer";
+
+const NOW = 1_800_000_000_000;
+const baseAgent: AgentInfo = {
+  id: "a1",
+  name: "Agent",
+  model: "model",
+  avatar: "A",
+  color: "#888",
+  isDefault: true,
+};
+
+const ws = (id: string, over: Partial<Workspace> = {}): Workspace => ({
+  id,
+  name: id,
+  hostId: "local",
+  project: "repo",
+  cwd: "/repo",
+  agents: [baseAgent],
+  messages: [],
+  createdAt: NOW - 1000,
+  lastMessageAt: NOW - 1000,
+  git: null,
+  pr: null,
+  ...over,
+});
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("StreamSilence", () => {
+  it("stays quiet before 120s (showing Queued if queued), switches to Quiet at 120s without 1Hz churn, and refreshes title on pointerEnter", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    expect(SILENCE_MS).toBe(120_000);
+
+    let renders = 0;
+    function Spy({ workspace }: { workspace: Workspace }) {
+      renders += 1;
+      return <StreamSilence workspace={workspace} />;
+    }
+
+    const busyQueued = ws("w1", {
+      queued: true,
+      agents: [{ ...baseAgent, busy: true, lastStreamAt: NOW - 60_000 }],
+    });
+    const { container } = render(<Spy workspace={busyQueued} />);
+    expect(container.textContent).toBe("Queued");
+
+    // 59s later (119s elapsed): still Queued, not Quiet.
+    act(() => {
+      vi.advanceTimersByTime(59_000);
+    });
+    expect(container.textContent).toBe("Queued");
+
+    // 1s later (120s elapsed): crosses SILENCE_MS -> renders fixed Quiet with factual detail in title.
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    const badge = container.querySelector(".session-silence")!;
+    expect(badge.textContent).toBe("Quiet");
+    expect(badge.getAttribute("title")).toBe("No new events for 120s");
+    expect(badge.getAttribute("aria-label")).toBe("Quiet: No new events for 120s");
+
+    // Zero 1Hz re-renders after crossing SILENCE_MS.
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const rendersAtQuiet = renders;
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(renders).toBe(rendersAtQuiet);
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+
+    // Pointer enter refreshes the factual detail tooltip on demand.
+    fireEvent.pointerEnter(badge);
+    expect(badge.textContent).toBe("Quiet");
+    expect(badge.getAttribute("title")).toBe("No new events for 150s");
+
+    // Keyboard focus is reachable via tabIndex=0, refreshes elapsed detail,
+    // exposes a visible role="tooltip", and dismisses on blur/Escape.
+    expect(badge.getAttribute("tabindex")).toBe("0");
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+    fireEvent.focus(badge);
+    const tip = container.querySelector('[role="tooltip"]')!;
+    expect(tip).not.toBeNull();
+    expect(tip.textContent).toBe("No new events for 160s");
+    expect(badge.getAttribute("aria-describedby")).toBe(tip.id);
+    fireEvent.blur(badge);
+    expect(container.querySelector('[role="tooltip"]')).toBeNull();
+  });
+
+  it("shows nothing before 120s when busy and not queued", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const busy = ws("w1", {
+      agents: [{ ...baseAgent, busy: true, lastStreamAt: NOW - 90_000 }],
+    });
+    const { container } = render(<StreamSilence workspace={busy} />);
+    expect(container.querySelector(".session-silence")).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(container.querySelector(".session-silence")?.textContent).toBe("Quiet");
+    expect(container.querySelector(".session-silence")?.getAttribute("title")).toBe(
+      "No new events for 120s",
+    );
+  });
+});
+
+describe("Sidebar idle disclosure and worker archive action", () => {
+  const project: Project = {
+    id: "p1",
+    name: "agent-team",
+    root: "/repo",
+    leadWorkspaceId: "lead",
+    createdAt: NOW - 5000,
+    objectives: [],
+  };
+
+  const baseProps = (over: Partial<SidebarProps> = {}): SidebarProps => ({
+    workspaces: [
+      ws("lead", { projectLink: { projectId: "p1", role: "lead" } }),
+      ws("done-worker", {
+        name: "Done Worker",
+        lastResult: "done",
+        projectLink: { projectId: "p1", role: "worker" },
+      }),
+      ws("idle-worker", {
+        name: "Idle Worker",
+        projectLink: { projectId: "p1", role: "worker" },
+      }),
+    ],
+    projects: [project],
+    activeWsId: "lead",
+    connected: true,
+    groupOverrides: {},
+    searchQuery: "",
+    searchHits: null,
+    systemStatus: null,
+    now: NOW,
+    onSelect: vi.fn(),
+    onDelete: vi.fn(),
+    onToggleGroup: vi.fn(),
+    onSearchChange: vi.fn(),
+    onJump: vi.fn(),
+    onCreate: vi.fn(),
+    onCreateIn: vi.fn(),
+    onReplayDemo: vi.fn(),
+    onDebugSnapshot: vi.fn(),
+    onPurgeArchived: vi.fn(),
+    onArchiveWorkspace: vi.fn(),
+    onArchiveProject: vi.fn(),
+    ...over,
+  });
+
+  it("renders Idle (N) disclosure with sibling Fold (+M) (no nested buttons) and unfolds items below", () => {
+    const props = baseProps();
+    const { container, getByRole } = render(<Sidebar {...props} />);
+    const toggle = getByRole("button", { name: "Idle (1)" });
+    const fold = getByRole("button", { name: "Fold (+1)" });
+
+    // No nested <button> inside <button>.
+    expect(toggle.querySelector("button")).toBeNull();
+    expect(fold.closest("button")).toBe(fold);
+    expect(toggle.closest(".ws-idle-row")).toBe(fold.closest(".ws-idle-row"));
+    expect(container.querySelectorAll(".ws-idle-row")).toHaveLength(1);
+    expect(container.textContent).not.toContain("Idle / Done");
+
+    // Unfolding renders Done Worker below the Idle (1) row in DOM order.
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const items = container.querySelector(".ws-group-items")!;
+    const children = [...items.children];
+    const idleRowIdx = children.indexOf(toggle.closest(".ws-idle-row")!);
+    const doneRow = [...items.querySelectorAll(".task-item")].find((el) =>
+      el.textContent?.includes("Done Worker"),
+    )!;
+    const doneRowIdx = children.indexOf(doneRow);
+    expect(doneRowIdx).toBeGreaterThan(idleRowIdx);
+
+    // Clicking Fold (+1) folds the visible idle worker without toggling the disclosure open.
+    fireEvent.click(fold);
+    expect(getByRole("button", { name: "Idle (2)" }).getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector(".ws-idle-fold")).toBeNull();
+  });
+
+  it("offers Archive session only on eligible non-running, non-queued, non-archived, non-sealed worker rows", () => {
+    const onArchiveWorkspace = vi.fn();
+    const onSelect = vi.fn();
+    const sealedProject: Project = {
+      ...project,
+      id: "p-sealed",
+      name: "sealed-proj",
+      leadWorkspaceId: "s-lead",
+      status: "sealed",
+    };
+    const { container } = render(
+      <Sidebar
+        {...baseProps({
+          projects: [project, sealedProject],
+          workspaces: [
+            ws("lead", { projectLink: { projectId: "p1", role: "lead" } }),
+            ws("w-idle", { name: "W Idle", projectLink: { projectId: "p1", role: "worker" } }),
+            ws("w-busy", {
+              name: "W Busy",
+              projectLink: { projectId: "p1", role: "worker" },
+              agents: [{ ...baseAgent, busy: true }],
+            }),
+            ws("w-starting", {
+              name: "W Starting",
+              queued: false,
+              projectLink: { projectId: "p1", role: "worker" },
+              agents: [{ ...baseAgent, busy: true, state: "idle" }],
+            }),
+            ws("w-queued", {
+              name: "W Queued",
+              queued: true,
+              projectLink: { projectId: "p1", role: "worker" },
+            }),
+            ws("w-archived", {
+              name: "W Archived",
+              archivedAt: NOW - 500,
+              projectLink: { projectId: "p1", role: "worker" },
+            }),
+            ws("s-lead", { projectLink: { projectId: "p-sealed", role: "lead" } }),
+            ws("w-sealed", {
+              name: "W Sealed",
+              projectLink: { projectId: "p-sealed", role: "worker" },
+            }),
+          ],
+          onArchiveWorkspace,
+          onSelect,
+        })}
+      />,
+    );
+
+    const findRow = (name: string) =>
+      [...container.querySelectorAll(".task-item")].find((el) => el.textContent?.includes(name));
+
+    const idleBtn = findRow("W Idle")!.querySelector<HTMLButtonElement>(".task-archive");
+    expect(idleBtn).not.toBeNull();
+    fireEvent.click(idleBtn!);
+    expect(onArchiveWorkspace).toHaveBeenCalledWith("w-idle");
+    expect(onSelect).not.toHaveBeenCalled();
+
+    expect(findRow("W Busy")!.querySelector(".task-archive")).toBeNull();
+    // agent_busy before agent_state (busy:true, state:"idle", queued:false) keeps running dot & hides Archive.
+    expect(findRow("W Starting")!.querySelector(".task-status.running")).not.toBeNull();
+    expect(findRow("W Starting")!.querySelector(".task-archive")).toBeNull();
+    expect(findRow("W Queued")!.querySelector(".task-archive")).toBeNull();
+    expect(findRow("W Sealed")!.querySelector(".task-archive")).toBeNull();
+
+    // Open archived section and confirm archived rows do not offer Archive session.
+    fireEvent.click(container.querySelector(".ws-archive-toggle")!);
+    expect(findRow("W Archived")!.querySelector(".task-archive")).toBeNull();
+  });
+});

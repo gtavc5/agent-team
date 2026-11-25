@@ -33,6 +33,7 @@ export const ICONS = {
   refresh: "M12.5 6A5 5 0 0 0 4 4.2L2.5 6m0-3.5V6H6m-2.5 4A5 5 0 0 0 12 11.8l1.5-1.8m0 3.5V10H10",
   sun: "M11 8a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM8 1.5v1m0 11v1M1.5 8h1m11 0h1M3.4 3.4l.8.8m7.6 7.6.8.8m0-9.2-.8.8m-7.6 7.6-.8.8",
   moon: "M13.5 10A5.7 5.7 0 1 1 6 2.5 5.8 5.8 0 0 0 13.5 10Z",
+  archive: "M2 3.5h12v2.5H2zM3.2 6v6.5h9.6V6M6.5 8.5h3",
 } as const;
 
 export type IconName = keyof typeof ICONS;

@@ -1623,6 +1623,7 @@ export function App() {
             onCreateIn={onCreateWorkspace}
             onReplayDemo={onReplayDemo}
             onPurgeArchived={onPurgeArchived}
+            onArchiveWorkspace={archiveWorkspace}
             onArchiveProject={onArchiveProject}
             onRenameProject={renameProject}
             onRestoreProject={onRestoreProject}

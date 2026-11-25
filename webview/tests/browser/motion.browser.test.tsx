@@ -19,8 +19,11 @@ it("stops status loops and chrome motion without hiding status text in reduced m
   const { container } = render(
     <>
       <span className="task-status running" />
+      <span className="task-status waiting" />
+      <span className="task-status waiting sleeping" />
       <span className="agent-status-dot agent-status-busy" />
       <span className="agent-status-dot agent-status-waiting" />
+      <span className="agent-status-dot agent-status-sleeping" />
       <span className="pr-checks pr-checks-pending" />
       <span className="delivery-inline">
         <span className="streaming-dot" /> Streaming
@@ -36,6 +39,8 @@ it("stops status loops and chrome motion without hiding status text in reduced m
         <svg className="icon" />
       </button>
       <span className="ap-dot ss-working" />
+      <span className="ap-dot ss-waiting" />
+      <span className="ap-dot ss-sleeping" />
       <div className="sidebar-debug-strip">Debug tools</div>
       <div className="quota-details">Quota details</div>
       <div className="stop-actions">Stop actions</div>
@@ -54,6 +59,8 @@ it("stops status loops and chrome motion without hiding status text in reduced m
   for (const animation of container.getAnimations({ subtree: true })) animation.pause();
   const get = (selector: string) => container.querySelector(selector)!;
   const loopMarkers = [
+    ".task-status.running",
+    ".task-status.waiting:not(.sleeping)",
     ".agent-status-busy",
     ".agent-status-waiting",
     ".pr-checks-pending",
@@ -61,7 +68,8 @@ it("stops status loops and chrome motion without hiding status text in reduced m
     ".banner-icon",
     ".subagent-icon-running",
     ".spinner",
-    ".ap-dot",
+    ".ap-dot.ss-working",
+    ".ap-dot.ss-waiting",
   ];
   const fades = [".sidebar-debug-strip", ".quota-details", ".stop-actions"];
   const statusTexts = [".delivery-inline", ".banner-retry", ".history-loading", ".quota-details"];
@@ -78,8 +86,13 @@ it("stops status loops and chrome motion without hiding status text in reduced m
   for (const selector of loopMarkers) {
     expect(getComputedStyle(get(selector)).animationIterationCount, selector).toBe("infinite");
   }
-  for (const selector of [".task-status", ".quota-refresh .icon"]) {
-    expect(getComputedStyle(get(selector)).animationName).toBe("none");
+  for (const selector of [
+    ".task-status.waiting.sleeping",
+    ".agent-status-sleeping",
+    ".ap-dot.ss-sleeping",
+    ".quota-refresh .icon",
+  ]) {
+    expect(getComputedStyle(get(selector)).animationName, selector).toBe("none");
   }
   for (const selector of fades) expect(properties(selector), selector).toEqual(["opacity"]);
   expect(properties(".dialog")).toEqual(["opacity", "transform"]);

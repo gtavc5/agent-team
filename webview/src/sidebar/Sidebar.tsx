@@ -17,9 +17,10 @@ import {
   archivedWorkspaces,
   canFoldWorker,
   initialIdleWorkers,
+  workspaceStatus,
+  type GroupStatus,
   type WorkspaceGroup,
 } from "./groups";
-import { isAgentActive } from "../workspace/agents";
 import { Icon } from "../panels/Icon";
 import { DEFAULT_BRANCH } from "../panels/scope";
 import { formatBytes, formatRelative } from "../format";
@@ -79,6 +80,13 @@ function SessionWait({ workspace }: { workspace: Workspace }) {
     );
   }
   return <StreamSilence workspace={workspace} />;
+}
+
+function statusDotClass(state: GroupStatus): string {
+  if (state === "working") return "running";
+  if (state === "waiting") return "waiting";
+  if (state === "sleeping") return "waiting sleeping";
+  return "idle";
 }
 
 const STATUS_COLORS = { danger: "var(--error)", warn: "var(--warning)", normal: "var(--accent)" };
@@ -154,6 +162,7 @@ export interface SidebarProps {
   onDebugSnapshot: () => void | Promise<unknown>;
   // One project's archived sessions, or (null) those in no project.
   onPurgeArchived: (projectId: string | null) => void;
+  onArchiveWorkspace?: (wsId: string) => void;
   onArchiveProject?: (projectId: string) => void;
   onRenameProject?: (projectId: string, name: string) => void;
   onRestoreProject?: (projectId: string) => void;
@@ -299,6 +308,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
     const project = link?.role === "lead" && known.has(link.projectId) ? link.projectId : null;
     return (
       <button
+        type="button"
         className="task-delete"
         title={project ? "Delete project" : "Delete session"}
         onClick={(e) => {
@@ -461,6 +471,12 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
     const foldable =
       !shelf && g.project ? visible.filter((w) => canFoldWorker(w, p.activeWsId)) : [];
     const idleOpen = showIdle.has(g.key);
+    const toggleIdle = () =>
+      setShowIdle((prev) => {
+        const next = new Set(prev);
+        if (!next.delete(g.key)) next.add(g.key);
+        return next;
+      });
     const foldIdle = () => {
       setFoldedIdle((prev) => new Set([...prev, ...foldable.map((w) => w.id)]));
       setShowIdle((prev) => {
@@ -472,6 +488,78 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
     const hasContent = items.length > 0 || past.length > 0;
     // A project of archived sessions only (its lead archived too) has no live one.
     const git = (g.workspaces[0] ?? g.archived[0])?.git;
+    const isRenaming = Boolean(g.project && renaming === g.project.id);
+    const canAdd = !g.project || Boolean(g.project.root && g.project.status !== "sealed");
+    const canArchiveProject =
+      !shelf && Boolean(g.project && g.project.status !== "sealed" && p.onArchiveProject);
+    const canRestoreProject =
+      shelf && Boolean(g.project && g.project.status !== "sealed" && p.onRestoreProject);
+    const leadDelete = lead ? deleteButton(lead) : null;
+    const hasActions =
+      !isRenaming && (canAdd || canArchiveProject || canRestoreProject || Boolean(leadDelete));
+    const renderWorkerItem = (ws: Workspace) => {
+      const state = workspaceStatus(ws);
+      const busy = state === "working" || state === "waiting";
+      const cue = sessionAttention(ws);
+      const owner = ws.projectLink
+        ? p.projects?.find((project) => project.id === ws.projectLink!.projectId)
+        : undefined;
+      const canArchive =
+        Boolean(p.onArchiveWorkspace) &&
+        ws.archivedAt == null &&
+        ws.projectLink?.role !== "lead" &&
+        owner?.status !== "sealed" &&
+        !busy &&
+        !ws.queued;
+      return (
+        <div
+          key={ws.id}
+          className={`task-item ${ws.id === p.activeWsId ? "active" : ""}${busy ? " task-item-active" : ""}`}
+          onClick={() => p.onSelect(ws.id)}
+        >
+          <div className={`task-status ${statusDotClass(state)}`} aria-hidden="true" />
+          <div className="task-info">
+            <div className="task-name">
+              <span className="task-name-text">
+                <RoleTag link={ws.projectLink} />
+                <span className="clip" title={ws.name}>
+                  {ws.name}
+                </span>
+              </span>
+              {cue ? (
+                <span
+                  className={`session-attention attention-${cue}${cue === "yourTurn" ? " awaits-tag" : ""}`}
+                >
+                  {cue === "yourTurn" ? "Your turn" : cue === "failed" ? "Failed" : "Unread result"}
+                </span>
+              ) : p.connected ? (
+                <SessionWait workspace={ws} />
+              ) : null}
+            </div>
+          </div>
+          <span className="task-hover">
+            <span className="task-time">
+              {formatRelative(ws.lastMessageAt ?? ws.createdAt, now)}
+            </span>
+            {canArchive && (
+              <button
+                type="button"
+                className="task-archive"
+                title="Archive session"
+                aria-label="Archive session"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  p.onArchiveWorkspace!(ws.id);
+                }}
+              >
+                <Icon name="archive" />
+              </button>
+            )}
+            {deleteButton(ws)}
+          </span>
+        </div>
+      );
+    };
     return (
       <div key={g.key} className="ws-group">
         <div
@@ -490,6 +578,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
             <span className="events-toggle" />
           ) : lead ? (
             <button
+              type="button"
               className="events-toggle ws-group-toggle"
               aria-label={expanded ? `Fold ${g.label}` : `Unfold ${g.label}`}
               aria-expanded={expanded}
@@ -503,7 +592,7 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
           ) : (
             <span className="events-toggle">{expanded ? "▾" : "▸"}</span>
           )}
-          {g.project && renaming === g.project.id ? (
+          {isRenaming ? (
             <NameInput
               name={g.label}
               label="Project name"
@@ -534,133 +623,120 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               Sealed
             </span>
           )}
-          {g.project && summary ? (
-            <span
-              className={`ws-group-attention attention-${attention.yourTurn ? "yourTurn" : attention.failed ? "failed" : "unread"}`}
-              role="status"
-              aria-label={`${g.label}: ${summary}`}
-              title={summary}
-            >
-              {summary}
-            </span>
-          ) : lead && p.connected ? (
-            <SessionWait workspace={lead} />
-          ) : null}
           {git?.branch && !DEFAULT_BRANCH.test(git.branch) && (
             <span className="ws-group-branch" title={gitTitle(git)}>
               {git.branch}
             </span>
           )}
-          {(!g.project || (g.project.root && g.project.status !== "sealed")) && (
-            <button
-              className="ws-group-add"
-              title={g.project ? `New session in ${g.project.name}` : `New workspace in ${g.key}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                p.onCreateIn(g.project?.root ?? g.key);
-              }}
-            >
-              <Icon name="plus" />
-            </button>
+          {!isRenaming && (
+            <span className="ws-group-status">
+              {g.status !== "idle" && (
+                <span className={`task-status ${statusDotClass(g.status)}`} aria-hidden="true" />
+              )}
+              {g.project && summary ? (
+                <span
+                  className={`ws-group-attention attention-${attention.yourTurn ? "yourTurn" : attention.failed ? "failed" : "unread"}`}
+                  role="status"
+                  aria-label={`${g.label}: ${summary}`}
+                  title={summary}
+                >
+                  {summary}
+                </span>
+              ) : lead && p.connected ? (
+                <SessionWait workspace={lead} />
+              ) : null}
+              {!expanded && !summary && items.length > 0 && (
+                <span className="ws-group-count">{items.length}</span>
+              )}
+            </span>
           )}
-          {!expanded && !summary && items.length > 0 && (
-            <span className="ws-group-count">{items.length}</span>
+          {hasActions && (
+            <span className="ws-group-actions">
+              {canAdd && (
+                <button
+                  type="button"
+                  className="ws-group-add"
+                  title={
+                    g.project ? `New session in ${g.project.name}` : `New workspace in ${g.key}`
+                  }
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    p.onCreateIn(g.project?.root ?? g.key);
+                  }}
+                >
+                  <Icon name="plus" />
+                </button>
+              )}
+              {canArchiveProject && (
+                <button
+                  type="button"
+                  className="ws-group-pill ws-group-archive"
+                  title={`Archive ${g.label} with its sessions`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    p.onArchiveProject!(g.project!.id);
+                  }}
+                >
+                  Archive
+                </button>
+              )}
+              {canRestoreProject && (
+                <button
+                  type="button"
+                  className="ws-group-pill"
+                  title={`Bring ${g.label} back among the projects`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    p.onRestoreProject!(g.project!.id);
+                  }}
+                >
+                  Restore
+                </button>
+              )}
+              {leadDelete}
+            </span>
           )}
-          {g.running && !summary && <span className="task-status running" aria-hidden="true" />}
-          {!shelf && g.project && g.project.status !== "sealed" && p.onArchiveProject && (
-            <button
-              className="ws-group-pill ws-group-archive"
-              title={`Archive ${g.label} with its sessions`}
-              onClick={(e) => {
-                e.stopPropagation();
-                p.onArchiveProject!(g.project!.id);
-              }}
-            >
-              Archive
-            </button>
-          )}
-          {shelf && g.project && g.project.status !== "sealed" && p.onRestoreProject && (
-            <button
-              className="ws-group-pill"
-              title={`Bring ${g.label} back among the projects`}
-              onClick={(e) => {
-                e.stopPropagation();
-                p.onRestoreProject!(g.project!.id);
-              }}
-            >
-              Restore
-            </button>
-          )}
-          {lead && deleteButton(lead)}
         </div>
         {expanded && hasContent && (
           <div className="ws-group-items">
-            {[...visible, ...(idleOpen ? idle : [])].map((ws) => {
-              const running = ws.agents.some((a) => a.busy || isAgentActive(a));
-              const cue = sessionAttention(ws);
-              return (
-                <div
-                  key={ws.id}
-                  className={`task-item ${ws.id === p.activeWsId ? "active" : ""}${running ? " task-item-active" : ""}`}
-                  onClick={() => p.onSelect(ws.id)}
-                >
-                  <div
-                    className={`task-status ${running && !cue ? "running" : "idle"}`}
-                    aria-hidden="true"
-                  />
-                  <div className="task-info">
-                    <div className="task-name">
-                      <span className="task-name-text">
-                        <RoleTag link={ws.projectLink} />
-                        <span className="clip" title={ws.name}>
-                          {ws.name}
-                        </span>
-                      </span>
-                      {cue ? (
-                        <span
-                          className={`session-attention attention-${cue}${cue === "yourTurn" ? " awaits-tag" : ""}`}
-                        >
-                          {cue === "yourTurn"
-                            ? "Your turn"
-                            : cue === "failed"
-                              ? "Failed"
-                              : "Unread result"}
-                        </span>
-                      ) : p.connected ? (
-                        <SessionWait workspace={ws} />
-                      ) : null}
-                    </div>
-                  </div>
-                  <span className="task-hover">
-                    <span className="task-time">
-                      {formatRelative(ws.lastMessageAt ?? ws.createdAt, now)}
+            {visible.map(renderWorkerItem)}
+            {idle.length > 0 ? (
+              <>
+                <div className="ws-idle-row">
+                  <button
+                    type="button"
+                    className="ws-idle-toggle"
+                    aria-expanded={idleOpen}
+                    onClick={toggleIdle}
+                  >
+                    <span className="events-toggle" aria-hidden="true">
+                      {idleOpen ? "▾" : "▸"}
                     </span>
-                    {deleteButton(ws)}
-                  </span>
+                    <span className="ws-idle-label">Idle ({idle.length})</span>
+                  </button>
+                  {foldable.length > 0 && (
+                    <button
+                      type="button"
+                      className="ws-idle-fold"
+                      title={`Fold ${foldable.length} idle session${foldable.length === 1 ? "" : "s"}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        foldIdle();
+                      }}
+                    >
+                      Fold (+{foldable.length})
+                    </button>
+                  )}
                 </div>
-              );
-            })}
-            {idle.length > 0 && (
-              <button
-                type="button"
-                className="ws-idle-toggle"
-                aria-expanded={idleOpen}
-                onClick={() =>
-                  setShowIdle((prev) => {
-                    const next = new Set(prev);
-                    if (!next.delete(g.key)) next.add(g.key);
-                    return next;
-                  })
-                }
-              >
-                {idleOpen ? `Hide idle (${idle.length})` : `Idle / Done (${idle.length})`}
-              </button>
-            )}
-            {foldable.length > 0 && (
-              <button type="button" className="ws-idle-toggle" onClick={foldIdle}>
-                Fold idle ({foldable.length})
-              </button>
-            )}
+                {idleOpen && idle.map(renderWorkerItem)}
+              </>
+            ) : foldable.length > 0 ? (
+              <div className="ws-idle-row">
+                <button type="button" className="ws-idle-toggle" onClick={foldIdle}>
+                  Fold idle ({foldable.length})
+                </button>
+              </div>
+            ) : null}
             {past.length > 0 && archiveList(g, past)}
           </div>
         )}

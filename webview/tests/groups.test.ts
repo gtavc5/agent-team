@@ -93,8 +93,14 @@ describe("running state includes background subagents", () => {
     ];
     const groups = groupWorkspaces([w]);
     expect(groups[0].running).toBe(true);
+    expect(groups[0].status).toBe("waiting");
     w.agents = [{ ...w.agents[0], state: "sleeping" }];
     expect(groupWorkspaces([w])[0].running).toBe(false);
+    expect(groupWorkspaces([w])[0].status).toBe("sleeping");
+    w.agents = [{ ...w.agents[0], state: "working" }];
+    expect(groupWorkspaces([w])[0].status).toBe("working");
+    w.agents = [{ ...w.agents[0], state: "idle" }];
+    expect(groupWorkspaces([w])[0].status).toBe("idle");
     // Running keeps even a stale group expanded.
     expect(isGroupExpanded({ ...groups[0], lastActive: NOW - STALE_MS - 1 }, {}, NOW)).toBe(true);
   });
@@ -144,5 +150,26 @@ describe("a project's archive", () => {
     expect(g.archived.map((w) => w.id)).toEqual(["old"]);
     expect(g.lastActive).toBe(5000);
     expect(archivedWorkspaces([lead, old, loose], [project]).map((w) => w.id)).toEqual(["loose"]);
+  });
+
+  it("treats busy:true with explicit state:'idle' as working (agent_busy before agent_state)", () => {
+    const starting = {
+      ...ws("starting", "/repo/a", 2000),
+      agents: [
+        {
+          id: "a",
+          name: "A",
+          model: "m",
+          avatar: "x",
+          color: "#fff",
+          isDefault: true,
+          busy: true,
+          state: "idle" as const,
+        },
+      ],
+    };
+    const [g] = groupWorkspaces([starting]);
+    expect(g.status).toBe("working");
+    expect(g.running).toBe(true);
   });
 });

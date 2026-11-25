@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { page } from "vitest/browser";
+import { page, cdp, userEvent } from "vitest/browser";
+import type {} from "@vitest/browser-playwright";
 import { App } from "../../src/App";
 import { collectSnapshot, SNAPSHOT_SELECTORS } from "../../src/dev/debugSnapshot";
 import type { AgentInfo, Message, Project, Workspace } from "../../src/state/useServer";
@@ -77,13 +78,16 @@ function mount(active = "lead") {
   return render(<App />, { container: root });
 }
 
-afterEach(() => {
+let touch = false;
+afterEach(async () => {
   cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   FakeSocket.instances = [];
   localStorage.clear();
   document.documentElement.removeAttribute("data-theme");
+  if (touch) await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  touch = false;
 });
 
 it.each([
@@ -101,7 +105,7 @@ it.each([
     const asking = workspace("Asking", 1, { awaitsUser: true, unread: 1 });
     const done = workspace("Result", 2, { agents: [{ ...agent, busy: true, lastStreamAt: NOW }] });
     const running = workspace("Running", 3, {
-      agents: [{ ...agent, busy: true, lastStreamAt: NOW - 14_875 }],
+      agents: [{ ...agent, busy: true, lastStreamAt: NOW - 119_875 }],
     });
     const old = workspace("Read and idle", -1, { lastResult: "done" });
     const view = mount();
@@ -111,14 +115,20 @@ it.each([
     expect(order()).toEqual(["Running", "Result", "Asking"]);
     expect(cue("Asking")).toBe("Your turn");
     expect(row("Read and idle")).toBeNull();
-    expect(view.getByRole("button", { name: "Idle / Done (1)" })).toBeTruthy();
+    const idleToggle = view.getByRole("button", { name: "Idle (1)" });
+    expect(idleToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(idleToggle.textContent).toContain("▸");
+    expect(document.body.textContent).not.toContain("Idle / Done");
     expect(cue("Result")).toBeUndefined();
     expect(row("Running")?.querySelector(".task-status.running")).toBeTruthy();
-    expect(row("Running")?.textContent).not.toContain("No new events");
+    expect(row("Running")?.querySelector(".session-silence")).toBeNull();
     clock = NOW + 125;
     await expect
       .poll(() => row("Running")?.querySelector(".session-silence")?.textContent)
-      .toBe("No new events for 15s");
+      .toBe("Quiet");
+    expect(row("Running")?.querySelector(".session-silence")?.getAttribute("title")).toBe(
+      "No new events for 120s",
+    );
     expect(row("Running")?.textContent).not.toMatch(/thinking|stuck/i);
 
     const runningRow = row("Running")!;
@@ -157,7 +167,10 @@ it.each([
     });
     expect(cue("Asking")).toBe("Your turn");
     expect(cue("Result")).toBe("Unread result");
-    expect(row("Running")?.textContent).toContain("No new events for 15s");
+    expect(row("Running")?.querySelector(".session-silence")?.textContent).toBe("Quiet");
+    expect(row("Running")?.querySelector(".session-silence")?.getAttribute("title")).toBe(
+      "No new events for 120s",
+    );
     const retryLabel = "Retrying (1/2 in 0s): 503 fixture service unavailable";
     receive({
       type: "stream_event",
@@ -192,12 +205,24 @@ it.each([
       message: frame(8, { kind: "user", status: "queued" }),
     });
     expect(row("Running")?.querySelector(".session-silence")?.textContent).toBe("Queued");
-    expect(view.queryByRole("button", { name: "Fold idle (1)" })).toBeNull();
+    expect(view.queryByRole("button", { name: /^Fold (?:idle|\(\+)/ })).toBeNull();
     receive({ type: "message_removed", workspaceId: running.id, messageId: "m8", queued: false });
     expect(row("Running")?.querySelector(".session-silence")).toBeNull();
-    fireEvent.click(view.getByRole("button", { name: "Fold idle (1)" }));
+    // Merged Fold (+1) sits in the Idle (1) row instead of stacking a second toggle row.
+    expect(document.querySelectorAll(".ws-idle-row")).toHaveLength(1);
+    fireEvent.click(view.getByRole("button", { name: "Fold (+1)" }));
     expect(order()).toEqual(["Result", "Asking"]);
-    expect(view.getByRole("button", { name: "Idle / Done (2)" })).toBeTruthy();
+    const foldedToggle = view.getByRole("button", { name: "Idle (2)" });
+    expect(foldedToggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(foldedToggle);
+    expect(foldedToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(foldedToggle.textContent).toContain("▾");
+    // Unfolded idle workers render below the Idle (2) disclosure row.
+    const idleRow = foldedToggle.closest(".ws-idle-row")!;
+    const unfolded = row("Read and idle")!;
+    expect(unfolded.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+      idleRow.getBoundingClientRect().bottom - 1,
+    );
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width);
     for (const el of [get(".main-panel"), get(".sidebar")])
       expect(el.scrollWidth).toBeLessThanOrEqual(el.clientWidth);
@@ -281,4 +306,516 @@ it("restores A's exact reading anchor after sending in B, without following new 
   fireEvent.click(row("B")!);
   fireEvent.click(row("A")!);
   expect(gap()).toBeLessThanOrEqual(1);
+});
+
+it("keeps 307px project headers readable with right-aligned status, centered Archive pill, and one-click worker archive", async () => {
+  await page.viewport(1280, 800);
+  vi.spyOn(Date, "now").mockReturnValue(NOW);
+  const agentTeam: Project = {
+    id: "at",
+    name: "agent-team",
+    root: "/repo/agent-team",
+    createdAt: NOW,
+    leadWorkspaceId: "at-lead",
+    objectives: [],
+  };
+  const makeLead = (over: Partial<Workspace> = {}) =>
+    workspace("at-lead", 0, {
+      name: "agent-team",
+      projectLink: { projectId: "at", role: "lead" },
+      ...over,
+    });
+  const makeWorker = (id: string, order: number, over: Partial<Workspace> = {}) =>
+    workspace(id, order, {
+      projectLink: { projectId: "at", role: "worker" },
+      ...over,
+    });
+
+  const view = mount("at-lead");
+  const sidebarEl = get(".sidebar");
+  sidebarEl.style.width = "307px";
+
+  const { sock, receive } = connect([]);
+  const load = (workspaces: Workspace[], projects: Project[] = [agentTeam]) =>
+    receive({ type: "init", workspaces, projects, config });
+
+  const header = () => get(".ws-group-project");
+  const label = () => get(".ws-group-project .ws-group-label");
+  const status = () => get(".ws-group-project .ws-group-status");
+  const actions = () => get(".ws-group-project .ws-group-actions");
+  const rect = (el: Element) => el.getBoundingClientRect();
+  const textRect = (el: Element) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    return range.getBoundingClientRect();
+  };
+
+  // Case 1: 1 need you on header aligns flush with Your turn on the worker row,
+  // and agent-team stays unclipped at 307px.
+  const waitingWorker = makeWorker("Worker A", 1, { awaitsUser: true });
+  const idleWorker = makeWorker("Worker Idle", 2);
+  const runningWorker = makeWorker("Worker Busy", 3, {
+    agents: [{ ...agent, busy: true, lastStreamAt: NOW }],
+  });
+  load([makeLead(), waitingWorker, idleWorker, runningWorker]);
+
+  expect(label().scrollWidth).toBeLessThanOrEqual(label().clientWidth);
+  expect(rect(label()).width).toBeGreaterThan(60);
+  const headerRect = rect(header());
+  const statusRect = rect(status());
+  const workerCueRect = rect(row("Worker A")!.querySelector(".session-attention")!);
+  expect(headerRect.right - statusRect.right).toBeLessThanOrEqual(10);
+  expect(Math.abs(statusRect.right - workerCueRect.right)).toBeLessThanOrEqual(1);
+  // Hidden actions must not reserve dead width on pointer devices.
+  expect(getComputedStyle(actions()).pointerEvents).toBe("none");
+  expect(getComputedStyle(actions()).opacity).toBe("0");
+
+  // Hover reveals +, Archive, × cleanly beside the status without moving or resizing the header.
+  const labelLeftBefore = rect(label()).left;
+  const headerHeightBefore = rect(header()).height;
+  await page.elementLocator(header()).hover();
+  await expect.poll(() => getComputedStyle(actions()).opacity).toBe("1");
+  expect(getComputedStyle(actions()).pointerEvents).toBe("auto");
+  expect(getComputedStyle(status()).visibility).toBe("visible");
+  expect(rect(status()).right).toBeLessThanOrEqual(rect(actions()).left + 1);
+  expect(rect(label()).left).toBe(labelLeftBefore);
+  expect(rect(header()).height).toBe(headerHeightBefore);
+
+  // Archive pill text is vertically centered inside its rounded border.
+  const archivePill = get(".ws-group-project .ws-group-archive");
+  // Flex items blockify inline-flex to flex in computed styles.
+  expect(getComputedStyle(archivePill).display).toBe("flex");
+  expect(getComputedStyle(archivePill).alignItems).toBe("center");
+  expect(getComputedStyle(archivePill).justifyContent).toBe("center");
+  const pillBox = rect(archivePill);
+  const pillTextBox = textRect(archivePill);
+  const pillCenter = (pillBox.top + pillBox.bottom) / 2;
+  const textCenter = (pillTextBox.top + pillTextBox.bottom) / 2;
+  expect(Math.abs(textCenter - pillCenter)).toBeLessThanOrEqual(1.5);
+
+  // Move pointer away, then verify keyboard focus reveals actions beside status cleanly.
+  await page.elementLocator(get(".sidebar-header")).hover();
+  await expect.poll(() => getComputedStyle(actions()).opacity).toBe("0");
+  archivePill.focus();
+  expect(getComputedStyle(actions()).opacity).toBe("1");
+  expect(getComputedStyle(actions()).pointerEvents).toBe("auto");
+  expect(getComputedStyle(status()).visibility).toBe("visible");
+  expect(rect(status()).right).toBeLessThanOrEqual(rect(actions()).left + 1);
+  archivePill.blur();
+
+  // Case 2: Quiet / Queued / Retrying on lead header keep agent-team unclipped and right-aligned.
+  const leadCases: Array<[Partial<Workspace>, string]> = [
+    [{ queued: true }, "Queued"],
+    [{ agents: [{ ...agent, busy: true, lastStreamAt: NOW - 150_000 }] }, "Quiet"],
+    [
+      {
+        agents: [
+          {
+            ...agent,
+            busy: true,
+            lastStreamAt: NOW,
+            retryLabel: "Retrying (1/2 in 5s): 503",
+          },
+        ],
+      },
+      "Retrying (attempt 1)",
+    ],
+  ];
+  for (const [leadPatch, expectedText] of leadCases) {
+    load([makeLead(leadPatch), idleWorker]);
+    expect(status().textContent).toBe(expectedText);
+    expect(label().scrollWidth).toBeLessThanOrEqual(label().clientWidth);
+    expect(rect(label()).width).toBeGreaterThan(60);
+    expect(rect(header()).right - rect(status()).right).toBeLessThanOrEqual(10);
+  }
+
+  // Case 3: When idle.length === 0 && foldable.length > 0, show compact Fold idle (M)
+  // that folds into ▸ Idle (M), and verify one-click Archive on eligible worker rows.
+  load([makeLead(), idleWorker, runningWorker]);
+  const foldIdleBtn = view.getByRole("button", { name: "Fold idle (1)" });
+  expect(foldIdleBtn).toBeTruthy();
+
+  // Running worker must NOT offer Archive session; idle worker MUST.
+  expect(row("Worker Busy")!.querySelector(".task-archive")).toBeNull();
+  const archiveWorkerBtn = row("Worker Idle")!.querySelector<HTMLButtonElement>(".task-archive")!;
+  expect(archiveWorkerBtn).not.toBeNull();
+  expect(archiveWorkerBtn.getAttribute("aria-label")).toBe("Archive session");
+  fireEvent.click(archiveWorkerBtn);
+  expect(sock.frames()).toContainEqual({
+    type: "archive_workspace",
+    workspaceId: "Worker Idle",
+  });
+
+  // Clicking Fold idle (1) collapses into ▸ Idle (1).
+  fireEvent.click(foldIdleBtn);
+  expect(view.getByRole("button", { name: "Idle (1)" })).toBeTruthy();
+  expect(view.queryByRole("button", { name: /^Fold (?:idle|\(\+)/ })).toBeNull();
+});
+
+it("keeps Quiet unclipped, hit-testable on long project names, and reachable via pointer hover and Tab navigation", async () => {
+  await page.viewport(1280, 800);
+  let clock = NOW;
+  vi.spyOn(Date, "now").mockImplementation(() => clock);
+
+  const longProj: Project = {
+    id: "proj",
+    name: "very-long-project-name-for-narrow-sidebar-regression",
+    root: "/repo/long",
+    createdAt: NOW,
+    leadWorkspaceId: "lead",
+    objectives: [],
+  };
+  const quietLead = workspace("lead", 0, {
+    name: longProj.name,
+    git: { branch: "feat/sidebar-header-layout", dirty: 0, ahead: 0, behind: 0 },
+    agents: [{ ...agent, busy: true, lastStreamAt: NOW - 120_000 }],
+  });
+  const quietWorker = workspace("QuietWorker", 1, {
+    agents: [{ ...agent, busy: true, lastStreamAt: NOW - 120_000 }],
+  });
+  mount("lead");
+  const sidebarEl = get(".sidebar");
+  sidebarEl.style.width = "307px";
+  const { receive } = connect([]);
+  receive({ type: "init", workspaces: [quietLead, quietWorker], projects: [longProj], config });
+
+  const leadHeader = get(".ws-group-project");
+  const leadQuiet = leadHeader.querySelector<HTMLElement>(".session-silence-quiet")!;
+  const leadActions = leadHeader.querySelector<HTMLElement>(".ws-group-actions")!;
+  const workerRow = row("QuietWorker")!;
+  const workerQuiet = workerRow.querySelector<HTMLElement>(".session-silence-quiet")!;
+  const workerHover = workerRow.querySelector<HTMLElement>(".task-hover")!;
+  expect(leadQuiet.textContent).toBe("Quiet");
+  expect(leadQuiet.getAttribute("title")).toBe("No new events for 120s");
+  expect(workerQuiet.textContent).toBe("Quiet");
+  expect(workerQuiet.getAttribute("title")).toBe("No new events for 120s");
+
+  clock = NOW + 30_000;
+
+  // Hover the quiet long-named lead header with +, Archive, × inline, then hover Quiet itself.
+  await page.elementLocator(leadHeader).hover();
+  await expect.poll(() => getComputedStyle(leadActions).opacity).toBe("1");
+  await page.elementLocator(leadQuiet).hover();
+  const leadBox = leadQuiet.getBoundingClientRect();
+  expect(getComputedStyle(leadQuiet).visibility).toBe("visible");
+  expect(leadQuiet.scrollWidth).toBeLessThanOrEqual(leadQuiet.clientWidth);
+  expect(leadBox.width).toBeGreaterThan(20);
+  expect(leadBox.right).toBeLessThanOrEqual(leadActions.getBoundingClientRect().left + 1);
+  expect(
+    document.elementFromPoint(leadBox.left + leadBox.width / 2, leadBox.top + leadBox.height / 2),
+  ).toBe(leadQuiet);
+  await expect.poll(() => leadQuiet.getAttribute("title")).toBe("No new events for 150s");
+
+  // Hover the quiet worker row, then move the pointer onto its Quiet badge.
+  await page.elementLocator(workerRow).hover();
+  await expect.poll(() => getComputedStyle(workerHover).opacity).toBe("1");
+  await page.elementLocator(workerQuiet).hover();
+  const workerBox = workerQuiet.getBoundingClientRect();
+  expect(getComputedStyle(workerQuiet).visibility).toBe("visible");
+  expect(workerQuiet.scrollWidth).toBeLessThanOrEqual(workerQuiet.clientWidth);
+  expect(workerBox.width).toBeGreaterThan(20);
+  expect(workerBox.right).toBeLessThanOrEqual(workerHover.getBoundingClientRect().left + 1);
+  expect(
+    document.elementFromPoint(
+      workerBox.left + workerBox.width / 2,
+      workerBox.top + workerBox.height / 2,
+    ),
+  ).toBe(workerQuiet);
+  await expect.poll(() => workerQuiet.getAttribute("title")).toBe("No new events for 150s");
+
+  // Keyboard Tab navigation reaches both Quiet badges, refreshes elapsed detail,
+  // displays a visible role="tooltip" inside the sidebar, and dismisses on Escape.
+  clock = NOW + 45_000;
+  const sidebarBox = sidebarEl.getBoundingClientRect();
+  const tabTo = async (target: HTMLElement, maxTabs = 12) => {
+    for (let i = 0; i < maxTabs && document.activeElement !== target; i += 1) {
+      await userEvent.tab();
+    }
+    expect(document.activeElement).toBe(target);
+  };
+
+  leadHeader.querySelector<HTMLElement>(".ws-group-toggle")!.focus();
+  await tabTo(leadQuiet);
+  const leadTip = leadQuiet.querySelector<HTMLElement>('[role="tooltip"]')!;
+  expect(leadTip).not.toBeNull();
+  expect(leadTip.textContent).toBe("No new events for 165s");
+  expect(leadQuiet.getAttribute("aria-describedby")).toBe(leadTip.id);
+  const leadTipBox = leadTip.getBoundingClientRect();
+  expect(leadTipBox.width).toBeGreaterThan(0);
+  expect(leadTipBox.left).toBeGreaterThanOrEqual(sidebarBox.left);
+  expect(leadTipBox.right).toBeLessThanOrEqual(sidebarBox.right);
+  await userEvent.keyboard("{Escape}");
+  expect(leadQuiet.querySelector('[role="tooltip"]')).toBeNull();
+
+  // Tab from the project header actions into the quiet worker's Quiet badge.
+  leadHeader.querySelector<HTMLElement>(".task-delete")!.focus();
+  await tabTo(workerQuiet);
+  const workerTip = workerQuiet.querySelector<HTMLElement>('[role="tooltip"]')!;
+  expect(workerTip).not.toBeNull();
+  expect(workerTip.textContent).toBe("No new events for 165s");
+  expect(workerQuiet.getAttribute("aria-describedby")).toBe(workerTip.id);
+  const workerTipBox = workerTip.getBoundingClientRect();
+  expect(workerTipBox.width).toBeGreaterThan(0);
+  expect(workerTipBox.left).toBeGreaterThanOrEqual(sidebarBox.left);
+  expect(workerTipBox.right).toBeLessThanOrEqual(sidebarBox.right);
+  await userEvent.keyboard("{Escape}");
+  expect(workerQuiet.querySelector('[role="tooltip"]')).toBeNull();
+});
+
+it.each(["light", "dark"] as const)(
+  "keeps running blue and waiting/sleeping purple status dots consistent across Sidebar, AgentsPanel, and Header (%s)",
+  async (theme) => {
+    await page.viewport(1280, 800);
+    document.documentElement.dataset.theme = theme;
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+
+    const resolveColor = (cssVar: string) => {
+      const probe = document.createElement("span");
+      probe.style.backgroundColor = `var(${cssVar})`;
+      document.body.append(probe);
+      const color = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return color;
+    };
+    const accent = resolveColor("--accent");
+    const purple = resolveColor("--purple");
+    const muted = resolveColor("--text-muted");
+    const expectPulsingDot = (dot: HTMLElement, color: string) => {
+      const cs = getComputedStyle(dot);
+      expect(cs.backgroundColor).toBe(color);
+      expect(cs.animationName).toBe("pulse");
+      expect(cs.animationIterationCount).toBe("infinite");
+      // Seek to keyframe 0% so opacity does not race an arbitrary animation frame.
+      for (const anim of dot.getAnimations()) {
+        anim.pause();
+        anim.currentTime = 0;
+      }
+      expect(getComputedStyle(dot).opacity).toBe("1");
+    };
+
+    const workingProj: Project = {
+      id: "proj-work",
+      name: "WorkingProj",
+      root: "/repo/work",
+      createdAt: NOW + 5,
+      leadWorkspaceId: "work-lead",
+      objectives: [],
+    };
+    const waitingProj: Project = {
+      id: "proj-wait",
+      name: "WaitingProj",
+      root: "/repo/wait",
+      createdAt: NOW + 10,
+      leadWorkspaceId: "wait-lead",
+      objectives: [],
+    };
+    const sleepingProj: Project = {
+      id: "proj-sleep",
+      name: "SleepingProj",
+      root: "/repo/sleep",
+      createdAt: NOW + 20,
+      leadWorkspaceId: "sleep-lead",
+      objectives: [],
+    };
+
+    const busyWithCue = workspace("BusyCue", 1, {
+      awaitsUser: true,
+      agents: [{ ...agent, busy: true, state: "working", lastStreamAt: NOW }],
+    });
+    const waitingWorker = workspace("Waiting", 2, {
+      agents: [{ ...agent, state: "waiting" }],
+    });
+    const sleepingWorker = workspace("Sleeping", 3, {
+      agents: [{ ...agent, state: "sleeping" }],
+    });
+    const idleWorker = workspace("IdleWorker", 4, {
+      lastResult: "done",
+      unread: 1,
+      queued: false,
+      agents: [{ ...agent, busy: false, state: "idle" }],
+    });
+    const workLead = workspace("work-lead", 6, {
+      name: "WorkingProj",
+      projectLink: { projectId: workingProj.id, role: "lead" },
+      agents: [{ ...agent, busy: true, state: "working", lastStreamAt: NOW }],
+    });
+    const waitLead = workspace("wait-lead", 11, {
+      name: "WaitingProj",
+      projectLink: { projectId: waitingProj.id, role: "lead" },
+      agents: [{ ...agent, state: "waiting" }],
+    });
+    const sleepLead = workspace("sleep-lead", 21, {
+      name: "SleepingProj",
+      projectLink: { projectId: sleepingProj.id, role: "lead" },
+      agents: [{ ...agent, state: "sleeping" }],
+    });
+
+    const view = mount("lead");
+    const { receive } = connect([]);
+    receive({
+      type: "init",
+      workspaces: [
+        lead,
+        busyWithCue,
+        waitingWorker,
+        sleepingWorker,
+        idleWorker,
+        workLead,
+        waitLead,
+        sleepLead,
+      ],
+      projects: [project, workingProj, waitingProj, sleepingProj],
+      config,
+    });
+
+    // Open Agents panel on the project lead so all project workers render together.
+    fireEvent.click(view.getByRole("button", { name: /^Agents/ }));
+
+    const runningDot = row("BusyCue")!.querySelector<HTMLElement>(".task-status")!;
+    const waitingDot = row("Waiting")!.querySelector<HTMLElement>(".task-status")!;
+    const sleepingDot = row("Sleeping")!.querySelector<HTMLElement>(".task-status")!;
+    const idleDot = row("IdleWorker")!.querySelector<HTMLElement>(".task-status")!;
+    const projectHeaderFor = (name: string) =>
+      [...document.querySelectorAll<HTMLElement>(".ws-group-project")].find((el) =>
+        el.textContent?.includes(name),
+      )!;
+    const headerDotFor = (name: string) =>
+      projectHeaderFor(name).querySelector<HTMLElement>(".task-status")!;
+    const combinedHeader = projectHeaderFor("Project");
+    const combinedHeaderDot = combinedHeader.querySelector<HTMLElement>(".task-status")!;
+    const workHeaderDot = headerDotFor("WorkingProj");
+    const waitHeaderDot = headerDotFor("WaitingProj");
+    const sleepHeaderDot = headerDotFor("SleepingProj");
+
+    const apWorking = get(".ap-dot.ss-working");
+    const apWaiting = get(".ap-dot.ss-waiting");
+    const apSleeping = get(".ap-dot.ss-sleeping");
+
+    // Combined project header: attention summary (1 need you) does NOT hide the running blue dot.
+    expect(combinedHeader.querySelector(".ws-group-attention")?.textContent).toContain(
+      "1 need you",
+    );
+    expect(combinedHeaderDot.classList.contains("running")).toBe(true);
+
+    // Working/running: pulsing --accent blue on worker (even with Your turn), project headers, and AgentsPanel.
+    expect(runningDot.classList.contains("running")).toBe(true);
+    expect(workHeaderDot.classList.contains("running")).toBe(true);
+    expect(row("BusyCue")!.querySelector(".session-attention")?.textContent).toBe("Your turn");
+    for (const dot of [runningDot, combinedHeaderDot, workHeaderDot, apWorking]) {
+      expectPulsingDot(dot, accent);
+    }
+
+    // Waiting: pulsing --purple across Sidebar worker, Sidebar project header, and AgentsPanel.
+    for (const dot of [waitingDot, waitHeaderDot, apWaiting]) {
+      expectPulsingDot(dot, purple);
+    }
+    expect(waitingDot.classList.contains("waiting")).toBe(true);
+    expect(waitHeaderDot.classList.contains("waiting")).toBe(true);
+
+    // Sleeping: steady --purple across Sidebar worker, Sidebar project header, and AgentsPanel.
+    for (const dot of [sleepingDot, sleepHeaderDot, apSleeping]) {
+      expect(getComputedStyle(dot).backgroundColor).toBe(purple);
+      expect(getComputedStyle(dot).animationName).toBe("none");
+    }
+    expect(sleepingDot.classList.contains("sleeping")).toBe(true);
+    expect(sleepHeaderDot.classList.contains("sleeping")).toBe(true);
+
+    // Idle: muted steady dot, eligible for Archive until agent_busy arrives.
+    expect(idleDot.classList.contains("idle")).toBe(true);
+    expect(getComputedStyle(idleDot).backgroundColor).toBe(muted);
+    expect(getComputedStyle(idleDot).opacity).toBe("0.5");
+    expect(getComputedStyle(idleDot).animationName).toBe("none");
+    expect(row("IdleWorker")!.querySelector(".task-archive")).not.toBeNull();
+
+    // Regression: agent_busy arriving before agent_state (with explicit state:"idle" and queued:false)
+    // restores the running blue dot and immediately hides Archive.
+    receive({ type: "agent_busy", workspaceId: "IdleWorker", agentId: agent.id, streamAt: NOW });
+    const startingDot = row("IdleWorker")!.querySelector<HTMLElement>(".task-status")!;
+    expect(startingDot.classList.contains("running")).toBe(true);
+    expect(row("IdleWorker")!.classList.contains("task-item-active")).toBe(true);
+    expect(row("IdleWorker")!.querySelector(".task-archive")).toBeNull();
+    expectPulsingDot(startingDot, accent);
+
+    // Verify Chat Header status dots match the same busy / waiting / sleeping styles.
+    fireEvent.click(row("BusyCue")!);
+    expectPulsingDot(get(".agent-status-dot.agent-status-busy"), accent);
+
+    fireEvent.click(row("Waiting")!);
+    expectPulsingDot(get(".agent-status-dot.agent-status-waiting"), purple);
+
+    fireEvent.click(row("Sleeping")!);
+    const headerSleeping = get(".agent-status-dot.agent-status-sleeping");
+    expect(getComputedStyle(headerSleeping).backgroundColor).toBe(purple);
+    expect(getComputedStyle(headerSleeping).animationName).toBe("none");
+  },
+);
+
+// Headless Chromium may keep hover disabled after touch emulation is turned off.
+it("keeps selected worker cues visible on hover-none touch devices, including sealed workers with no actions", async () => {
+  touch = true;
+  await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: true });
+  await page.viewport(390, 800);
+  expect(matchMedia("(hover: none)").matches).toBe(true);
+  vi.spyOn(Date, "now").mockReturnValue(NOW);
+
+  const sealedProj: Project = {
+    id: "sealed-proj",
+    name: "SealedProj",
+    root: "/repo/sealed",
+    createdAt: NOW + 10,
+    leadWorkspaceId: "sealed-lead",
+    status: "sealed",
+    sealedReason: "Read-only archive",
+    objectives: [],
+  };
+  const quietWorker = workspace("TouchQuiet", 1, {
+    agents: [{ ...agent, busy: true, lastStreamAt: NOW - 150_000 }],
+  });
+  const sealedLead = workspace("sealed-lead", 11, {
+    name: "SealedProj",
+    projectLink: { projectId: sealedProj.id, role: "lead" },
+  });
+  const sealedWorker = workspace("SealedCue", 12, {
+    projectLink: { projectId: sealedProj.id, role: "worker" },
+    awaitsUser: true,
+  });
+
+  mount("lead");
+  const { receive } = connect([]);
+  receive({
+    type: "init",
+    workspaces: [lead, quietWorker, sealedLead, sealedWorker],
+    projects: [project, sealedProj],
+    config,
+  });
+
+  // Open mobile sidebar, select the quiet worker (closes drawer), then reopen sidebar.
+  fireEvent.click(get(".mobile-menu-btn"));
+  fireEvent.click(row("TouchQuiet")!);
+  fireEvent.click(get(".mobile-menu-btn"));
+
+  const activeQuietRow = row("TouchQuiet")!;
+  expect(activeQuietRow.classList.contains("active")).toBe(true);
+  const quietBadge = activeQuietRow.querySelector<HTMLElement>(".session-silence")!;
+  const quietHover = activeQuietRow.querySelector<HTMLElement>(".task-hover")!;
+  expect(quietBadge.textContent).toBe("Quiet");
+  expect(getComputedStyle(quietBadge).visibility).toBe("visible");
+  expect(quietBadge.getBoundingClientRect().width).toBeGreaterThan(0);
+  expect(getComputedStyle(quietHover).opacity).toBe("1");
+  expect(quietBadge.getBoundingClientRect().right).toBeLessThanOrEqual(
+    quietHover.getBoundingClientRect().left + 1,
+  );
+
+  // Select the sealed worker (which has neither Archive nor Delete), reopen sidebar, and verify its cue stays visible.
+  fireEvent.click(row("SealedCue")!);
+  fireEvent.click(get(".mobile-menu-btn"));
+  const activeSealedRow = row("SealedCue")!;
+  expect(activeSealedRow.classList.contains("active")).toBe(true);
+  expect(activeSealedRow.querySelector(".task-archive")).toBeNull();
+  expect(activeSealedRow.querySelector(".task-delete")).toBeNull();
+  expect(getComputedStyle(activeSealedRow.querySelector(".task-hover")!).display).toBe("none");
+  const sealedCue = activeSealedRow.querySelector<HTMLElement>(".session-attention")!;
+  expect(sealedCue.textContent).toBe("Your turn");
+  expect(getComputedStyle(sealedCue).visibility).toBe("visible");
+  expect(sealedCue.getBoundingClientRect().width).toBeGreaterThan(0);
 });

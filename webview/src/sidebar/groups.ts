@@ -1,9 +1,12 @@
 import type { Project, Workspace } from "../state/useServer";
+import { sessionState } from "../panels/scope";
 import { agentState, isAgentActive } from "../workspace/agents";
 import { sessionAttention } from "./attention";
 
 // Groups older than this default to collapsed in the sidebar.
 export const STALE_MS = 3 * 86_400_000;
+
+export type GroupStatus = "working" | "waiting" | "sleeping" | "idle";
 
 export interface WorkspaceGroup {
   // Group key = the workspace cwd, so same-folder workspaces fold together;
@@ -18,6 +21,24 @@ export interface WorkspaceGroup {
   lastActive: number;
   createdAt: number;
   running: boolean;
+  status: GroupStatus;
+}
+
+// Effective sidebar status: preserve the independent `busy` flag when
+// `agent_busy` arrives before `agent_state` flips an explicit "idle" state.
+export function workspaceStatus(ws: Workspace): GroupStatus {
+  if (ws.archivedAt != null) return "idle";
+  if (ws.agents.some((a) => a.busy)) return "working";
+  const s = sessionState(ws);
+  return s === "archived" ? "idle" : s;
+}
+
+function groupStatus(workspaces: Workspace[]): GroupStatus {
+  const states = workspaces.map(workspaceStatus);
+  for (const s of ["working", "waiting", "sleeping"] as const) {
+    if (states.includes(s)) return s;
+  }
+  return "idle";
 }
 
 function lastActive(ws: Workspace): number {
@@ -72,6 +93,7 @@ export function groupWorkspaces(
       lastActive: Math.max(...[...live, ...archived].map(lastActive)),
       createdAt: project?.createdAt ?? Math.min(...live.map((w) => w.createdAt)),
       running: live.some((w) => w.agents.some((a) => a.busy || isAgentActive(a))),
+      status: groupStatus(live),
     });
   }
   groups.sort(
