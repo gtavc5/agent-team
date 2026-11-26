@@ -1,4 +1,5 @@
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
@@ -120,7 +121,9 @@ afterAll(async () => {
       vi.unstubAllEnvs();
       if (dir) {
         closeHistory(dir);
-        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        // The demo clone and its worktrees contain thousands of files; synchronous
+        // removal can block the test runner past the hook deadline on Windows.
+        await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     }
   }
@@ -295,7 +298,7 @@ it("streams Replay Demo thinking, drills into a subagent, jumps to a quote and c
   const turn = page.locator("#msg-demo-layout-turn");
   // Use the first, longer streaming turn for liveness. Short thinking phases
   // and their exact timing are tested with a controlled clock in Browser Mode.
-  await page.locator("#msg-demo-msg-1 .turn-footer").waitFor({ state: "attached" });
+  await page.locator("#msg-demo-msg-1 .streaming-dot").waitFor({ state: "attached" });
   await page.waitForFunction("window.__yaatDemoReplay?.done === true", undefined, {
     timeout: 25_000,
   });
@@ -309,11 +312,11 @@ it("streams Replay Demo thinking, drills into a subagent, jumps to a quote and c
   await card.getByTitle("completed", { exact: true }).waitFor();
   expect(await card.getByTitle("Cancel this subagent").count()).toBe(0);
   await card.getByRole("button", { name: "Expand subagent: Search the syntax module" }).click();
-  await card.getByText("Found 2 mutation sites, verifying callers now.").waitFor();
-  await card.getByText("15k tokens · 7 tools").waitFor();
+  const details = card.locator(":scope > .subagent-details");
+  await details.getByText("Found 2 mutation sites, verifying callers now.").waitFor();
   await card.locator(".subagent-time", { hasText: /^21s$/ }).waitFor();
-  await card.getByRole("button", { name: "Collapse subagent trace" }).click();
-  await card.locator(".subagent-details").waitFor({ state: "hidden" });
+  await details.getByRole("button", { name: "Collapse subagent trace" }).click();
+  await details.waitFor({ state: "detached" });
 
   const running = page.locator(".subagent-item", { hasText: "Watch CI for regressions" });
   await running.getByRole("button", { name: "Cancel", exact: true }).click();

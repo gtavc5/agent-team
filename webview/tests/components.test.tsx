@@ -12,40 +12,33 @@ const sa = (over: Partial<NonNullable<StreamEvent["subagent"]>> = {}): StreamEve
 });
 
 describe("SubAgentItem", () => {
-  it("shows only the execution summary and closes a nonempty trace from its footer", () => {
-    const { container, getByRole, queryByRole } = render(
+  it("toggles the inline body and keeps the collapsed card to its header", () => {
+    const { container, getByRole } = render(
       <SubAgentItem
         ev={sa({
           status: "completed",
           model: "provider/resolved",
           effort: "high",
           durationMs: 3000,
-          lastTool: "PrivateTool",
-          events: [{ kind: "text", content: "trace" }],
+          lastTool: "Read",
+          summary: "Finished",
+          eventCount: 1000,
         })}
       />,
     );
-    const header = container.querySelector(".subagent-header")!;
-    expect(header.textContent).toBe("▸✓explore the reporesolvedhigh3s");
-    expect(queryByRole("button", { name: "Collapse subagent trace" })).toBeNull();
-    fireEvent.click(getByRole("button", { name: "Expand subagent: explore the repo" }));
-    fireEvent.click(getByRole("button", { name: "Collapse subagent trace" }));
-    expect(container.querySelector(".subagent-body")).toBeNull();
-    expect(document.activeElement).toBe(
-      getByRole("button", { name: "Expand subagent: explore the repo" }),
+    const button = getByRole("button", { name: "Expand subagent: explore the repo" });
+    expect(container.querySelector(".subagent-details")).toBeNull();
+    expect(container.textContent).not.toContain("Finished");
+    fireEvent.click(button);
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector(".subagent-item > .subagent-details")?.textContent).toContain(
+      "Trace is unavailable.",
     );
+    fireEvent.click(getByRole("button", { name: "Collapse subagent trace" }));
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector(".subagent-details")).toBeNull();
   });
 
-  it.each([
-    ["empty", {}],
-    ["loading", { eventCount: 1, events: [] }],
-    ["empty-thinking", { events: [{ kind: "thinking", content: "", contentLength: 0 }] }],
-    ["whitespace-thinking", { events: [{ kind: "thinking", content: "\n  ", contentLength: 0 }] }],
-  ])("does not show a bottom collapse control on a %s subagent", (_name, over) => {
-    const { getByRole, queryByRole } = render(<SubAgentItem ev={sa(over)} />);
-    fireEvent.click(getByRole("button", { name: "Expand subagent: explore the repo" }));
-    expect(queryByRole("button", { name: "Collapse subagent trace" })).toBeNull();
-  });
   it("shows a cancel button while running and reports the taskId", () => {
     const onCancel = vi.fn();
     const { container, getByTitle } = render(
@@ -63,33 +56,6 @@ describe("SubAgentItem", () => {
       <SubAgentItem ev={sa({ status: "running", cancellable: false })} onCancel={() => {}} />,
     );
     expect(container.querySelector(".btn-cancel-subagent")).toBeNull();
-  });
-
-  it("renders nested subagents as nested SubAgentItems with merged lifecycle", () => {
-    const nestedEvents: StreamEvent[] = [
-      { kind: "tool_use", content: "Read /a", toolUseId: "t1" },
-      {
-        kind: "subagent_start",
-        content: "",
-        subagent: { taskId: "nested-1", description: "inner search", agentType: "Explore" },
-      },
-      {
-        kind: "subagent_done",
-        content: "",
-        subagent: { taskId: "nested-1", description: "", status: "completed" },
-      },
-    ];
-    const { container, getByText } = render(
-      <SubAgentItem ev={sa({ status: "running", events: nestedEvents })} />,
-    );
-    fireEvent.click(container.querySelector(".subagent-header")!);
-
-    const items = container.querySelectorAll(".subagent-item");
-    expect(items).toHaveLength(2); // parent + one nested (start/done folded)
-    expect(items[1].className).toContain("subagent-completed");
-    expect(getByText("inner search")).toBeTruthy();
-    // The nested lifecycle events must not leak into the regular event list.
-    expect(container.querySelectorAll(".event-subagent_start")).toHaveLength(0);
   });
 });
 
@@ -573,17 +539,6 @@ describe("MessageItem delivery state", () => {
     expect(alert.matches(".delivery-status.delivery-outcome-unknown")).toBe(true);
     expect(alert.textContent).toContain("Delivery outcome unknown.");
     expect(queryByRole("status")).toBeNull();
-  });
-
-  it("renders a queued badge, dims the message, and cancels via the badge", () => {
-    const onCancelQueued = vi.fn();
-    const { container, getByTitle, getByText } = render(
-      <MessageItem msg={queuedMsg} agents={agents} onCancelQueued={onCancelQueued} />,
-    );
-    expect(getByText("queued")).toBeTruthy();
-    expect(container.querySelector(".message")!.className).toContain("message-queued");
-    fireEvent.click(getByTitle("Remove from queue"));
-    expect(onCancelQueued).toHaveBeenCalledWith("mq");
   });
 
   it("offers no cancel for a message handed to the running turn", () => {

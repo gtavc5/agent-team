@@ -194,12 +194,13 @@ function makeWorkspace(
     onMessageDone: () => {},
   },
   usageRecorder?: UsageRecorder,
+  lifecycleDir?: string,
 ) {
   const host = new SnapHost("local", "Local", undefined, usageRecorder);
   const registry = new HostRegistry();
   registry.register(host);
   const ws = new Workspace("ws", "t", "p", "local", RECORD_CWD, registry, cb);
-  ws.addAgent("A", model, "🤖", "#888", { backend: "codex", effort });
+  ws.addAgent("A", model, "🤖", "#888", { backend: "codex", effort, dataDir: lifecycleDir });
   return { ws, host };
 }
 
@@ -224,10 +225,11 @@ export async function replay(
   fixture: Fixture,
   cb?: WorkspaceCallbacks,
   usageRecorder?: UsageRecorder,
+  lifecycleDir?: string,
 ): Promise<Replay> {
-  if (backend === "pi") return replayPi(rec, fixture, cb, usageRecorder);
+  if (backend === "pi") return replayPi(rec, fixture, cb, usageRecorder, lifecycleDir);
   const model = rec.header.model || DEFAULT_MODEL[backend];
-  const { ws, host } = makeWorkspace(model, fixture.effort, cb, usageRecorder);
+  const { ws, host } = makeWorkspace(model, fixture.effort, cb, usageRecorder, lifecycleDir);
   const tools = fixture.tools ? panelTools(fixture.tools, fixture.instructions) : null;
   for (const entry of ws.agents.values()) entry.session.setPanelTools?.(tools);
   const events: StreamEvent[] = [];
@@ -302,7 +304,7 @@ export async function replay(
 // A real PiRpcClient reads LF-delimited stdout and writes to a controlled stdin.
 // Only startup replies are supplied by the player; turn traffic is tape-ordered.
 // This does not launch Pi or verify extension registration in a real process.
-class PiRpcPlayer {
+export class PiRpcPlayer {
   readonly sent: PiFrame[] = [];
   readonly connections: Array<{ restored: boolean }> = [];
   private readonly written: PiFrame[] = [];
@@ -532,6 +534,7 @@ async function replayPi(
   fixture: Fixture,
   cb?: WorkspaceCallbacks,
   usageRecorder?: UsageRecorder,
+  lifecycleDir?: string,
 ): Promise<Replay> {
   const base = Date.parse(rec.header.recordedAt) - (rec.entries.at(-1)?.t ?? 0);
   if (vi.isFakeTimers()) vi.setSystemTime(base);
@@ -605,6 +608,7 @@ async function replayPi(
   const agent = ws.addAgent("A", rec.header.model || DEFAULT_MODEL.pi, "🤖", "#888", {
     backend: "pi",
     workspaceId: ws.id,
+    dataDir: lifecycleDir,
   });
   const session = sessions[0];
   const running: Promise<unknown>[] = [];
@@ -909,11 +913,8 @@ export function clientView(events: StreamEvent[], backend: Backend = "codex"): M
   let cur: ClientMessage | null = null;
   // The reply an error finished; the turn's result has nothing left to end.
   let failed = false;
-  for (const raw of events) {
-    const e =
-      backend === "pi" && (raw.kind === "subagent_done" || raw.kind === "subagent_enrichment")
-        ? stripChildTranscript(raw)
-        : raw;
+  for (const e of events) {
+    if (e.subagent) continue; // Raw subagent frames are not a client protocol.
     if (e.kind === "text") continue;
     if (e.kind === "result" && !cur && failed) {
       failed = false;
@@ -927,31 +928,9 @@ export function clientView(events: StreamEvent[], backend: Backend = "codex"): M
       cur = null;
       continue;
     }
-    // A card update goes to the newest message holding the card, as the
-    // workspace routes it; a resumed agent has a card in an older one too.
-    const taskId = e.subagent?.taskId;
-    const holds = (m: ClientMessage) =>
-      m.events!.some(
-        (x) =>
-          (x.kind === "subagent_start" ||
-            (e.kind === "subagent_enrichment" && x.kind === "subagent_done")) &&
-          x.subagent?.taskId === taskId,
-      );
-    const owner =
-      taskId &&
-      (e.kind === "subagent_progress" ||
-        e.kind === "subagent_done" ||
-        e.kind === "subagent_enrichment")
-        ? [...msgs].reverse().find(holds)
-        : undefined;
-    if (e.kind === "subagent_enrichment" && !owner) continue;
-    if (owner && owner !== cur) {
-      msgs[msgs.indexOf(owner)] = applyEventsToMessage(owner, [e]);
-      continue;
-    }
-    // A result or card for a tool call an earlier reply made.
+    // A result for a tool call an earlier reply made.
     const caller =
-      (e.kind === "tool_result" || e.kind === "subagent_start") &&
+      e.kind === "tool_result" &&
       e.toolUseId &&
       !cur?.events!.some((x) => x.kind === "tool_use" && x.toolUseId === e.toolUseId)
         ? [...msgs]
@@ -1003,29 +982,15 @@ export function clientView(events: StreamEvent[], backend: Backend = "codex"): M
 
 export const strip = (m: Message): unknown =>
   JSON.parse(
-    JSON.stringify(m.events, (k: string, v: unknown) =>
-      k === "_innerEvent" ||
-      k === "contentOffset" ||
-      k === "step" ||
-      k === "toolInput" ||
-      k === "transcriptRevision"
-        ? undefined
-        : v,
+    JSON.stringify(
+      m.events?.filter((e) => !e.subagent),
+      (k: string, v: unknown) =>
+        k === "_innerEvent" ||
+        k === "contentOffset" ||
+        k === "step" ||
+        k === "toolInput" ||
+        k === "transcriptRevision"
+          ? undefined
+          : v,
     ),
   ) as unknown;
-
-export function stripChildTranscript(event: StreamEvent): StreamEvent {
-  const child = event.subagent;
-  if (!child?.events) return event;
-  const { events, ...summary } = child;
-  const count = Math.max(summary.eventCount ?? 0, events.length);
-  return {
-    ...event,
-    subagent: {
-      ...summary,
-      eventCount:
-        count ||
-        (event.kind === "subagent_done" || event.kind === "subagent_enrichment" ? 0 : undefined),
-    },
-  };
-}

@@ -6,6 +6,8 @@ import { sessionAttention } from "./attention";
 
 // Groups older than this default to collapsed in the sidebar.
 export const STALE_MS = 3 * 86_400_000;
+// Quiet project workers older than this fold on a fresh sidebar mount.
+export const IDLE_FOLD_MS = 60 * 60 * 1000;
 
 export type GroupStatus = "working" | "waiting" | "sleeping" | "idle";
 
@@ -134,6 +136,31 @@ export function canFoldWorker(ws: Workspace, activeWsId: string | null): boolean
   );
 }
 
+// A project worktree repeats context its archived row already has. External
+// folders keep their basename so the session remains distinguishable.
+export function archivedFolderLabel(ws: Workspace, project?: Project): string | null {
+  const cwd = ws.cwd.replaceAll("\\", "/").replace(/\/+$/, "") || "/";
+  const folder = cwd.split("/").filter(Boolean).pop() ?? ws.cwd;
+  if (!project?.root) return folder;
+  const root = project.root.replaceAll("\\", "/").replace(/\/+$/, "") || "/";
+  if (cwd === root || cwd.startsWith(`${root === "/" ? "" : root}/`)) return null;
+  const rootBase = root.split("/").filter(Boolean).pop() ?? root;
+  if (cwd.startsWith(root) && /^-wt-[^/]+(?:\/|$)/.test(cwd.slice(root.length))) return null;
+  const parts = cwd.split("/");
+  if (
+    parts.some((part, i) => {
+      const candidate = parts[i + 1];
+      const prefix = `${rootBase}-wt-`;
+      return (
+        part === "worktrees" && candidate?.startsWith(prefix) && candidate.length > prefix.length
+      );
+    })
+  ) {
+    return null;
+  }
+  return folder;
+}
+
 export function initialIdleWorkers(
   group: WorkspaceGroup,
   activeWsId: string | null,
@@ -144,7 +171,7 @@ export function initialIdleWorkers(
     .filter(
       (ws) =>
         canFoldWorker(ws, activeWsId) &&
-        (ws.lastResult === "done" || now - lastActive(ws) >= STALE_MS),
+        (ws.lastResult === "done" || now - lastActive(ws) >= IDLE_FOLD_MS),
     )
     .map((ws) => ws.id);
 }

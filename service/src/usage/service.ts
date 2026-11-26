@@ -6,11 +6,14 @@ import { maintainUsageLedger } from "./ledger";
 import { syncSources } from "./sync";
 import { journey, overview } from "./queries";
 import type { UsageRequest } from "./request";
+import { sessionStats, type StatsRequest } from "./session-stats";
+import type { SessionStatsPage } from "../../../shared/session-stats";
 
 const bundle = join(__dirname, "usage-worker.js");
-type Data = UsageOverview | UsageJourney;
-export type UsageJob = { baseDir: string; request?: UsageRequest };
+type Data = UsageOverview | UsageJourney | SessionStatsPage;
+export type UsageJob = { baseDir: string; request?: UsageRequest; stats?: StatsRequest };
 export function runUsageJob(job: UsageJob): Data | number {
+  if (job.stats) return sessionStats(job.baseDir, job.stats);
   if (!job.request) {
     maintainUsageLedger(job.baseDir);
     return syncSources(job.baseDir);
@@ -58,11 +61,11 @@ export function refreshUsage(baseDir: string): Promise<number> {
 // Bound queued work; simultaneous explicit refreshes share the collector scan.
 let tail = Promise.resolve();
 let outstanding = 0;
-export async function usageView(baseDir: string, request: UsageRequest) {
+async function queuedRead(job: UsageJob) {
   if (outstanding >= 8) throw new Error("Usage reader busy");
   outstanding++;
-  const scan = request.refresh ? refreshUsage(baseDir) : undefined;
-  const read = Promise.all([tail, scan]).then(() => run({ baseDir, request }));
+  const scan = job.request?.refresh ? refreshUsage(job.baseDir) : undefined;
+  const read = Promise.all([tail, scan]).then(() => run(job));
   tail = read.then(
     () => {},
     () => {},
@@ -70,14 +73,23 @@ export async function usageView(baseDir: string, request: UsageRequest) {
   try {
     const data = await read;
     if (typeof data === "number") throw new Error("Invalid usage response");
-    return {
-      ...data,
-      since: request.filters.since,
-      until: request.filters.until,
-      incompleteSources: lastScan.get(baseDir) ?? 0,
-      sourcesPending: !lastScan.has(baseDir),
-    };
+    return data;
   } finally {
     outstanding--;
   }
+}
+
+export function sessionStatsView(baseDir: string, stats: StatsRequest) {
+  return queuedRead({ baseDir, stats });
+}
+
+export async function usageView(baseDir: string, request: UsageRequest) {
+  const data = await queuedRead({ baseDir, request });
+  return {
+    ...data,
+    since: request.filters.since,
+    until: request.filters.until,
+    incompleteSources: lastScan.get(baseDir) ?? 0,
+    sourcesPending: !lastScan.has(baseDir),
+  };
 }

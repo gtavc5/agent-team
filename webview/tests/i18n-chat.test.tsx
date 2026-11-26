@@ -17,6 +17,7 @@ import {
   StepGroup,
   SubAgentItem,
 } from "../src/chat/messages";
+import { SubagentTraceContext } from "../src/chat/subagentTrace";
 import { StopControl } from "../src/composer/StopControl";
 import { formatDuration, formatRelative, formatRunTime, formatUptime } from "../src/format";
 import { resetLocaleForTests, setLocaleOverride, setServerLanguage } from "../src/i18n";
@@ -304,22 +305,45 @@ describe("messages.tsx localization", () => {
     expect(evBox.querySelector(".event-placeholder")!.textContent).toBe("2.0k 字符 · 点击加载");
 
     const { container: subBox } = render(
-      <SubAgentItem
-        ev={{
-          kind: "subagent_start",
-          content: "",
-          subagent: {
-            taskId: "t1",
-            description: "",
-            status: "running",
-            effort: "high",
-            durationMs: 2500,
-            prompt: "Investigate",
-            usage: { totalTokens: 4000, toolUses: 3, durationMs: 2500 },
+      <SubagentTraceContext.Provider
+        value={{
+          workspaceId: "w1",
+          epoch: 1,
+          requestPage: (_target, _window, receive) => {
+            receive({
+              type: "subagent_trace_page",
+              requestId: 1,
+              events: [],
+              start: 0,
+              end: 0,
+              totalEvents: 0,
+              revision: 0,
+              hasMore: false,
+              truncated: false,
+              prompt: "Investigate",
+              usage: { totalTokens: 4000, toolUses: 3, durationMs: 2500 },
+            });
+            return () => {};
           },
         }}
-        onCancel={vi.fn()}
-      />,
+      >
+        <SubAgentItem
+          messageId="m1"
+          ev={{
+            kind: "subagent_start",
+            content: "",
+            subagent: {
+              taskId: "t1",
+              description: "",
+              status: "running",
+              effort: "high",
+              durationMs: 2500,
+              usage: { totalTokens: 4000, toolUses: 3, durationMs: 2500 },
+            },
+          }}
+          onCancel={vi.fn()}
+        />
+      </SubagentTraceContext.Provider>,
     );
     const subToggle = within(subBox).getByRole("button", { name: "展开子代理：子代理" });
     expect(subBox.querySelector(".subagent-status-icon")!.getAttribute("title")).toBe("运行中");

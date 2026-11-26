@@ -104,55 +104,61 @@ describe.each(["detail", "summary"])("EventItem %s matrix", (mode) => {
 });
 
 describe("StepBox + TurnFooter phase matrix", () => {
-  it.each(["standalone", "alongside steps", "closing", "settled", "running tool"])(
-    "%s: scopes indicators in folded and expanded states",
-    (phase) => {
-      vi.useFakeTimers({ toFake: ["Date"] });
-      vi.setSystemTime(now);
-      const msg: Message = { ...turn };
-      if (phase === "standalone" || phase === "alongside steps") {
-        msg.liveThinkingSince = now;
-        msg.liveThinking = "Working it out.";
+  it.each([
+    "standalone",
+    "alongside steps",
+    "after subagent",
+    "closing",
+    "settled",
+    "running tool",
+  ])("%s: scopes indicators in folded and expanded states", (phase) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    const msg: Message = { ...turn };
+    if (phase === "standalone" || phase === "alongside steps" || phase === "after subagent") {
+      msg.liveThinkingSince = now;
+      msg.liveThinking = "Working it out.";
+    }
+    if (phase === "alongside steps") msg.events = [read];
+    if (phase === "after subagent") {
+      msg.events = [
+        {
+          kind: "subagent_start",
+          content: "",
+          subagent: { taskId: "sa1", description: "Investigate", status: "completed" },
+        },
+      ];
+    }
+    if (phase === "closing") msg.closingThinking = "Almost there.";
+    if (phase === "settled") {
+      msg.status = "done";
+      msg.events = [{ kind: "thinking", content: "Solved." }];
+    }
+    if (phase === "running tool")
+      msg.events = [{ ...read, toolResult: undefined, startedAt: now - 4_000 }];
+    const { container } = render(<MessageItem msg={msg} agents={[]} />);
+    const toggle = ".step-header > .trace-header-toggle";
+    for (const open of [false, true]) {
+      if (open) click(container, toggle);
+      expect(container.querySelectorAll(".events-list")).toHaveLength(open ? 1 : 0);
+      const footer = container.querySelector(".turn-footer");
+      expect(container.querySelectorAll(".chip-live")).toHaveLength(
+        msg.liveThinkingSince == null ? 0 : 1,
+      );
+      expect(container.querySelectorAll(".step-header .chip-live")).toHaveLength(
+        msg.liveThinkingSince == null ? 0 : 1,
+      );
+      expect(footer?.textContent).toBe(phase === "running tool" ? "Read · 4s" : undefined);
+      if (open && (msg.liveThinkingSince != null || msg.closingThinking != null)) {
+        expect(container.querySelector(".live-thinking > .event-row")).toBeNull();
       }
-      if (phase === "alongside steps") msg.events = [read];
-      if (phase === "closing") msg.closingThinking = "Almost there.";
-      if (phase === "settled") {
-        msg.status = "done";
-        msg.events = [{ kind: "thinking", content: "Solved." }];
-      }
-      if (phase === "running tool")
-        msg.events = [{ ...read, toolResult: undefined, startedAt: now - 4_000 }];
-      const { container } = render(<MessageItem msg={msg} agents={[]} />);
-      const toggle = ".step-header > .trace-header-toggle";
-      for (const open of [false, true]) {
-        if (open) click(container, toggle);
-        expect(container.querySelectorAll(".events-list")).toHaveLength(open ? 1 : 0);
-        const footer = container.querySelector(".turn-footer");
-        expect(container.querySelectorAll(".chip-live")).toHaveLength(
-          msg.liveThinkingSince == null ? 0 : 1,
-        );
-        expect(container.querySelectorAll(".step-header .chip-live")).toHaveLength(
-          phase === "standalone" ? 1 : 0,
-        );
-        expect(footer?.textContent).toBe(
-          phase === "settled"
-            ? undefined
-            : phase === "alongside steps"
-              ? "Thinking · 0s"
-              : phase === "running tool"
-                ? "Read · 4s"
-                : "",
-        );
-        if (open && msg.liveThinkingSince != null)
-          expect(container.querySelector(".live-thinking")?.textContent).toContain(
-            msg.liveThinking,
-          );
-        if (open && phase === "running tool")
-          expect(container.querySelector(".event-time-live")?.textContent).toBe("4s");
-        audit(container);
-      }
-    },
-  );
+      if (open && msg.liveThinkingSince != null)
+        expect(container.querySelector(".live-thinking")?.textContent).toContain(msg.liveThinking);
+      if (open && phase === "running tool")
+        expect(container.querySelector(".event-time-live")?.textContent).toBe("4s");
+      audit(container);
+    }
+  });
 });
 
 describe("SubAgentItem state matrix", () => {
@@ -175,22 +181,16 @@ describe("SubAgentItem state matrix", () => {
           status,
           ...fields,
           usage: { totalTokens: 4_000, toolUses: 2, durationMs: 18_000 },
-          events: [orphan],
+          eventCount: 1,
         },
       };
       const { container } = render(<SubAgentItem ev={ev} />);
-      for (const open of [false, true]) {
-        if (open) click(container, ".subagent-header > .trace-header-toggle");
-        expect(
-          [...container.querySelectorAll(".subagent-header .subagent-time")].map(
-            (e) => e.textContent,
-          ),
-        ).toEqual(expected ? [expected] : []);
-        expect(container.querySelector(".subagent-usage")?.textContent).toBe(
-          open ? "4k tokens · 2 tools" : undefined,
-        );
-        audit(container);
-      }
+      expect(
+        [...container.querySelectorAll(".subagent-header .subagent-time")].map(
+          (e) => e.textContent,
+        ),
+      ).toEqual(expected ? [expected] : []);
+      audit(container);
     },
   );
 });
@@ -298,9 +298,11 @@ it("finds duplicate live thinking in actual message DOM and exported snapshot HT
     </div>,
   );
   audit(container);
-  container
-    .querySelector(".turn-footer")!
-    .append(container.querySelector(".step-header .chip-live")!.cloneNode(true));
+  expect(container.querySelector(".turn-footer")).toBeNull();
+  const footer = document.createElement("div");
+  footer.className = "turn-footer";
+  footer.append(container.querySelector(".step-header .chip-live")!.cloneNode(true));
+  container.querySelector(".message-body")!.append(footer);
   const findings = auditChatRedundancy(container);
   expect(findings.map((f) => f.rule)).toEqual(["live-thinking"]);
   expect(auditChatRedundancy(collectSnapshot().html)).toEqual(findings);
@@ -337,7 +339,7 @@ it("diagnoses historic duplicates in captured HTML, without scanning message pro
       <div class="event-tool_result"><div class="event-row"><span class="event-chip">Result</span><button class="btn-diff">Result · 511 chars</button></div></div>
       <div class="event-tool_use"><div class="event-row"><span class="event-chip">Edit</span></div><div class="event-summary-line"><code>src/file.ts</code></div><div class="event-content"><p><strong>Edit</strong> <code>src/file.ts</code></p></div></div>
       <div class="event-tool_use"><div class="event-row"><span class="event-chip">Bash</span></div><div class="event-content"><p><strong>Bash</strong></p><div class="code-block"><pre>echo ok</pre></div></div></div>
-      <div class="subagent-item"><div class="subagent-header"><span class="subagent-time">4s</span></div><div class="subagent-body"><div class="subagent-usage">4k tokens · 2 tools · 18s</div></div></div>
+      <div class="subagent-item"><div class="subagent-header"><span class="subagent-time">4s</span></div><div class="subagent-header"><span class="subagent-time">18s</span></div></div>
     </div><div class="turn-footer"><span class="chip-live">Thinking · 1s</span></div>
   </div></div>`;
   const doc = new DOMParser().parseFromString(html, "text/html");

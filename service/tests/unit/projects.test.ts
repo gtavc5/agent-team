@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { z } from "zod";
 import { ProjectStore } from "../../src/project/store";
+import { ReportJournalStore } from "../../src/project/report-journal";
 import {
   languageInstructions,
   leadToolset,
@@ -313,35 +314,82 @@ describe("panel tool arguments", () => {
     },
   );
 
-  it("guides the lead to choose worker presets and override defaults when needed", () => {
+  it("guides the lead from task fit to preset reuse or a suitable capacity fallback", () => {
     const { instructions } = leadToolset(api, project, "/notes", ["m"]);
-    expect(instructions).toContain(
-      "Choose a preset whose defaults and dispatch hints fit the task's complexity, domain and parallel load. Override model or effort when needed; do not default every worker to the same model.",
+    expect(instructions).toMatch(/preset defaults and dispatch hints[^\n]*task fit/i);
+    expect(instructions).toMatch(/best fit[^\n]*reuse a preset for similar tasks/i);
+    expect(instructions).toMatch(/capacity is constrained[^\n]*another suitable provider/i);
+    expect(instructions).toMatch(/override model or effort/i);
+  });
+
+  it("requires explicit execution and hands off a quick edit when its scope grows", () => {
+    const { instructions } = leadToolset(api, project, "/notes", ["m"]);
+    expect(instructions).toMatch(/discussion alone does not authorize work/i);
+    expect(instructions).toMatch(
+      /act or dispatch only when the user explicitly requests execution or rework/i,
+    );
+    expect(instructions).toMatch(
+      /quick edit grows[^\n]*hand it off to a worker[^\n]*unless the user/i,
     );
   });
 
-  it("separates discussion from confirmed execution routing while keeping anti-relay boundaries", () => {
+  it("routes direct work and delegated work to the right owner", () => {
     const { instructions } = leadToolset(api, project, "/notes", ["m"]);
-    expect(instructions).toContain("discussion alone starts no work");
-    expect(instructions).toContain("once the user explicitly asks you to do or rework something");
-    expect(instructions).toContain(
-      "Good — do it directly: read-only checks, board or notes updates, obvious few-line edits in one file",
+    const direct = instructions.split("\n").find((line) => line.startsWith("Handle "));
+    const delegated = instructions.split("\n").find((line) => line.startsWith("Delegate "));
+    for (const scope of [
+      "read-only checks",
+      "board or notes updates",
+      "few-line edits",
+      "do yourself",
+    ]) {
+      expect(direct).toContain(scope);
+    }
+    for (const scope of [
+      "multi-file",
+      "isolated worktrees",
+      "full test suites",
+      "slow verification",
+      "visual checks",
+      "review rework",
+    ]) {
+      expect(delegated).toContain(scope);
+    }
+    expect(instructions).toMatch(
+      /prefer message_session[^\n]*idle, lead-dispatchable[^\n]*otherwise use start_session/i,
     );
-    expect(instructions).toContain("work the user explicitly asks you to do yourself");
-    expect(instructions).toContain(
-      "Good — delegate: multi-file changes or bug fixes, isolated worktrees, full test suites, slow verification, visual checks, or review rework",
+    expect(instructions).toMatch(/self-contained task[^\n]*which session owns it/i);
+    expect(instructions).toMatch(
+      /message_session only[^\n]*authorized work[^\n]*outside requests[^\n]*recover/i,
     );
-    expect(instructions).toContain(
-      "Prefer message_session to an idle, lead-dispatchable worker whose context fits (check project_status); otherwise use start_session",
+    expect(instructions).toMatch(/never message[^\n]*just to ask for a report/i);
+  });
+
+  it("distinguishes a session the user owns from a worker waiting for the user", () => {
+    const { instructions } = leadToolset(api, project, "/notes", ["m"]);
+    const userOwned = instructions
+      .split("\n")
+      .find((line) => line.startsWith("User-owned sessions:"));
+    for (const state of ["created", "switched off", "took over", "stopped"]) {
+      expect(userOwned).toContain(state);
+    }
+    expect(userOwned).toMatch(/no notices[^\n]*never message, stop, or archive/i);
+    expect(instructions).toMatch(
+      /worker awaiting user input:[^\n]*one sentence[^\n]*which session is waiting/i,
     );
-    expect(instructions).toContain(
-      'because you already have context or "only a few steps remain."',
+    expect(instructions).toMatch(
+      /do not dispatch to that worker[^\n]*answer for the user[^\n]*relay[^\n]*chase[^\n]*poll/i,
     );
-    expect(instructions).toContain("stop immediately and hand off to a worker");
-    expect(instructions).toContain("do not answer for the user, relay, chase or poll");
-    expect(instructions).toContain(
-      "Never dispatch to a worker the user owns, took over, stopped, or is awaited by",
+  });
+
+  it("limits worker recovery and makes archiving a prerequisite for worktree cleanup", () => {
+    const { instructions } = leadToolset(api, project, "/notes", ["m"]);
+    const notice = instructions.split("\n").find((line) => line.startsWith("[From the panel,"));
+    expect(notice).toMatch(/retry a failed turn at most once[^\n]*fails again, tell the user/i);
+    expect(notice).toMatch(
+      /panel carries on[^\n]*restart[^\n]*second time[^\n]*worker to carry on/i,
     );
+    expect(instructions).toMatch(/before reusing or removing[^\n]*worktree[^\n]*archive_session/i);
   });
 
   it("shows selectable preset defaults and dispatch hints in the lead's start_session description", () => {
@@ -386,7 +434,9 @@ describe("panel tool arguments", () => {
       workerToolset(api, "ws-i", project, "/notes", true),
       workerToolset(api, "ws-u", project, "/notes", false, true),
     ]) {
+      expect(byName(worker).start_session).toBeUndefined();
       expect(worker.instructions).not.toContain("Dispatch hints");
+      expect(worker.instructions).not.toMatch(/another suitable provider|prefer message_session/i);
       for (const hint of [scoutHint, reviewHint]) {
         expect(worker.instructions).not.toContain(hint);
         for (const tool of worker.tools) expect(tool.description).not.toContain(hint);
@@ -418,7 +468,9 @@ describe("panel tool arguments", () => {
     ] as z.ZodType[]) {
       expect(field.description).toBe("The whole list");
     }
-    expect(lead).toContain("check the board keeps nothing about the old one");
+    expect(lead).toMatch(
+      /\[From session …\][^\n]*tasks to review[^\n]*tasks done[^\n]*dropped[^\n]*delete the objective/,
+    );
     expect(lead.length).toBeLessThan(5200);
     expect(worker.length).toBeLessThan(3800);
     // Nothing the CLI would cut.
@@ -2585,7 +2637,7 @@ describe("a worker that goes idle without reporting", () => {
       session(w).emit("event", { kind: "error", content: "API Error: 529 overloaded" });
       await settle();
       expect(told()).toEqual([
-        note("its turn failed: API Error: 529 overloaded", "do it", "Working on it"),
+        'Worker turn failed on your message "do it".\n\nError: API Error: 529 overloaded\n\nIts last reply:\n\nWorking on it',
       ]);
 
       await ask("try again");
@@ -2622,7 +2674,7 @@ describe("a worker that goes idle without reporting", () => {
     }
   });
 
-  it("tells a stopped turn that a wake-up then carried on as ended, and keeps the reply past a stray error", async () => {
+  it("does not treat a stray process diagnostic after a successful wake-up as a failed turn", async () => {
     useFakeTimers();
     try {
       const { w, say, told, settle, session, endTurn, state } = await started();
@@ -2637,9 +2689,7 @@ describe("a worker that goes idle without reporting", () => {
       // The CLI dies afterwards with an error of its own.
       session(w).emit("event", { kind: "error", content: "[Claude error] exited" });
       await settle();
-      expect(told()).toEqual([
-        note("its turn failed: [Claude error] exited", "do it", "Build passed."),
-      ]);
+      expect(told()).toEqual([]);
     } finally {
       vi.useRealTimers();
     }
@@ -2946,6 +2996,130 @@ describe("a worker that goes idle without reporting", () => {
       vi.useRealTimers();
     }
   });
+
+  it("journals each terminal failure while the lead is offline, even after finish_task", async () => {
+    useFakeTimers();
+    try {
+      const {
+        w,
+        lead,
+        project,
+        host,
+        call,
+        ask,
+        told,
+        settle,
+        session,
+        restart,
+        manager,
+        base,
+        registry,
+        workspaces,
+      } = await started();
+      const fail = (worker: Workspace, content: string) => {
+        session(worker).isRunning = false;
+        session(worker).emit("event", { kind: "error", content });
+      };
+      const journal = () =>
+        new ReportJournalStore().load(new ProjectStore(base).projectDir(project.id));
+      await ask("check the release");
+      host.isLeadOnline = () => false;
+      await call(w, "finish_task", { summary: "The patch is ready" });
+      session(w).emit("event", {
+        kind: "tool_use",
+        toolName: "bash",
+        toolUseId: "check",
+        content: "**bash**",
+      });
+      session(w).emit("event", {
+        kind: "tool_result",
+        toolUseId: "check",
+        content: "exit status 2",
+        isError: true,
+      });
+      fail(w, "Provider unavailable");
+      await vi.advanceTimersByTimeAsync(0);
+      fail(w, "Connection lost");
+      // A duplicate-looking idle error is not another turn.
+      fail(w, "Connection lost");
+      const pending = w.getState();
+      const back = restart(w);
+      manager.recheckWorkers();
+      await settle();
+      expect(told()).toEqual([]);
+      expect(journal().map((r) => r.kind)).toEqual(["final", "failure", "failure"]);
+      expect(journal()[1]).toMatchObject({
+        boardState: "not_applicable",
+        leadDelivery: { state: "pending" },
+      });
+      expect(journal()[1].payload.text).toContain(
+        "Last tool: bash (reported an error) — exit status 2",
+      );
+      // Simulate the journal commit surviving while the worker's cleanup did not.
+      const stale = Workspace.fromState(pending, registry);
+      workspaces.set(w.id, stale);
+      await back.dispose();
+      manager.recheckWorkers();
+      await settle();
+      expect(journal().map((r) => r.kind)).toEqual(["final", "failure", "failure"]);
+      host.isLeadOnline = () => true;
+      await manager.drainInbox(project.id);
+      expect(told()).toHaveLength(3);
+      expect(told()[1]).toContain("Error: Provider unavailable");
+      expect(told()[2]).toContain('Worker turn failed on your message "check the release".');
+      expect(told()[2]).toContain("Error: Connection lost");
+      expect(told()[2]).not.toContain("Last tool:");
+      expect(lead.getMessages().filter((m) => m.from?.role === "panel")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("journals distinct failed wake-up turns on the same input without retrying the worker", async () => {
+    useFakeTimers();
+    try {
+      const { w, say, state, told, settle, session, manager } = await started();
+      const sent = [...session(w).sent];
+      say("first attempt");
+      session(w).isRunning = false;
+      session(w).emit("event", { kind: "error", content: "Connection lost" });
+      await settle();
+      state("working");
+      say("wake-up output");
+      session(w).emit("event", { kind: "error", content: "Connection lost" });
+      state("idle");
+      await settle();
+      expect(told()).toHaveLength(2);
+      expect(told()[0]).toContain("first attempt");
+      expect(told()[1]).toContain("wake-up output");
+      manager.workerIdle(w);
+      await settle();
+      expect(told()).toHaveLength(2);
+      expect(session(w).sent).toEqual(sent);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["stop", "archive", "disable reporting"])(
+    "does not journal a terminal failure if the worker is subject to %s before settling",
+    async (action) => {
+      useFakeTimers();
+      try {
+        const { w, lead, call, told, settle, session, manager } = await started();
+        session(w).isRunning = false;
+        session(w).emit("event", { kind: "error", content: "Network disconnected" });
+        if (action === "stop") w.abortAll();
+        else if (action === "archive") await call(lead, "archive_session", { session_id: w.id });
+        else manager.setReporting(w.id, false);
+        await settle();
+        expect(told()).toEqual([]);
+        expect(w.pendingTurnFailures()).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("waits for a rate-limit retry still to run, however late it is", async () => {
     useFakeTimers();

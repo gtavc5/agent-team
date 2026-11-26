@@ -1665,6 +1665,22 @@ describe("PiSession dispatch and stream state", () => {
     expect(h.done).toHaveBeenCalledTimes(1);
   });
 
+  it("marks confirmed transport on the terminal Pi error, not the retry banner", async () => {
+    const h = harness();
+    await h.session.send("work");
+    const { event } = h.clients[0];
+    const errorMessage = "OAuth token refresh failed: getaddrinfo ENOTFOUND auth.example.test";
+    for (const frame of piFrames("messages/retry-failed")) {
+      if (frame.type === "response") continue;
+      if (frame.type === "auto_retry_start") event({ ...frame, errorMessage });
+      else if (frame.type === "auto_retry_end") event({ ...frame, finalError: errorMessage });
+      else event(frame);
+    }
+    expect(h.events.filter((e) => e.networkFailure)).toEqual([
+      { kind: "error", content: errorMessage, context: null, networkFailure: true },
+    ]);
+  });
+
   it.each([undefined, "https://override.test", ""])(
     "sets the CCPA proxy only for the Pi child when the endpoint override is %s",
     async (override) => {

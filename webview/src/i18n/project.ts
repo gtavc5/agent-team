@@ -2,6 +2,8 @@ import { createTranslator, type MessageCatalog } from "./core";
 
 export const projectMessages = {
   // Board dialog & header
+  issuesDialogLabel: { en: "{name} issues", "zh-CN": "{name} 问题" },
+  notesDialogLabel: { en: "{name} notes", "zh-CN": "{name} 笔记" },
   boardDialogLabel: {
     en: "{name} objectives",
     "zh-CN": "{name} 目标看板",

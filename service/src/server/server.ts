@@ -36,13 +36,19 @@ import {
   isCodexCliAvailable,
   type ModelOption,
 } from "../config/presets";
-import { CommandInfo, StreamEvent, type Backend, type PiAvailableModel } from "../session/types";
+import { CommandInfo, type Backend, type PiAvailableModel } from "../session/types";
 import { HostRegistry, LocalHost } from "../session/host";
 import { codexProcessEnv, probeCodexAuth, type CodexAuthState } from "../session/codex";
 import { completeDirs, resolveWorkspacePath } from "../repo/dirs";
 import { GitScanner } from "../repo/scanner";
 import { HistoryService, sidebarHits, type SearchHit } from "../workspace/history-service";
-import { summarizeMessages, toWireMessage } from "../workspace/summary";
+import {
+  summarizeMessages,
+  toWireEvent,
+  toWireMessage,
+  toWireStreamEvent,
+} from "../workspace/summary";
+import { readTracePage } from "../../../shared/subagent-trace";
 import { ProjectManager, type ProjectHost } from "../project/manager";
 import { Auth } from "./auth";
 import { mergeLocalCommands } from "./commands";
@@ -72,16 +78,6 @@ import { SystemMonitor } from "./system";
 import { serviceReport } from "../config/diagnostics";
 import { applyRuntimeEnvironment, hasOutboundProxy, RuntimeConfigError } from "../config/runtime";
 import { startCcpaProxy, type CcpaProxy } from "../acp-proxy/proxy";
-
-function stripEventsInnerEvents(events: StreamEvent[]): StreamEvent[] {
-  return events.map((e) => {
-    if (!e.subagent?.events?.length) return e;
-    return {
-      ...e,
-      subagent: { ...e.subagent, eventCount: e.subagent.events.length, events: undefined },
-    };
-  });
-}
 
 const execFileAsync = promisify(execFile);
 
@@ -124,6 +120,7 @@ export class Server {
   private pendingWork = 0;
   private bootFence?: string;
   private restored = false;
+  private recoveryReady = false;
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private sendOrder = new Map<string, Promise<void>>();
   private uploadsDir: string;
@@ -551,7 +548,7 @@ export class Server {
         "open_workspace",
         "load_messages",
         "load_message_details",
-        "load_subagent_events",
+        "load_subagent_trace",
         "search",
         "list_dirs",
         "ping",
@@ -650,25 +647,26 @@ export class Server {
           type: "message_details",
           workspaceId: workspace.id,
           messageId: message.id,
-          events: stripEventsInnerEvents(message.events ?? []),
+          events: (message.events ?? []).map(toWireEvent),
         });
         return;
       }
 
-      case "load_subagent_events": {
-        const workspace = this.workspaces.get(msg.workspaceId as string);
-        if (workspace && this.ensureLoaded(workspace)) {
-          const message = workspace.getMessages().find((m) => m.id === msg.messageId);
-          const ev = message?.events?.find((e) => e.subagent?.taskId === msg.taskId);
-          this.sendJson(ws, {
-            type: "subagent_events",
-            workspaceId: msg.workspaceId,
-            messageId: msg.messageId,
-            taskId: msg.taskId,
-            events: ev?.subagent?.events ?? [],
-            transcriptRevision: ev?.subagent?.transcriptRevision,
-          });
-        }
+      case "load_subagent_trace": {
+        if (typeof msg.requestId !== "number" || !Number.isSafeInteger(msg.requestId)) return;
+        const message =
+          workspace && this.ensureLoaded(workspace) && typeof msg.messageId === "string"
+            ? workspace.findMessage(msg.messageId)
+            : undefined;
+        this.sendJson(
+          ws,
+          readTracePage(
+            msg.requestId,
+            message?.events,
+            typeof msg.taskId === "string" ? msg.taskId : "",
+            msg,
+          ),
+        );
         return;
       }
 
@@ -1105,6 +1103,7 @@ export class Server {
   private removeWorkspace(workspaceId: string): void {
     const ws = this.workspaces.get(workspaceId);
     if (!ws) return;
+    this.projects.recovery.cancel(ws);
     this.cancelWorkspaceRetries(ws);
     void ws.dispose();
     const timer = this.persistTimers.get(workspaceId);
@@ -1512,6 +1511,8 @@ export class Server {
 
     this.projects.archiveShelved();
     this.projects.recheckWorkers();
+    this.recoveryReady = true;
+    for (const w of this.workspaces.values()) this.projects.recovery.restore(w);
     const archived = [...this.workspaces.values()].filter((w) => w.isArchived).length;
     console.log(`Restored ${this.workspaces.size} workspace(s), ${archived} archived`);
   }
@@ -1571,6 +1572,7 @@ export class Server {
   private projectHost(): ProjectHost {
     return {
       dispatchAllowed: () => this.dispatchAllowed,
+      recoveryReady: () => this.recoveryReady,
       workspaces: () => this.workspaces.values(),
       workspace: (id) => this.workspaces.get(id),
       createWorkspace: (name, cwd, link) => this.makeWorkspace(name, cwd, undefined, link),
@@ -1961,6 +1963,7 @@ export class Server {
       },
       onAttention: (wsId, unread, lastResult) => {
         this.broadcastUI({ type: "workspace_attention", workspaceId: wsId, unread, lastResult });
+        if (lastResult === undefined) this.persistWorkspace(wsId);
       },
       onStreamEvent: (wsId, agentMsg, event, streamAt, retryLabel) => {
         if (isLoggedEvent(event)) {
@@ -1970,7 +1973,7 @@ export class Server {
           type: "stream_event",
           workspaceId: wsId,
           messageId: agentMsg.id,
-          event,
+          event: toWireStreamEvent(event, agentMsg),
           ...(streamAt != null && { streamAt }),
           ...(retryLabel !== undefined && { retryLabel }),
           ...((streamAt != null || retryLabel !== undefined) && { agentId: agentMsg.agentId }),
@@ -1986,7 +1989,7 @@ export class Server {
           messageId: msgId,
           status,
           content,
-          events: events ? stripEventsInnerEvents(events) : undefined,
+          events: events?.map(toWireEvent),
           ...patch,
           ...(patch &&
             "queuedFor" in patch && { queued: this.workspaces.get(wsId)?.hasQueuedInput }),
@@ -2020,6 +2023,10 @@ export class Server {
           this.flushPendingLeadTools(ws);
         }
       },
+      onLeadTerminal: (w, agentId, reply, interrupted) =>
+        this.projects.recovery.terminal(w, agentId, reply, interrupted),
+      onLeadStop: (w, agentId) => this.projects.recovery.stop(w, agentId),
+      prepareManualInput: (w, agentId, pair) => this.projects.recovery.manual(w, agentId, pair),
       onSaveNow: () => this.persistWorkspaceNow(id),
       canDequeue: () => this.restored,
       canDispatch: (w) => this.dispatchAllowed && !this.isProjectSealed(w),
@@ -2083,6 +2090,7 @@ export class Server {
 
   private async closeOnce(): Promise<void> {
     this.closing = true;
+    this.projects.recovery.close();
     this.telemetry.close();
     if (this.bootFence) fs.unwatchFile(this.bootFence);
     this.quota.stop();

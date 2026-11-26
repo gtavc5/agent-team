@@ -1,3 +1,4 @@
+import { lifecycleWriter } from "../usage/lifecycle";
 import { estimatedContext, type ContextUsage } from "../../../shared/context-usage";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -7,11 +8,13 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import type { UsageObservation } from "../../../shared/usage";
 import type { PanelToolset } from "../project/tools";
+import { isTransientTransportFailure } from "../project/network-failure";
 import { ACP_PREPARE_STEP, inspectAcpRuntime } from "./acp-readiness";
 import { applyNonInteractiveGitEnv } from "./git-env";
 import type { BoundarySteer, HostSessionHandle } from "./host";
-import { PanelHttpServer, type PanelHttpAddress } from "./panel-http";
+import { PanelHttpServer, type PanelHttpAddress, type SessionCheckpoint } from "./panel-http";
 import { discoverLocalPiPackages, prepareControlledPiAgentHome } from "./pi-agent-home";
+import { signPiRecoveryPrompt } from "./pi-recovery-context";
 import {
   PiRpcClient,
   PiRpcResponseError,
@@ -53,11 +56,12 @@ import {
   decodePiSubagentSnapshot,
   type PiSubagentWidgetNode,
 } from "./pi-subagent-widget";
+import { encodePiPairedPrompt, PI_PANEL_CONTEXT_TYPE } from "./pi-panel-bridge";
 import { decodeExtensionUi } from "./pi-extension-ui";
 import { extractPiToolResultText, formatPiToolUse } from "./pi-tool-format";
 import { ACP } from "./quota-schema";
 import { retireOnEof } from "./retire";
-import { piUsage } from "./usage-observation";
+import { piAssistantUsage, piUsage } from "./usage-observation";
 import { formatReportMarker } from "./types";
 import type {
   ActiveAsyncChildRecord,
@@ -70,6 +74,7 @@ import type {
   PersistedSessionAnchor,
   PiAvailableModel,
   PromptEnvelope,
+  InputTrigger,
   RunState,
   SendHooks,
   SendReceipt,
@@ -117,6 +122,11 @@ const text = (value: unknown) => (typeof value === "string" ? value : undefined)
 const num = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
 const list = (value: unknown): Json[] => (Array.isArray(value) ? value.map(object) : []);
+function piTerminalError(content: string): StreamEvent {
+  const transient = isTransientTransportFailure(content);
+  return { kind: "error", content, ...(transient && { networkFailure: true }) };
+}
+
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const realpath = fs.realpathSync.native;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -365,7 +375,7 @@ function sessionMessageText(entry: Json): string | undefined {
 }
 
 // A removed agent cannot be resumed to run the bridge's live probe. A
-// durable user entry proves receipt; absence never proves non-delivery
+// durable input entry proves receipt; absence never proves non-delivery
 // (Pi can buffer an initial user entry until the first assistant entry).
 export function hasPersistedPiReport(attempt: DispatchAttempt, cwd: string): boolean {
   if (!attempt.piSession || !attempt.reportId) return false;
@@ -376,9 +386,12 @@ export function hasPersistedPiReport(attempt: DispatchAttempt, cwd: string): boo
     return parsed.entries.some(
       (entry, index) =>
         index >= attempt.beforeEntryCount &&
-        entry.type === "message" &&
-        object(entry.message).role === "user" &&
-        sessionMessageText(entry)?.startsWith(marker),
+        ((entry.type === "custom_message" &&
+          entry.customType === PI_PANEL_CONTEXT_TYPE &&
+          object(entry.details).reportId === attempt.reportId) ||
+          (entry.type === "message" &&
+            object(entry.message).role === "user" &&
+            sessionMessageText(entry)?.startsWith(marker))),
     );
   } catch {
     return false;
@@ -431,8 +444,14 @@ interface AnchorProbe {
 }
 
 interface Turn {
+  trigger: InputTrigger;
+  modelTrigger: InputTrigger | "continuation";
+  modelStep?: { id: string; firstDelta: boolean };
   steer?: { input: BoundarySteer; wireText: string; claimed: boolean; observed: boolean };
   anchorInput?: FirstInputClaim;
+  paired: boolean;
+  recovery: boolean;
+  recoveryNotEmpty?: boolean;
   id: string;
   inputId?: string;
   reportId?: string;
@@ -502,10 +521,15 @@ function piEffortLevels(model: Json): string[] | undefined {
 type Setting = { desired?: string; applied?: string; lastError?: string };
 
 function newTurn(generation: number, envelope?: PromptEnvelope): Turn {
+  const trigger = envelope ? (envelope.trigger ?? "user") : "auto";
   return {
     id: randomUUID(),
+    trigger,
+    modelTrigger: trigger,
     inputId: envelope?.inputId,
     reportId: envelope?.reportId,
+    paired: envelope?.panelContext !== undefined,
+    recovery: !!envelope?.recovery,
     generation,
     settled: false,
     written: false,
@@ -581,6 +605,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   };
   private readonly config: SessionConfig;
   private readonly normalizedCwd: string;
+  private panelToken?: string;
   private readonly panelHttp: PanelHttpServer;
   private readonly sessionKey = randomUUID();
   private readonly ownsPanel: boolean;
@@ -596,7 +621,10 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private compactingRpc?: PiRpcClient;
   private context: ContextUsage | null = null;
   private contextRevision = 0;
-  private compactionBoundary?: { pending?: Promise<void> };
+  private compactionBoundary?: {
+    pending?: Promise<void>;
+    reconcile?: (proof: SessionCheckpoint) => void;
+  };
   private starting?: Promise<void>;
   private closing?: Promise<void>;
   private interrupting?: Promise<boolean>;
@@ -660,6 +688,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       config.normalizedCwd ??
       (fs.existsSync(config.cwd) ? realpath(config.cwd) : path.resolve(config.cwd));
     this.config = { ...config, cwd: this.normalizedCwd };
+    this.lifecycle = lifecycleWriter(this.config, "pi", () => this.sessionId);
     this.model = { desired: config.model };
     this.effort = { desired: config.effort };
     this.ownsPanel = !options.panelHttp;
@@ -982,6 +1011,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       },
     });
     this.registered = true;
+    this.panelToken = token;
     try {
       const env = applyNonInteractiveGitEnv({
         ...process.env,
@@ -1237,7 +1267,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     if (this.disposed || this.isRunning) throw new Error("Pi session is busy or disposed");
     const envelope = typeof input === "string" ? { inputId: randomUUID(), text: input } : input;
     const turn = newTurn(this.processGeneration, envelope);
-    const compact = /^\/compact(?:\s+([\s\S]+))?$/.exec(envelope.text.trim());
+    const compact = !turn.paired && /^\/compact(?:\s+([\s\S]+))?$/.exec(envelope.text.trim());
     if (compact && envelope.attachmentIds?.length)
       throw new Error("/compact does not accept attachments");
     turn.compact = Boolean(compact);
@@ -1303,7 +1333,24 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         this.finish(turn, { kind: "result", content: "" });
         return { disposition: "handled" };
       }
-      const reply = await rpc.prompt(envelope.text, {
+      if (envelope.recovery && !this.panelToken)
+        throw new Error("Pi recovery requires a panel route");
+      let wireText = this.panelToken
+        ? signPiRecoveryPrompt(envelope, this.panelToken)
+        : envelope.text;
+      if (envelope.panelContext !== undefined) {
+        if (!this.panelToken || !envelope.reportId)
+          throw new Error("Pi paired prompt requires a panel route and report ID");
+        wireText = encodePiPairedPrompt(
+          {
+            userText: wireText,
+            panelContext: envelope.panelContext,
+            reportId: envelope.reportId,
+          },
+          this.panelToken,
+        );
+      }
+      const reply = await rpc.prompt(wireText, {
         images,
         onBeforeWrite,
         ...(/^\/quota(?:\s|$)/.test(envelope.text.trimStart()) && { timeoutMs: 50_000 }),
@@ -1315,9 +1362,13 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         } else if (this.live(turn)) {
           turn.inputId = undefined;
           turn.reportId = undefined;
+          if (turn.modelTrigger === turn.trigger) turn.modelTrigger = "auto";
+          turn.trigger = "auto";
           this.emitWakeup();
         }
-        return { disposition: "handled" };
+        return turn.paired
+          ? { disposition: "rejected", error: "Pi did not run the paired prompt" }
+          : { disposition: "handled" };
       }
       if (reply?.disposition !== "started")
         throw new Error("Pi returned an unknown prompt disposition");
@@ -1341,6 +1392,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           // wakeup turn so its agent_settled transitions back to idle and dequeues.
           turn.inputId = undefined;
           turn.reportId = undefined;
+          if (turn.modelTrigger === turn.trigger) turn.modelTrigger = "auto";
+          turn.trigger = "auto";
           turn.written = false;
           this.emitWakeup();
         } else {
@@ -1355,6 +1408,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       }
       if (turn.written && this.live(turn)) {
         const retiring = this.retireProcess();
+        // A failed RPC write/read is not a settled provider error: execution may have begun.
         this.finish(turn, { kind: "error", content: message(error) });
         await retiring;
       } else this.finish(turn);
@@ -1413,6 +1467,17 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     const steer = turn.steer;
     delete turn.steer;
     if (outcome === "read") {
+      if (steer?.claimed) {
+        const { inputId, trigger = "user" } = steer.input.envelope;
+        this.lifecycle?.({
+          turnId: turn.id,
+          stepId: inputId,
+          kind: "user",
+          marker: "stepEnd",
+          at: Date.now(),
+          trigger,
+        });
+      }
       turn.replyTextLength = 0;
       turn.messageBaseOffset = 0;
       for (const block of turn.blocks.values()) block.emittedTextLength = 0;
@@ -1559,13 +1624,35 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     this.emit("session_checkpoint");
   }
 
-  private recordAssistantUsage(msg: Json): void {
-    if (!this.options.recordUsage || !this.sessionId) return;
-    const observation = piUsage(this.sessionId, msg);
-    if (observation) this.options.recordUsage(observation);
+  private readonly lifecycle: ReturnType<typeof lifecycleWriter>;
+
+  private recordAssistantEnd(turn: Turn, msg: Json, at: number): void {
+    const observation = this.sessionId
+      ? this.lifecycle
+        ? piAssistantUsage(this.sessionId, msg)
+        : this.options.recordUsage && piUsage(this.sessionId, msg)
+      : null;
+    if (observation?.id) this.options.recordUsage?.({ ...observation, id: observation.id });
+    if (!this.lifecycle) return;
+    this.lifecycle({
+      turnId: turn.id,
+      stepId: turn.modelStep?.id ?? randomUUID(),
+      kind: "model",
+      marker: "stepEnd",
+      at,
+      model: text(msg.model),
+      ...(observation && {
+        inferenceId: observation.id,
+        piMessageKey: observation.piMessageKey,
+        promptTokens: observation.input + observation.cacheRead + observation.cacheWrite,
+      }),
+    });
+    delete turn.modelStep;
+    if (msg.stopReason === "toolUse") turn.modelTrigger = "continuation";
   }
 
   private handleEvent(event: Json): void {
+    const at = this.lifecycle ? Date.now() : 0;
     if (event.type === "extension_ui_request") {
       const widget = decodePiSubagentWidget(event);
       if (widget) {
@@ -1617,6 +1704,23 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
             ? `Compaction aborted (${reason})`
             : `Context compacted (${reason})${counts}`);
         const compacted = Boolean(event.result) && !event.aborted && !error;
+        let reconcile: ((proof: SessionCheckpoint) => void) | undefined;
+        if (compacted && this.lifecycle) {
+          const mark = {
+            turnId: turn && this.live(turn) ? turn.id : randomUUID(),
+            stepId: randomUUID(),
+            kind: "compaction" as const,
+            marker: "compaction" as const,
+            at,
+            ...(manual && { trigger: turn.trigger }),
+          };
+          this.lifecycle(mark);
+          const beforeCount = Math.max(this.minEntryCount, this.sessionProof?.entryCount ?? 0);
+          reconcile = (proof) => {
+            const id = this.provenCompactionEntry(proof, beforeCount, result);
+            if (id) this.lifecycle?.({ ...mark, marker: "nativeEntry", piCompactionEntryId: id });
+          };
+        }
         const window = this.model.applied
           ? this.resolveModel(this.model.applied)?.contextWindow
           : undefined;
@@ -1627,10 +1731,10 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         }
         if (event.result) {
           this.stats = null;
-          this.compactionBoundary = {};
+          this.compactionBoundary = { reconcile };
           void this.syncCompactionCheckpoint(this.rpc!);
         }
-        if (manual && error) this.finish(turn, { kind: "error", content });
+        if (manual && error) this.finish(turn, { kind: "error", content: error });
         else {
           this.event({
             kind: "compact",
@@ -1670,6 +1774,25 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     switch (event.type) {
       case "message_start":
         if (msg.role === "assistant") {
+          if (this.lifecycle) {
+            // An unsolicited model may start while the prompt reply is still in flight.
+            // The caller's trigger only belongs to a prompt Pi has actually read.
+            const id = randomUUID();
+            turn.modelStep = { id, firstDelta: false };
+            this.lifecycle({
+              turnId: turn.id,
+              stepId: id,
+              kind: "model",
+              marker: "stepStart",
+              at,
+              model: text(msg.model),
+              trigger: turn.steer?.observed
+                ? (turn.steer.input.envelope.trigger ?? "user")
+                : turn.started && !turn.accepted && turn.modelTrigger === turn.trigger
+                  ? "auto"
+                  : turn.modelTrigger,
+            });
+          }
           turn.messageBaseOffset = turn.replyTextLength;
           turn.blocks.clear();
           turn.finalText = "";
@@ -1689,23 +1812,54 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
             update.type === "toolcall_end")
         )
           this.finishSteer(turn, "read");
+        if (
+          turn.modelStep &&
+          !turn.modelStep.firstDelta &&
+          (update.type === "text_delta" ||
+            update.type === "thinking_delta" ||
+            update.type === "toolcall_delta") &&
+          typeof update.delta === "string" &&
+          update.delta.length
+        ) {
+          turn.modelStep.firstDelta = true;
+          this.lifecycle?.({
+            turnId: turn.id,
+            stepId: turn.modelStep.id,
+            kind: "model",
+            marker: "firstDelta",
+            at,
+          });
+        }
         this.updateMessage(turn, update);
         break;
       }
       case "message_end": {
         if (msg.role === "user" && turn.written && turn.inputId && !turn.accepted) {
+          this.lifecycle?.({
+            turnId: turn.id,
+            stepId: turn.inputId,
+            kind: "user",
+            marker: "stepEnd",
+            at,
+            trigger: turn.trigger,
+          });
           if (turn.anchorInput) {
             // Skills, input hooks and image normalization finalize the text before
             // Pi emits message_end and only then appends it to the JSONL file.
             turn.anchorInput.text = sessionMessageText({ message: msg }) ?? turn.anchorInput.text;
             if (this.rpc) this.schedulePersistedAnchor(turn, this.rpc, true);
           }
-          turn.accepted = true;
-          this.emit("user_message_accepted", {
-            inputId: turn.inputId,
-            reportId: turn.reportId,
-            generation: turn.generation,
-          });
+          if (!turn.paired) this.acceptUserMessage(turn);
+        } else if (
+          turn.paired &&
+          turn.written &&
+          turn.inputId &&
+          !turn.accepted &&
+          msg.role === "custom" &&
+          msg.customType === PI_PANEL_CONTEXT_TYPE &&
+          object(msg.details).reportId === turn.reportId
+        ) {
+          this.acceptUserMessage(turn);
         } else if (msg.role === "user" && turn.steer?.claimed) {
           // Pi persists this before the provider call, which can still be aborted without a response.
           const content = text(msg.content) ?? text(list(msg.content)[0]?.text);
@@ -1713,19 +1867,29 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           turn.steer.observed ||=
             content === expected || !!content?.startsWith(`${expected}\n\n[Image`);
         } else if (msg.role === "assistant") {
-          this.recordAssistantUsage(msg);
           if (
             turn.steer?.observed &&
             !this.interrupting &&
             ["stop", "toolUse", "length"].includes(String(msg.stopReason))
           )
             this.finishSteer(turn, "read");
+          this.recordAssistantEnd(turn, msg, at);
           const blocks = list(msg.content);
           turn.finalText = blocks
             .filter((block) => block.type === "text")
             .map((block) => text(block.text) ?? "")
             .join("");
           const replyUsage = object(msg.usage);
+          // The context hook can supersede only provably empty failed assistant
+          // records. Never schedule a replacement the hook could not remove.
+          if (
+            turn.recovery &&
+            (msg.stopReason !== "error" ||
+              replyUsage.output !== 0 ||
+              !Array.isArray(msg.content) ||
+              msg.content.length !== 0)
+          )
+            turn.recoveryNotEmpty = true;
           if (msg.usage) turn.replyUsage = replyUsage;
           turn.error =
             msg.stopReason === "error"
@@ -1751,18 +1915,21 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         break;
       }
       case "tool_execution_start":
+        this.recordToolBoundary(turn, event, "toolStart", at);
         this.startTool(turn, event);
         break;
       case "tool_execution_update":
         this.updateTool(turn, event);
         break;
       case "tool_execution_end":
+        this.recordToolBoundary(turn, event, "toolResult", at);
         this.endTool(turn, event);
         break;
       case "agent_settled":
         this.settle(turn);
         break;
       case "auto_retry_start": {
+        turn.modelTrigger = "retry";
         const attempt = num(event.attempt);
         const maxAttempts = num(event.maxAttempts);
         const delayMs = num(event.delayMs);
@@ -1787,6 +1954,24 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         this.event({ kind: "retry", content: "" });
         break;
     }
+  }
+
+  private recordToolBoundary(
+    turn: Turn,
+    event: Json,
+    marker: "toolStart" | "toolResult",
+    at: number,
+  ): void {
+    const toolCallId = text(event.toolCallId);
+    if (toolCallId)
+      this.lifecycle?.({
+        turnId: turn.id,
+        stepId: toolCallId,
+        toolCallId,
+        kind: "tool",
+        marker,
+        at,
+      });
   }
 
   private updateMessage(turn: Turn, update: Json): void {
@@ -1859,9 +2044,24 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     }
   }
 
+  private acceptUserMessage(turn: Turn): void {
+    turn.accepted = true;
+    this.emit("user_message_accepted", {
+      inputId: turn.inputId,
+      reportId: turn.reportId,
+      generation: turn.generation,
+    });
+  }
+
   private settle(turn: Turn): void {
     this.hasConfirmedTurns = true;
     if (turn.anchorInput && this.rpc) this.schedulePersistedAnchor(turn, this.rpc, true);
+    if (turn.paired && !turn.accepted && turn.inputId) {
+      this.emit("prompt_outcome_unknown", {
+        inputId: turn.inputId,
+        reason: "Pi did not confirm the paired panel context",
+      });
+    }
     this.emit("agent_settled", { inputId: turn.inputId });
     this.cancelDialogs();
     this.closeTurnTools(turn, "Tool stopped before completion");
@@ -1912,7 +2112,12 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     this.finish(
       turn,
       turn.error && !this.interrupting
-        ? { kind: "error", content: turn.error, context: null }
+        ? {
+            ...(turn.recovery && (turn.recoveryNotEmpty || !turn.accepted || reply.output !== 0)
+              ? { kind: "error" as const, content: turn.error }
+              : piTerminalError(turn.error)),
+            context: null,
+          }
         : {
             kind: "result",
             content: turn.finalText,
@@ -2028,6 +2233,26 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     }
   }
 
+  private provenCompactionEntry(proof: SessionCheckpoint, beforeCount: number, result: Json) {
+    if (!proof.sessionFile || !proof.leafId || proof.entryCount <= beforeCount) return;
+    if (
+      typeof result.firstKeptEntryId !== "string" ||
+      typeof result.tokensBefore !== "number" ||
+      typeof result.summary !== "string"
+    )
+      return;
+    const native = proof.compaction;
+    if (
+      native &&
+      native.index >= beforeCount &&
+      native.index < proof.entryCount &&
+      native.firstKeptEntryId === result.firstKeptEntryId &&
+      native.tokensBefore === result.tokensBefore &&
+      native.summaryKey === createHash("sha256").update(result.summary).digest("hex")
+    )
+      return text(native.id);
+  }
+
   private syncCompactionCheckpoint(rpc: PiRpcClient): Promise<void> | undefined {
     const boundary = this.compactionBoundary;
     if (boundary)
@@ -2049,7 +2274,14 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           proof.sessionId === this.sessionId &&
           proof.entryCount >= this.minEntryCount
         ) {
-          if (this.compactionBoundary === boundary) this.compactionBoundary = undefined;
+          if (boundary && this.compactionBoundary === boundary) {
+            this.compactionBoundary = undefined;
+            try {
+              boundary.reconcile?.(proof);
+            } catch {
+              // The checkpoint can be valid even when the append cannot be read here.
+            }
+          }
           this.updateCheckpoint(proof.leafId, proof.entryCount, proof.sessionFile);
         }
       })
@@ -4055,6 +4287,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private unregisterRoute(): void {
     if (this.registered) this.panelHttp.unregisterSession(this.sessionKey);
     this.registered = false;
+    this.panelToken = undefined;
   }
 
   dispose(totalTimeoutMs = 10_000): Promise<void> {

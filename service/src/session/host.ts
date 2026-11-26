@@ -9,6 +9,7 @@ import type {
   UiDialogRequest,
   UiDialogResponse,
   PromptEnvelope,
+  InputTrigger,
   RunState,
   SendHooks,
   SendReceipt,
@@ -39,7 +40,7 @@ export interface HostSessionHandle extends EventEmitter {
   readonly nextTurnOptions?: { model?: string; effort?: string; fast?: boolean };
   readonly optionsPending?: boolean;
   send(input: string | PromptEnvelope, hooks?: SendHooks): Promise<SendReceipt | void>;
-  steer?(message: string, inputId: string): Promise<boolean>;
+  steer?(message: string, inputId: string, trigger?: InputTrigger): Promise<boolean>;
   readonly canSteer?: boolean;
   setBoundarySteerSource?(source: () => BoundarySteer | undefined): void;
   abort(): void;

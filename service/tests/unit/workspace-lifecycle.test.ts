@@ -103,6 +103,36 @@ function makeWorkspace(cb: Partial<WorkspaceCallbacks> = {}) {
   return { ws, host, agent, session };
 }
 
+describe("Workspace network waiting", () => {
+  it("publishes transient recovery state live and in fresh snapshots without holding Send", async () => {
+    const onAgentUpdated = vi.fn<NonNullable<WorkspaceCallbacks["onAgentUpdated"]>>();
+    const { ws, agent, session } = makeWorkspace({ onAgentUpdated });
+    ws.projectLink = { projectId: "p1", role: "lead" };
+    try {
+      onAgentUpdated.mockClear();
+      expect(ws.isNetworkWaiting(agent.id)).toBe(false);
+      ws.setNetworkWaiting(agent.id, true);
+      ws.setNetworkWaiting(agent.id, true);
+      expect(ws.isNetworkWaiting(agent.id)).toBe(true);
+      const fresh = ws.getInfo(false).agents[0];
+      expect(fresh).toMatchObject({ networkWaiting: true, busy: false, state: "idle" });
+      expect(onAgentUpdated.mock.calls).toEqual([[ws.id, fresh, true]]);
+      expect(ws.getState().agents[0]).not.toHaveProperty("networkWaiting");
+
+      await ws.sendMessage("Manual message");
+      expect(session.sent).toEqual(["Manual message"]);
+      expect(ws.isNetworkWaiting(agent.id)).toBe(true);
+      ws.setNetworkWaiting(agent.id, false);
+      expect(ws.isNetworkWaiting(agent.id)).toBe(false);
+      const cleared = ws.getInfo(false).agents[0];
+      expect(cleared.networkWaiting).toBe(false);
+      expect(onAgentUpdated).toHaveBeenLastCalledWith(ws.id, cleared, true);
+    } finally {
+      await ws.dispose();
+    }
+  });
+});
+
 describe("Workspace teardown", () => {
   it("dispose does not start a queued prompt and releases the sessions", async () => {
     const { ws, host, session } = makeWorkspace();

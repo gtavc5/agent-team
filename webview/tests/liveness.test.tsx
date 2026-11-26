@@ -355,7 +355,7 @@ describe("message_done ordering", () => {
         event: {
           kind: "subagent_start",
           content: "",
-          subagent: { taskId: "t", description: "d", events: [] },
+          subagent: { taskId: "t", description: "d" },
         },
       });
       ws.receive({
@@ -363,12 +363,14 @@ describe("message_done ordering", () => {
         workspaceId: "w",
         messageId: "m1",
         event: {
-          kind: "subagent_progress",
+          kind: "subagent_enrichment",
           content: "",
           subagent: {
             taskId: "t",
             description: "",
-            _innerEvent: { kind: "tool_use", content: "**Read** `a`" },
+            lastTool: "Read",
+            eventCount: 1,
+            transcriptRevision: 1,
           },
         },
       });
@@ -383,14 +385,24 @@ describe("message_done ordering", () => {
           {
             kind: "subagent_start",
             content: "",
-            subagent: { taskId: "t", description: "d", eventCount: 1 },
+            subagent: {
+              taskId: "t",
+              description: "d",
+              eventCount: 1,
+              transcriptRevision: 1,
+              lastTool: "Read",
+            },
           },
         ],
       });
     });
     const m = result.current.workspaces[0].messages[0];
     expect(m.status).toBe("done");
-    expect(m.events?.[0].subagent?.events?.map((e) => e.kind)).toEqual(["tool_use"]);
+    expect(m.events?.[0].subagent).toMatchObject({
+      eventCount: 1,
+      transcriptRevision: 1,
+      lastTool: "Read",
+    });
   });
 });
 
@@ -447,81 +459,44 @@ describe("snapshot replies after events still waiting for a frame", () => {
     expect(result.current.workspaces[0].messages[0].events).toHaveLength(1);
   });
 
-  it("does not duplicate a subagent transcript the user just opened", () => {
-    const { result, ws } = connected();
-    const start = {
-      kind: "subagent_start",
-      content: "d",
-      subagent: { taskId: "T", description: "d", status: "running", eventCount: 1 },
-    };
-    act(() =>
-      ws.receive({
-        type: "workspace_messages",
-        workspaceId: "w",
-        messages: [liveMessage({ events: [start] })],
-      }),
-    );
-    const i1 = { kind: "tool_use", content: "**Read** a", toolUseId: "i1" };
-    const i2 = { kind: "tool_use", content: "**Read** b", toolUseId: "i2" };
-    act(() => {
-      ws.receive(
-        streamEvent({
-          kind: "subagent_progress",
-          content: "",
-          subagent: { taskId: "T", description: "", _innerEvent: i2 },
-        }),
-      );
-      // Reply to load_subagent_events: the server's copy already has i2.
-      ws.receive({
-        type: "subagent_events",
-        workspaceId: "w",
-        messageId: "m1",
-        taskId: "T",
-        events: [i1, i2],
-      });
-    });
-    frame();
-    act(() =>
-      ws.receive({
-        type: "message_done",
-        workspaceId: "w",
-        messageId: "m1",
-        status: "done",
-        content: "Hello",
-        events: [{ ...start, subagent: { ...start.subagent, eventCount: 2 } }],
-      }),
-    );
-    const sa = result.current.workspaces[0].messages[0].events![0].subagent!;
-    expect(sa.events!.map((e) => e.toolUseId)).toEqual(["i1", "i2"]);
-  });
-
-  it("gives a card one inner event under StrictMode when its start shares the frame", () => {
+  it("routes a requested trace page outside message state and drops cancelled or oversize replies", () => {
     const { result, ws } = connected(({ children }) => <StrictMode>{children}</StrictMode>);
+    const target = { workspaceId: "w", messageId: "m1", taskId: "T" };
+    const receive = vi.fn();
+    const events = [{ kind: "text", content: "detail" }];
     act(() =>
       ws.receive({ type: "workspace_messages", workspaceId: "w", messages: [liveMessage()] }),
     );
+    const message = result.current.workspaces[0].messages[0];
+    const sendPage = (events: unknown[]) => {
+      const request = ws.frames().at(-1)!;
+      ws.receive({
+        type: "subagent_trace_page",
+        requestId: request.requestId,
+        events,
+        totalEvents: events.length,
+        revision: 1,
+      });
+    };
     act(() => {
-      ws.receive(
-        streamEvent({
-          kind: "subagent_start",
-          content: "d",
-          subagent: { taskId: "T", description: "d", status: "running", events: [] },
-        }),
-      );
-      ws.receive(
-        streamEvent({
-          kind: "subagent_progress",
-          content: "",
-          subagent: {
-            taskId: "T",
-            description: "",
-            _innerEvent: { kind: "tool_use", content: "**Read** a", toolUseId: "i1" },
-          },
-        }),
-      );
+      result.current.requestSubagentTrace(target, {}, receive)();
+      sendPage(events);
     });
-    frame();
-    expect(result.current.workspaces[0].messages[0].events![0].subagent!.events).toHaveLength(1);
+    act(() => {
+      result.current.requestSubagentTrace(target, {}, receive);
+      sendPage([{ ...events[0], content: "🧪".repeat(10_000) }]);
+    });
+    act(() => {
+      result.current.requestSubagentTrace(target, {}, receive);
+      sendPage(Array(25).fill(events[0]));
+    });
+    expect(receive).not.toHaveBeenCalled();
+    act(() => {
+      result.current.requestSubagentTrace(target, {}, receive);
+      sendPage(events);
+    });
+    expect(receive).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ events }));
+    expect(result.current.workspaces[0].messages[0]).toBe(message);
   });
 
   it("ignores a stream_event without an event", () => {

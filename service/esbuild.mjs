@@ -7,7 +7,13 @@ const outdir = path.resolve(process.env.YAAT_BUILD_OUT_DIR ?? "../dist");
 
 const sessionDir = path.resolve("src/session");
 const quotaDir = path.join(sessionDir, "quota");
-const extensionFiles = ["acp-readiness.ts", "pi-panel-bridge.ts", "pi-quota.ts", "quota-schema.ts"];
+const extensionFiles = [
+  "acp-readiness.ts",
+  "pi-panel-bridge.ts",
+  "pi-quota.ts",
+  "pi-recovery-context.ts",
+  "quota-schema.ts",
+];
 
 function quotaFiles() {
   return fs.readdirSync(quotaDir).filter((file) => file.endsWith(".ts"));

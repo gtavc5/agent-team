@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { LeadRecovery } from "./lead-recovery";
 import { ProjectCommitLock } from "./commit-lock";
 import { ProjectNotesStore } from "./notes";
 import {
@@ -105,6 +106,7 @@ const PEER_WINDOW_MS = 10 * 60_000;
 // What the manager needs from the server that owns the workspaces.
 export interface ProjectHost {
   dispatchAllowed?(): boolean;
+  recoveryReady?(): boolean;
   workspaces(): Iterable<Workspace>;
   workspace(id: string): Workspace | undefined;
   createWorkspace(name: string, cwd: string, link: ProjectLink): Workspace;
@@ -185,6 +187,20 @@ export class ProjectManager {
   private settling = new Map<string, ReturnType<typeof setTimeout>>();
   private carrying = new Set<string>();
   private closed = false;
+  readonly recovery = new LeadRecovery({
+    journal: (w) => this.journal(w.projectLink!.projectId),
+    save: (w) => this.host.saveWorkspaceNow(w),
+    availability: (w) => {
+      const project = w.projectLink && this.store.get(w.projectLink.projectId);
+      if (!project || this.host.workspace(w.id) !== w) return "gone";
+      if (w.isArchived || project.archivedAt || project.status !== "active") return "unavailable";
+      if (this.host.dispatchAllowed?.() === false || this.host.recoveryReady?.() === false)
+        return "blocked";
+      return "ready";
+    },
+    slot: (delay) => this.takeStartSlot(delay),
+    drain: (w) => this.leadAgentsChanged(w),
+  });
 
   constructor(
     private readonly baseDir: string,
@@ -205,6 +221,7 @@ export class ProjectManager {
 
   close(): void {
     this.closed = true;
+    this.recovery.close();
     for (const t of this.timers.keys()) clearTimeout(t);
     this.timers.clear();
     this.settling.clear();
@@ -365,6 +382,7 @@ export class ProjectManager {
     project.archivedAt = archived ? Date.now() : null;
     this.store.save(project);
     const lead = this.leadOf(id);
+    if (archived && lead) this.recovery.stop(lead);
     if (archived) for (const w of live) this.host.archiveWorkspace(w);
     else if (lead?.isArchived) this.host.restoreWorkspace(lead);
     this.changed(id);
@@ -424,6 +442,7 @@ export class ProjectManager {
     this.requireActive(id);
     for (const w of this.members(id)) {
       if (w.projectLink?.role === "lead") {
+        this.recovery.cancel(w);
         this.host.removeWorkspace(w.id);
         continue;
       }
@@ -712,7 +731,7 @@ export class ProjectManager {
       const owed = w
         .lastDelivered()
         .some((d) => fromLead(asked(messages, d.input), lead) && !d.answered);
-      if (!owed) continue;
+      if (!owed && !w.pendingTurnFailures().length) continue;
       this.settleAfter(w, delay);
       delay += START_SPACING_MS;
     }
@@ -742,34 +761,96 @@ export class ProjectManager {
     }
     const t = this.later(w.projectLink!.projectId, ms, () => {
       this.settling.delete(w.id);
-      this.tellIfSilent(w.id);
+      void this.tellIfSilent(w.id).catch((error) => console.error("[projects]", error));
       this.showAwaiting(w);
     });
     if (t) this.settling.set(w.id, t);
   }
 
-  // A worker the lead sent something went quiet without reporting on it. A
-  // turn a restart cut off, the panel tells it to carry on. The lead hears
-  // it once, with how the turn ended and the last reply, when it failed or
-  // when it answered a later message of the lead's. A task that ended in a
-  // question waits for the user, as do the turns the user took over or
-  // stopped.
-  private tellIfSilent(workspaceId: string): void {
+  // A worker that went quiet may owe a report even if another lead input
+  // has already replaced the failed turn's input in lastDelivered().
+  private async tellIfSilent(workspaceId: string): Promise<void> {
     const w = this.host.workspace(workspaceId);
     const link = w?.projectLink;
     if (!w || link?.role !== "worker" || link.unreported || w.isArchived) return;
     if (!w.messagesLoaded || !w.isQuiet) return;
-    const project = this.store.get(link.projectId);
-    const lead = this.leadOf(link.projectId);
-    if (!project || project.archivedAt || !lead || lead.isArchived) return;
+    const id = link.projectId;
+    if (w.pendingTurnFailures().length) {
+      const shouldDrain = await this.commitLock.run(id, () => {
+        const project = this.store.get(id);
+        if (
+          this.closed ||
+          this.host.workspace(workspaceId) !== w ||
+          w.projectLink !== link ||
+          w.isArchived ||
+          !w.messagesLoaded ||
+          !w.isQuiet ||
+          project?.status !== "active" ||
+          project.archivedAt ||
+          !project.leadWorkspaceId
+        )
+          return false;
+        const messages = w.getMessages();
+        const userOwned = this.isUserTakenOver(w);
+        let committed = false;
+        for (const { inputId, replyId } of w.pendingTurnFailures()) {
+          const got = w.findMessage(inputId);
+          const reply = w.findMessage(replyId);
+          const input = got && (got.from?.role === "panel" ? asked(messages, got) : got);
+          if (
+            !userOwned &&
+            input?.from?.role === "lead" &&
+            input.from.workspaceId === project.leadWorkspaceId &&
+            reply?.status === "error"
+          ) {
+            this.journal(id).append({
+              reportId: randomUUID(),
+              callId: `turn-failure:${w.id}:${replyId}`,
+              kind: "failure",
+              workerWsId: w.id,
+              workerName: w.name,
+              payload: { text: failedTurnNotice(input, reply) },
+              frozenPlan: null,
+              boardState: "not_applicable",
+              leadDelivery: { state: "pending" },
+              createdAt: reply.timestamp,
+            });
+            w.markAnswered(inputId);
+            committed = true;
+          }
+          w.clearTurnFailure(replyId);
+        }
+        this.host.saveWorkspaceNow(w);
+        return committed && this.leadOnline(project);
+      });
+      if (shouldDrain) await this.drainInbox(id);
+    }
+
+    const lead = this.leadOf(id);
+    if (
+      this.closed ||
+      this.host.workspace(workspaceId) !== w ||
+      w.projectLink !== link ||
+      w.isArchived ||
+      !w.messagesLoaded ||
+      !w.isQuiet ||
+      this.store.get(id)?.status !== "active" ||
+      this.store.get(id)?.archivedAt ||
+      !lead ||
+      lead.isArchived
+    )
+      return;
     const messages = w.getMessages();
     const task = taskOf(messages);
     for (const { input: got, replies, stopped, answered, since } of w.lastDelivered()) {
       const input = asked(messages, got);
       if (!fromLead(input, lead) || answered) continue;
-      const last = replies[replies.length - 1];
-      const failed = last?.status === "error";
-      if (since || stopped === "user" || (input.id === task?.id && !stopped && !failed)) {
+      if (
+        since ||
+        stopped === "user" ||
+        (input.id === task?.id && !stopped) ||
+        (replies.at(-1)?.status === "error" && !stopped)
+      ) {
         w.markAnswered(got.id);
         this.host.persistWorkspace(w);
         continue;
@@ -779,33 +860,17 @@ export class ProjectManager {
         this.carryOn(w, got);
         continue;
       }
-      const error = last?.events?.filter((e) => e.kind === "error").pop();
-      const text = replies
-        .map((m) =>
-          (m.content.endsWith(INTERRUPTED)
-            ? m.content.slice(0, -INTERRUPTED.length)
-            : m.content
-          ).trim(),
-        )
-        .filter(Boolean)
-        .pop();
+      const text = replies.map(replyText).filter(Boolean).pop();
       const how =
         stopped === "restart"
           ? "a server restart cut it off again after it carried on"
-          : failed
-            ? `its turn failed: ${oneLine(error?.content ?? "", 500)}`
-            : "its turn ended";
-      const body = [
-        `No report on your message "${oneLine(input.content, 80)}" (${how}).`,
-        text ? `Its last reply:\n\n${text.length > 1500 ? `…${text.slice(-1500)}` : text}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n\n");
+          : "its turn ended";
+      const body = silentTurnNotice(input, how, text);
       this.deliver(
         lead,
         body,
         { workspaceId: w.id, name: w.name, role: "panel" },
-        `[From the panel, about session "${w.name}" (${w.id}). Act on it if there is something to do; no reply to the session is needed.]\n\n${body}`,
+        `${silentNoticeHeader(w.name, w.id)}\n\n${body}`,
       );
       w.markAnswered(got.id);
       this.host.persistWorkspace(w);
@@ -942,6 +1007,7 @@ export class ProjectManager {
         this.carrying.delete(w.id);
         this.host.cancelWorkspaceTimers?.(w);
         this.host.loadWorkspace(w);
+        if (w.projectLink?.role === "lead") this.recovery.stop(w);
       }
       await Promise.all(members.map((w) => w.seal()));
       this.changed(id);
@@ -967,6 +1033,7 @@ export class ProjectManager {
   ): void {
     const id = workspace.projectLink?.projectId;
     if (!id) return;
+    if (this.recovery.receipt(workspace, reportId, state, meta?.errorMessage)) return;
     const journal = this.journal(id);
     const current = journal.getByReportId(reportId)?.leadDelivery.state;
     if (
@@ -2251,7 +2318,7 @@ export class ProjectManager {
           journal.updateBoardState(report.reportId, "applied");
         }
       }
-      if (!lead || !this.host.loadWorkspace(lead)) return;
+      if (!lead || lead.leadOutage || !this.host.loadWorkspace(lead)) return;
       const target = lead;
       // Flush any dirty Lead history before reconciling in-memory rows against inbox.json.
       this.host.saveWorkspaceNow(target);
@@ -2289,19 +2356,22 @@ export class ProjectManager {
         ) {
           const agent = target.resolveAgent();
           if (!agent || (target.isArchived && !this.host.restoreWorkspace(target))) continue;
-          const body = `${report.kind === "final" ? "Finished" : "Progress"}:
-
-${report.payload.text}`;
+          const failure = report.kind === "failure";
+          const body = failure
+            ? (report.payload.text ?? "")
+            : `${report.kind === "final" ? "Finished" : "Progress"}:\n\n${report.payload.text}`;
+          const header = failure
+            ? silentNoticeHeader(report.workerName, report.workerWsId)
+            : `[From session "${report.workerName}" (${report.workerWsId})]`;
           target.ensureReportQueued(
             report.leadMessageId,
             agent.info.id,
-            buildReportEnvelope(
-              report,
-              `[From session "${report.workerName}" (${report.workerWsId})]
-
-${body}`,
-            ),
-            { workspaceId: report.workerWsId, name: report.workerName, role: "worker" },
+            buildReportEnvelope(report, `${header}\n\n${body}`),
+            {
+              workspaceId: report.workerWsId,
+              name: report.workerName,
+              role: failure ? "panel" : "worker",
+            },
             body,
           );
           journal.updateLeadDelivery(report.reportId, { state: "enqueued" });
@@ -2316,6 +2386,7 @@ ${body}`,
       this.store.get(id)?.status === "active" &&
       this.leadOnline(this.require(id)) &&
       !target.isArchived &&
+      !target.leadOutage &&
       target.messagesLoaded
     ) {
       for (const agentId of target.agents.keys()) target.dequeueNext(agentId);
@@ -2671,6 +2742,48 @@ async function folderSize(dir: string): Promise<{ files: number; bytes: number }
     }
   }
   return out;
+}
+
+function silentNoticeHeader(name: string, id: string): string {
+  return `[From the panel, about session "${name}" (${id}). Act on it if there is something to do; no reply to the session is needed.]`;
+}
+
+function replyText(reply: Message): string {
+  const text = reply.content;
+  return (text.endsWith(INTERRUPTED) ? text.slice(0, -INTERRUPTED.length) : text).trim();
+}
+
+function lastReplyContext(text?: string): string {
+  return text ? `Its last reply:\n\n${text.length > 1500 ? `…${text.slice(-1500)}` : text}` : "";
+}
+
+function silentTurnNotice(input: Message, how: string, text?: string): string {
+  return [
+    `No report on your message "${oneLine(input.content, 80)}" (${how}).`,
+    lastReplyContext(text),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function failedTurnNotice(input: Message, reply: Message): string {
+  const error = reply.events
+    ?.filter((e) => e.kind === "error")
+    .at(-1)
+    ?.content.trim();
+  const tool = reply.events?.filter((e) => e.kind === "tool_use" && e.toolName).at(-1);
+  const toolResult = tool?.toolResult?.trim();
+  const toolContext = tool?.toolName
+    ? `Last tool: ${oneLine(tool.toolName, 80)}${tool.toolResultIsError ? " (reported an error)" : ""}${toolResult ? ` — ${oneLine(toolResult, 500)}` : tool.toolResult === undefined ? " (outcome unknown)" : " (returned)"}`
+    : "";
+  return [
+    `Worker turn failed on your message "${oneLine(input.content, 80)}".`,
+    error ? `Error: ${oneLine(error, 500)}` : "",
+    lastReplyContext(replyText(reply)),
+    toolContext,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function oneLine(s: string, max: number): string {

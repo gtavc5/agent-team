@@ -110,6 +110,7 @@ describe("server telemetry", () => {
       "chat.cancel_wakeup",
       "trace.step_toggle",
       "trace.subagent_toggle",
+      "trace.subagent_page",
       "trace.tool_toggle",
       "trace.load_details",
       "workspace.archive",

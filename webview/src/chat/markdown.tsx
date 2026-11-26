@@ -26,6 +26,7 @@ import {
 import { codeText, copyText } from "./clipboard";
 import { useLocale } from "../i18n";
 import { t, useT } from "../i18n/chat";
+import { DiagramPreview, diagramLanguage, diagramSource } from "./DiagramPreview";
 
 export function CopyButton({ text }: { text: () => string }) {
   const tr = useT();
@@ -48,6 +49,9 @@ export function CopyButton({ text }: { text: () => string }) {
 
 export function CodeBlock({ children, node: _node, ...rest }: ComponentProps<"pre"> & ExtraProps) {
   const preRef = useRef<HTMLPreElement>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const language = diagramLanguage(children);
+  const source = language ? diagramSource(children) : "";
   const text = () => {
     const code = preRef.current?.querySelector("code");
     return code ? codeText(code) : "";
@@ -56,8 +60,17 @@ export function CodeBlock({ children, node: _node, ...rest }: ComponentProps<"pr
   // block's lines.
   return (
     <div className="code-block">
-      <CopyButton text={text} />
-      <pre {...rest} ref={preRef}>
+      {language ? (
+        <DiagramPreview
+          language={language}
+          source={source}
+          onPreviewChange={setPreviewing}
+          copy={<CopyButton text={text} />}
+        />
+      ) : (
+        <CopyButton text={text} />
+      )}
+      <pre {...rest} ref={preRef} hidden={language !== null && previewing}>
         {children}
       </pre>
     </div>
@@ -74,6 +87,8 @@ function ScrollTable({ node: _node, ...props }: ComponentProps<"table"> & ExtraP
 
 // Inside a link, code is part of the link's text, not a reference of its own.
 const InLink = createContext(false);
+// A local link already supplies the code element for its label.
+const InCodeLink = createContext(false);
 
 // Where it is given (the board's objective details), the ids of the
 // project's issues named in text link to the issue.
@@ -268,7 +283,7 @@ export function FileRefCode({
         open(target);
       }}
     >
-      {children}
+      <InCodeLink.Provider value={true}>{children}</InCodeLink.Provider>
     </code>
   );
 }
@@ -296,7 +311,9 @@ function Link({ href, children, node: _node, ...rest }: ComponentProps<"a"> & Ex
           {children}
         </FileRefCode>
       ) : (
-        <code title={href}>{children}</code>
+        <code title={href}>
+          <InCodeLink.Provider value={true}>{children}</InCodeLink.Provider>
+        </code>
       )}
     </InLink.Provider>
   );
@@ -306,7 +323,9 @@ function Link({ href, children, node: _node, ...rest }: ComponentProps<"a"> & Ex
 function InlineCode({ children, node: _node, ...rest }: ComponentProps<"code"> & ExtraProps) {
   const openable = useOpenable();
   const inLink = useContext(InLink);
+  const inCodeLink = useContext(InCodeLink);
   const text = typeof children === "string" ? children : null;
+  if (inCodeLink) return <>{children}</>;
   if (
     openable &&
     !inLink &&
@@ -471,9 +490,10 @@ function useMathPlugins(needed: boolean): MathPlugins | null {
 // Markdown parsing + highlighting is the hottest path during streaming.
 // Memoized so a re-render only re-parses blocks whose text actually changed
 // (inline plugin arrays would defeat react-markdown's own memoization).
-export const MdBlock = memo(function MdBlock({ children }: { children: string }) {
+type MdBlockProps = { children: string; thinking?: boolean };
+export const MdBlock = memo(function MdBlock({ children, thinking }: MdBlockProps) {
   useLocale();
-  const { text, hasMath } = useMemo(() => prepareSource(children), [children]);
+  const { text, hasMath } = useMemo(() => prepareSource(children, thinking), [children, thinking]);
   const math = useMathPlugins(hasMath);
   const refs = useContext(IssueRefContext);
   const paths = useProsePaths();
@@ -516,7 +536,9 @@ function InlineLink({ href, children }: ComponentProps<"a">) {
   return (
     <InLink.Provider value={true}>
       {target && openable?.(target) ? (
-        <FileRefCode target={target}>{children}</FileRefCode>
+        <FileRefCode target={target} className="inline-code">
+          {children}
+        </FileRefCode>
       ) : (
         children
       )}
@@ -528,7 +550,9 @@ function InlineCodeText({ children }: { children?: ReactNode }) {
   const paths = useProsePaths();
   const openable = useOpenable();
   const inLink = useContext(InLink);
+  const inCodeLink = useContext(InCodeLink);
   const text = typeof children === "string" ? children : null;
+  if (inCodeLink) return <>{children}</>;
   return paths && openable && !inLink && text && parseFileRef(text) && openable(text) ? (
     <FileRefCode target={text} className="inline-code">
       {children}
@@ -643,13 +667,13 @@ export function markdownBlocks(text: string): string[] {
 // A streaming reply grows at its end: parsed block by block, the finished
 // blocks keep their memoized output and only the last one re-parses per
 // frame, instead of the whole reply (quadratic over a long answer).
-export function StreamingMdBlock({ children }: { children: string }) {
+export function StreamingMdBlock({ children, thinking }: MdBlockProps) {
   return (
     <>
       {markdownBlocks(children).map((block, i) => (
         <Fragment key={i}>
           {i > 0 && "\n"}
-          <MdBlock>{block}</MdBlock>
+          <MdBlock thinking={thinking}>{block}</MdBlock>
         </Fragment>
       ))}
     </>

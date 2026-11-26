@@ -88,21 +88,15 @@ function TokenTrend({
           <h3>{tr("tokenTrend")}</h3>
           <span>{tr("trendGranularity", { granularity: granularityLabel })}</span>
         </div>
-        <div className="usage-overview-modes" role="group" aria-label={tr("chartBreakdown")}>
-          <button
-            type="button"
-            className="btn-secondary"
-            aria-pressed={mode === "types"}
-            onClick={() => setMode("types")}
-          >
+        <div
+          className="bp-views usage-overview-modes"
+          role="group"
+          aria-label={tr("chartBreakdown")}
+        >
+          <button type="button" aria-pressed={mode === "types"} onClick={() => setMode("types")}>
             {tr("tokenTypes")}
           </button>
-          <button
-            type="button"
-            className="btn-secondary"
-            aria-pressed={mode === "models"}
-            onClick={() => setMode("models")}
-          >
+          <button type="button" aria-pressed={mode === "models"} onClick={() => setMode("models")}>
             {tr("topModels")}
           </button>
         </div>

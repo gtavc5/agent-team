@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   applyEventsToMessage,
   applyStreamBatch,
-  mergeDetailEvents,
   mergeLatestPage,
   downgradedMessageIds,
   toolNameOf,
@@ -28,14 +27,13 @@ const msg = (over: Partial<Message> = {}): Message => ({
   ...over,
 });
 
-// A subagent_progress carrying one inner event of task `taskId`.
-const carrier = (taskId: string, inner: StreamEvent): StreamEvent =>
-  ev("subagent_progress", {
-    subagent: { taskId, description: "", _innerEvent: inner } as unknown as StreamEvent["subagent"],
+const traceSummary = (taskId: string, eventCount: number, transcriptRevision: number) =>
+  ev("subagent_enrichment", {
+    subagent: { taskId, description: "", eventCount, transcriptRevision, lastTool: "Read" },
   });
 
 describe("applyEventsToMessage", () => {
-  it("keeps lifecycle metadata equivalent in live root, live nested, and timeline cards", () => {
+  it("keeps lifecycle metadata equivalent in live and timeline cards", () => {
     const lifecycle = [
       ev("subagent_start", {
         subagent: { taskId: "child", description: "Audit", status: "running", eventCount: 5 },
@@ -61,35 +59,25 @@ describe("applyEventsToMessage", () => {
         },
       }),
     ];
-    const parent = ev("subagent_start", {
-      subagent: { taskId: "parent", description: "Parent", events: [] },
-    });
     const expected = {
       taskId: "child",
       description: "Audit",
       model: "anthropic/claude-opus-4-6",
       effort: "high",
-      eventCount: 9,
+      eventCount: 0,
       status: "completed",
       summary: "Done",
     };
     const run = (frames: StreamEvent[], initial = msg()) =>
       frames.reduce((m, frame) => applyEventsToMessage(m, [frame]), initial);
     const root = run(lifecycle).events!;
-    const nested = run(
-      lifecycle.map((frame) => carrier("parent", frame)),
-      msg({ events: [parent] }),
-    ).events![0].subagent!.events!;
-    for (const events of [root, nested]) {
-      expect(events[0].subagent).toMatchObject(expected);
-      expect(splitEvents(events).subagents[0].subagent).toMatchObject(expected);
-    }
+    expect(root[0].subagent).toMatchObject(expected);
+    expect(splitEvents(root).subagents[0].subagent).toMatchObject(expected);
     expect(splitEvents(lifecycle).subagents[0].subagent).toMatchObject(expected);
-    expect(parent.subagent?.events).toEqual([]);
   });
 
   it.each([false, true])(
-    "keeps loaded progress metadata on completion (another update: %s)",
+    "keeps sparse progress metadata on completion (another update: %s)",
     (anotherUpdate) => {
       const start = ev("subagent_start", {
         subagent: { taskId: "child", description: "Audit", status: "running" },
@@ -108,42 +96,32 @@ describe("applyEventsToMessage", () => {
         subagent: { taskId: "child", description: "", status: "completed", eventCount: 0 },
       });
       const loaded = [start, progress];
-      const parent = ev("subagent_start", {
-        subagent: { taskId: "parent", description: "Parent", events: loaded },
-      });
       const updates = anotherUpdate
         ? [ev("subagent_progress", { subagent: { taskId: "child", description: "" } }), done]
         : [done];
       const root = applyEventsToMessage(msg({ events: loaded }), updates).events!;
-      const nested = applyEventsToMessage(
-        msg({ events: [parent] }),
-        updates.map((update) => carrier("parent", update)),
-      ).events![0].subagent!.events!;
       const expected = {
         taskId: "child",
         description: "Audit",
         model: "opus",
         effort: "high",
         lastTool: "Read",
-        eventCount: 9,
+        eventCount: 0,
         status: "completed",
       };
-      for (const result of [root, nested]) {
-        expect(result[0].subagent).toMatchObject(expected);
-        expect(splitEvents(result).subagents[0].subagent).toMatchObject(expected);
-      }
+      expect(root[0].subagent).toMatchObject(expected);
+      expect(splitEvents(root).subagents[0].subagent).toMatchObject(expected);
       expect(loaded).toEqual([start, progress]);
       expect(start.subagent).not.toHaveProperty("model");
-      expect(parent.subagent?.events).toBe(loaded);
     },
   );
 
   it.each([
-    [12, 4, 12],
-    [3, 19, 19],
+    [12, 4],
+    [3, 19],
   ])(
-    "keeps the larger subagent transcript count (%i at start, %i at completion)",
-    (start, end, expected) => {
+    "uses the authoritative terminal trace count (%i at start, %i at completion)",
+    (start, end) => {
       const info = { taskId: "task", description: "work" };
       const message = msg({
         events: [ev("subagent_start", { subagent: { ...info, eventCount: start } })],
@@ -153,44 +131,9 @@ describe("applyEventsToMessage", () => {
           subagent: { ...info, status: "completed", eventCount: end },
         }),
       ]);
-      expect(out.events![0].subagent!.eventCount).toBe(expected);
+      expect(out.events![0].subagent!.eventCount).toBe(end);
     },
   );
-
-  it("clears pre-completion live slice on expanded running card when subagent_done carries eventCount without inline events, while keeping Codex slices", () => {
-    const start = ev("subagent_start", {
-      subagent: {
-        taskId: "pi-live",
-        description: "Audit",
-        status: "running",
-        events: [ev("tool_use", { content: "`pwd`", toolUseId: "t1" })],
-      },
-    });
-    const afterSameCount = applyEventsToMessage(msg({ events: [start] }), [
-      ev("subagent_done", {
-        subagent: { taskId: "pi-live", description: "", status: "completed", eventCount: 1 },
-      }),
-    ]);
-    expect(afterSameCount.events![0].subagent!.events).toBeUndefined();
-    expect(afterSameCount.events![0].subagent!.eventCount).toBe(1);
-    expect(afterSameCount.events![0].subagent!.status).toBe("completed");
-
-    const codexStart = ev("subagent_start", {
-      subagent: {
-        taskId: "codex-live",
-        description: "Audit",
-        status: "running",
-        events: [ev("tool_use", { content: "`pwd`", toolUseId: "t1" })],
-      },
-    });
-    const afterCodex = applyEventsToMessage(msg({ events: [codexStart] }), [
-      ev("subagent_done", {
-        subagent: { taskId: "codex-live", description: "", status: "completed" },
-      }),
-    ]);
-    expect(afterCodex.events![0].subagent!.events).toHaveLength(1);
-    expect(afterCodex.events![0].subagent!.status).toBe("completed");
-  });
 
   it("appends text deltas and ignores thinking deltas", () => {
     const out = applyEventsToMessage(msg({ content: "He" }), [
@@ -242,7 +185,7 @@ describe("applyEventsToMessage", () => {
       ev("thinking", { content: "thought" }),
       ev("tool_use", { content: "Read", toolUseId: "read" }),
       ev("subagent_start", {
-        subagent: { taskId: "task", description: "work", status: "running", events: [] },
+        subagent: { taskId: "task", description: "work", status: "running" },
       }),
     ];
     for (const event of progress) {
@@ -279,50 +222,23 @@ describe("applyEventsToMessage", () => {
     ]);
   });
 
-  it("folds subagent inner events onto the start event without mutating the input", () => {
+  it("applies absolute progress and revision without attaching a trace or mutating the original card", () => {
     const start = ev("subagent_start", {
-      subagent: { taskId: "task", description: "d", status: "running", events: [] },
+      subagent: { taskId: "task", description: "Audit", status: "running", eventCount: 1 },
     });
     const input = msg({ events: [start] });
     const out = applyEventsToMessage(input, [
-      ev("subagent_progress", {
-        subagent: {
-          taskId: "task",
-          description: "",
-          _innerEvent: ev("tool_use", { toolUseId: "i1", content: "Read" }),
-        } as unknown as StreamEvent["subagent"],
-      }),
-      ev("subagent_progress", {
-        subagent: {
-          taskId: "task",
-          description: "",
-          _innerEvent: ev("tool_result", {
-            toolUseId: "i1",
-            content: "body",
-            isMarkdown: true,
-            isError: true,
-            durationMs: 17,
-          }),
-        } as unknown as StreamEvent["subagent"],
-      }),
-      ev("subagent_done", {
-        subagent: { taskId: "task", description: "", status: "completed", summary: "ok" },
-      }),
+      traceSummary("task", 50, 7),
+      traceSummary("task", 2, 6),
     ]);
-    expect(input.events![0].subagent!.events).toEqual([]);
-    const sa = out.events![0].subagent!;
-    expect(sa.events).toHaveLength(1);
-    expect(sa.events![0]).toMatchObject({
-      kind: "tool_use",
-      toolUseId: "i1",
-      toolResult: "body",
-      toolResultIsMarkdown: true,
-      toolResultIsError: true,
-      durationMs: 17,
+    expect(start.subagent!.eventCount).toBe(1);
+    expect(out.events).toHaveLength(1);
+    expect(out.events![0].subagent).toMatchObject({
+      eventCount: 50,
+      transcriptRevision: 7,
+      lastTool: "Read",
     });
-    expect(sa.status).toBe("completed");
-    expect(sa.summary).toBe("ok");
-    expect(out.events!.map((e) => e.kind)).toEqual(["subagent_start", "subagent_done"]);
+    expect(out.events![0].subagent).not.toHaveProperty("events");
   });
 
   it("returns the same message object when nothing applies", () => {
@@ -332,74 +248,16 @@ describe("applyEventsToMessage", () => {
     expect(applyEventsToMessage(m, [ev("text_delta", { content: "" })])).toBe(m);
   });
 
-  it("is pure: the same batch applied twice gives one inner event (StrictMode)", () => {
-    // A start and its first inner event in one batch: React may run the
-    // updater twice with the same previous state and the same wire objects.
-    const batch = [
-      ev("subagent_start", {
-        subagent: { taskId: "t", description: "d", status: "running", events: [] },
-      }),
-      carrier("t", ev("tool_use", { toolUseId: "i1", content: "**Read** a" })),
-    ];
-    const base = msg();
-    applyEventsToMessage(base, batch);
-    const second = applyEventsToMessage(base, batch);
-    expect(second.events![0].subagent!.events).toHaveLength(1);
-    expect(batch[0].subagent!.events).toEqual([]);
-  });
-
-  it("keeps untouched subagent cards identical so memoized cards skip", () => {
-    const quiet = ev("subagent_start", {
-      subagent: { taskId: "a", description: "a", status: "running", events: [] },
-    });
-    const busy = ev("subagent_start", {
-      subagent: { taskId: "b", description: "b", status: "running", events: [] },
-    });
-    const out = applyEventsToMessage(msg({ events: [quiet, busy] }), [
-      carrier("b", ev("tool_use", { toolUseId: "i1" })),
-    ]);
-    expect(out.events![0]).toBe(quiet);
-    expect(out.events![1]).not.toBe(busy);
-    expect(out.events![1].subagent!.events).toHaveLength(1);
-  });
-
-  it("does not start a partial transcript on a card that was never loaded", () => {
-    // From a summary page: the server holds the transcript, the client only
-    // its size. Applying the live tail would pass for the whole of it.
-    const start = ev("subagent_start", {
-      subagent: { taskId: "t", description: "d", status: "running", eventCount: 3 },
-    });
-    const out = applyEventsToMessage(msg({ events: [start] }), [
-      carrier("t", ev("tool_use", { toolUseId: "i4" })),
-      carrier("t", ev("tool_result", { toolUseId: "i4", content: "ok" })),
-      carrier("t", ev("thinking", { content: "hm" })),
-    ]);
-    const sa = out.events![0].subagent!;
-    expect(sa.events).toBeUndefined();
-    // Still more on the server than here: the card offers to load it.
-    expect(sa.eventCount).toBe(5);
-  });
-
-  it("counts on a never-loaded card what the server's transcript gains, not every carrier", () => {
-    const card = ev("subagent_start", {
-      subagent: { taskId: "t", description: "d", status: "running", eventCount: 1 },
-    });
-    // A nested task reports progress three times: the server keeps one
-    // entry for it, replaced in place, then its done replaces that entry.
-    const progress = ev("subagent_progress", {
-      subagent: { taskId: "n", description: "nested", lastTool: "Read" },
-    });
-    let m = applyEventsToMessage(msg({ events: [card] }), [
-      carrier("t", progress),
-      carrier("t", progress),
-      carrier("t", carrier("n", ev("tool_use", { toolUseId: "deep" }))),
-      carrier("t", progress),
-    ]);
-    expect(m.events![0].subagent!.eventCount).toBe(2);
-    m = applyEventsToMessage(m, [
-      carrier("t", ev("subagent_done", { subagent: { taskId: "n", description: "" } })),
-    ]);
-    expect(m.events![0].subagent!.eventCount).toBe(2);
+  it("is pure under repeated batches and preserves unrelated summary identities", () => {
+    const quiet = ev("subagent_start", { subagent: { taskId: "idle", description: "Idle" } });
+    const busy = ev("subagent_start", { subagent: { taskId: "busy", description: "Busy" } });
+    const batch = [quiet, busy, traceSummary("busy", 12, 34)];
+    const first = applyEventsToMessage(msg(), batch);
+    const second = applyEventsToMessage(msg(), batch);
+    expect(first).toEqual(second);
+    expect(second.events![0]).toBe(quiet);
+    expect(second.events![1].subagent!.eventCount).toBe(12);
+    expect(busy.subagent!.eventCount).toBeUndefined();
   });
 });
 
@@ -442,39 +300,6 @@ describe("tool name helpers", () => {
   it("summarises single-line tool calls without the name or backticks", () => {
     expect(toolSummary(ev("tool_use", { content: "**Read** `src/a.ts`" }))).toBe("src/a.ts");
     expect(toolSummary(ev("tool_use", { content: "**Bash**\n```bash\nls\n```" }))).toBe("");
-  });
-});
-
-describe("mergeDetailEvents", () => {
-  it("takes the server events but keeps client-loaded subagent transcripts", () => {
-    const client = [
-      ev("subagent_start", {
-        subagent: { taskId: "t", description: "", events: [ev("tool_use")] },
-      }),
-    ];
-    const server = [
-      ev("thinking", { content: "full body" }),
-      ev("subagent_start", { subagent: { taskId: "t", description: "d", eventCount: 1 } }),
-    ];
-    const merged = mergeDetailEvents(client, server);
-    expect(merged[0].content).toBe("full body");
-    expect(merged[1].subagent!.events).toHaveLength(1);
-    expect(merged[1].subagent!.description).toBe("d");
-    expect(mergeDetailEvents(undefined, server)).toBe(server);
-  });
-
-  it("drops a client transcript shorter than the server's: it has a gap", () => {
-    const client = [
-      ev("subagent_start", {
-        subagent: { taskId: "t", description: "d", events: [ev("tool_use", { toolUseId: "i1" })] },
-      }),
-    ];
-    const server = [
-      ev("subagent_start", { subagent: { taskId: "t", description: "d", eventCount: 3 } }),
-    ];
-    const [start] = mergeDetailEvents(client, server);
-    expect(start.subagent!.events).toBeUndefined();
-    expect(start.subagent!.eventCount).toBe(3);
   });
 });
 
@@ -571,30 +396,6 @@ describe("mergeLatestPage", () => {
     expect(out[0].detail).toBeUndefined();
   });
 
-  it("carries client-loaded subagent transcripts across a resync", () => {
-    const inner = [ev("tool_use", { toolName: "Grep" })];
-    const cur = msg({
-      id: "m1",
-      timestamp: 1,
-      status: "streaming",
-      events: [
-        ev("subagent_start", { subagent: { taskId: "t", description: "d", events: inner } }),
-      ],
-    });
-    const next = msg({
-      id: "m1",
-      timestamp: 1,
-      status: "done",
-      events: [
-        ev("subagent_done", { subagent: { taskId: "t", description: "d", status: "completed" } }),
-      ],
-      detail: "summary",
-    });
-    const out = mergeLatestPage([cur], [next]);
-    expect(out[0].status).toBe("done");
-    expect(out[0].events?.[0].subagent?.events).toBe(inner);
-  });
-
   it("an empty newest page means the workspace has no messages", () => {
     expect(mergeLatestPage([msg({ id: "m1" })], [])).toEqual([]);
   });
@@ -654,7 +455,7 @@ describe("mergeLatestPage", () => {
               taskId: "t1",
               description: "bg",
               status: "running",
-              events: [ev("tool_use", { toolUseId: "i1" })],
+              eventCount: 1,
             },
           }),
         ],
@@ -688,52 +489,30 @@ describe("mergeLatestPage", () => {
   it("takes the server's copy when a card was stopped by a server restart", () => {
     const card = (status: "running" | "stopped", extra: Partial<StreamEvent["subagent"]> = {}) =>
       ev("subagent_start", { subagent: { taskId: "t", description: "d", status, ...extra } });
-    const existing = [msg({ id: "m1", status: "done", events: [card("running", { events: [] })] })];
+    const existing = [msg({ id: "m1", status: "done", events: [card("running")] })];
     const incoming = [
       msg({ id: "m1", status: "done", detail: "summary", events: [card("stopped")] }),
     ];
     expect(mergeLatestPage(existing, incoming)[0].events![0].subagent!.status).toBe("stopped");
   });
 
-  it("does not let a live tail after a resync hide the part it missed", () => {
-    // The client had i1 when the socket dropped; the server went on to i3.
-    const existing = [
+  it("replaces a trace summary on reconnect even when only the revision changed", () => {
+    const at = (revision: number) =>
       msg({
-        id: "m1",
-        timestamp: 1,
+        status: "done",
         events: [
           ev("subagent_start", {
             subagent: {
               taskId: "T",
-              description: "d",
-              status: "running",
-              events: [ev("tool_use", { toolUseId: "i1" })],
+              description: "Audit",
+              eventCount: 25,
+              transcriptRevision: revision,
             },
           }),
         ],
-      }),
-    ];
-    const incoming = [
-      msg({
-        id: "m1",
-        timestamp: 1,
-        detail: "summary",
-        events: [
-          ev("subagent_start", {
-            subagent: { taskId: "T", description: "d", status: "running", eventCount: 3 },
-          }),
-        ],
-      }),
-    ];
-    let m = mergeLatestPage(existing, incoming)[0];
-    m = applyEventsToMessage(m, [
-      carrier("T", ev("tool_use", { toolUseId: "i4" })),
-      carrier("T", ev("tool_use", { toolUseId: "i5" })),
-      carrier("T", ev("tool_use", { toolUseId: "i6" })),
-    ]);
-    const sa = m.events![0].subagent!;
-    // SubAgentItem loads the transcript while eventCount exceeds what it has.
-    expect(sa.eventCount ?? 0).toBeGreaterThan(sa.events?.length ?? 0);
+      });
+    const newer = { ...at(2), detail: "summary" as const };
+    expect(mergeLatestPage([at(1)], [newer])[0]).toEqual(newer);
   });
 });
 
@@ -742,12 +521,12 @@ describe("downgradedMessageIds", () => {
     const existing = [
       msg({ id: "live", status: "streaming", events: [ev("thinking", { content: "body" })] }),
       msg({ id: "page", status: "done", events: [ev("thinking")], detail: "summary" }),
-      msg({ id: "empty", status: "done", events: [] }),
+      msg({ id: "empty", status: "done" }),
     ];
     const merged = [
       msg({ id: "live", status: "done", events: [ev("thinking")], detail: "summary" }),
       msg({ id: "page", status: "done", events: [ev("thinking")], detail: "summary" }),
-      msg({ id: "empty", status: "done", events: [] }),
+      msg({ id: "empty", status: "done" }),
       msg({ id: "new", status: "done", events: [ev("thinking")], detail: "summary" }),
     ];
     expect(downgradedMessageIds(existing, merged)).toEqual(["live"]);
@@ -776,7 +555,7 @@ describe("robustness", () => {
     const start = msg({
       events: [
         ev("subagent_start", {
-          subagent: { taskId: "a", description: "review", agentType: "Explore", events: [] },
+          subagent: { taskId: "a", description: "review", agentType: "Explore" },
         }),
       ],
     });
@@ -872,13 +651,13 @@ describe("live thinking", () => {
 
   it("keeps the block and its timer while a background task reports on the message", () => {
     const bg = ev("subagent_start", {
-      subagent: { taskId: "bg", description: "bg", status: "running", events: [] },
+      subagent: { taskId: "bg", description: "bg", status: "running" },
     });
     vi.setSystemTime(1_000);
     let m = applyEventsToMessage(msg({ events: [bg] }), [think(""), think("First half. ")]);
     vi.setSystemTime(5_000);
     m = applyEventsToMessage(m, [
-      carrier("bg", ev("tool_use", { toolUseId: "x", content: "**Read** a" })),
+      traceSummary("bg", 1, 1),
       ev("subagent_progress", { subagent: { taskId: "bg", description: "", lastTool: "Read" } }),
       think("Second half."),
     ]);

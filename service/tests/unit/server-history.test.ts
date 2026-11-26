@@ -201,6 +201,49 @@ describe("a real server saving histories", () => {
     }
   });
 
+  it("broadcasts and persists a cleared failure when a failed session resumes", async () => {
+    const seeded = ws("ws-a", [msg("u1", "previous turn", 1000)]);
+    seeded.state.attention = { unread: 1, lastResult: "failed", awaitsUser: false };
+    const { base, web, dir } = seed([seeded]);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const restore = vi.spyOn(LocalHost.prototype, "restoreSession");
+    const { frames, stop } = await start(base, web);
+    try {
+      const session = restore.mock.results.at(-1)!.value as FakeSession;
+      session.isRunning = true;
+      session.emit("event", { kind: "text_delta", content: "resuming externally" });
+      await until(
+        () => frames.some((f) => f.type === "workspace_attention" && f.workspaceId === "ws-a"),
+        "cleared attention broadcast",
+      );
+      const update = frames.find(
+        (f) => f.type === "workspace_attention" && f.workspaceId === "ws-a",
+      )!;
+      expect(update).toMatchObject({ workspaceId: "ws-a", unread: 1 });
+      expect(update).not.toHaveProperty("lastResult");
+
+      const stateFile = path.join(dir, "ws-a.json");
+      await until(() => {
+        const saved = JSON.parse(fs.readFileSync(stateFile, "utf8")) as WorkspaceState;
+        return saved.attention?.unread === 1 && saved.attention.lastResult === undefined;
+      }, "cleared attention persisted");
+    } finally {
+      await stop();
+    }
+
+    const fresh = await start(base, web);
+    try {
+      const init = fresh.frames.find((f) => f.type === "init") as {
+        workspaces: Array<Record<string, unknown>>;
+      };
+      const restored = init.workspaces.find((w) => w.id === "ws-a")!;
+      expect(restored).toMatchObject({ unread: 1 });
+      expect(restored).not.toHaveProperty("lastResult");
+    } finally {
+      await fresh.stop();
+    }
+  });
+
   it("broadcasts enrichment of an unloaded tool owner and persists the authoritative child transcript", async () => {
     const workspaceId = "ws-a";
     const taskId = "child";
@@ -264,7 +307,7 @@ describe("a real server saving histories", () => {
             (f) =>
               f.type === "stream_event" &&
               (f.event as { subagent?: { transcriptRevision?: number } }).subagent
-                ?.transcriptRevision === 2,
+                ?.transcriptRevision === 3,
           ),
         "enrichment frame",
       );
@@ -281,14 +324,14 @@ describe("a real server saving histories", () => {
           messageId,
           event: {
             kind: "subagent_enrichment",
-            subagent: { transcriptRevision: 1, durationMs: 300 },
+            subagent: { transcriptRevision: 2, durationMs: 300 },
           },
         },
         {
           messageId,
           event: {
             kind: "subagent_enrichment",
-            subagent: { taskId, eventCount: 1, summary: "final summary", transcriptRevision: 2 },
+            subagent: { taskId, eventCount: 1, summary: "final summary", transcriptRevision: 3 },
           },
         },
       ]);
@@ -303,9 +346,16 @@ describe("a real server saving histories", () => {
     try {
       fresh.send({ type: "open_workspace", workspaceId });
       fresh.send({ type: "load_message_details", workspaceId, messageId });
-      fresh.send({ type: "load_subagent_events", workspaceId, messageId, taskId });
+      fresh.send({
+        type: "load_subagent_trace",
+        requestId: 17,
+        limit: 1,
+        workspaceId,
+        messageId,
+        taskId,
+      });
       await until(
-        () => fresh.frames.some((f) => f.type === "subagent_events"),
+        () => fresh.frames.some((f) => f.type === "subagent_trace_page"),
         "fresh child details",
       );
       const reply = (
@@ -323,20 +373,22 @@ describe("a real server saving histories", () => {
           model: "provider/model",
           effort: "high",
           durationMs: 500,
-          summaryLength: 13,
+          summary: "final summary",
           eventCount: 1,
-          transcriptRevision: 2,
+          transcriptRevision: 3,
         });
       }
       const detail = fresh.frames.find((f) => f.type === "message_details")!.events as NonNullable<
         Message["events"]
       >;
       for (const e of detail.slice(1)) {
-        expect(e.subagent).toMatchObject({ summary: "final summary", transcriptRevision: 2 });
+        expect(e.subagent).toMatchObject({ summary: "final summary", transcriptRevision: 3 });
       }
-      expect(fresh.frames.find((f) => f.type === "subagent_events")).toMatchObject({
+      expect(fresh.frames.find((f) => f.type === "subagent_trace_page")).toMatchObject({
         events,
-        transcriptRevision: 2,
+        requestId: 17,
+        totalEvents: 1,
+        revision: 3,
       });
     } finally {
       await fresh.stop();

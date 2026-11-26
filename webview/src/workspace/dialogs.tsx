@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, useId } from "react";
 import type { TelemetryConfirmation } from "../../../shared/telemetry";
 import { recordTelemetry } from "../telemetry";
 import { useWorkspaceT } from "../i18n/workspace";
@@ -145,12 +145,30 @@ export function AddAgentDialog({
   const finalName = customName || preset?.name || "Agent";
 
   return (
-    <DialogFrame title={tr("addAgentTitle")} onClose={onClose} suspended={suspended}>
-      <div className="preset-grid">
+    <DialogFrame
+      title={tr("addAgentTitle")}
+      onClose={onClose}
+      suspended={suspended}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!model) return;
+        onAdd(
+          finalName,
+          model,
+          preset?.avatar ?? "🤖",
+          preset?.color ?? "#888",
+          effort || undefined,
+        );
+        onClose();
+      }}
+    >
+      <div className="preset-grid" role="group" aria-label="Agent presets">
         {presets.map((p, i) => (
-          <div
+          <button
             key={p.name}
-            className={`preset-item ${i === selectedPreset ? "selected" : ""}`}
+            type="button"
+            className="preset-item"
+            aria-pressed={i === selectedPreset}
             onClick={() => {
               setSelectedPreset(i);
               if (p.model || p.effort) {
@@ -161,8 +179,9 @@ export function AddAgentDialog({
               setCustomName("");
             }}
           >
-            <div
+            <span
               className="agent-avatar"
+              aria-hidden="true"
               style={{
                 width: 36,
                 height: 36,
@@ -173,15 +192,15 @@ export function AddAgentDialog({
               {isImageAvatar(p.avatar) ? (
                 <img
                   src={p.avatar}
-                  alt={p.name}
+                  alt=""
                   style={{ width: 36, height: 36, borderRadius: "50%", objectFit: "cover" }}
                 />
               ) : (
                 p.avatar
               )}
-            </div>
+            </span>
             <span>{p.name}</span>
-          </div>
+          </button>
         ))}
       </div>
 
@@ -254,22 +273,7 @@ export function AddAgentDialog({
         <button type="button" className="btn-secondary" onClick={onClose}>
           {tr("cancel")}
         </button>
-        <button
-          type="button"
-          className="btn-primary"
-          disabled={!model}
-          onClick={() => {
-            if (!model) return;
-            onAdd(
-              finalName,
-              model,
-              preset?.avatar ?? "🤖",
-              preset?.color ?? "#888",
-              effort || undefined,
-            );
-            onClose();
-          }}
-        >
+        <button type="submit" className="btn-primary" disabled={!model}>
           {tr("add")}
         </button>
       </div>
@@ -322,16 +326,18 @@ export function CodexSetupDialog({
   };
 
   const statusNote = (() => {
-    if (rechecking) return null;
+    if (rechecking) return "Checking Codex sign-in…";
     if (codexAuth?.authenticated) return tr("codexSignedIn");
-    if (!checkRequested) return null;
-    if (codexAuth?.status === "error" && codexAuth.error) {
-      return tr("checkFailed", { error: codexAuth.error });
+    if (codexAuth?.status === "error") {
+      return codexAuth.error
+        ? tr("checkFailed", { error: codexAuth.error })
+        : "Check failed. Try Re-check again.";
     }
     if (codexAuth?.status === "unavailable") {
       return tr("codexCliUnavailable");
     }
-    return tr("codexStillNotSignedIn");
+    if (!codexAuth?.checkedAt) return "Waiting for the Codex sign-in status…";
+    return checkRequested ? tr("codexStillNotSignedIn") : null;
   })();
 
   return (
@@ -477,7 +483,9 @@ function useDirectoryField({
 }) {
   const [dirPath, setDirPath] = useState(initialPath);
   const [suggestOpen, setSuggestOpen] = useState(false);
-  const [suggestIdx, setSuggestIdx] = useState(0);
+  const [suggestIdx, setSuggestIdx] = useState(-1);
+  const inputId = useId();
+  const listId = `${inputId}-directories`;
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const blurTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -497,40 +505,58 @@ function useDirectoryField({
   const suggestions =
     !disabled && onListDirs && dirSuggestions?.prefix === dirPath ? dirSuggestions.dirs : [];
 
+  const expanded = suggestOpen && suggestions.length > 0;
+  const activeIndex = expanded && suggestIdx < suggestions.length ? suggestIdx : -1;
+  useEffect(() => {
+    if (activeIndex !== -1) {
+      document.getElementById(`${listId}-${activeIndex}`)?.scrollIntoView?.({ block: "nearest" });
+    }
+  }, [activeIndex, listId]);
+
+  const closeSuggestions = () => {
+    setSuggestOpen(false);
+    setSuggestIdx(-1);
+  };
+
   const handlePathChange = (value: string) => {
     setDirPath(value);
     setSuggestOpen(true);
-    setSuggestIdx(0);
+    setSuggestIdx(-1);
     requestDirs(value);
   };
 
   const pickSuggestion = (dir: string) => {
+    clearTimeout(debounceRef.current);
     setDirPath(dir);
-    setSuggestIdx(0);
-    requestDirs(dir);
+    closeSuggestions();
   };
 
   const handlePathKeyDown = (e: React.KeyboardEvent) => {
-    if (e.nativeEvent.isComposing) return;
-    if (!suggestOpen || suggestions.length === 0) return;
+    if (e.nativeEvent.isComposing || !expanded) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setSuggestIdx((i) => (i + 1) % suggestions.length);
+      setSuggestIdx((activeIndex + 1) % suggestions.length);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setSuggestIdx((i) => (i - 1 + suggestions.length) % suggestions.length);
-    } else if (e.key === "Tab" || e.key === "Enter") {
+      setSuggestIdx(activeIndex > 0 ? activeIndex - 1 : suggestions.length - 1);
+    } else if (e.key === "Enter" && activeIndex !== -1) {
       e.preventDefault();
-      pickSuggestion(suggestions[suggestIdx % suggestions.length]);
-    } else if (e.key === "Escape") {
-      setSuggestOpen(false);
+      pickSuggestion(suggestions[activeIndex]);
     }
   };
 
   const field = (
-    <label className="dialog-field path-field">
-      <span>{label}</span>
+    <div className="dialog-field path-field">
+      <label className="dialog-field-label" htmlFor={inputId}>
+        {label}
+      </label>
       <input
+        id={inputId}
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={expanded}
+        aria-controls={expanded ? listId : undefined}
+        aria-activedescendant={activeIndex !== -1 ? `${listId}-${activeIndex}` : undefined}
         value={dirPath}
         disabled={disabled}
         onChange={(e) => handlePathChange(e.target.value)}
@@ -546,18 +572,28 @@ function useDirectoryField({
           // click that lands past the list (e.g. on Create after the
           // list shrinks) completes before the layout shifts. Picking a
           // suggestion never blurs: items preventDefault on mousedown.
-          blurTimerRef.current = setTimeout(() => setSuggestOpen(false), 150);
+          setSuggestIdx(-1);
+          blurTimerRef.current = setTimeout(closeSuggestions, 150);
         }}
         placeholder={placeholder}
         autoComplete="off"
         spellCheck={false}
       />
-      {suggestOpen && suggestions.length > 0 && (
-        <div className="dir-suggest">
+      {expanded && (
+        <div
+          className="dir-suggest"
+          role="listbox"
+          id={listId}
+          aria-label={`${label} suggestions`}
+          tabIndex={-1}
+        >
           {suggestions.map((dir, i) => (
             <div
               key={dir}
-              className={`dir-suggest-item ${i === suggestIdx ? "active" : ""}`}
+              id={`${listId}-${i}`}
+              role="option"
+              aria-selected={i === activeIndex}
+              className={`dir-suggest-item${i === activeIndex ? " active" : ""}`}
               onMouseDown={(e) => {
                 e.preventDefault();
                 pickSuggestion(dir);
@@ -568,14 +604,14 @@ function useDirectoryField({
           ))}
         </div>
       )}
-    </label>
+    </div>
   );
   return {
     path: dirPath,
     field,
     dismiss: () => {
-      if (!suggestOpen || suggestions.length === 0) return false;
-      setSuggestOpen(false);
+      if (!expanded) return false;
+      closeSuggestions();
       return true;
     },
   };
@@ -583,8 +619,7 @@ function useDirectoryField({
 
 // A workspace is just a name plus a directory, a session of that folder's
 // project (the server brings the project and its lead the first time). The
-// path field completes directories live against the server (shell-style
-// tab completion).
+// path field lists matching directories from the server for explicit selection.
 export function CreateWorkspaceDialog({
   hosts,
   onClose,

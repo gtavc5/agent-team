@@ -5,15 +5,6 @@
   flex-wrap: wrap;
   gap: 6px;
 }
-.usage-overview-modes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-.usage-overview-modes .btn-secondary {
-  padding: 3px 8px;
-}
-.usage-overview-modes [aria-pressed="true"],
 .usage-overview-ranking button[aria-pressed="true"] {
   color: var(--text-strong);
   border-color: var(--accent);
@@ -72,9 +63,9 @@
 }
 .usage-overview-ranks > svg {
   position: absolute;
-  inset: 0 6px;
+  inset: 0 7px;
   height: 100%;
-  width: calc(100% - 12px);
+  width: calc(100% - 14px);
   fill: var(--usage-input);
   pointer-events: none;
   z-index: 1;

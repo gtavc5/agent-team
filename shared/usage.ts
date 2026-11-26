@@ -29,6 +29,7 @@ export interface UsageObservation {
   output: number;
   workspaceId?: string;
   piSessionId?: string;
+  piMessageKey?: string;
   channel?: string;
   turnId?: string;
   toolCalls?: { id: string; name: string }[];

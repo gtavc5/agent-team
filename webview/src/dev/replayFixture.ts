@@ -1,3 +1,6 @@
+import { readTracePage, type TraceTarget, type TraceWindow } from "../../../shared/subagent-trace";
+import type { StreamEvent, SubAgentInfo } from "../state/useServer";
+
 // Synthetic replay for reviewing every event-rendering path by eye.
 // Triggered by the 🎬 button in the sidebar; plays a scripted conversation
 // through the exact same dispatch pipeline as live server frames.
@@ -808,6 +811,7 @@ export async function startDemoReplay(
 ): Promise<void> {
   const runId = ++activeReplayRun;
   const frames = buildFrames();
+  demoTraces.clear();
   const pacing = replayPacing();
   const commitSamplesMs: number[] = [];
   const startedAt = performance.now();
@@ -836,7 +840,7 @@ export async function startDemoReplay(
     if (runId !== activeReplayRun) return;
     const { delayAfterMs: _delay, ...wire } = frame;
     const frameStart = performance.now();
-    dispatch(wire);
+    dispatch(projectDemoTrace(wire));
     if (pacing.mode === "raf") {
       await nextFrameCommit();
       commitSamplesMs.push(performance.now() - frameStart);
@@ -864,6 +868,71 @@ export async function startDemoReplay(
   console.log("[replay-demo] finished");
 }
 
+type DemoEvent = Omit<StreamEvent, "subagent"> & { subagent?: DemoRun };
+type DemoRun = SubAgentInfo & { prompt?: string; events?: DemoEvent[]; _innerEvent?: DemoEvent };
+const demoTraces = new Map<string, DemoEvent[]>();
+
+function recordDemoEvent(events: DemoEvent[], event: DemoEvent): DemoRun | undefined {
+  const update = event.subagent;
+  const start =
+    update &&
+    events.find((e) => e.kind === "subagent_start" && e.subagent?.taskId === update.taskId)
+      ?.subagent;
+  if (start && update._innerEvent) {
+    recordDemoEvent((start.events ??= []), update._innerEvent);
+    start.transcriptRevision = (start.transcriptRevision ?? 0) + 1;
+    start.eventCount = start.events.length;
+    const tool = /^\*\*([^*]+)\*\*/.exec(update._innerEvent.content)?.[1];
+    if (update._innerEvent.kind === "tool_use" && tool) start.lastTool = tool;
+  } else if (start && update && event.kind === "subagent_done") {
+    start.status = update.status;
+    start.summary = update.summary;
+    start.usage = update.usage;
+    start.transcriptRevision = (start.transcriptRevision ?? 0) + 1;
+  } else if (start && update) {
+    if (update.lastTool) start.lastTool = update.lastTool;
+  } else if (event.kind === "tool_result" && event.toolUseId) {
+    const tool = events.find((e) => e.toolUseId === event.toolUseId);
+    if (tool) {
+      tool.toolResult = event.content;
+      tool.toolResultIsMarkdown = event.isMarkdown;
+      tool.toolResultIsError = event.isError;
+      tool.durationMs = event.durationMs;
+    } else events.push(event);
+  } else events.push(structuredClone(event));
+  return start;
+}
+
+function projectDemoTrace(wire: Frame): Frame {
+  if (wire.type !== "stream_event") return wire;
+  const event = wire.event as DemoEvent;
+  if (!event.subagent) return wire;
+  const { _innerEvent, events: _events, prompt: _prompt, ...summary } = event.subagent;
+  const id = wire.messageId as string;
+  let trace = demoTraces.get(id);
+  if (!trace) demoTraces.set(id, (trace = []));
+  const start = recordDemoEvent(trace, event);
+  return {
+    ...wire,
+    event: {
+      ...event,
+      content: "",
+      kind: _innerEvent ? "subagent_enrichment" : event.kind,
+      subagent: {
+        ...summary,
+        eventCount: start?.events?.length,
+        transcriptRevision: start?.transcriptRevision,
+        lastTool: start?.lastTool ?? summary.lastTool,
+        summary: summary.summary?.slice(0, 200).split("\n", 1)[0],
+      },
+    },
+  };
+}
+
+export function demoTracePage(id: number, target: TraceTarget, window: TraceWindow) {
+  return readTracePage(id, demoTraces.get(target.messageId), target.taskId, window);
+}
+
 // The demo has no real server task behind it, so Cancel is emulated locally:
 // emit the same subagent_done(stopped) frame a real stopTask would produce.
 export function cancelDemoSubagent(
@@ -871,15 +940,17 @@ export function cancelDemoSubagent(
   taskId: string,
 ): void {
   dispatch(
-    ev("demo-msg-1", {
-      kind: "subagent_done",
-      content: "",
-      subagent: {
-        taskId,
-        description: "",
-        status: "stopped",
-        summary: "Stopped by user (demo — a real run would call `Query.stopTask`).",
-      },
-    }),
+    projectDemoTrace(
+      ev("demo-msg-1", {
+        kind: "subagent_done",
+        content: "",
+        subagent: {
+          taskId,
+          description: "",
+          status: "stopped",
+          summary: "Stopped by user (demo — a real run would call `Query.stopTask`).",
+        },
+      }),
+    ),
   );
 }

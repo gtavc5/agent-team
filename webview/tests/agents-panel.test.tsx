@@ -523,8 +523,9 @@ describe("the agents panel in the app", () => {
     boot();
     const rail = document.querySelector(".header-rail")!;
     expect(rail.parentElement!.className).toBe("workspace-info-bar");
-    // Objectives, agents (background work included), files, changes.
-    expect(rail.querySelectorAll(".rail-btn")).toHaveLength(4);
+    // Stats shares the existing objectives, agents, files and changes rail.
+    expect(rail.querySelectorAll(".rail-btn")).toHaveLength(5);
+    expect(rail.querySelector('.rail-btn[aria-label="Session stats"]')).not.toBeNull();
   });
 
   it("leaves the lead to the sidebar: a worker's branch line has no button for it", () => {

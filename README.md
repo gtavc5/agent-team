@@ -42,6 +42,16 @@ new work. The panel provides the orchestration and UI, not a model of its own.
 - **Surviving restarts and limits** — a turn a server restart cut off is
   carried on by the panel itself; a turn stopped by a usage limit is retried
   after the window resets.
+- **Network outages** — after native short retries fail, a project lead can
+  wait up to 30 minutes, including time across service restarts. Worker reports
+  accumulate in its inbox; workers are never rerun for a network failure.
+  Recovery sends one outage summary with pending reports, not the old task.
+  Pi filters superseded empty attempts from model input; native Codex keeps
+  the first summary and adds only new reports. Every actual failure stays in
+  the transcript. Partial output or tool activity on a recovery attempt,
+  uncertain delivery, Stop, archive, or expiry ends automatic recovery.
+  Writing during the wait sends the pending context alongside your message
+  in one turn. Authentication, quota and unknown errors use their usual paths.
 - By default (`init-config` / `config.example.toml`), `[user].language` tells leads
   and workers to address you in Simplified Chinese while repository artifacts,
   project-board entries, and agent-to-agent instructions stay English

@@ -13,7 +13,14 @@ import {
 import { telemetryTarget } from "../telemetryEvents";
 import type { ReactNode } from "react";
 import type { Message, MessageOrigin, AgentInfo, StreamEvent } from "../state/useServer";
-import { hasOutstandingSubagents, timelineBlocks, type TimelineBlock } from "./events";
+import {
+  hasOutstandingSubagents,
+  SUBAGENT_KINDS,
+  timelineBlocks,
+  type TimelineBlock,
+} from "./events";
+import { SubagentTraceContext, useTracePage } from "./subagentTrace";
+import { traceBytes, type TraceRow, type TraceWindow } from "../../../shared/subagent-trace";
 import { isOutstandingSubagentStatus, type SubagentStatus } from "../../../shared/subagent-status";
 import { toolNameOf, toolSummary } from "../state/stream";
 import { copySelectionAsMarkdown } from "./clipboard";
@@ -440,6 +447,8 @@ export const EventItem = memo(function EventItem({
   const tr = useT();
   const [resultOpen, setResultOpen] = useState(false);
   const [bodyOpen, setBodyOpen] = useState(false);
+  const resultFold = useBottomCollapse(resultOpen, () => setResultOpen(false));
+  const bodyFold = useBottomCollapse(bodyOpen, () => setBodyOpen(false));
   const summarized = !!onLoadDetails;
   const running = useContext(TurnRunningContext) && isRunningTool(ev);
   const runningSecs = useElapsed(running ? ev.startedAt : undefined);
@@ -510,47 +519,56 @@ export const EventItem = memo(function EventItem({
     setBodyOpen((v) => !v);
   };
 
+  const failed = ev.isError || ev.toolResultIsError;
   return (
-    <div className={`event event-${ev.kind}${liveThinking ? " live-thinking" : ""}`}>
-      <div className="event-row" aria-hidden={liveThinking || undefined}>
-        {!liveThinking && <span className={`event-chip ${chipClass}`}>{label}</span>}
-        {isToolUse && ev.durationMs != null && (
-          <span className="event-time" title={tr("fromCallResult")}>
-            {formatRunTime(ev.durationMs)}
-          </span>
-        )}
-        {running && ev.startedAt != null && (
-          <span className="event-time event-time-live" title={tr("runningFor")}>
-            {formatDuration(runningSecs * 1000)}
-          </span>
-        )}
-        {hasHiddenBody && (
-          <button
-            className="btn-inline"
-            {...telemetryTarget("trace.tool_toggle")}
-            onClick={toggleBody}
-          >
-            {bodyOpen ? tr("hide") : tr("details")}
-          </button>
-        )}
-        {(isResult || hasResult) && (
-          <button
-            className="btn-inline btn-diff"
-            aria-expanded={resultOpen}
-            {...telemetryTarget("trace.tool_toggle")}
-            onClick={toggleResult}
-          >
-            {isResult
-              ? resultOpen
-                ? tr("hide")
-                : tr("show")
-              : resultOpen
-                ? tr("hideResult")
-                : tr("result")}{" "}
-            · {resultLabel(resultLen, tr)}
-          </button>
-        )}
-      </div>
+    <div
+      className={`event event-${ev.kind}${failed ? " event-failed" : ""}${liveThinking ? " live-thinking" : ""}`}
+    >
+      {!liveThinking && (
+        <div className="event-row">
+          <span className={`event-chip ${chipClass}`}>{label}</span>
+          {isToolUse && ev.durationMs != null && (
+            <span className="event-time" title={tr("fromCallResult")}>
+              {formatRunTime(ev.durationMs)}
+            </span>
+          )}
+          {running && ev.startedAt != null && (
+            <span className="event-time event-time-live" title={tr("runningFor")}>
+              {formatDuration(runningSecs * 1000)}
+            </span>
+          )}
+          {hasHiddenBody && (
+            <button
+              className="btn-inline"
+              {...telemetryTarget("trace.tool_toggle")}
+              ref={bodyFold.toggle}
+              aria-expanded={bodyOpen}
+              onClick={toggleBody}
+            >
+              {bodyOpen ? tr("hide") : tr("details")}
+            </button>
+          )}
+          {(isResult || hasResult) && (
+            <button
+              className="btn-inline btn-diff"
+              ref={resultFold.toggle}
+              aria-expanded={resultOpen}
+              {...telemetryTarget("trace.tool_toggle")}
+              onClick={toggleResult}
+            >
+              {isResult
+                ? resultOpen
+                  ? tr("hide")
+                  : tr("show")
+                : resultOpen
+                  ? tr("hideResult")
+                  : tr("result")} {"· "}
+              {resultLabel(resultLen, tr)}
+              {failed ? ` · ${tr("subagentStatusFailed")}` : ""}
+            </button>
+          )}
+        </div>
+      )}
       {isToolUse && summary && (
         <div className="event-summary-line">
           {!summaryCut && <CopyButton text={() => summary} />}
@@ -562,7 +580,8 @@ export const EventItem = memo(function EventItem({
         </div>
       )}
       {(bodyMissing || (toolBodyMissing && !bodyOpen)) && (
-        <div
+        <button
+          type="button"
           className="event-content event-placeholder"
           {...telemetryTarget("trace.tool_toggle")}
           onClick={isResult ? toggleResult : toggleBody}
@@ -570,7 +589,7 @@ export const EventItem = memo(function EventItem({
           {tr("tapToLoad", {
             size: formatSize(bodyMissing ? (ev.contentLength ?? 0) : bodyLen, tr),
           })}
-        </div>
+        </button>
       )}
       {isResult ? (
         resultOpen &&
@@ -594,12 +613,19 @@ export const EventItem = memo(function EventItem({
             (!liveThinking || body) && (
               <div className="event-content">
                 {isThinking ? (
-                  <StreamingMdBlock>{body}</StreamingMdBlock>
+                  <StreamingMdBlock thinking>{body}</StreamingMdBlock>
                 ) : (
                   <MdBlock>{body}</MdBlock>
                 )}
               </div>
             )}
+          {hasHiddenBody && bodyOpen && (
+            <BottomCollapse
+              onClick={bodyFold.collapse}
+              label="Collapse tool details"
+              action="trace.tool_toggle"
+            />
+          )}
           {hasResult && resultOpen && ev.toolResult != null && (
             <div className="event-content event-result">
               {ev.toolResultIsMarkdown ? (
@@ -613,6 +639,13 @@ export const EventItem = memo(function EventItem({
           )}
         </>
       )}
+      {resultOpen && (isResult ? ev.content : ev.toolResult) && (
+        <BottomCollapse
+          onClick={resultFold.collapse}
+          label="Collapse tool result"
+          action="trace.tool_toggle"
+        />
+      )}
     </div>
   );
 });
@@ -625,14 +658,15 @@ function useBottomCollapse(open: boolean, close: () => void) {
     scroller ? scroller.getBoundingClientRect().top + scroller.clientTop : 0;
 
   useLayoutEffect(() => {
-    if (open || !pending.current || !header.current) return;
+    const el = header.current ?? toggle.current;
+    if (open || !pending.current || !el) return;
     const { scroller, clipped } = pending.current;
     pending.current = null;
     toggle.current?.focus({ preventScroll: true });
     if (!clipped) return;
     // Measure again after the body is removed: the browser may already have
     // clamped the scroll offset, particularly at the end of the transcript.
-    const delta = header.current.getBoundingClientRect().top - topOfViewport(scroller);
+    const delta = el.getBoundingClientRect().top - topOfViewport(scroller);
     if (delta < 0) (scroller ?? window).scrollBy({ top: delta, behavior: "instant" });
   }, [open]);
 
@@ -640,7 +674,7 @@ function useBottomCollapse(open: boolean, close: () => void) {
     header,
     toggle,
     collapse: () => {
-      const el = header.current;
+      const el = header.current ?? toggle.current;
       if (el) {
         let scroller = el.parentElement;
         while (scroller && !/^(auto|scroll|overlay)$/.test(getComputedStyle(scroller).overflowY)) {
@@ -663,7 +697,7 @@ function BottomCollapse({
 }: {
   onClick: () => void;
   label: string;
-  action: "trace.step_toggle" | "trace.subagent_toggle";
+  action: "trace.step_toggle" | "trace.subagent_toggle" | "trace.tool_toggle";
 }) {
   const tr = useT();
   return (
@@ -696,31 +730,42 @@ const SUBAGENT_STATUS_ICONS: Record<SubagentStatus, string> = {
   rejected: "⊘",
 };
 
+type TraceScope = {
+  messageId: string;
+  rootTaskId: string;
+  path: readonly string[];
+  revision: number;
+};
+const ROOT_TRACE_PATH: readonly string[] = [];
+
 export const SubAgentItem = memo(function SubAgentItem({
   ev,
-  onLoadEvents,
+  messageId,
+  traceParent,
   onCancel,
-  onLoadDetails,
 }: {
   ev: StreamEvent;
-  onLoadEvents?: (taskId: string) => void;
+  messageId?: string;
+  traceParent?: TraceScope;
   onCancel?: (taskId: string) => void;
-  onLoadDetails?: () => void;
 }) {
   const tr = useT();
   const [open, setOpen] = useState(false);
   const bottom = useBottomCollapse(open, () => setOpen(false));
   const sa = ev.subagent;
-  // The server holds more of the transcript than the client (a summary
-  // page, or a live tail that arrived after the summary).
-  const needsLoad = !!sa && (sa.eventCount ?? 0) > (sa.events?.length ?? 0);
-  const transcriptRevision = sa?.transcriptRevision;
-  useEffect(() => {
-    if (open && needsLoad && onLoadEvents && sa?.taskId) onLoadEvents(sa.taskId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch once per open/needsLoad flip or transcript replacement; sa and onLoadEvents change identity on every stream update
-  }, [open, needsLoad, transcriptRevision]);
+  const parentPath = traceParent?.path;
+  const taskId = sa?.taskId;
+  const path = useMemo(
+    () => (parentPath && taskId ? [...parentPath, taskId] : ROOT_TRACE_PATH),
+    [parentPath, taskId],
+  );
   if (!sa) return null;
-
+  const scope: TraceScope = {
+    path,
+    messageId: traceParent?.messageId ?? messageId ?? "",
+    rootTaskId: traceParent?.rootTaskId ?? sa.taskId,
+    revision: traceParent?.revision ?? sa.transcriptRevision ?? 0,
+  };
   const status = sa.status ?? (ev.kind === "subagent_done" ? "failed" : "stopped");
   const outstanding = isOutstandingSubagentStatus(status);
   const statusTitle = tr(
@@ -738,26 +783,7 @@ export const SubAgentItem = memo(function SubAgentItem({
     )[status],
   );
 
-  const allInner = sa.events ?? [];
-  const hasBody = !!(sa.prompt || sa.summary || sa.usage || allInner.some(hasVisibleEventBody));
-
-  const handleToggle = () => {
-    const willOpen = !open;
-    setOpen(willOpen);
-    if (willOpen && onLoadDetails) onLoadDetails();
-  };
-
-  // Its time is in the header, measured from this run's start: the CLI's
-  // counts from the first, a resumed agent's idle time between included.
-  // Records from before it was measured: the CLI's time of a finished agent.
   const ran = sa.durationMs ?? (outstanding ? undefined : sa.usage?.durationMs);
-  const usageStr = sa.usage
-    ? tr("subagentUsage", {
-        tokens: `${Math.round(sa.usage.totalTokens / 1000)}k`,
-        tools: sa.usage.toolUses,
-      })
-    : null;
-
   const role = sa.description || tr("subagent");
   return (
     <div className={`subagent-item subagent-${status}`}>
@@ -765,7 +791,7 @@ export const SubAgentItem = memo(function SubAgentItem({
         className="subagent-header"
         ref={bottom.header}
         {...telemetryTarget("trace.subagent_toggle")}
-        onClick={handleToggle}
+        onClick={() => setOpen((value) => !value)}
       >
         <button
           type="button"
@@ -812,54 +838,167 @@ export const SubAgentItem = memo(function SubAgentItem({
           </button>
         )}
       </div>
-      {open && (
-        <div className="subagent-details subagent-body">
-          {sa.prompt && (
-            <div className="subagent-prompt">
-              <MdBlock>{sa.prompt}</MdBlock>
-            </div>
-          )}
-          {(needsLoad || (!sa.prompt && sa.hasPrompt) || (!sa.summary && sa.summaryLength)) && (
-            <div className="subagent-loading">{tr("loading")}</div>
-          )}
-          {allInner.length > 0 && (
-            <div className="subagent-events">
-              {timelineBlocks(allInner).map((block, bi) => {
-                if (block.kind === "steps") {
-                  return block.events.map((ie, i) => (
-                    <EventItem key={`${bi}-${i}`} ev={ie} onLoadDetails={onLoadDetails} />
-                  ));
-                }
-                return (
-                  <TimelineBlockItem
-                    key={timelineBlockKey(block, bi)}
-                    block={block}
-                    onLoadEvents={onLoadEvents}
-                    onCancelSubagent={onCancel}
-                    onLoadDetails={onLoadDetails}
-                  />
-                );
-              })}
-            </div>
-          )}
-          {sa.summary && (
-            <div className="subagent-summary">
-              <MdBlock>{sa.summary}</MdBlock>
-            </div>
-          )}
-          {usageStr && <div className="subagent-usage">{usageStr}</div>}
-          {hasBody && (
-            <BottomCollapse
-              onClick={bottom.collapse}
-              label={tr("collapseTrace")}
-              action="trace.subagent_toggle"
-            />
-          )}
-        </div>
-      )}
+      {open && <SubagentDetails scope={scope} onCollapse={bottom.collapse} />}
     </div>
   );
 });
+
+function eventFromTraceRow(row: TraceRow): StreamEvent {
+  const hiddenChild = !row.child && SUBAGENT_KINDS.has(row.kind);
+  return {
+    kind: row.kind === "omitted" || hiddenChild ? "notice" : row.kind,
+    content: row.kind === "omitted" ? "Step shortened to fit this page." : row.content,
+    toolName: row.toolName,
+    toolUseId: row.toolUseId,
+    toolResult: row.toolResult,
+    isMarkdown: row.isMarkdown,
+    toolResultIsMarkdown: row.toolResultIsMarkdown,
+    ...(row.failed && (row.kind === "tool_use" ? { toolResultIsError: true } : { isError: true })),
+    durationMs: row.durationMs,
+    subagent: row.child,
+  };
+}
+
+function SubagentDetails({ scope, onCollapse }: { scope: TraceScope; onCollapse: () => void }) {
+  const tr = useT();
+  const connection = useContext(SubagentTraceContext);
+  const workspaceId = connection?.workspaceId;
+  const { messageId, rootTaskId, path, revision } = scope;
+  const target = useMemo(
+    () => (workspaceId && messageId ? { workspaceId, messageId, taskId: rootTaskId } : null),
+    [workspaceId, messageId, rootTaskId],
+  );
+  const [cursor, setCursor] = useState<Pick<TraceWindow, "cursor" | "direction">>({});
+  const window = useMemo(() => ({ ...cursor, ...(path.length ? { path } : {}) }), [cursor, path]);
+  const { page, isNavigating, timedOut } = useTracePage(connection, target, window, revision);
+  const projection = useMemo(() => {
+    const events = page?.events.map(eventFromTraceRow) ?? [];
+    return { blocks: timelineBlocks(events), indexes: new Map(events.map((ev, i) => [ev, i])) };
+  }, [page]);
+  const loading = !target
+    ? "Trace is unavailable."
+    : connection?.epoch == null
+      ? "Offline. Waiting to reconnect…"
+      : timedOut
+        ? "Trace request timed out."
+        : !page || (isNavigating && page.unavailable)
+          ? "Loading trace…"
+          : isNavigating
+            ? "Loading page…"
+            : page.unavailable
+              ? "Trace is unavailable."
+              : null;
+  const usage = page?.usage;
+  const reset = () => setCursor({});
+  return (
+    <div className="subagent-details subagent-body">
+      {loading && (
+        <div className="subagent-loading" role="status">
+          {loading}
+          {(timedOut || (!isNavigating && page?.unavailable)) && connection?.epoch != null && (
+            <button
+              type="button"
+              className="btn-inline"
+              {...telemetryTarget("trace.subagent_page")}
+              onClick={() => setCursor({ ...cursor })}
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+      {page && !page.unavailable && (
+        <div
+          className="subagent-trace-page"
+          data-trace-entries={page.events.length}
+          data-trace-bytes={traceBytes(page)}
+        >
+          {page.prompt && (
+            <div className="subagent-prompt">
+              <MdBlock>{page.prompt}</MdBlock>
+            </div>
+          )}
+          {page.totalEvents > page.events.length && (
+            <nav className="subagent-pagination" aria-label="Trace pages">
+              <span>
+                {page.events.length ? `${page.start + 1}–${page.end} of ` : ""}
+                {page.totalEvents} steps
+              </span>
+              <button
+                type="button"
+                className="btn-inline"
+                {...telemetryTarget("trace.subagent_page")}
+                disabled={!page.start || isNavigating || connection?.epoch == null}
+                onClick={() => setCursor({ direction: "before", cursor: page.start })}
+              >
+                Earlier
+              </button>
+              <button
+                type="button"
+                className="btn-inline"
+                {...telemetryTarget("trace.subagent_page")}
+                disabled={page.end >= page.totalEvents || isNavigating || connection?.epoch == null}
+                onClick={() => setCursor({ direction: "after", cursor: page.end })}
+              >
+                Newer
+              </button>
+              <button
+                type="button"
+                className="btn-inline"
+                {...telemetryTarget("trace.subagent_page")}
+                disabled={cursor.cursor == null || connection?.epoch == null}
+                onClick={reset}
+              >
+                Latest
+              </button>
+            </nav>
+          )}
+          {page.truncated && (
+            <div className="subagent-loading">Some detail was shortened to fit this page.</div>
+          )}
+          {!page.totalEvents && !page.prompt && !page.result && (
+            <div className="subagent-loading">No trace steps recorded.</div>
+          )}
+          {projection.blocks.length > 0 && (
+            <div className="subagent-events">
+              {projection.blocks.flatMap((block, i) =>
+                block.kind === "steps"
+                  ? block.events.map((ev) => (
+                      <EventItem key={`step:${page.start + projection.indexes.get(ev)!}`} ev={ev} />
+                    ))
+                  : [
+                      <TimelineBlockItem
+                        key={timelineBlockKey(block, i)}
+                        block={block}
+                        traceParent={scope}
+                      />,
+                    ],
+              )}
+            </div>
+          )}
+          {page.result && (
+            <div className="subagent-summary">
+              <MdBlock>{page.result}</MdBlock>
+            </div>
+          )}
+          {usage && (
+            <div className="subagent-usage">
+              {tr("subagentUsage", {
+                tokens: formatTokens(usage.totalTokens),
+                tools: usage.toolUses,
+              })}
+            </div>
+          )}
+        </div>
+      )}
+      <BottomCollapse
+        onClick={onCollapse}
+        label={tr("collapseTrace")}
+        action="trace.subagent_toggle"
+      />
+    </div>
+  );
+}
 
 function stepSummary(regular: StreamEvent[], tr: ReturnType<typeof useT>): string {
   const count = (kind: string) => regular.filter((e) => e.kind === kind).length;
@@ -969,13 +1108,13 @@ function StepTools({ tools }: { tools: string[] }) {
 function StepBox({
   events,
   live,
-  standaloneSince,
+  liveSince,
   onLoadDetails,
   defaultOpen = false,
 }: {
   events: StreamEvent[];
   live?: string;
-  standaloneSince?: number;
+  liveSince?: number;
   onLoadDetails?: () => void;
   defaultOpen?: boolean;
 }) {
@@ -984,7 +1123,7 @@ function StepBox({
   const hasBody = !!live?.trim() || events.some(hasVisibleEventBody);
   const open = hasBody && (toggled ?? defaultOpen);
   const bottom = useBottomCollapse(open, () => setToggled(false));
-  if (events.length === 0 && live == null) return null;
+  if (events.length === 0 && live == null && liveSince == null) return null;
   const toggle = () => {
     if (!open) onLoadDetails?.();
     setToggled(!open);
@@ -1022,7 +1161,7 @@ function StepBox({
           <span className="trace-header-placeholder" aria-hidden="true" />
         )}
         {events.length > 0 && <span className="step-summary">{stepSummary(events, tr)}</span>}
-        {standaloneSince != null && <StepThinkingStatus since={standaloneSince} />}
+        {liveSince != null && <StepThinkingStatus since={liveSince} />}
         {!open && tools.length > 0 && <StepTools tools={tools} />}
       </div>
       {open && (
@@ -1043,13 +1182,14 @@ function StepBox({
 // boundary, so the step boxes between them count only what happened there.
 type StepTimelineProps = {
   blocks: TimelineBlock[];
-  onLoadEvents?: (taskId: string) => void;
+  messageId?: string;
+  traceParent?: TraceScope;
   onCancelSubagent?: (taskId: string) => void;
   onLoadDetails?: () => void;
   defaultOpen?: boolean;
   // A thinking block streaming in or between its closing delta and final event.
   live?: string;
-  standaloneSince?: number;
+  liveSince?: number;
 };
 
 export function StepGroup({
@@ -1061,14 +1201,14 @@ export function StepGroup({
 
 function StepTimeline({
   blocks,
-  onLoadEvents,
+  messageId,
   onCancelSubagent,
   onLoadDetails,
   defaultOpen = false,
   live,
-  standaloneSince,
+  liveSince,
 }: StepTimelineProps) {
-  if (live != null && blocks.at(-1)?.kind !== "steps") {
+  if ((live != null || liveSince != null) && blocks.at(-1)?.kind !== "steps") {
     blocks = [...blocks, { kind: "steps", events: [] }];
   }
   return (
@@ -1080,7 +1220,7 @@ function StepTimeline({
               key={`s${i}`}
               events={block.events}
               live={i === blocks.length - 1 ? live : undefined}
-              standaloneSince={i === blocks.length - 1 ? standaloneSince : undefined}
+              liveSince={i === blocks.length - 1 ? liveSince : undefined}
               onLoadDetails={onLoadDetails}
               defaultOpen={defaultOpen}
             />
@@ -1090,7 +1230,7 @@ function StepTimeline({
           <TimelineBlockItem
             key={timelineBlockKey(block, i)}
             block={block}
-            onLoadEvents={onLoadEvents}
+            messageId={messageId}
             onCancelSubagent={onCancelSubagent}
             onLoadDetails={onLoadDetails}
           />
@@ -1108,10 +1248,11 @@ function timelineBlockKey(block: TimelineCard, index: number): string {
 
 function TimelineBlockItem({
   block,
-  onLoadEvents,
+  messageId,
+  traceParent,
   onCancelSubagent,
   onLoadDetails,
-}: Pick<StepTimelineProps, "onLoadEvents" | "onCancelSubagent" | "onLoadDetails"> & {
+}: Pick<StepTimelineProps, "messageId" | "traceParent" | "onCancelSubagent" | "onLoadDetails"> & {
   block: TimelineCard;
 }) {
   switch (block.kind) {
@@ -1123,26 +1264,23 @@ function TimelineBlockItem({
       return (
         <SubAgentItem
           ev={block.ev}
-          onLoadEvents={onLoadEvents}
+          messageId={messageId}
+          traceParent={traceParent}
           onCancel={onCancelSubagent}
-          onLoadDetails={onLoadDetails}
         />
       );
   }
 }
 
-function LiveChip({ secs }: { secs: number }) {
+function StepThinkingStatus({ since }: { since: number }) {
   const tr = useT();
+  const secs = useElapsed(since);
   return (
     <span className="event-chip chip-thinking chip-live">
       <span className="streaming-dot" />
       {tr("thinkingTime", { seconds: secs })}
     </span>
   );
-}
-
-function StepThinkingStatus({ since }: { since: number }) {
-  return <LiveChip secs={useElapsed(since)} />;
 }
 
 const CALL_SHOWN_AFTER_S = 3;
@@ -1161,32 +1299,22 @@ function workInFlight(events: StreamEvent[]): boolean {
 
 const WAIT_SHOWN_AFTER_S = 15;
 
-function QuietWait({ since }: { since: number }) {
-  const tr = useT();
-  const now = Date.now();
-  const elapsed = elapsedSeconds(now, since);
-  const show = elapsed >= WAIT_SHOWN_AFTER_S;
-  useRenderAt(show ? nextSecondAt(now, since) : since + WAIT_SHOWN_AFTER_S * 1000);
-  return show ? tr("quietEvents", { seconds: elapsed }) : null;
-}
-
 function TurnFooter({
   msg,
   activity,
   detailEvents,
-  thinkingInHeader,
 }: {
   msg: Message;
   activity?: string | null;
   detailEvents: StreamEvent[];
-  thinkingInHeader: boolean;
 }) {
   const tr = useT();
   const now = Date.now();
-  const thinkingSince = msg.liveThinkingSince;
+  const thinkingLive = msg.liveThinkingSince != null;
   let call: StreamEvent | undefined;
+  let waitElapsed: number | null = null;
   let tickAt = Infinity;
-  if (!thinkingInHeader && !activity) {
+  if (!activity && !thinkingLive) {
     for (let i = detailEvents.length - 1; i >= 0; i--) {
       const e = detailEvents[i];
       if (!isRunningTool(e) || e.startedAt == null) continue;
@@ -1197,8 +1325,21 @@ function TurnFooter({
       }
       tickAt = Math.min(tickAt, showAt);
     }
-    const since = call?.startedAt ?? thinkingSince;
-    if (since != null) tickAt = Math.min(tickAt, nextSecondAt(now, since));
+    if (call?.startedAt != null) {
+      tickAt = Math.min(tickAt, nextSecondAt(now, call.startedAt));
+    } else if (
+      msg.waitingSince != null &&
+      !workInFlight(detailEvents) &&
+      !detailEvents.some((e) => e.kind === "retry")
+    ) {
+      const elapsed = elapsedSeconds(now, msg.waitingSince);
+      if (elapsed >= WAIT_SHOWN_AFTER_S) {
+        waitElapsed = elapsed;
+        tickAt = Math.min(tickAt, nextSecondAt(now, msg.waitingSince));
+      } else {
+        tickAt = Math.min(tickAt, msg.waitingSince + WAIT_SHOWN_AFTER_S * 1000);
+      }
+    }
   }
   useRenderAt(tickAt);
 
@@ -1208,16 +1349,14 @@ function TurnFooter({
       ? `${chipLabelFor(toolNameOf(call) ?? tr("toolFallback"))} · ${formatDuration(elapsedSeconds(now, call.startedAt!) * 1000)}`
       : null);
 
+  if (!label && waitElapsed == null) return null;
+
   return (
     <div className="turn-footer">
-      {thinkingInHeader ? null : label ? (
+      {label ? (
         <span className="turn-activity">{label}</span>
-      ) : thinkingSince != null ? (
-        <LiveChip secs={elapsedSeconds(now, thinkingSince)} />
-      ) : msg.waitingSince != null &&
-        !workInFlight(detailEvents) &&
-        !detailEvents.some((e) => e.kind === "retry") ? (
-        <QuietWait since={msg.waitingSince} />
+      ) : waitElapsed != null ? (
+        tr("quietEvents", { seconds: waitElapsed })
       ) : null}
     </div>
   );
@@ -1287,7 +1426,6 @@ export const MessageItem = memo(function MessageItem({
   onStartingRow,
   onQuote,
   onJumpToMessage,
-  onLoadSubagentEvents,
   onCancelSubagent,
   onCancelQueued,
   onLoadDetails,
@@ -1305,7 +1443,6 @@ export const MessageItem = memo(function MessageItem({
   onOpenWorkspace?: (workspaceId: string) => void;
   onQuote?: (msg: Message) => void;
   onJumpToMessage?: (messageId: string) => void;
-  onLoadSubagentEvents?: (messageId: string, taskId: string) => void;
   onCancelSubagent?: (agentId: string, taskId: string) => void;
   onCancelQueued?: (messageId: string) => void;
   onLoadDetails?: (messageId: string) => void;
@@ -1313,10 +1450,6 @@ export const MessageItem = memo(function MessageItem({
   isTurnTail?: boolean;
 }) {
   const tr = useT();
-  const handleLoadEvents = useCallback(
-    (taskId: string) => onLoadSubagentEvents?.(msg.id, taskId),
-    [msg.id, onLoadSubagentEvents],
-  );
   // Only wired while the message is a summary; once details arrive the
   // prop becomes undefined and the items render their bodies directly.
   const summarized = msg.detail === "summary";
@@ -1352,7 +1485,9 @@ export const MessageItem = memo(function MessageItem({
     return (
       <div className="system-message">
         {avatar && <img className="system-avatar" src={avatar} alt="" />}
-        <MdBlock>{text}</MdBlock>
+        <div className="system-message-body">
+          <MdBlock>{text}</MdBlock>
+        </div>
       </div>
     );
   }
@@ -1434,9 +1569,9 @@ export const MessageItem = memo(function MessageItem({
     tailAt = joinsLastEvents ? segments.length - 2 : segments.length - 1;
   }
   const liveSince = msg.liveThinkingSince;
-  const liveBlock = liveSince != null ? (msg.liveThinking ?? "") : msg.closingThinking;
+  const headerLiveSince = agent?.activity ? undefined : liveSince;
+  const liveBlock = headerLiveSince != null ? (msg.liveThinking ?? "") : msg.closingThinking;
   const tailBlocks = tailAt >= 0 ? timelineBlocks(segments[tailAt].events) : [];
-  const standaloneSince = tailBlocks.at(-1)?.kind === "steps" ? undefined : liveSince;
 
   const time = formatMessageTime(
     msg.timestamp,
@@ -1446,7 +1581,12 @@ export const MessageItem = memo(function MessageItem({
 
   const quoteButton =
     !isUser && onQuote && segments.length > 0 ? (
-      <button className="btn-quote" title={tr("quoteMessage")} onClick={() => onQuote(msg)}>
+      <button
+        className="btn-quote"
+        aria-label={tr("quoteMessage")}
+        title={tr("quoteMessage")}
+        onClick={() => onQuote(msg)}
+      >
         ↩
       </button>
     ) : null;
@@ -1465,7 +1605,7 @@ export const MessageItem = memo(function MessageItem({
         >
           <div className="message-gutter">
             {compact ? null : from ? (
-              <div className="avatar-user avatar-from">{ORIGIN_GLYPH[from.role]}</div>
+              <div className="avatar-from">{ORIGIN_GLYPH[from.role]}</div>
             ) : isUser ? (
               <div className="avatar-user">
                 {isImageAvatar(user.avatar) ? (
@@ -1494,7 +1634,7 @@ export const MessageItem = memo(function MessageItem({
               <div className="message-header">
                 {isUser ? (
                   <>
-                    {from ? (
+                    {from && onOpenWorkspace ? (
                       <button
                         className="message-author from-author"
                         title={tr("openThatSession")}
@@ -1502,6 +1642,8 @@ export const MessageItem = memo(function MessageItem({
                       >
                         {originLabel(from)}
                       </button>
+                    ) : from ? (
+                      <span className="message-author from-author">{originLabel(from)}</span>
                     ) : (
                       <span className="message-author user-author" title={user.name}>
                         {user.name}
@@ -1625,11 +1767,11 @@ export const MessageItem = memo(function MessageItem({
                         {(seg.events.length > 0 || si === tailAt) && (
                           <StepTimeline
                             blocks={si === tailAt ? tailBlocks : timelineBlocks(seg.events)}
-                            onLoadEvents={handleLoadEvents}
+                            messageId={msg.id}
                             onCancelSubagent={handleCancelSubagent}
                             onLoadDetails={handleLoadDetails}
                             live={si === tailAt ? liveBlock : undefined}
-                            standaloneSince={si === tailAt ? standaloneSince : undefined}
+                            liveSince={si === tailAt ? headerLiveSince : undefined}
                           />
                         )}
                       </div>
@@ -1637,12 +1779,7 @@ export const MessageItem = memo(function MessageItem({
                   </div>
                 )}
             {!isUser && streaming && (
-              <TurnFooter
-                msg={msg}
-                activity={agent?.activity}
-                detailEvents={detailEvents}
-                thinkingInHeader={standaloneSince != null}
-              />
+              <TurnFooter msg={msg} activity={agent?.activity} detailEvents={detailEvents} />
             )}
             {showMentionAction && (
               <div className="message-footer-actions">

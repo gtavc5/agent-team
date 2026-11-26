@@ -109,6 +109,10 @@ it("UsageOverview uses a half-open UTC day domain, not the first and last return
 
 it("UsageOverview shows model family series and Other without inferring names from ranked identifiers", () => {
   render(<UsageOverview {...props} />);
+  expect(screen.getByRole("group", { name: "Chart breakdown" }).classList).toContain("bp-views");
+  expect(screen.getByRole("button", { name: "Top models" }).classList).not.toContain(
+    "btn-secondary",
+  );
   fireEvent.click(screen.getByRole("button", { name: "Top models" }));
   expect(screen.getByRole("button", { name: "Top models" }).getAttribute("aria-pressed")).toBe(
     "true",

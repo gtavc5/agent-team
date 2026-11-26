@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  agentNameColor,
   agentState,
   isAgentActive,
   agentQueues,
@@ -16,6 +17,32 @@ const a = (over: Partial<AgentInfo> = {}): AgentInfo => ({
   color: "#fff",
   isDefault: true,
   ...over,
+});
+
+describe("agent name colors", () => {
+  const weight = (color: string) => Number(agentNameColor(color).match(/ (\d+)%/)![1]);
+
+  it("preserves more identity than the old flat 25% mix for real preset colors", () => {
+    for (const color of [
+      "#528bff",
+      "#e5c07b",
+      "#c678dd",
+      "#D8A0D8",
+      "#8AB4F8",
+      "#C0C0C0",
+      "#7DD3FC",
+      "#A5B4FC",
+    ]) {
+      expect(weight(color), color).toBeGreaterThan(25);
+    }
+  });
+
+  it("bounds worst-case black and white and falls back for unsafe input", () => {
+    expect(weight("#ffffff")).toBe(26);
+    expect(weight("#000000")).toBe(25);
+    expect(agentNameColor("transparent")).toBe("var(--text-primary)");
+    expect(agentNameColor("not-a-color")).toBe("var(--text-primary)");
+  });
 });
 
 describe("agent state helpers", () => {

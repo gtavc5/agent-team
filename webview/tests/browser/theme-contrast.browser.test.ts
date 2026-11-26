@@ -85,9 +85,40 @@ it.each(["light", "dark"])("keeps normal-sized %s text above 4.5:1", (theme) => 
   }
   passes("text-muted", "bg-tertiary", "accent-soft"); // Diff hunk header and sticky gutter.
   for (const fill of ["accent-solid", "accent-hover", "error"]) passes("on-solid", fill);
-  for (const profileColor of ["#ffffff", "#000000"]) {
+
+  // Nested row actions keep their label/icon readable over both hover layers.
+  for (const fg of ["text-primary", "text-secondary", "accent-hover", "error"]) {
+    passes(fg, "bg-secondary", "bg-hover-strong");
+    passes(fg, "bg-secondary", "bg-hover", "bg-hover-strong");
+  }
+  const hoveredRow = painted(["bg-secondary", "bg-hover"]);
+  const hoveredAction = painted(["bg-secondary", "bg-hover", "bg-hover-strong"]);
+  const separation =
+    (Math.max(hoveredRow, hoveredAction) + 0.05) / (Math.min(hoveredRow, hoveredAction) + 0.05);
+  expect(separation, `${theme}: nested hover surface distinction`).toBeGreaterThan(1.1);
+  if (theme === "dark") {
+    const restingRow = painted(["bg-secondary"]);
+    expect((hoveredRow + 0.05) / (restingRow + 0.05)).toBeGreaterThan(1.03);
+  }
+
+  const profileColors = [
+    "#ffffff",
+    "#000000",
+    "#528bff",
+    "#e5c07b",
+    "#c678dd",
+    "#D8A0D8",
+    "#8AB4F8",
+    "#C0C0C0",
+    "#7DD3FC",
+    "#A5B4FC",
+  ];
+  for (const profileColor of profileColors) {
     document.documentElement.style.setProperty("--test-agent-name", agentNameColor(profileColor));
-    passes("test-agent-name", "bg-primary");
-    passes("test-agent-name", "bg-secondary");
+    for (const surface of ["bg-primary", "bg-secondary", "bg-tertiary", "bg-elevated"]) {
+      passes("test-agent-name", surface);
+    }
+    // Jump-highlight animation peak: 22% accent over the transcript canvas.
+    passes("test-agent-name", "bg-primary", "bg-highlight");
   }
 });

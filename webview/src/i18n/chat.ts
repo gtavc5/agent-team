@@ -198,7 +198,7 @@ export const chatCatalog = {
   show: { en: "Show", "zh-CN": "显示" },
   details: { en: "Details", "zh-CN": "详情" },
   hideResult: { en: "Hide result", "zh-CN": "隐藏结果" },
-  tapToLoad: { en: "{size} · tap to load", "zh-CN": "{size} · 点击加载" },
+  tapToLoad: { en: "Load details · {size}", "zh-CN": "{size} · 点击加载" },
   collapse: { en: "Collapse", "zh-CN": "收起" },
   subagent: { en: "Subagent", "zh-CN": "子代理" },
   subagentUsage: {

@@ -12,6 +12,9 @@ export default defineConfig({
     browser: {
       enabled: true,
       headless: true,
+      // Use the same loopback address in Vite and Chromium. The string keeps 0
+      // through Vitest 4 and Vite 6's falsy defaults; Node binds an ephemeral port.
+      api: { host: "127.0.0.1", port: "0" as unknown as number },
       provider: playwright(),
       instances: [{ browser: "chromium" }],
     },

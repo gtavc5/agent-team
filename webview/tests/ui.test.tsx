@@ -83,7 +83,7 @@ describe("EventItem", () => {
         <EventItem ev={history} onLoadDetails={onLoadDetails} />,
       );
       expect(container.querySelector(".event-content pre")).toBeNull();
-      fireEvent.click(getByText(/tap to load/));
+      fireEvent.click(getByText(/Load details/));
       expect(onLoadDetails).toHaveBeenCalledTimes(1);
       rerender(<EventItem ev={event} />);
       expect(container.querySelector(".event-chip")?.textContent).toBe("bash");
@@ -362,22 +362,26 @@ describe("streaming turn footer", () => {
       vi.advanceTimersByTime(ms);
     });
 
-  it.each(["done", "error"] as const)("keeps one footer until the turn is %s", (status) => {
-    const view = (over: Partial<Message> = {}) => <MessageItem msg={msg(over)} agents={[agent]} />;
-    const { container, rerender } = render(view({ waitingSince: Date.now() }));
-    const node = footer(container)!;
-    expect(node).toBe(container.querySelector(".message-body")!.lastElementChild);
-    expect(node.textContent).toBe("");
-    tick(14_999);
-    expect(node.textContent).toBe("");
-    tick(1);
-    expect(node.textContent).toBe("No new events for 15s");
-    rerender(view({ content: "So", waitingSince: Date.now() }));
-    expect([...container.querySelectorAll(".turn-footer")]).toEqual([node]);
-    expect(node.textContent).toBe("");
-    rerender(view({ content: "So", status }));
-    expect(footer(container)).toBeNull();
-  });
+  it.each(["done", "error"] as const)(
+    "mounts the footer only when a turn status is active and clears it when %s",
+    (status) => {
+      const view = (over: Partial<Message> = {}) => (
+        <MessageItem msg={msg(over)} agents={[agent]} />
+      );
+      const { container, rerender } = render(view({ waitingSince: Date.now() }));
+      expect(footer(container)).toBeNull();
+      tick(14_999);
+      expect(footer(container)).toBeNull();
+      tick(1);
+      const node = footer(container)!;
+      expect(node).toBe(container.querySelector(".message-body")!.lastElementChild);
+      expect(node.textContent).toBe("No new events for 15s");
+      rerender(view({ content: "So", waitingSince: Date.now() }));
+      expect(footer(container)).toBeNull();
+      rerender(view({ content: "So", status }));
+      expect(footer(container)).toBeNull();
+    },
+  );
 
   it.each([false, true])("shows only the highest priority status (compact: %s)", (compact) => {
     const since = Date.now() - 45_000;
@@ -385,20 +389,32 @@ describe("streaming turn footer", () => {
       <MessageItem msg={msg(over)} agents={[{ ...agent, activity }]} compact={compact} />
     );
     const { container, rerender } = render(view({ waitingSince: since }));
-    const node = footer(container)!;
-    expect(node.textContent).toBe("No new events for 45s");
+    expect(footer(container)!.textContent).toBe("No new events for 45s");
+
+    // Standalone live thinking yields to explicit server activity without leaving an empty step box,
+    // and resumes in .step-header once activity clears.
+    const standaloneThinking = { liveThinkingSince: since, waitingSince: since };
+    rerender(view(standaloneThinking, "compacting context"));
+    expect(footer(container)!.textContent).toBe("compacting context");
+    expect(container.querySelector(".step-group")).toBeNull();
+    expect(container.textContent).not.toContain("Thinking ·");
+    rerender(view(standaloneThinking));
+    expect(footer(container)).toBeNull();
+    expect(container.querySelector(".step-header .chip-live")!.textContent).toBe("Thinking · 45s");
+
     const thinking = {
       events: [{ ...read, toolResult: "ok" }],
       liveThinkingSince: since,
       waitingSince: since,
     };
     rerender(view(thinking));
-    expect(node.textContent).toBe("Thinking · 45s");
+    expect(footer(container)).toBeNull();
+    expect(container.querySelector(".step-header .chip-live")!.textContent).toBe("Thinking · 45s");
     expect(container.textContent.match(/Thinking · 45s/g)).toHaveLength(1);
     rerender(view(thinking, "compacting context"));
-    expect(footer(container)).toBe(node);
-    expect(node.textContent).toBe("compacting context");
+    expect(footer(container)!.textContent).toBe("compacting context");
     expect(container.textContent.match(/compacting context/g)).toHaveLength(1);
+    expect(container.querySelector(".step-header .chip-live")).toBeNull();
     expect(container.textContent).not.toContain("Thinking ·");
   });
 
@@ -406,28 +422,28 @@ describe("streaming turn footer", () => {
     vi.setSystemTime(10_000);
     const view = (over: Partial<Message> = {}) => <MessageItem msg={msg(over)} agents={[agent]} />;
     const { container, rerender } = render(view({ waitingSince: 10_000 }));
-    const node = footer(container)!;
+    expect(footer(container)).toBeNull();
     tick(250);
     const first = { ...read, toolUseId: "read", startedAt: Date.now() };
     rerender(view({ events: [first] }));
     tick(2_999);
-    expect(node.textContent).toBe("");
+    expect(footer(container)).toBeNull();
     tick(1);
-    expect(node.textContent).toBe("Read · 3s");
+    expect(footer(container)!.textContent).toBe("Read · 3s");
 
     tick(250);
     const second = ev("tool_use", { toolName: "Bash", toolUseId: "bash", startedAt: Date.now() });
     rerender(view({ events: [first, second] }));
-    expect(node.textContent).toBe("Read · 3s");
+    expect(footer(container)!.textContent).toBe("Read · 3s");
     tick(3_000);
-    expect(node.textContent).toBe("Bash · 3s");
+    expect(footer(container)!.textContent).toBe("Bash · 3s");
 
     tick(250);
     rerender(view({ waitingSince: Date.now() }));
     tick(14_999);
-    expect(node.textContent).toBe("");
+    expect(footer(container)).toBeNull();
     tick(1);
-    expect(node.textContent).toBe("No new events for 15s");
+    expect(footer(container)!.textContent).toBe("No new events for 15s");
   });
 
   it("rechecks a wait deadline if the wall clock moved backward", () => {
@@ -439,7 +455,7 @@ describe("streaming turn footer", () => {
       );
       clock.mockImplementation(() => new Date().getTime() - 1_000);
       tick(15_000);
-      expect(footer(container)?.textContent).toBe("");
+      expect(footer(container)).toBeNull();
       tick(1_000);
       expect(footer(container)?.textContent).toBe("No new events for 15s");
     } finally {
@@ -451,22 +467,21 @@ describe("streaming turn footer", () => {
     const waitingSince = Date.now() - 45_000;
     const view = (over: Partial<Message>) => <MessageItem msg={msg(over)} agents={[agent]} />;
     const { container, rerender } = render(view({ waitingSince }));
-    const node = footer(container)!;
-    expect(node.textContent).toBe("No new events for 45s");
+    expect(footer(container)!.textContent).toBe("No new events for 45s");
     const call = { ...read, startedAt: Date.now() };
     rerender(view({ waitingSince, events: [call] }));
-    expect(node.textContent).toBe("");
+    expect(footer(container)).toBeNull();
     tick(2_999);
-    expect(node.textContent).toBe("");
+    expect(footer(container)).toBeNull();
     tick(1);
-    expect(node.textContent).toBe("Read · 3s");
+    expect(footer(container)!.textContent).toBe("Read · 3s");
     const running = ev("subagent_start", {
       subagent: { taskId: "child", description: "Working", status: "running" },
     });
     rerender(view({ waitingSince, events: [running] }));
-    expect(node.textContent).toBe("");
+    expect(footer(container)).toBeNull();
     tick(6_000);
-    expect(node.textContent).toBe("");
+    expect(footer(container)).toBeNull();
   });
 });
 
@@ -900,7 +915,7 @@ describe("summary pages and lazy details", () => {
       />,
     );
     expect(container.querySelector(".event-placeholder")!.textContent).toContain("4.2k chars");
-    fireEvent.click(getByText(/tap to load/));
+    fireEvent.click(getByText(/Load details/));
     expect(onLoad).toHaveBeenCalledTimes(1);
   });
 
@@ -1028,7 +1043,7 @@ describe("live thinking", () => {
     expect(container.querySelector(".live-thinking")!.textContent).toContain("Still thinking.");
   });
 
-  it("streams the whole block as an item of an open step box, with a ticking timer", () => {
+  it("streams the whole block as an item of an open step box, with a ticking timer in its header", () => {
     vi.setSystemTime(10_000);
     const events = [
       ev("tool_use", { toolName: "Read", content: "**Read** `a`", contentOffset: 0 }),
@@ -1039,20 +1054,21 @@ describe("live thinking", () => {
     const panel = () => container.querySelector(".live-thinking");
     const boxes = () => container.querySelectorAll(".step-group");
     const header = boxes()[0].querySelector(".step-header")!;
-    const footer = container.querySelector(".turn-footer")!;
     expect(boxes()).toHaveLength(1);
-    expect(header.textContent).toContain("▸1 tool call");
     expect(header.querySelector(".step-summary")!.textContent).toBe("1 tool call");
+    expect(header.querySelector(".chip-live")!.textContent).toBe("Thinking · 0s");
+    expect(container.querySelector(".turn-footer")).toBeNull();
     expect(panel()).toBeNull();
-    expect(footer.textContent).toBe("Thinking · 0s");
 
     fireEvent.click(header);
     expect(boxes()[0].classList.contains("open")).toBe(true);
+    expect(panel()!.querySelector(".event-row")).toBeNull();
     expect(panel()!.querySelector(".event-content")).toBeNull();
     act(() => {
       vi.advanceTimersByTime(3_000);
     });
-    expect(footer.textContent).toBe("Thinking · 3s");
+    expect(header.querySelector(".chip-live")!.textContent).toBe("Thinking · 3s");
+    expect(container.querySelector(".turn-footer")).toBeNull();
     expect(container.textContent.match(/Thinking · 3s/g)).toHaveLength(1);
 
     // Each fragment adds to what is shown; nothing scrolls away or is cut.
@@ -1060,6 +1076,7 @@ describe("live thinking", () => {
     rerender(<MessageItem msg={view(first)} agents={[agent]} />);
     const long = first + "\n\n" + "x".repeat(2000) + " the tail";
     rerender(<MessageItem msg={view(long)} agents={[agent]} />);
+    expect(panel()!.querySelector(".event-row")).toBeNull();
     const body = panel()!.querySelector(".event-content")!;
     expect(body.querySelector("strong")!.textContent).toBe("states");
     expect(body.textContent.endsWith("the tail")).toBe(true);
@@ -1079,6 +1096,11 @@ describe("live thinking", () => {
     expect(panel()).toBeNull();
     expect(boxes()).toHaveLength(1);
     expect(boxes()[0].classList.contains("open")).toBe(true);
+    expect(boxes()[0].querySelector(".step-header .chip-live")).toBeNull();
+    expect(boxes()[0].querySelector(".step-summary")!.textContent).toBe("1 thinking · 1 tool call");
+    expect(boxes()[0].querySelector(".event-thinking .event-row .chip-thinking")!.textContent).toBe(
+      "Thought for 5s",
+    );
     expect(boxes()[0].querySelector(".event-thinking .event-content")!.textContent).toContain(
       "the tail",
     );
@@ -1095,14 +1117,15 @@ describe("live thinking", () => {
     const original = box();
     expect(box().querySelector(".live-thinking")).toBeNull();
     const header = box().querySelector(".step-header")!;
-    const footer = container.querySelector(".turn-footer")!;
     expect(header.textContent).toBe("▸Thinking · 0s");
-    expect(footer.textContent).toBe("");
+    expect(container.querySelector(".turn-footer")).toBeNull();
     fireEvent.click(header);
+    expect(box().querySelector(".live-thinking > .event-row")).toBeNull();
     expect(box().querySelector(".live-thinking")!.textContent).toBe("Let me see.");
     void act(() => vi.advanceTimersByTime(1_000));
     expect(header.textContent).toBe("▾Thinking · 1s");
     expect(container.textContent.match(/Thinking · 1s/g)).toHaveLength(1);
+    expect(container.querySelector(".turn-footer")).toBeNull();
     fireEvent.click(box().querySelector(".step-header")!);
     expect(box().querySelector(".live-thinking")).toBeNull();
     rerender(
@@ -1122,6 +1145,7 @@ describe("live thinking", () => {
     expect(container.querySelectorAll(".step-group")).toHaveLength(1);
     expect(box()).toBe(original);
     expect(box().querySelector(".step-header")!.textContent).toBe("▸1 thinking");
+    expect(container.querySelector(".turn-footer")).toBeNull();
   });
 
   it.each([false, true])(
@@ -1146,7 +1170,7 @@ describe("live thinking", () => {
       expect(toggle.getAttribute("aria-expanded")).toBe(String(open));
       expect(box.querySelector(".chip-live, .step-summary")).toBeNull();
       expect(box.querySelector(".live-thinking")?.textContent).toBe(open ? "Reasoned." : undefined);
-      expect(container.querySelector(".turn-footer")!.textContent).toBe("");
+      expect(container.querySelector(".turn-footer")).toBeNull();
       msg = applyEventsToMessage(msg, [
         ev("thinking", { content: "Reasoned.", durationMs: 6_000 }),
       ]);
@@ -1186,7 +1210,7 @@ describe("live thinking", () => {
     expect(before.map((e) => e.tagName)).toEqual(["DIV", "P", "DIV"]);
     expect(before[1].textContent).toBe("Found it.");
     expect(before[2].textContent).toMatch(/^▸Thinking · \d+s$/);
-    expect(container.querySelector(".turn-footer")!.textContent).toBe("");
+    expect(container.querySelector(".turn-footer")).toBeNull();
     rerender(
       <MessageItem
         msg={live({
@@ -1199,6 +1223,101 @@ describe("live thinking", () => {
     expect(items()).toHaveLength(3);
     expect(items()[2]).toBe(before[2]);
     expect(items()[2].textContent).toBe("▸1 thinking");
+  });
+
+  it.each([
+    [
+      "subagent",
+      ev("subagent_start", {
+        contentOffset: 0,
+        subagent: { taskId: "sa1", description: "Explore repo", status: "completed" },
+      }),
+    ],
+    [
+      "banner",
+      ev("notice", { level: "warning", content: "Rate limited briefly", contentOffset: 0 }),
+    ],
+  ])("hosts live thinking in a trailing step header after a %s without a footer", (_kind, prev) => {
+    vi.setSystemTime(20_000);
+    const { container, rerender } = render(
+      <MessageItem
+        msg={live({
+          events: [prev],
+          liveThinking: "Reviewing result.",
+          liveThinkingSince: 16_000,
+        })}
+        agents={[agent]}
+      />,
+    );
+    const box = container.querySelector(".step-group")!;
+    expect(box.querySelector(".step-header .chip-live")!.textContent).toBe("Thinking · 4s");
+    expect(container.querySelector(".turn-footer")).toBeNull();
+    fireEvent.click(box.querySelector(".step-header")!);
+    expect(box.querySelector(".live-thinking > .event-row")).toBeNull();
+    expect(box.querySelector(".live-thinking .event-content")!.textContent).toBe(
+      "Reviewing result.",
+    );
+
+    rerender(
+      <MessageItem
+        msg={live({
+          events: [
+            prev,
+            ev("thinking", { content: "Reviewing result.", durationMs: 5_000, contentOffset: 0 }),
+          ],
+        })}
+        agents={[agent]}
+      />,
+    );
+    expect(container.querySelector(".step-group")).toBe(box);
+    expect(box.querySelector(".step-header .chip-live")).toBeNull();
+    expect(box.querySelector(".step-summary")!.textContent).toBe("1 thinking");
+    expect(box.querySelector(".event-thinking .chip-thinking")!.textContent).toBe("Thought for 5s");
+    expect(container.querySelector(".turn-footer")).toBeNull();
+  });
+
+  it("matches a continuous stream and a timestamp-only reconnect snapshot during live thinking", () => {
+    vi.setSystemTime(30_000);
+    let streamed = live();
+    streamed = applyEventsToMessage(streamed, [
+      ev("tool_use", {
+        toolName: "Read",
+        toolUseId: "t1",
+        content: "**Read** `a`",
+        contentOffset: 0,
+      }),
+      ev("tool_result", { toolUseId: "t1", content: "ok" }),
+      ev("thinking_delta", { startedAt: 26_000, content: "Weighing options." }),
+    ]);
+    // Server snapshots carry liveThinkingSince without client-only liveThinking text.
+    const snapshot = live({
+      events: streamed.events,
+      liveThinkingSince: 26_000,
+    });
+
+    const a = render(<MessageItem msg={streamed} agents={[agent]} />);
+    const b = render(<MessageItem msg={snapshot} agents={[agent]} />);
+    for (const view of [a, b]) {
+      expect(view.container.querySelector(".step-summary")!.textContent).toBe("1 tool call");
+      expect(view.container.querySelector(".step-header .chip-live")!.textContent).toBe(
+        "Thinking · 4s",
+      );
+      expect(view.container.querySelector(".turn-footer")).toBeNull();
+    }
+    expect(b.container.querySelector(".step-header")!.innerHTML).toBe(
+      a.container.querySelector(".step-header")!.innerHTML,
+    );
+
+    // Replaying the next thinking_delta onto the timestamp-only snapshot exposes the live body cleanly.
+    const resumed = applyEventsToMessage(snapshot, [
+      ev("thinking_delta", { startedAt: 26_000, content: "Next check." }),
+    ]);
+    b.rerender(<MessageItem msg={resumed} agents={[agent]} />);
+    fireEvent.click(b.container.querySelector(".step-header")!);
+    expect(b.container.querySelector(".live-thinking > .event-row")).toBeNull();
+    expect(b.container.querySelector(".live-thinking .event-content")!.textContent).toBe(
+      "Next check.",
+    );
   });
 });
 

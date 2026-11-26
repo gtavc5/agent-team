@@ -64,6 +64,8 @@ export type NoticeLevel = "info" | "notice" | "warning" | "error" | "schedule" |
 export interface StreamEvent {
   kind: StreamEventKind;
   content: string;
+  // Confirmed transient transport on a terminal error; not delivery proof.
+  networkFailure?: true;
   // Tool name for tool_use events (the content is the formatted markdown).
   toolName?: string;
   toolSource?: ToolSource;
@@ -130,12 +132,10 @@ export interface SubAgentInfo {
   // From the task's start to its end, by our clock: every kind of task.
   durationMs?: number;
   summary?: string;
-  // Advanced by the workspace on each enrichment, including metadata-only updates.
+  // Advanced by the workspace on every trace change, even when the count is unchanged.
   transcriptRevision?: number;
   eventCount?: number;
   events?: StreamEvent[];
-  hasPrompt?: boolean;
-  summaryLength?: number;
   // SDK task type ("local_agent", "local_bash", "local_monitor"...). Absent
   // on older records, which were all agents.
   taskType?: string;
@@ -166,11 +166,17 @@ export interface BackgroundTask {
 export type MessageStatus =
   "done" | "streaming" | "error" | "queued" | "starting" | "dispatching" | "outcome_unknown";
 
+export type InputTrigger = "user" | "lead" | "worker" | "peer" | "system" | "auto" | "retry";
+
 export interface PromptEnvelope {
+  trigger?: InputTrigger;
   inputId: string;
   text: string;
   attachmentIds?: string[];
+  panelContext?: string;
   reportId?: string;
+  // For later native Codex attempts, delta is only new panel context (empty if unchanged).
+  recovery?: { outageId: string; supersedes: string[]; delta?: string };
 }
 
 export interface DispatchAttempt {
@@ -319,6 +325,14 @@ export interface PersistedSessionAnchor {
   entryCount: number;
 }
 
+export interface CodexRecoveryProof {
+  outageId: string;
+  inputId: string;
+  threadId: string;
+  turnId: string;
+  userItem: { id: string; textHash: string } | null;
+}
+
 export interface SessionState {
   sessionId: string | null;
   config: SessionConfig;
@@ -332,6 +346,8 @@ export interface SessionState {
   // Directly verified on disk; independent of turn or dispatch completion.
   persistedSessionAnchor?: PersistedSessionAnchor;
   hasConfirmedTurns?: boolean;
+  // Observed settled admission; Codex must independently confirm the latest failed turn.
+  codexRecoveryProof?: CodexRecoveryProof;
   desiredModel?: string;
   desiredEffort?: string;
   activeAsyncRuns?: ActiveAsyncRunRecord[];

@@ -5,6 +5,7 @@ import { configDefaults, defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["tests/**/*.test.{ts,mjs}"],
+    tags: [{ name: "shutdown-stress", description: "Orphan and leak stress for local Slow runs" }],
     exclude: [...configDefaults.exclude, "tests/e2e/**"],
     // Wake-up times render as local clock times in the snap transcripts.
     env: { TZ: "UTC" },

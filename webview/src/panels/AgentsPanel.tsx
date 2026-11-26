@@ -164,6 +164,9 @@ function SessionCard({
   // Stop ends a running turn; background work has its own stops, and a
   // sleeping session archives like an idle one.
   const busy = state === "working" || state === "waiting";
+  const canStop =
+    state === "working" ||
+    (connected && state !== "archived" && w.agents.some((a) => a.networkWaiting));
   const name = sessionName(w, project);
   const tasks = workCount([w]);
   // Where it works, when that is not the project's own checkout.
@@ -219,7 +222,7 @@ function SessionCard({
             </span>
           ))}
           {tasks > 0 && <span className="ap-brief-tasks">{tasksTag(w, t)}</span>}
-          {state === "working" && <span className="ap-actions">{stop}</span>}
+          {canStop && <span className="ap-actions">{stop}</span>}
         </div>
       )}
       {open && (
@@ -301,7 +304,7 @@ function SessionCard({
                     <button className="panel-btn" onClick={() => actions.onRestore(w.id)}>
                       {t("restore")}
                     </button>
-                  ) : state === "working" ? (
+                  ) : canStop ? (
                     stop
                   ) : (
                     !busy &&

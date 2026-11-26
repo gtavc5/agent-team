@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
+import { loadMath } from "../../src/chat/markdown";
 import { MessageItem } from "../../src/chat/messages";
 import { buildFrames, DEMO_WS_ID, frameDelay, LAYOUT_TURN_ID } from "../../src/dev/replayFixture";
 import { applyEventsToMessage, withoutLiveTiming } from "../../src/state/stream";
@@ -49,18 +50,34 @@ it.each([390, 520, 600, 960])("keeps the folded streaming turn stable at %ipx", 
   await document.fonts.ready;
   const query = (selector: string) => container.querySelector<HTMLElement>(selector)!;
   const turn = query(".message");
-  const footer = query(".turn-footer");
   const header = query(".step-header");
   const strip = query(".step-tools");
-  const measure = () => [rect(turn).height, rect(header).height, rect(footer).height];
-  const initial = measure();
-  expect(initial[2]).toBeGreaterThan(0);
+  const initialHeaderHeight = rect(header).height;
+  const initialTurnHeight = rect(turn).height;
 
-  function checkPhase(label: string) {
-    expect([...container.querySelectorAll(".turn-footer")]).toEqual([footer]);
-    expect(footer).toBe(query(".message-body").lastElementChild);
-    expect(footer.textContent).toBe(label);
-    expect(measure(), label || "quiet placeholder").toEqual(initial);
+  function checkPhase(opts: { headerThinking?: string; footerLabel?: string } = {}) {
+    const footer = container.querySelector<HTMLElement>(".turn-footer");
+    const chip = header.querySelector<HTMLElement>(".chip-live");
+    if (opts.headerThinking) {
+      expect(chip).not.toBeNull();
+      expect(chip!.textContent).toBe(opts.headerThinking);
+      expect(rect(chip!).right).toBeLessThanOrEqual(rect(header).right + 0.5);
+      expect(chip!.scrollWidth).toBeLessThanOrEqual(chip!.clientWidth);
+    } else {
+      expect(chip).toBeNull();
+    }
+    if (opts.footerLabel) {
+      expect(footer).not.toBeNull();
+      expect(footer).toBe(query(".message-body").lastElementChild);
+      expect(footer!.textContent).toBe(opts.footerLabel);
+      expect(rect(footer!).height).toBe(20);
+    } else {
+      expect(footer).toBeNull();
+      expect(rect(turn).height, opts.headerThinking ?? "quiet").toBe(initialTurnHeight);
+    }
+    expect(rect(header).height, opts.headerThinking ?? opts.footerLabel ?? "quiet").toBe(
+      initialHeaderHeight,
+    );
     expect(container.querySelector(".events-list")).toBeNull();
 
     const summary = query(".step-summary");
@@ -70,19 +87,25 @@ it.each([390, 520, 600, 960])("keeps the folded streaming turn stable at %ipx", 
     expect(rect(summary).right).toBeLessThanOrEqual(rect(header).right);
     expect(summary.scrollWidth).toBeLessThanOrEqual(summary.clientWidth);
     expect(getComputedStyle(summary).textOverflow).not.toBe("ellipsis");
+    if (chip) {
+      expect(rect(summary).right).toBeLessThanOrEqual(rect(chip).left);
+      expect(rect(summary).top).toBeLessThan(rect(chip).bottom);
+      expect(rect(summary).bottom).toBeGreaterThan(rect(chip).top);
+    }
     const chips = [...strip.querySelectorAll<HTMLElement>(".event-chip")];
     expect(chips.length).toBeGreaterThanOrEqual(4);
-    expect(chips.some((chip) => rect(chip).width > 220)).toBe(true);
-    for (const [i, chip] of chips.entries()) {
-      expect(rect(chip).top).toBe(rect(chips[0]).top);
-      if (i > 0) expect(rect(chips[i - 1]).right).toBeLessThanOrEqual(rect(chip).left);
-      expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth);
-      expect(getComputedStyle(chip).textOverflow).not.toBe("ellipsis");
+    expect(chips.some((c) => rect(c).width > 220)).toBe(true);
+    for (const [i, c] of chips.entries()) {
+      expect(rect(c).top).toBe(rect(chips[0]).top);
+      if (i > 0) expect(rect(chips[i - 1]).right).toBeLessThanOrEqual(rect(c).left);
+      expect(c.scrollWidth).toBeLessThanOrEqual(c.clientWidth);
+      expect(getComputedStyle(c).textOverflow).not.toBe("ellipsis");
     }
     if (width <= 520) {
       expect(rect(summary).bottom).toBeLessThanOrEqual(rect(chips[0]).top);
+      if (chip) expect(rect(chip).bottom).toBeLessThanOrEqual(rect(chips[0]).top);
     } else {
-      expect(rect(summary).right).toBeLessThanOrEqual(rect(strip).left);
+      expect(rect(chip ?? summary).right).toBeLessThanOrEqual(rect(strip).left);
       expect(rect(summary).top).toBeLessThan(rect(chips[0]).bottom);
       expect(rect(summary).bottom).toBeGreaterThan(rect(chips[0]).top);
     }
@@ -113,34 +136,33 @@ it.each([390, 520, 600, 960])("keeps the folded streaming turn stable at %ipx", 
     replayAt += frameDelay(frame);
   }
 
-  checkPhase("");
+  checkPhase();
   advanceTo(quietSince + 4_999);
-  checkPhase("");
+  checkPhase();
   advanceTo(quietSince + 5_000);
-  checkPhase("");
+  checkPhase();
   replayNext(); // thinking_start
-  checkPhase("Thinking · 0s");
+  checkPhase({ headerThinking: "Thinking · 0s" });
   expect(query(".step-summary").textContent).toBe("4 tool calls");
-  expect(header.querySelector(".chip-live")).toBeNull();
   advanceTo(replayAt - 1);
-  checkPhase("Thinking · 5s");
+  checkPhase({ headerThinking: "Thinking · 5s" });
   replayNext(); // first reasoning text, still folded
-  checkPhase("Thinking · 6s");
+  checkPhase({ headerThinking: "Thinking · 6s" });
   replayNext(); // thinking_end marker
-  checkPhase("");
+  checkPhase();
   expect(query(".step-summary").textContent).toBe("4 tool calls");
   replayNext(); // persisted thinking block
-  checkPhase("");
+  checkPhase();
   expect(query(".step-summary").textContent).toBe("1 thinking · 4 tool calls");
   const toolStartedAt = replayAt;
   replayNext();
   expect(query(".step-summary").textContent).toBe("1 thinking · 5 tool calls");
   advanceTo(toolStartedAt + 2_999);
-  checkPhase("");
+  checkPhase();
   advanceTo(toolStartedAt + 3_000);
-  checkPhase("RunTests · 3s");
+  checkPhase({ footerLabel: "RunTests · 3s" });
   replayNext(); // server activity takes precedence
-  checkPhase("Checking layout · 3s");
+  checkPhase({ footerLabel: "Checking layout · 3s" });
 
   // Let the strip's ResizeObserver publish its measurements before checking the fades.
   await new Promise<void>((resolve) =>
@@ -188,14 +210,10 @@ it.each([390, 520, 600, 960])("keeps standalone thinking stable at %ipx", async 
   const { container, rerender } = render(view());
   await document.fonts.ready;
   const query = (selector: string) => container.querySelector<HTMLElement>(selector)!;
-  const footer = query(".turn-footer");
-  const footerHeight = rect(footer).height;
-  expect(footerHeight).toBeGreaterThan(0);
+  expect(container.querySelector(".turn-footer")).toBeNull();
   const flush = (event: StreamEvent) => {
     msg = applyEventsToMessage(msg, [event]);
     rerender(view());
-    expect(query(".turn-footer")).toBe(footer);
-    expect(rect(footer).height).toBe(footerHeight);
   };
 
   const content = "Let me see.\n\n<details><summary>Notes</summary>\n\n- Evidence\n\n</details>";
@@ -206,17 +224,22 @@ it.each([390, 520, 600, 960])("keeps standalone thinking stable at %ipx", async 
   const headerHeight = rect(header).height;
   const collapsedHeight = rect(box).height;
   expect(header.textContent).toBe("▸Thinking · 0s");
-  expect(footer.textContent).toBe("");
+  expect(container.querySelector(".turn-footer")).toBeNull();
   expect(container.querySelectorAll(".chip-live")).toHaveLength(1);
   expect(container.querySelector(".live-thinking")).toBeNull();
   fireEvent.click(toggle);
+  const liveEvent = query(".live-thinking");
+  const liveBody = query(".live-thinking > .event-content");
+  expect(liveEvent.querySelector(".event-row")).toBeNull();
+  // No artificial 18px empty row above the streaming body (only .event's 3px top padding).
+  expect(rect(liveBody).top - rect(liveEvent).top).toBeLessThanOrEqual(4);
   const details = query(".live-thinking details") as HTMLDetailsElement;
   fireEvent.click(query(".live-thinking summary"));
   expect(details.open).toBe(true);
   void act(() => vi.advanceTimersByTime(1_000));
   expect(header.textContent).toBe("▾Thinking · 1s");
   expect(container.querySelectorAll(".chip-live")).toHaveLength(1);
-  expect(footer.textContent).toBe("");
+  expect(container.querySelector(".turn-footer")).toBeNull();
   expect(rect(header).height).toBe(headerHeight);
   const expandedHeight = rect(box).height;
 
@@ -227,7 +250,7 @@ it.each([390, 520, 600, 960])("keeps standalone thinking stable at %ipx", async 
   expect(query(".live-thinking details")).toBe(details);
   expect(details.open).toBe(true);
   expect(header.textContent).toBe("▾");
-  expect(footer.textContent).toBe("");
+  expect(container.querySelector(".turn-footer")).toBeNull();
   expect(rect(header).height).toBe(headerHeight);
   expect(rect(box).height).toBe(expandedHeight);
 
@@ -237,17 +260,354 @@ it.each([390, 520, 600, 960])("keeps standalone thinking stable at %ipx", async 
   expect(header.textContent).toBe("▾1 thinking");
   expect(query(".event-thinking details")).toBe(details);
   expect(details.open).toBe(true);
+  expect(query(".event-thinking > .event-row .chip-thinking").textContent).toBe("Thought for 1s");
   expect(rect(header).height).toBe(headerHeight);
-  expect(rect(box).height).toBe(expandedHeight);
+  expect(container.querySelector(".turn-footer")).toBeNull();
   fireEvent.click(toggle);
   expect(header.textContent).toBe("▸1 thinking");
   expect(rect(box).height).toBe(collapsedHeight);
   void act(() => vi.advanceTimersByTime(15_000));
-  expect(footer.textContent).toBe("No new events for 15s");
-  expect(rect(footer).height).toBe(footerHeight);
+  const waitFooter = query(".turn-footer");
+  expect(waitFooter.textContent).toBe("No new events for 15s");
+  expect(rect(waitFooter).height).toBe(20);
   flush({ kind: "tool_use", content: "**Read**", toolName: "Read", startedAt: Date.now() });
-  expect(footer.textContent).toBe("");
+  expect(container.querySelector(".turn-footer")).toBeNull();
   void act(() => vi.advanceTimersByTime(3_000));
-  expect(footer.textContent).toBe("Read · 3s");
-  expect(rect(footer).height).toBe(footerHeight);
+  const toolFooter = query(".turn-footer");
+  expect(toolFooter.textContent).toBe("Read · 3s");
+  expect(rect(toolFooter).height).toBe(20);
 });
+
+it.each([
+  [390, "dark"],
+  [960, "light"],
+] as const)(
+  "reads the same thinking while streaming and after reopen at %ipx (%s)",
+  async (width, theme) => {
+    await page.viewport(width, 800);
+    await loadMath();
+    document.documentElement.dataset.theme = theme;
+    try {
+      const now = Date.now();
+      const initial: Message = {
+        id: "sample",
+        kind: "agent",
+        agentId: "a1",
+        content: "",
+        timestamp: now,
+        status: "streaming",
+      };
+      const command = String.raw`find . \( -name '*.ts' \)`;
+      const argument = "/tmp/_test_/*.ts";
+      const tail = String.raw` and ${argument}, $O(n \log n)$, then *read this*.`;
+      const view = (msg: Message) => <MessageItem msg={msg} agents={[]} />;
+      let msg = applyEventsToMessage(initial, [
+        { kind: "thinking_delta", content: command, startedAt: now },
+      ]);
+      const live = render(view(msg));
+      const expand = (dom: ReturnType<typeof render>) =>
+        fireEvent.click(dom.getByRole("button", { name: "Expand steps" }));
+      expand(live);
+      msg = applyEventsToMessage(msg, [{ kind: "thinking_delta", content: tail, startedAt: now }]);
+      live.rerender(view(msg));
+      const read = (container: HTMLElement) => {
+        const body = container.querySelector<HTMLElement>(".event-thinking .event-content")!;
+        expect(body.innerText).toContain(`${command} and ${argument}`);
+        expect(body.querySelector("em")?.textContent).toBe("read this");
+        expect(body.querySelectorAll(".katex")).toHaveLength(1);
+        expect(body.querySelector(".katex-display, .katex-error, pre, code")).toBeNull();
+        expect(rect(body).height).toBeGreaterThan(0);
+        return body.innerHTML;
+      };
+      const visible = read(live.container);
+      const done = applyEventsToMessage(msg, [
+        { kind: "thinking", content: command + tail, durationMs: 1 },
+      ]);
+      live.unmount();
+      const reopened = render(view({ ...withoutLiveTiming(done), status: "done" }));
+      expand(reopened);
+      expect(read(reopened.container)).toBe(visible);
+    } finally {
+      delete document.documentElement.dataset.theme;
+    }
+  },
+);
+
+it.each([
+  ["dark", 390],
+  ["light", 390],
+  ["dark", 960],
+  ["light", 960],
+] as const)(
+  "keeps live thinking unified in .step-header across placements in %s mode at %ipx",
+  async (theme, width) => {
+    await page.viewport(width, 800);
+    document.documentElement.dataset.theme = theme;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const now = 1_800_000_000_000;
+    vi.setSystemTime(now);
+    const agent: AgentInfo = {
+      id: "a1",
+      name: "Alice",
+      color: "#528bff",
+      model: "test",
+      avatar: "A",
+      isDefault: true,
+    };
+    const cases: Array<{ name: string; events: StreamEvent[]; expectSummary?: string }> = [
+      { name: "standalone", events: [] },
+      {
+        name: "after prior steps",
+        events: [
+          { kind: "thinking", content: "Initial plan.", durationMs: 2_000, contentOffset: 0 },
+          {
+            kind: "tool_use",
+            toolName: "Read",
+            toolUseId: "t1",
+            content: "**Read** `src/index.ts`",
+            toolResult: "ok",
+            contentOffset: 0,
+          },
+        ],
+        expectSummary: "1 thinking · 1 tool call",
+      },
+      {
+        name: "after subagent",
+        events: [
+          {
+            kind: "subagent_start",
+            content: "",
+            contentOffset: 0,
+            subagent: { taskId: "sa1", description: "Audit code", status: "completed" },
+          },
+        ],
+      },
+      {
+        name: "after banner",
+        events: [
+          {
+            kind: "notice",
+            level: "info",
+            content: "Context checkpoint saved",
+            contentOffset: 0,
+          },
+        ],
+      },
+    ];
+
+    try {
+      for (const scenario of cases) {
+        const msg: Message = {
+          id: `m-${scenario.name.replace(/\s+/g, "-")}`,
+          kind: "agent",
+          agentId: agent.id,
+          content: "",
+          timestamp: now - 10_000,
+          status: "streaming",
+          events: scenario.events,
+          liveThinking: "Evaluating next step.",
+          liveThinkingSince: now - 4_000,
+        };
+        const { container, unmount } = render(
+          <div className="messages">
+            <MessageItem msg={msg} agents={[agent]} />
+          </div>,
+        );
+        await document.fonts.ready;
+
+        const header = container.querySelector<HTMLElement>(".step-header")!;
+        const chip = header.querySelector<HTMLElement>(".chip-live")!;
+        expect(chip, scenario.name).not.toBeNull();
+        expect(chip.textContent, scenario.name).toBe("Thinking · 4s");
+        expect(container.querySelector(".turn-footer"), scenario.name).toBeNull();
+        expect(rect(chip).right, scenario.name).toBeLessThanOrEqual(rect(header).right + 0.5);
+        expect(document.documentElement.scrollWidth, scenario.name).toBeLessThanOrEqual(width);
+
+        if (scenario.expectSummary) {
+          const summary = header.querySelector<HTMLElement>(".step-summary")!;
+          expect(summary.textContent, scenario.name).toBe(scenario.expectSummary);
+          expect(rect(summary).right, scenario.name).toBeLessThanOrEqual(rect(chip).left);
+        }
+
+        // Expanding live thinking sits directly under .events-list without an 18px empty .event-row gap.
+        fireEvent.click(header);
+        const liveEvent = container.querySelector<HTMLElement>(".live-thinking")!;
+        const liveBody = container.querySelector<HTMLElement>(".live-thinking > .event-content")!;
+        expect(liveEvent.querySelector(".event-row"), scenario.name).toBeNull();
+        expect(rect(liveBody).top - rect(liveEvent).top, scenario.name).toBeLessThanOrEqual(4);
+        expect(container.querySelector(".turn-footer"), scenario.name).toBeNull();
+
+        unmount();
+      }
+    } finally {
+      delete document.documentElement.dataset.theme;
+    }
+  },
+);
+
+it("keeps a long step summary and live timer inside the header at 320px", async () => {
+  await page.viewport(320, 800);
+  vi.useFakeTimers({ toFake: ["Date"] });
+  const now = 1_800_000_000_000;
+  vi.setSystemTime(now);
+  const agent: AgentInfo = {
+    id: "a1",
+    name: "Alice",
+    color: "#528bff",
+    model: "test",
+    avatar: "A",
+    isDefault: true,
+  };
+  const events: StreamEvent[] = [
+    ...Array.from({ length: 100 }, (): StreamEvent => ({
+      kind: "thinking",
+      content: "step",
+      contentOffset: 0,
+    })),
+    ...Array.from({ length: 100 }, (_, i): StreamEvent => ({
+      kind: "tool_use",
+      toolName: "Read",
+      toolUseId: `t-${i}`,
+      content: "**Read** `a`",
+      toolResult: "ok",
+      contentOffset: 0,
+    })),
+    ...Array.from({ length: 100 }, (): StreamEvent => ({
+      kind: "tool_result",
+      content: "orphan",
+      contentOffset: 0,
+    })),
+  ];
+  const msg: Message = {
+    id: "narrow-long",
+    kind: "agent",
+    agentId: agent.id,
+    content: "",
+    timestamp: now - 15_000,
+    status: "streaming",
+    events,
+    liveThinking: "Still checking.",
+    liveThinkingSince: now - 12_000,
+  };
+  const { container } = render(
+    <div className="messages">
+      <MessageItem msg={msg} agents={[agent]} />
+    </div>,
+  );
+  await document.fonts.ready;
+
+  const header = container.querySelector<HTMLElement>(".step-header")!;
+  const summary = header.querySelector<HTMLElement>(".step-summary")!;
+  const chip = header.querySelector<HTMLElement>(".chip-live")!;
+  expect(summary.textContent).toBe("100 thinking · 100 tool calls · 100 results");
+  expect(chip.textContent).toBe("Thinking · 12s");
+  expect(container.querySelector(".turn-footer")).toBeNull();
+  expect(rect(summary).right).toBeLessThanOrEqual(rect(header).right + 0.5);
+  expect(rect(chip).left).toBeGreaterThanOrEqual(rect(header).left - 0.5);
+  expect(rect(chip).right).toBeLessThanOrEqual(rect(header).right + 0.5);
+  expect(chip.scrollWidth).toBeLessThanOrEqual(chip.clientWidth);
+  expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(320);
+});
+
+it.each([390, 960])(
+  "matches live stream and timestamp-only reconnect snapshot geometry at %ipx",
+  async (width) => {
+    await page.viewport(width, 800);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const now = 1_800_000_000_000;
+    vi.setSystemTime(now);
+    const agent: AgentInfo = {
+      id: "a1",
+      name: "Alice",
+      color: "#528bff",
+      model: "test",
+      avatar: "A",
+      isDefault: true,
+    };
+    const base: Message = {
+      id: "equiv",
+      kind: "agent",
+      agentId: agent.id,
+      content: "",
+      timestamp: now - 10_000,
+      status: "streaming",
+      events: [],
+    };
+    const renderView = (msg: Message) => (
+      <div className="messages">
+        <MessageItem msg={msg} agents={[agent]} />
+      </div>
+    );
+    const measure = (root: HTMLElement) => {
+      const header = root.querySelector<HTMLElement>(".step-header")!;
+      const chip = header.querySelector<HTMLElement>(".chip-live")!;
+      return {
+        headerHeight: rect(header).height,
+        chipText: chip.textContent,
+        chipLeft: rect(chip).left,
+        turnHeight: rect(root.querySelector<HTMLElement>(".message")!).height,
+        footer: root.querySelector(".turn-footer"),
+      };
+    };
+
+    // 1. After prior steps: a timestamp-only server snapshot (no client-only liveThinking)
+    // matches the continuous stream's step-header chip, height, and absent footer immediately.
+    let streamed = base;
+    const liveView = render(renderView(streamed));
+    for (const ev of [
+      {
+        kind: "tool_use",
+        toolName: "Read",
+        toolUseId: "t1",
+        content: "**Read** `src/app.ts`",
+        contentOffset: 0,
+      },
+      { kind: "tool_result", toolUseId: "t1", content: "ok" },
+      { kind: "thinking_delta", startedAt: now - 5_000, content: "Checking state." },
+    ] satisfies StreamEvent[]) {
+      streamed = applyEventsToMessage(streamed, [ev]);
+      liveView.rerender(renderView(streamed));
+    }
+    await document.fonts.ready;
+    const fromStream = measure(liveView.container);
+    liveView.unmount();
+
+    const snapshot: Message = {
+      ...base,
+      events: streamed.events,
+      liveThinkingSince: now - 5_000,
+    };
+    const snapView = render(renderView(snapshot));
+    await document.fonts.ready;
+    const fromSnapshot = measure(snapView.container);
+    expect(fromStream.footer).toBeNull();
+    expect(fromStream.chipText).toBe("Thinking · 5s");
+    expect(fromSnapshot).toEqual(fromStream);
+    snapView.unmount();
+
+    // 2. Standalone timestamp-only snapshot: timer renders in .step-header with no footer,
+    // and the next thinking_delta restores the expand affordance without a 18px empty row.
+    let standaloneSnap: Message = { ...base, liveThinkingSince: now - 5_000 };
+    const standaloneView = render(renderView(standaloneSnap));
+    await document.fonts.ready;
+    const beforeDelta = measure(standaloneView.container);
+    expect(beforeDelta.footer).toBeNull();
+    expect(beforeDelta.chipText).toBe("Thinking · 5s");
+    expect(standaloneView.container.querySelector(".trace-header-toggle")).toBeNull();
+
+    standaloneSnap = applyEventsToMessage(standaloneSnap, [
+      { kind: "thinking_delta", startedAt: now - 5_000, content: "Resumed reasoning." },
+    ]);
+    standaloneView.rerender(renderView(standaloneSnap));
+    const afterDelta = measure(standaloneView.container);
+    expect(afterDelta).toEqual(beforeDelta);
+    fireEvent.click(standaloneView.container.querySelector(".trace-header-toggle")!);
+    const liveEvent = standaloneView.container.querySelector<HTMLElement>(".live-thinking")!;
+    const liveBody = standaloneView.container.querySelector<HTMLElement>(
+      ".live-thinking > .event-content",
+    )!;
+    expect(liveEvent.querySelector(".event-row")).toBeNull();
+    expect(rect(liveBody).top - rect(liveEvent).top).toBeLessThanOrEqual(4);
+    expect(liveBody.textContent).toBe("Resumed reasoning.");
+  },
+);

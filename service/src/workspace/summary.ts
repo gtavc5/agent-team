@@ -21,6 +21,58 @@ function firstLine(s: string): string {
   return line.length > FIRST_LINE_MAX ? line.slice(0, FIRST_LINE_MAX) + "…" : line;
 }
 
+function shortSummary(text: string): string {
+  return firstLine(text.slice(0, FIRST_LINE_MAX + 1));
+}
+
+export function toWireEvent(e: StreamEvent): StreamEvent {
+  if (!e.subagent) return e;
+  const sa = e.subagent;
+  return {
+    kind: e.kind,
+    content: "",
+    toolUseId: e.toolUseId,
+    contentOffset: e.contentOffset,
+    waitingSince: e.waitingSince,
+    subagent: {
+      taskId: sa.taskId,
+      description: shortSummary(sa.description ?? ""),
+      ...(sa.summary != null && { summary: shortSummary(sa.summary) }),
+      ...(sa.lastTool != null && { lastTool: shortSummary(sa.lastTool) }),
+      ...(sa.status != null && { status: sa.status }),
+      ...(sa.agentType && { agentType: shortSummary(sa.agentType) }),
+      ...(sa.taskType && { taskType: shortSummary(sa.taskType) }),
+      ...(sa.model && { model: shortSummary(sa.model) }),
+      ...(sa.effort && { effort: shortSummary(sa.effort) }),
+      ...(sa.durationMs != null && { durationMs: sa.durationMs }),
+      ...(sa.usage && { usage: sa.usage }),
+      ...(sa.cancellable != null && { cancellable: sa.cancellable }),
+      ...(sa.transcriptRevision != null && { transcriptRevision: sa.transcriptRevision }),
+      ...(sa.events != null || sa.eventCount != null
+        ? { eventCount: sa.events?.length ?? sa.eventCount }
+        : {}),
+    },
+  };
+}
+
+export function toWireStreamEvent(e: StreamEvent, message: Message): StreamEvent {
+  if (!e.subagent?._innerEvent) return toWireEvent(e);
+  const owner = message.events?.find(
+    (start) => start.kind === "subagent_start" && start.subagent?.taskId === e.subagent?.taskId,
+  )?.subagent;
+  return toWireEvent({
+    kind: "subagent_enrichment",
+    content: "",
+    subagent: {
+      taskId: e.subagent.taskId,
+      description: "",
+      lastTool: owner?.lastTool,
+      eventCount: owner?.events?.length ?? owner?.eventCount,
+      transcriptRevision: owner?.transcriptRevision,
+    },
+  });
+}
+
 export function summarizeEvent(e: StreamEvent): StreamEvent {
   const base: StreamEvent = { kind: e.kind, content: "" };
   if (e.toolName) base.toolName = e.toolName;
@@ -78,26 +130,7 @@ export function summarizeEvent(e: StreamEvent): StreamEvent {
     case "subagent_start":
     case "subagent_progress":
     case "subagent_done":
-      if (e.subagent) {
-        const sa = e.subagent;
-        base.subagent = {
-          taskId: sa.taskId,
-          description: sa.description,
-          ...(sa.agentType && { agentType: sa.agentType }),
-          ...(sa.taskType && { taskType: sa.taskType }),
-          ...(sa.status && { status: sa.status }),
-          ...(sa.lastTool && { lastTool: sa.lastTool }),
-          ...(sa.usage && { usage: sa.usage }),
-          ...(sa.durationMs != null && { durationMs: sa.durationMs }),
-          ...(sa.model != null && { model: sa.model }),
-          ...(sa.effort != null && { effort: sa.effort }),
-          ...(sa.cancellable !== undefined && { cancellable: sa.cancellable }),
-          eventCount: sa.events?.length ?? sa.eventCount ?? 0,
-          ...(sa.transcriptRevision != null && { transcriptRevision: sa.transcriptRevision }),
-          ...(sa.prompt && { hasPrompt: true }),
-          ...(sa.summary && { summaryLength: sa.summary.length }),
-        };
-      }
+      base.subagent = toWireEvent(e).subagent;
       break;
     default:
       // thinking, text, tool_result and anything else: body on demand.
@@ -109,17 +142,18 @@ export function summarizeEvent(e: StreamEvent): StreamEvent {
 
 /** Strip persistence-only dispatch fields before broadcasting a message over WS. */
 export function toWireMessage(m: Message): Message {
-  if (m.queuedEnvelope === undefined && m.dispatchAttempt === undefined) return m;
-  const copy = { ...m };
+  const hasSubagent = m.events?.some((e) => e.subagent) ?? false;
+  if (!hasSubagent && m.queuedEnvelope === undefined && m.dispatchAttempt === undefined) return m;
+  const copy = { ...m, ...(hasSubagent && { events: m.events?.map(toWireEvent) }) };
   delete copy.queuedEnvelope;
   delete copy.dispatchAttempt;
   return copy;
 }
 
 export function summarizeMessage(m: Message): Message {
-  const wire = toWireMessage(m);
-  if (!wire.events?.length) return wire;
-  return { ...wire, events: wire.events.map(summarizeEvent), detail: "summary" };
+  if (!m.events?.length) return toWireMessage(m);
+  const { queuedEnvelope: _queued, dispatchAttempt: _attempt, ...wire } = m;
+  return { ...wire, events: m.events.map(summarizeEvent), detail: "summary" };
 }
 
 export function summarizeMessages(messages: Message[]): Message[] {

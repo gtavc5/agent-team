@@ -14,25 +14,43 @@ function runNode(args, cwd) {
   return child.status ?? 1;
 }
 
+function timed(label, budgetMs, run) {
+  const start = performance.now();
+  const status = run();
+  const duration = performance.now() - start;
+  const observation = `[${label}] ${(duration / 1000).toFixed(2)}s (reference budget ${budgetMs / 1000}s)`;
+  if (duration > budgetMs) console.warn(`${observation}; duration above baseline (warning only)`);
+  else console.log(observation);
+  return status;
+}
+
 function runRoot() {
   const run = (workspace, tier, flags = []) =>
     runNode([script, workspace, tier, ...flags], join(repo, workspace));
   switch (tier) {
     case "unit":
-    case "fast":
       return run("service", tier, args) || run("webview", tier, args);
+    case "fast": {
+      const local = () => run("service", tier, args) || run("webview", tier, args);
+      // Explicit Vitest arguments keep their original workspace scope.
+      if (args.length) return local();
+      return timed("fast", 25_000, () => local() || run("service", "e2e", ["journey-pilot-queue"]));
+    }
     case "browser":
       return run("webview", tier, args);
     case "e2e":
       return run("service", tier, args);
     case "slow":
       if (!process.env.npm_execpath) throw new Error("Launch this tier with npm run test:slow.");
-      return (
-        runNode([process.env.npm_execpath, "run", "check"], repo) ||
-        run("service", "unit") ||
-        run("webview", "unit") ||
-        run("webview", "browser", ["--from-slow"]) ||
-        run("service", "e2e", ["--from-slow"])
+      return timed(
+        "slow",
+        270_000,
+        () =>
+          runNode([process.env.npm_execpath, "run", "check"], repo) ||
+          run("service", "unit") ||
+          run("webview", "unit") ||
+          run("webview", "browser", ["--from-slow"]) ||
+          run("service", "e2e", ["--from-slow"]),
       );
   }
   throw new Error(`Unknown test tier: ${tier}`);

@@ -68,8 +68,8 @@ function connect(sock: FakeSocket, workspaces = [ws]) {
     });
   });
 }
-async function boot(tail: Message[] = [], workspaces = [ws], hasMore = false) {
-  await page.viewport(390, 760);
+async function boot(tail: Message[] = [], workspaces = [ws], hasMore = false, width = 390) {
+  await page.viewport(width, 760);
   localStorage.clear();
   FakeSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeSocket);
@@ -97,10 +97,54 @@ function move(el: HTMLElement, top: number) {
 }
 afterEach(() => {
   cleanup();
+  delete document.documentElement.dataset.theme;
   vi.useRealTimers();
   vi.unstubAllGlobals();
   localStorage.clear();
 });
+
+it.each(["light", "dark"] as const)(
+  "uses compact avatar rings in UI chrome and the full ring only in chat (%s)",
+  async (theme) => {
+    await boot(
+      [],
+      [{ ...ws, agents: [agent, { ...agent, id: "b", name: "Second", avatar: "B" }] }],
+    );
+    document.documentElement.dataset.theme = theme;
+    const chatAvatar = get("#msg-m0 .message-gutter .agent-avatar");
+    const chipAvatars = [...document.querySelectorAll<HTMLElement>(".agents-chip .agent-avatar")];
+    expect(chipAvatars).toHaveLength(2);
+    const compactShadow = getComputedStyle(chipAvatars[0]).boxShadow;
+    const expectCompact = (avatar: HTMLElement) => {
+      expect(avatar.classList.contains("agent-avatar-compact")).toBe(true);
+      expect(getComputedStyle(avatar).boxShadow).toBe(compactShadow);
+    };
+    for (const avatar of chipAvatars) {
+      expectCompact(avatar);
+      expect(getComputedStyle(avatar).boxShadow).toContain("0px 0px 0px 1px");
+    }
+    expect(chipAvatars[1].getBoundingClientRect().left).toBeLessThan(
+      chipAvatars[0].getBoundingClientRect().right,
+    );
+
+    fireEvent.click(get(".agents-chip"));
+    expect(get(".agents-chip").getAttribute("aria-pressed")).toBe("true");
+    expect(getComputedStyle(get(".agents-chip")).borderTopWidth).toBe("1px");
+    expect(getComputedStyle(get(".ap-session")).borderTopWidth).toBe("1px");
+    expectCompact(get(".agents-panel .ap-agent > .agent-avatar"));
+    fireEvent.click(get(".side-panel-close"));
+
+    const input = get<HTMLTextAreaElement>("textarea");
+    fireEvent.change(input, { target: { value: "@", selectionStart: 1 } });
+    expectCompact(get(".mention-popup .agent-avatar"));
+    fireEvent.change(input, { target: { value: "", selectionStart: 0 } });
+    fireEvent.click(get("#msg-m0 .btn-quote"));
+    expectCompact(get(".quote-bar .agent-avatar"));
+
+    expect(chatAvatar.classList.contains("agent-avatar-compact")).toBe(false);
+    expect(getComputedStyle(chatAvatar).boxShadow).not.toBe(compactShadow);
+  },
+);
 
 it("follows a growing tail only until the reader moves up, and resumes at the bottom", async () => {
   const live = turn(18, { status: "streaming", content: "Working" });
@@ -212,12 +256,10 @@ it("jumps within the transcript without clearing search or being pulled back by 
   const second = get("#msg-m8");
 
   fireEvent.click(get("#msg-m18 .forward-ref-icon"));
-  advance(100);
   expect(first.matches(".message-highlight")).toBe(true);
   expectInView(scroll, first);
-  advance(900);
+  advance(1_000);
   fireEvent.click(get("#msg-m19 .forward-ref-preview"));
-  advance(100);
   expect(first.matches(".message-highlight")).toBe(false);
   expect(second.matches(".message-highlight")).toBe(true);
   expectInView(scroll, second);
@@ -236,9 +278,79 @@ it("jumps within the transcript without clearing search or being pulled back by 
   expect(scroll.scrollTop).toBe(top);
   advance(1_000); // The first highlight would now have expired.
   expect(second.matches(".message-highlight")).toBe(true);
-  advance(900);
+  advance(1_000);
   expect(second.matches(".message-highlight")).toBe(false);
 });
+
+it.each([
+  { width: 390, theme: "dark", motion: "reduce" },
+  { width: 1200, theme: "light", motion: "no-preference" },
+])(
+  "lands immediately and respects the next upward scroll ($width, $theme, $motion)",
+  async ({ width, theme, motion }) => {
+    await cdp().send("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: motion }],
+    });
+    try {
+      const { scroll, receive } = await boot([reply(18, "m3")], [ws], false, width);
+      document.documentElement.dataset.theme = theme;
+      fireEvent.click(get("#msg-m18 .forward-ref"));
+      expect(document.activeElement).toBe(get("#msg-m3"));
+      expectInView(scroll, get("#msg-m3"));
+      const search = get<HTMLInputElement>(".search-bar input");
+      search.focus();
+      fireEvent.change(search, { target: { value: "needle" } });
+      receive({
+        type: "search_results",
+        query: "needle",
+        hits: [
+          {
+            workspaceId: "w",
+            workspaceName: title,
+            messageId: "m7",
+            timestamp: 1007,
+            snippet: "needle",
+          },
+        ],
+      });
+      fireEvent.click(get(".search-result-item"));
+      expect([...document.querySelectorAll(".message-highlight")]).toEqual([get("#msg-m7")]);
+      expect(document.activeElement).not.toBe(get("#msg-m7"));
+      expectInView(scroll, get("#msg-m7"));
+      fireEvent.click(get(".jump-latest"));
+      expect(gap(scroll)).toBeLessThanOrEqual(1);
+      expect(document.querySelector(".message-highlight")).toBeNull();
+      receive({
+        type: "new_message",
+        message: turn(98, { status: "streaming", content: "Working" }),
+      });
+      expect(gap(scroll)).toBeLessThanOrEqual(1);
+      // An inline delta grows text but not row height. Even a tiny upward
+      // move must detach before Chromium delivers its coalesced scroll event.
+      scroll.scrollTop -= 3;
+      const slightlyUp = scroll.scrollTop;
+      receive({
+        type: "stream_event",
+        messageId: "m98",
+        event: { kind: "text_delta", content: "." },
+      });
+      expect(scroll.scrollTop).toBe(slightlyUp);
+      move(scroll, 200);
+      fireEvent.click(get(".jump-latest"));
+      // Deliver the frame before Chromium dispatches the coalesced scroll event.
+      scroll.scrollTop -= 220;
+      const top = scroll.scrollTop;
+      receive({ type: "new_message", message: turn(99) });
+      expect(get("#msg-m99")).toBeTruthy();
+      expect(scroll.scrollTop).toBe(top);
+      await nextPaint();
+      expect(scroll.scrollTop).toBe(top);
+      expect(get(".jump-latest")).toBeTruthy();
+    } finally {
+      await cdp().send("Emulation.setEmulatedMedia", { features: [] });
+    }
+  },
+);
 
 it("pages back to a quote and recovers from a reference missing from history", async () => {
   const { scroll, sock, receive } = await boot(
@@ -276,6 +388,25 @@ it("pages back to a quote and recovers from a reference missing from history", a
   expect(scroll.scrollTop).toBe(0);
   fireEvent.click(get("#msg-m20 .forward-ref"));
   await expect.poll(() => get("#msg-m3").matches(".message-highlight")).toBe(true);
+});
+
+it("does not take focus or seek when a paged quote arrives after new reader input", async () => {
+  const { scroll, receive } = await boot([reply(18, "m-2")], [ws], true);
+  move(scroll, 350);
+  fireEvent.click(get("#msg-m18 .forward-ref"));
+  fireEvent.wheel(scroll, { deltaY: -80 });
+  move(scroll, 270);
+  const anchor = get("#msg-m3").getBoundingClientRect().top;
+  receive({
+    type: "workspace_messages",
+    before: history[0].timestamp,
+    messages: [turn(-2)],
+    hasMore: false,
+  });
+  expect(get("#msg-m-2")).toBeTruthy();
+  expect(document.querySelector(".message-highlight")).toBeNull();
+  expect(document.activeElement).not.toBe(get("#msg-m-2"));
+  expect(get("#msg-m3").getBoundingClientRect().top).toBeCloseTo(anchor, 0);
 });
 
 it("keeps the visible history anchored when paging cannot find a quote", async () => {
@@ -321,11 +452,14 @@ it("keeps the visible history anchored even if new content grows below while pag
     hasMore: false,
   });
   const paged = get("#msg-m-2");
-  const codeScroll = get("#msg-m-2 pre code");
+  const codeScroll = get("#msg-m-2 pre");
+  const codeInner = get("#msg-m-2 pre code");
   expect(codeScroll.scrollWidth).toBeGreaterThan(codeScroll.clientWidth + 100);
   expect(scroll.scrollWidth).toBe(scroll.clientWidth);
   codeScroll.scrollLeft = 100;
   expect(codeScroll.scrollLeft).toBe(100);
+  codeInner.scrollLeft = 100;
+  expect(codeInner.scrollLeft).toBe(0);
   expect(paged.getAnimations({ subtree: true })).toEqual([]);
   expect(target.getBoundingClientRect().top).toBeCloseTo(top, 0);
   await nextPaint();
@@ -364,12 +498,11 @@ it("jumps from the composer preview and closes the quote without a second jump",
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   preview.focus();
   await userEvent.keyboard("{Enter}");
-  void act(() => vi.advanceTimersByTime(100));
   expect(target.matches(".message-highlight")).toBe(true);
   expect(document.activeElement).toBe(target);
   expectInView(scroll, target);
   expect(get(".quote-bar-content")).toBe(preview);
-  void act(() => vi.advanceTimersByTime(1900));
+  void act(() => vi.advanceTimersByTime(2000));
   expect(target.matches(".message-highlight")).toBe(false);
 
   move(scroll, scroll.scrollHeight);

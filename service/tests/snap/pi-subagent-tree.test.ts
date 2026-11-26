@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { splitEvents } from "../../../webview/src/chat/events";
-import { applyEventsToMessage } from "../../../webview/src/state/stream";
+import { applyInnerEvent } from "../../src/workspace/workspace";
+import { readTracePage } from "../../../shared/subagent-trace";
 import {
   projectPiSubagentTree,
   type PiSubagentTreeState,
@@ -33,14 +34,6 @@ const step = (id: string, state: PiSubagentWidgetNode["state"]): PiSubagentWidge
   state,
 });
 
-function wrap(inner: StreamEvent): StreamEvent {
-  return {
-    kind: "subagent_progress",
-    content: "",
-    subagent: { taskId: owner, description: "", _innerEvent: inner },
-  };
-}
-
 function restore(state: PiSubagentTreeState): PiSubagentTreeState {
   return JSON.parse(JSON.stringify(state)) as PiSubagentTreeState;
 }
@@ -59,29 +52,13 @@ describe("projectPiSubagentTree", () => {
       "subagent_progress",
       "notice",
     ]);
-    const message = applyEventsToMessage(
-      {
-        id: "m",
-        kind: "agent",
-        agentId: "a",
-        content: "",
-        timestamp: 1,
-        status: "done",
-        events: [
-          {
-            kind: "subagent_start",
-            content: "",
-            subagent: { taskId: owner, description: "Build", events: [] },
-          },
-        ],
-      },
-      [...first.events, ...next.events].map(wrap),
-    );
-    expect(message.events).toHaveLength(1);
+    const trace: StreamEvent[] = [];
+    for (const event of [...first.events, ...next.events])
+      expect(applyInnerEvent(trace, event)).toBe(true);
     const {
       subagents: [audit],
       banners,
-    } = splitEvents(message.events![0].subagent!.events!);
+    } = splitEvents(trace);
     expect(audit.subagent).toMatchObject({
       description: "reviewer",
       status: "completed",
@@ -89,7 +66,9 @@ describe("projectPiSubagentTree", () => {
     });
     const {
       subagents: [lane],
-    } = splitEvents(audit.subagent!.events!);
+    } = splitEvents(
+      trace.find((e) => e.subagent?.taskId === audit.subagent!.taskId)!.subagent!.events!,
+    );
     expect(lane.subagent).toMatchObject({
       status: "completed",
       cancellable: false,
@@ -102,6 +81,26 @@ describe("projectPiSubagentTree", () => {
       "Host step: Build checks (running)",
       "Host step: Build checks (partial)",
     ]);
+    expect(
+      readTracePage(
+        1,
+        [
+          {
+            kind: "subagent_start",
+            content: "",
+            subagent: {
+              taskId: owner,
+              description: "Build",
+              events: trace,
+            },
+          },
+        ],
+        owner,
+        { path: [audit.subagent!.taskId, lane.subagent!.taskId] },
+      ),
+    ).toMatchObject({
+      result: "checked files",
+    });
     expect(projectPiSubagentTree(owner, decodeBuildChildren(settled), next.state).events).toEqual(
       [],
     );

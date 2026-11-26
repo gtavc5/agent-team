@@ -13,7 +13,7 @@ describe("splitEvents", () => {
     const events = [
       ev("thinking"),
       ev("tool_use", { toolUseId: "t1" }),
-      ev("subagent_start", { subagent: { taskId: "a", description: "d", events: [] } }),
+      ev("subagent_start", { subagent: { taskId: "a", description: "d" } }),
     ];
     const { regular, subagents } = splitEvents(events);
     expect(regular.map((e) => e.kind)).toEqual(["thinking", "tool_use"]);
@@ -24,7 +24,7 @@ describe("splitEvents", () => {
   it("folds start/progress/done into one entry per taskId", () => {
     const events = [
       ev("subagent_start", {
-        subagent: { taskId: "a", description: "explore", events: [ev("tool_use")] },
+        subagent: { taskId: "a", description: "explore", eventCount: 1 },
       }),
       ev("subagent_progress", {
         subagent: { taskId: "a", description: "", lastTool: "Grep" },
@@ -36,11 +36,11 @@ describe("splitEvents", () => {
     const { subagents } = splitEvents(events);
     expect(subagents).toHaveLength(1);
     const sa = subagents[0].subagent!;
-    // Final status/summary from done, description from start, inner events kept.
+    // Final status/summary from done, description from start, trace count kept.
     expect(sa.status).toBe("completed");
     expect(sa.summary).toBe("done!");
     expect(sa.description).toBe("explore");
-    expect(sa.events).toHaveLength(1);
+    expect(sa.eventCount).toBe(1);
   });
 
   it("keeps distinct taskIds separate and preserves order", () => {
@@ -179,7 +179,7 @@ describe("folded card identity", () => {
 
   it("gives the same card object while its lifecycle events are unchanged", () => {
     const start = ev("subagent_start", {
-      subagent: { taskId: "a", description: "d", status: "running", events: [] },
+      subagent: { taskId: "a", description: "d", status: "running" },
     });
     const done = ev("subagent_done", {
       subagent: { taskId: "a", description: "", status: "completed" },
@@ -199,7 +199,7 @@ describe("folded card identity", () => {
 });
 
 describe("timelineBlocks details", () => {
-  it("folds a summarised done event without losing the start's count or type", () => {
+  it("uses the authoritative terminal count without losing the start's type", () => {
     const events = [
       ev("subagent_start", {
         subagent: {
@@ -224,7 +224,7 @@ describe("timelineBlocks details", () => {
     const card = (timelineBlocks(events)[0] as { ev: StreamEvent }).ev;
     expect(card.subagent).toMatchObject({
       status: "completed",
-      eventCount: 36,
+      eventCount: 0,
       model: "p/start",
       effort: "high",
       agentType: "Explore",

@@ -219,9 +219,9 @@ describe("bare URLs in the source", () => {
 });
 
 describe("cost", () => {
-  const time = (md: string) => {
+  const time = (md: string, thinking = false) => {
     const t = performance.now();
-    prepareSource(md);
+    prepareSource(md, thinking);
     return performance.now() - t;
   };
 
@@ -238,6 +238,20 @@ describe("cost", () => {
       "https://x.com/中".repeat(10_000),
     ]) {
       expect(time(md), md.slice(0, 12)).toBeLessThan(300);
+      expect(time(md, true), md.slice(0, 12)).toBeLessThan(300);
+    }
+  });
+
+  it("bounds shell and path scans in thinking source", () => {
+    for (const md of [
+      "src/_x_/*/".repeat(20_000),
+      "*".repeat(120_000) + "word.",
+      "**src/foo/*/bar.ts** ".repeat(12_000),
+      String.raw`\[ -f x `.repeat(20_000) + String.raw`\]`,
+      "$(cmd1):$(cmd2) ".repeat(12_000),
+      ' --grep="*'.repeat(12_000),
+    ]) {
+      expect(time(md, true), md.slice(0, 12)).toBeLessThan(300);
     }
   });
 });

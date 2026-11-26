@@ -94,6 +94,7 @@ export function UiDialogModal({
 
       {(dialog.method === "input" || dialog.method === "editor") && (
         <form
+          className="ui-dialog-response"
           onSubmit={(event) => {
             event.preventDefault();
             respond({ value });

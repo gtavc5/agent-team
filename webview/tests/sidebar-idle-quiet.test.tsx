@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FOLDED_IDLE_STORAGE_KEY, Sidebar, type SidebarProps } from "../src/sidebar/Sidebar";
+import { IDLE_FOLD_MS } from "../src/sidebar/groups";
 import { resetLocaleForTests, setServerLanguage } from "../src/i18n";
-import { Sidebar, type SidebarProps } from "../src/sidebar/Sidebar";
 import { SILENCE_MS, StreamSilence } from "../src/sidebar/StreamSilence";
 import type { AgentInfo, Project, Workspace } from "../src/state/useServer";
 
@@ -30,11 +31,22 @@ const ws = (id: string, over: Partial<Workspace> = {}): Workspace => ({
   ...over,
 });
 
+beforeEach(() => {
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key),
+    clear: () => values.clear(),
+  });
+});
+
 afterEach(() => {
   cleanup();
   resetLocaleForTests();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("StreamSilence", () => {
@@ -168,11 +180,12 @@ describe("Sidebar idle disclosure and worker archive action", () => {
     ...over,
   });
 
-  it("renders Idle (N) disclosure with sibling Fold (+M) (no nested buttons) and unfolds items below", () => {
+  it("renders ... (N) disclosure with sibling Fold (+M) (no nested buttons) and unfolds items below", () => {
     const props = baseProps();
     const { container, getByRole } = render(<Sidebar {...props} />);
-    const toggle = getByRole("button", { name: "Idle (1)" });
+    const toggle = getByRole("button", { name: "Show 1 folded session" });
     const fold = getByRole("button", { name: "Fold (+1)" });
+    expect(toggle.textContent).toContain("... (1)");
 
     // No nested <button> inside <button>.
     expect(toggle.querySelector("button")).toBeNull();
@@ -181,7 +194,7 @@ describe("Sidebar idle disclosure and worker archive action", () => {
     expect(container.querySelectorAll(".ws-idle-row")).toHaveLength(1);
     expect(container.textContent).not.toContain("Idle / Done");
 
-    // Unfolding renders Done Worker below the Idle (1) row in DOM order.
+    // Unfolding renders Done Worker below the ... (1) row in DOM order.
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     const items = container.querySelector(".ws-group-items")!;
@@ -195,8 +208,96 @@ describe("Sidebar idle disclosure and worker archive action", () => {
 
     // Clicking Fold (+1) folds the visible idle worker without toggling the disclosure open.
     fireEvent.click(fold);
-    expect(getByRole("button", { name: "Idle (2)" }).getAttribute("aria-expanded")).toBe("false");
+    expect(
+      getByRole("button", { name: "Show 2 folded sessions" }).getAttribute("aria-expanded"),
+    ).toBe("false");
     expect(container.querySelector(".ws-idle-fold")).toBeNull();
+  });
+
+  it("persists a manual fold across a fresh mount and prunes it when promoted", () => {
+    const props = baseProps({
+      workspaces: [
+        ws("lead", { projectLink: { projectId: "p1", role: "lead" } }),
+        ws("idle-worker", {
+          name: "Idle Worker",
+          projectLink: { projectId: "p1", role: "worker" },
+        }),
+      ],
+    });
+    const first = render(<Sidebar {...props} />);
+    fireEvent.click(first.getByRole("button", { name: "Fold (1)" }));
+    expect(first.getByRole("button", { name: "Show 1 folded session" })).toBeTruthy();
+    expect(JSON.parse(localStorage.getItem(FOLDED_IDLE_STORAGE_KEY)!)).toEqual(["idle-worker"]);
+    first.unmount();
+
+    const second = render(<Sidebar {...props} />);
+    expect(second.getByRole("button", { name: "Show 1 folded session" })).toBeTruthy();
+    expect(second.queryByText("Idle Worker")).toBeNull();
+    second.rerender(<Sidebar {...props} activeWsId="idle-worker" />);
+    expect(second.getByText("Idle Worker")).toBeTruthy();
+    expect(second.queryByRole("button", { name: "Show 1 folded session" })).toBeNull();
+    expect(localStorage.getItem(FOLDED_IDLE_STORAGE_KEY)).toBeNull();
+  });
+
+  it("folds old quiet null-result workers on reload but leaves fresh ones visible", () => {
+    const oldQuiet = ws("old-quiet", {
+      name: "Old Quiet",
+      createdAt: NOW - IDLE_FOLD_MS - 10_000,
+      lastMessageAt: NOW - IDLE_FOLD_MS - 1,
+      projectLink: { projectId: "p1", role: "worker" },
+    });
+    const fresh = ws("fresh", {
+      name: "Fresh",
+      projectLink: { projectId: "p1", role: "worker" },
+    });
+    const view = render(<Sidebar {...baseProps({ workspaces: [oldQuiet, fresh] })} />);
+    expect(view.getByRole("button", { name: "Show 1 folded session" }).textContent).toContain(
+      "... (1)",
+    );
+    expect(view.queryByText("Old Quiet")).toBeNull();
+    expect(view.getByText("Fresh")).toBeTruthy();
+  });
+
+  it("prunes deleted, archived, and promoted manual IDs from durable storage", () => {
+    localStorage.setItem(
+      FOLDED_IDLE_STORAGE_KEY,
+      JSON.stringify(["idle-worker", "deleted", "archived-worker", "active-worker"]),
+    );
+    const active = ws("active-worker", {
+      projectLink: { projectId: "p1", role: "worker" },
+    });
+    const idle = ws("idle-worker", {
+      projectLink: { projectId: "p1", role: "worker" },
+    });
+    const archived = ws("archived-worker", {
+      archivedAt: NOW - 1,
+      projectLink: { projectId: "p1", role: "worker" },
+    });
+    render(
+      <Sidebar {...baseProps({ workspaces: [idle, active, archived], activeWsId: active.id })} />,
+    );
+    expect(JSON.parse(localStorage.getItem(FOLDED_IDLE_STORAGE_KEY)!)).toEqual(["idle-worker"]);
+  });
+
+  it("keeps storage before init and prunes it after an authoritative empty snapshot", () => {
+    localStorage.setItem(FOLDED_IDLE_STORAGE_KEY, JSON.stringify(["deleted"]));
+    const props = baseProps({ workspaces: [], snapshotReady: false });
+    const view = render(<Sidebar {...props} />);
+    expect(JSON.parse(localStorage.getItem(FOLDED_IDLE_STORAGE_KEY)!)).toEqual(["deleted"]);
+    view.rerender(<Sidebar {...props} snapshotReady={true} />);
+    expect(localStorage.getItem(FOLDED_IDLE_STORAGE_KEY)).toBeNull();
+  });
+
+  it("merges manual folds from two mounted clients instead of overwriting them", () => {
+    const a = ws("idle-a", { projectLink: { projectId: "p1", role: "worker" } });
+    const b = ws("idle-b", { projectLink: { projectId: "p1", role: "worker" } });
+    const first = render(<Sidebar {...baseProps({ workspaces: [a, b], activeWsId: b.id })} />);
+    const second = render(<Sidebar {...baseProps({ workspaces: [a, b], activeWsId: a.id })} />);
+    fireEvent.click(first.container.querySelector(".ws-idle-toggle")!);
+    fireEvent.click(second.container.querySelector(".ws-idle-toggle")!);
+    expect(new Set(JSON.parse(localStorage.getItem(FOLDED_IDLE_STORAGE_KEY)!) as string[])).toEqual(
+      new Set(["idle-a", "idle-b"]),
+    );
   });
 
   it("offers Archive session only on eligible non-running, non-queued, non-archived, non-sealed worker rows", () => {

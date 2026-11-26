@@ -1,6 +1,6 @@
 // The board page at clice's scale and at its edges: selection, Escape,
 // focus, broken files, counts, the archive.
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { render, fireEvent, within } from "@testing-library/react";
 import { BoardPage, type SessionInfo } from "../src/project/BoardPage";
 import type { Objective, ObjectiveStatus, Project } from "../src/state/useServer";
@@ -64,6 +64,8 @@ const project = (objectives: Project["objectives"]): Project => ({
 });
 
 const sessions = new Map<string, SessionInfo>();
+
+afterEach(() => vi.unstubAllGlobals());
 
 function page(p: Project) {
   const props = {
@@ -189,6 +191,28 @@ describe("Escape", () => {
 });
 
 describe("focus", () => {
+  it("cycles Tab and Shift+Tab inside the dialog, even from background focus", () => {
+    const { container, getByTitle } = page(project([o("a/x")]));
+    const dialog = container.querySelector<HTMLElement>("[role=dialog]")!;
+    const first = getByTitle("Rename");
+    const last = container.querySelector<HTMLElement>(".bp-card")!;
+
+    first.focus();
+    fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(last);
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+
+    dialog.focus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+    const background = document.body.appendChild(document.createElement("button"));
+    background.focus();
+    fireEvent.keyDown(background, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(last);
+    background.remove();
+  });
+
   it("moves into the dialog on open and back to the opener on close", () => {
     const opener = document.createElement("button");
     document.body.appendChild(opener);
@@ -200,6 +224,36 @@ describe("focus", () => {
     unmount();
     expect(document.activeElement).toBe(opener);
     opener.remove();
+  });
+});
+
+describe("dialog and selection semantics", () => {
+  it("names every mode and exposes area and objective detail state", () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 503 })));
+    const { container, getByRole } = page(project([o("a/x")]));
+    expect(getByRole("dialog", { name: "clice objectives" })).toBeTruthy();
+
+    const areas = container.querySelectorAll<HTMLButtonElement>(".bp-area");
+    expect(areas[0].getAttribute("aria-pressed")).toBe("true");
+    expect(areas[1].getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(areas[1]);
+    expect(areas[0].getAttribute("aria-pressed")).toBe("false");
+    expect(areas[1].getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(getByRole("button", { name: "Dependencies" }));
+    const node = container.querySelector<HTMLButtonElement>(".bp-node")!;
+    expect(node.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(node);
+    expect(node.getAttribute("aria-expanded")).toBe("true");
+    expect(node.getAttribute("aria-controls")).toBe("bp-objective-detail");
+    expect(container.querySelector("#bp-objective-detail")).not.toBeNull();
+
+    fireEvent.click(getByRole("button", { name: "Issues" }));
+    expect(getByRole("dialog", { name: "clice issues" })).toBeTruthy();
+    fireEvent.click(getByRole("button", { name: "Notes" }));
+    expect(getByRole("dialog", { name: "clice notes" })).toBeTruthy();
+    fireEvent.click(getByRole("button", { name: "Objectives" }));
+    expect(getByRole("dialog", { name: "clice objectives" })).toBeTruthy();
   });
 });
 

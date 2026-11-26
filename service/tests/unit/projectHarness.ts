@@ -28,7 +28,7 @@ afterEach(async () => {
 
 export const tick = () => new Promise((r) => setTimeout(r, 0));
 
-export function setupProjects() {
+export function setupProjects(onSaveNow?: WorkspaceCallbacks["onSaveNow"]) {
   const base = tmpDir();
   const root = path.join(base, "repo");
   fs.mkdirSync(path.join(root, "wt"), { recursive: true });
@@ -59,6 +59,16 @@ export function setupProjects() {
     onNewMessage: () => {},
     onStreamEvent: () => {},
     onMessageDone: () => {},
+    onLeadTerminal: (w, agentId, reply, interrupted) =>
+      manager.recovery.terminal(w, agentId, reply, interrupted),
+    onLeadStop: (w, agentId) => manager.recovery.stop(w, agentId),
+    prepareManualInput: (w, agentId, pair) => manager.recovery.manual(w, agentId, pair),
+    onSaveNow,
+    onReportDeliveryState: (reportId, state, meta) => {
+      for (const w of workspaces.values())
+        if (w.leadOutage?.batch?.id === reportId)
+          manager.mirrorReportDelivery(w, reportId, state, meta);
+    },
     onAgentIdle: (wsId) => manager.workerIdle(workspaces.get(wsId)!),
     onAgentState: (wsId, _agentId, state) => {
       if (state === "idle") manager.workerIdle(workspaces.get(wsId)!);
