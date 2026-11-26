@@ -44,6 +44,11 @@ type SourceSettings = {
   defaultProvider?: unknown;
   defaultModel?: unknown;
   subagents?: unknown;
+  retry?: unknown;
+  transport?: unknown;
+  httpProxy?: unknown;
+  httpIdleTimeoutMs?: unknown;
+  websocketConnectTimeoutMs?: unknown;
 };
 
 function readSettings(sourceAgentDir: string): SourceSettings {
@@ -822,8 +827,17 @@ export function prepareControlledPiAgentHome(
   for (const key of ["enabledModels", "defaultProvider", "defaultModel"] as const) {
     if (sourceSettings[key] !== undefined) settings[key] = sourceSettings[key];
   }
-  if (options.mode === "runtime" && sourceSettings.subagents !== undefined) {
-    settings.subagents = sourceSettings.subagents;
+  if (options.mode === "runtime") {
+    for (const key of [
+      "subagents",
+      "retry",
+      "transport",
+      "httpProxy",
+      "httpIdleTimeoutMs",
+      "websocketConnectTimeoutMs",
+    ] as const) {
+      if (sourceSettings[key] !== undefined) settings[key] = sourceSettings[key];
+    }
   }
   const settingsPath = path.join(piAgentDir, "settings.json");
   writeJson(settingsPath, settings);

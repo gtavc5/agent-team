@@ -436,6 +436,50 @@ describe("prepareControlledPiAgentHome", () => {
     expectIsolatedRouting(prepareControlledPiAgentHome(options));
   });
 
+  const networkSettings = {
+    retry: { enabled: false, maxRetries: 0, baseDelayMs: 250, extra: { values: [1, 2] } },
+    transport: "sse",
+    httpProxy: "http://proxy.example.invalid:8080",
+    httpIdleTimeoutMs: 30_000,
+    websocketConnectTimeoutMs: 12_000,
+  };
+
+  it("forwards runtime retry and network settings and drops them when removed from the source", () => {
+    const { sourceAgentDir, dataDir } = makeSource();
+    const sourcePath = path.join(sourceAgentDir, "settings.json");
+    fs.writeFileSync(sourcePath, JSON.stringify({ ...networkSettings, subagents, theme: "dark" }));
+    const options = { mode: "runtime", sourceAgentDir, dataDir } as const;
+    const { settingsPath } = prepareControlledPiAgentHome(options);
+    const managedDefaults = { defaultProjectTrust: "always", packages: [] };
+    expect(JSON.parse(fs.readFileSync(settingsPath, "utf8"))).toEqual({
+      ...managedDefaults,
+      ...networkSettings,
+      subagents,
+    });
+
+    fs.writeFileSync(sourcePath, JSON.stringify({ subagents }));
+    prepareControlledPiAgentHome(options);
+    expect(JSON.parse(fs.readFileSync(settingsPath, "utf8"))).toEqual({
+      ...managedDefaults,
+      subagents,
+    });
+  });
+
+  it.each(["test-copied-creds", "test-synthetic"] as const)(
+    "does not forward host retry or network settings in %s mode",
+    (mode) => {
+      const { sourceAgentDir } = makeSource();
+      fs.writeFileSync(path.join(sourceAgentDir, "settings.json"), JSON.stringify(networkSettings));
+      const home = prepareControlledPiAgentHome({ mode, sourceAgentDir });
+      temporaryDirectories.push(home.piAgentDir, home.env.PI_SUBAGENTS_TEMP_ROOT);
+      if (home.geminiHome) temporaryDirectories.push(home.geminiHome);
+      expect(JSON.parse(fs.readFileSync(home.settingsPath, "utf8"))).toEqual({
+        defaultProjectTrust: "always",
+        packages: [],
+      });
+    },
+  );
+
   it("links the user model catalog but only seeds the managed model cache once", () => {
     const { sourceAgentDir, dataDir } = makeSource();
     const catalog = path.join(sourceAgentDir, "models.json");
