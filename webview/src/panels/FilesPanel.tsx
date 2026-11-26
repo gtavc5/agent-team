@@ -11,7 +11,7 @@ import { toJsxRuntime } from "hast-util-to-jsx-runtime";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import { highlightTree } from "../chat/highlight";
 import { copyText } from "../chat/clipboard";
-import { MdBlock } from "../chat/markdown";
+import { ImagePathContext, MdBlock } from "../chat/markdown";
 import { FileOpenContext, splitFileRef, WIN_DRIVE, type FileRef } from "../chat/fileRef";
 import { formatSize, utf8Length } from "../format";
 import { FileIcon, Icon } from "./Icon";
@@ -160,7 +160,8 @@ function resolveFrom(dir: string, ref: string): string {
   if (ref.startsWith("/") || ref.startsWith("~") || WIN_DRIVE.test(ref)) return ref;
   const sep = /^[A-Za-z]:\\/.test(dir) ? "\\" : "/";
   const parts = dir.replace(/[\\/]+$/, "").split(/[\\/]/);
-  const minLen = /^[A-Za-z]:$/.test(parts[0] ?? "") ? 1 : 0;
+  const drive = /^[A-Za-z]:$/.test(parts[0] ?? "");
+  const minLen = drive || dir.startsWith("/") ? 1 : 0;
   for (const seg of ref.split(/[\\/]/)) {
     if (seg === "..") {
       if (parts.length > minLen) parts.pop();
@@ -168,7 +169,7 @@ function resolveFrom(dir: string, ref: string): string {
       parts.push(seg);
     }
   }
-  if (minLen === 1 && parts.length === 1) return `${parts[0]}${sep}`;
+  if (drive && parts.length === 1) return `${parts[0]}${sep}`;
   return parts.join(sep) || "/";
 }
 
@@ -356,7 +357,9 @@ export function FilesPanel({
 
   const view = "view" in load ? load.view : null;
   const path = view?.path ?? ("path" in load && load.path ? load.path : ref.path);
-  const raw = `api/file/raw?ws=${encodeURIComponent(wsId)}&path=${encodeURIComponent(path)}${literal}`;
+  const rawUrl = (p: string) =>
+    `api/file/raw?ws=${encodeURIComponent(wsId)}&path=${encodeURIComponent(p)}${literal}`;
+  const raw = rawUrl(path);
   const image = useImagePreview(raw, !changesOn && view?.kind === "image" ? view.size : null);
   const isMarkdown = view?.kind === "text" && languageFor(path) === "markdown";
   const go = (next: FileRef) => {
@@ -374,6 +377,13 @@ export function FilesPanel({
     const notes = path.slice(0, path.length - view!.ref!.length + "notes".length);
     if (/^notes(\/|$)/.test(p)) return notes + p.slice("notes".length);
     return /^\.\.?\//.test(p) ? resolveFrom(parentOf(path), p) : p;
+  };
+  const resolveImage = (p: string) => {
+    if (view?.ref) return rawUrl(noteRef(p));
+    if (p.startsWith("/") || WIN_DRIVE.test(p)) return rawUrl(p);
+    const dir = parentOf(path);
+    // A literal preview keeps '..' for the filesystem to walk across symlinks.
+    return rawUrl(literal ? `${dir.replace(/[\\/]+$/, "")}/${p}` : resolveFrom(dir, p));
   };
   const openRef = (r: string) => {
     const parsed = splitFileRef(r);
@@ -544,7 +554,9 @@ export function FilesPanel({
           (isMarkdown && !source ? (
             <div className="file-markdown message-content">
               <FileOpenContext.Provider value={openRef}>
-                <MdBlock>{view.content}</MdBlock>
+                <ImagePathContext.Provider value={resolveImage}>
+                  <MdBlock>{view.content}</MdBlock>
+                </ImagePathContext.Provider>
               </FileOpenContext.Provider>
             </div>
           ) : (

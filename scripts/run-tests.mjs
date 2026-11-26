@@ -61,7 +61,12 @@ async function runRoot() {
         (await runAsync(
           [npm, "run", "--silent", "build", "-w", "webview", "--", "--logLevel", "error"],
           repo,
-        )) || browserE2e(["demo-browser.test.ts", "journey-pilot-subagent.test.ts"]);
+        )) ||
+        browserE2e([
+          "demo-browser.test.ts",
+          "journey-markdown-images.test.ts",
+          "journey-pilot-subagent.test.ts",
+        ]);
       return timed("slow", () =>
         parallel(
           runAsync([npm, "run", "check"], repo),

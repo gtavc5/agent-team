@@ -7,7 +7,7 @@ export default {
   test: {
     ...unit.test,
     maxWorkers: Math.max(1, Math.min(5, Math.floor(availableParallelism() / 2))),
-    include: ["tests/{app,events,liveness,queue-journey,stream}.test.{ts,tsx}"],
+    include: ["tests/{app,events,liveness,markdown-images,queue-journey,stream}.test.{ts,tsx}"],
     tagsFilter: ["!history-stress && !app-detail"],
   },
 };

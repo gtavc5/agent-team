@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { MdBlock, ProsePathContext } from "../chat/markdown";
+import { ImagePathContext, MdBlock, ProsePathContext } from "../chat/markdown";
 import { FileOpenContext, splitFileRef, WIN_DRIVE, type FileRef } from "../chat/fileRef";
 import { CodeView, languageFor, type FileView } from "../panels/FilesPanel";
 import { FileIcon, Icon } from "../panels/Icon";
@@ -252,6 +252,8 @@ export function FilePreview({
   const raw = fileUrl(project, file.path, true);
   const image = useImagePreview(raw, view?.kind === "image" ? view.size : null);
   const found = view?.ref;
+  const resolveImage = (ref: string) =>
+    fileUrl(project, refFrom(found ?? file.path.replace(/\\/g, "/"), ref), true);
   useEffect(() => {
     const bare = (p: string) => p.replace(/\/+$/, "");
     if (found && bare(found) !== bare(file.path)) onResolve(found);
@@ -340,7 +342,9 @@ export function FilePreview({
             <FileOpenContext.Provider value={openRef}>
               <ProsePathContext.Provider value={acceptHere}>
                 <div className="file-markdown message-content bn-md">
-                  <MdBlock>{view.content}</MdBlock>
+                  <ImagePathContext.Provider value={resolveImage}>
+                    <MdBlock>{view.content}</MdBlock>
+                  </ImagePathContext.Provider>
                 </div>
               </ProsePathContext.Provider>
             </FileOpenContext.Provider>
