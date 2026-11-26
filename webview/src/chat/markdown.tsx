@@ -24,6 +24,7 @@ import {
   splitFileRef,
 } from "./fileRef";
 import { codeText, copyText } from "./clipboard";
+import { DiagramPreview, diagramLanguage, diagramSource } from "./DiagramPreview";
 
 export function CopyButton({ text }: { text: () => string }) {
   const [copied, setCopied] = useState(false);
@@ -45,6 +46,9 @@ export function CopyButton({ text }: { text: () => string }) {
 
 export function CodeBlock({ children, node: _node, ...rest }: ComponentProps<"pre"> & ExtraProps) {
   const preRef = useRef<HTMLPreElement>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const language = diagramLanguage(children);
+  const source = language ? diagramSource(children) : "";
   const text = () => {
     const code = preRef.current?.querySelector("code");
     return code ? codeText(code) : "";
@@ -53,8 +57,17 @@ export function CodeBlock({ children, node: _node, ...rest }: ComponentProps<"pr
   // block's lines.
   return (
     <div className="code-block">
-      <CopyButton text={text} />
-      <pre {...rest} ref={preRef}>
+      {language ? (
+        <DiagramPreview
+          language={language}
+          source={source}
+          onPreviewChange={setPreviewing}
+          copy={<CopyButton text={text} />}
+        />
+      ) : (
+        <CopyButton text={text} />
+      )}
+      <pre {...rest} ref={preRef} hidden={language !== null && previewing}>
         {children}
       </pre>
     </div>

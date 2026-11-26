@@ -1,0 +1,99 @@
+.code-block > pre[hidden] {
+  display: none;
+}
+
+.code-block .code-block-actions {
+  float: right;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 6px -100% -100%;
+}
+
+.code-block .code-block-actions .copy-btn {
+  float: none;
+  position: static;
+  flex: none;
+  margin: 0;
+}
+
+.code-block .code-block-actions .diagram-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 27px;
+  height: 22px;
+  padding: 1px 4px;
+  vertical-align: top;
+}
+
+.diagram-toggle .icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+.diagram-preview {
+  max-width: 100%;
+  margin: 8px 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+.diagram-preview > svg {
+  display: block;
+  max-width: none;
+  height: auto;
+  margin: 0 auto;
+}
+
+.diagram-preview--mermaid text {
+  fill: var(--text-primary) !important;
+  font-family: var(--font-mono) !important;
+}
+
+/* The renderer supplies theme-aware default marks. Only the canvas needs
+   clearing here; explicit node, edge and label colors stay untouched. */
+.diagram-preview--graphviz > svg > g > polygon[fill="white" i],
+.diagram-preview--graphviz > svg > g > polygon[fill="#fff" i],
+.diagram-preview--graphviz > svg > g > polygon[fill="#ffffff" i] {
+  fill: transparent;
+}
+
+.diagram-preview-status,
+.diagram-preview-error {
+  display: block;
+  clear: both;
+  margin: 4px 0;
+  font-size: var(--fs-meta);
+}
+
+.diagram-preview-status {
+  color: var(--text-muted);
+}
+
+.diagram-preview-error {
+  color: var(--error);
+  overflow-wrap: anywhere;
+}
+
+@media (hover: none) {
+  .code-block .code-block-actions .diagram-toggle {
+    width: 36px;
+    height: 32px;
+    padding: 4px;
+  }
+
+  .diagram-toggle .icon {
+    width: 16px;
+    height: 16px;
+  }
+}
