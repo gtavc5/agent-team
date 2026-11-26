@@ -239,15 +239,65 @@ it("restores keyboard focus and keeps the last collapsed card in view with norma
   const scroller = get(container, ".messages");
   const header = get(container, ".step-header");
   const toggle = get(header, "button");
-  await page.getByRole("button", { name: "Expand steps" }).click();
-  const footer = get(container, ".trace-collapse");
-  footer.focus();
-  expect(rect(header).bottom).toBeLessThan(rect(scroller).top);
-  await userEvent.keyboard("{Enter}");
-  expect(toggle.getAttribute("aria-expanded")).toBe("false");
-  expect(document.activeElement).toBe(toggle);
-  expect(rect(header).top).toBeGreaterThanOrEqual(rect(scroller).top - 1);
-  expect(rect(header).bottom).toBeLessThanOrEqual(rect(scroller).bottom + 1);
+  for (let i = 0; i < 2; i++) {
+    await page.getByRole("button", { name: "Expand steps" }).click();
+    const footer = get(container, ".trace-collapse");
+    footer.focus();
+    expect(rect(header).bottom).toBeLessThan(rect(scroller).top);
+    await userEvent.keyboard("{Enter}");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(toggle);
+    expect(rect(header).top).toBeGreaterThanOrEqual(rect(scroller).top - 1);
+    expect(rect(header).bottom).toBeLessThanOrEqual(rect(scroller).bottom + 1);
+  }
+});
+
+it.each([390, 1200])(
+  "returns focus to the tool result toggle on successive bottom collapses at %ipx",
+  async (width) => {
+    await page.viewport(width, 720);
+    const { container, getByRole } = render(
+      <div className="messages" style={{ height: 340, overflowAnchor: "none" }}>
+        <div style={{ flex: "none", height: 500 }} />
+        <EventItem
+          ev={{ kind: "tool_result", content: "Trace paragraph.\n\n".repeat(90), isMarkdown: true }}
+        />
+        <div style={{ flex: "none", height: 600 }} />
+      </div>,
+    );
+    const scroller = get(container, ".messages");
+    const toggle = get(container, ".btn-diff");
+    for (let i = 0; i < 2; i++) {
+      fireEvent.click(toggle);
+      const footer = getByRole("button", { name: "Collapse tool result" });
+      footer.focus();
+      expect(rect(toggle).bottom).toBeLessThan(rect(scroller).top);
+      fireEvent.click(footer);
+      expect(document.activeElement).toBe(toggle);
+      expect(footer.isConnected).toBe(false);
+      expect(rect(toggle).top).toBeGreaterThanOrEqual(rect(scroller).top - 1);
+      expect(rect(toggle).bottom).toBeLessThanOrEqual(rect(scroller).bottom);
+    }
+  },
+);
+
+it("returns focus to Details rather than Result when both tool folds are open", () => {
+  const { getByRole } = render(
+    <EventItem
+      ev={{ kind: "tool_use", content: "**SomeLongToolName** reading", toolResult: "completed" }}
+    />,
+  );
+  const details = getByRole("button", { name: "Details" });
+  const result = getByRole("button", { name: /^Result/ });
+  fireEvent.click(result);
+  for (let i = 0; i < 2; i++) {
+    fireEvent.click(details);
+    const footer = getByRole("button", { name: "Collapse tool details" });
+    footer.focus();
+    fireEvent.click(footer);
+    expect(document.activeElement).toBe(details);
+    expect(result.getAttribute("aria-expanded")).toBe("true");
+  }
 });
 
 it("opens a ViewImage path by mouse and keyboard with visible file-link affordance", async () => {

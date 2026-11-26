@@ -806,19 +806,25 @@ it("keeps BottomCollapse reachable after scrolling a tall subagent trace and res
   view.meta.summary = "Line of detailed output.\n\n".repeat(60);
   view.snapshot(0);
   const scroller = view.container.querySelector<HTMLElement>(".messages")!;
-  view.openTrace();
-  view.answer(0);
   const header = view.container.querySelector<HTMLElement>(".subagent-header")!;
-  const collapseBtn = view.getByRole("button", { name: "Collapse subagent trace" });
-  scroller.scrollTop +=
-    collapseBtn.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom + 24;
-  expect(header.getBoundingClientRect().bottom).toBeLessThan(scroller.getBoundingClientRect().top);
-  expect(collapseBtn.getBoundingClientRect().bottom).toBeLessThanOrEqual(
-    scroller.getBoundingClientRect().bottom,
-  );
-  fireEvent.click(collapseBtn);
-  expect(view.details()).toBeNull();
-  expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(
-    scroller.getBoundingClientRect().top - 1,
-  );
+  for (let i = 0; i < 2; i++) {
+    view.openTrace();
+    view.answer(0);
+    const collapseBtn = view.getByRole("button", { name: "Collapse subagent trace" });
+    scroller.scrollTop +=
+      collapseBtn.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom + 24;
+    expect(header.getBoundingClientRect().bottom).toBeLessThan(
+      scroller.getBoundingClientRect().top,
+    );
+    expect(collapseBtn.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      scroller.getBoundingClientRect().bottom,
+    );
+    collapseBtn.focus();
+    fireEvent.click(collapseBtn);
+    expect(document.activeElement).toBe(header.querySelector(".trace-header-toggle"));
+    expect(view.details()).toBeNull();
+    expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+      scroller.getBoundingClientRect().top - 1,
+    );
+  }
 });

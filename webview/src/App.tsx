@@ -929,24 +929,22 @@ export function App() {
     pages: number;
     fromSearch: boolean;
   } | null>(null);
-  const jumpScrollTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const jumpHighlightTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const cancelJumpTimers = useCallback(() => {
-    clearTimeout(jumpScrollTimerRef.current);
+  const clearJumpHighlight = useCallback(() => {
     clearTimeout(jumpHighlightTimerRef.current);
   }, []);
   useLayoutEffect(() => {
     setHighlightMsgId(null);
-    return cancelJumpTimers;
-  }, [activeWsId, cancelJumpTimers]);
+    return clearJumpHighlight;
+  }, [activeWsId, clearJumpHighlight]);
 
   const startJump = useCallback(
     (wsId: string, msgId: string, fromSearch: boolean) => {
-      cancelJumpTimers();
+      clearJumpHighlight();
       setHighlightMsgId(null);
       setPendingJump({ wsId, msgId, pages: 0, fromSearch });
     },
-    [cancelJumpTimers],
+    [clearJumpHighlight],
   );
   const jumpToMessage = useCallback(
     (wsId: string, msgId: string) => {
@@ -1101,7 +1099,7 @@ export function App() {
     const moved = el.scrollTop !== lastScrollTopRef.current;
     const wasFollowing = stuckToBottomRef.current;
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (distFromBottom <= 8) stuckToBottomRef.current = true;
+    if (distFromBottom <= 1) stuckToBottomRef.current = true;
     else if (el.scrollTop < lastScrollTopRef.current || distFromBottom > 150) {
       stuckToBottomRef.current = false;
     }
@@ -1149,6 +1147,23 @@ export function App() {
     if (el.firstElementChild) ro.observe(el.firstElementChild);
     return () => ro.disconnect();
   }, [activeWs?.id, saveReadingPosition, syncLatestVisible]);
+
+  const followTail = useCallback(
+    (el: HTMLElement) => {
+      if (!stuckToBottomRef.current) return;
+      // Native scrolling changes scrollTop before its scroll event is delivered.
+      // An intervening stream commit must not undo the reader's upward move.
+      if (el.scrollTop < lastScrollTopRef.current && !isAtBottom(el, 1)) {
+        stuckToBottomRef.current = false;
+        setFollowing(false);
+        saveReadingPosition();
+      } else {
+        el.scrollTop = el.scrollHeight;
+        lastScrollTopRef.current = el.scrollTop;
+      }
+    },
+    [saveReadingPosition],
+  );
 
   // Follow the conversation while the reader is at the bottom: a new
   // message scrolls into view, a streaming one keeps the end pinned. Only
@@ -1203,33 +1218,48 @@ export function App() {
     if (anchor && el && anchor.wsId === activeWs?.id && msgs[0]?.id !== anchor.firstId) {
       anchorRef.current = null;
       const nowOffset = measureAnchorOffset(el, anchor.firstId);
-      const delta =
+      // Viewport-relative measurements already include native scroll anchoring.
+      el.scrollTop =
         anchor.firstOffset !== null && nowOffset !== null
-          ? nowOffset - anchor.firstOffset
-          : el.scrollHeight - anchor.height;
-      el.scrollTop = anchor.top + delta;
+          ? el.scrollTop + (nowOffset - anchor.firstOffset)
+          : anchor.top + (el.scrollHeight - anchor.height);
       syncLatestVisible();
       return;
     }
-    if (el && stuckToBottomRef.current && (msgs.length > prevCount || streaming || wasStreaming)) {
-      el.scrollTop = el.scrollHeight;
-    }
+    if (msgs.length > prevCount || streaming || wasStreaming) followTail(el);
     syncLatestVisible();
-  }, [activeWs, connected, loadMessages, measureAnchorOffset, syncLatestVisible]);
+  }, [activeWs, connected, followTail, loadMessages, measureAnchorOffset, syncLatestVisible]);
 
   // A delayed starting row can grow the transcript without a server update.
   const onStartingRow = useCallback(
     (row: HTMLDivElement | null) => {
       const el = messagesContainerRef.current;
-      if (row && el && stuckToBottomRef.current) el.scrollTop = el.scrollHeight;
+      if (row && el) followTail(el);
       syncLatestVisible();
     },
-    [syncLatestVisible],
+    [followTail, syncLatestVisible],
   );
+
+  // A paged lookup may outlive the click. Fresh input belongs to the reader,
+  // not to the lookup; let an outstanding page arrive without seeking again.
+  useEffect(() => {
+    if (!pendingJump) return;
+    const cancel = () => setPendingJump(null);
+    const inputs = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
+    for (const type of inputs)
+      window.addEventListener(type, cancel, { capture: true, passive: true });
+    return () => {
+      for (const type of inputs) window.removeEventListener(type, cancel, true);
+    };
+  }, [pendingJump]);
 
   const jumpToLatest = () => {
     const el = messagesContainerRef.current;
     if (!el) return;
+    setPendingJump(null);
+    clearJumpHighlight();
+    setHighlightMsgId(null);
+    jumpScrollTopRef.current = null;
     anchorRef.current = null;
     el.scrollTop = el.scrollHeight;
     stuckToBottomRef.current = true;
@@ -1239,7 +1269,7 @@ export function App() {
     setLatestVisible(true);
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const jump = pendingJump;
     if (!jump) return;
     if (activeWsId !== jump.wsId) {
@@ -1250,22 +1280,20 @@ export function App() {
     if (!activeWs || !activeWs.messagesLoaded) return;
     if (activeWs.messages.some((m) => m.id === jump.msgId)) {
       setPendingJump(null);
+      const target = document.getElementById(`msg-${jump.msgId}`);
+      const scroller = messagesContainerRef.current;
+      if (!target || !scroller?.contains(target)) return;
       setHighlightMsgId(jump.msgId);
-      jumpScrollTimerRef.current = setTimeout(() => {
-        const target = document.getElementById(`msg-${jump.msgId}`);
-        const scroller = messagesContainerRef.current;
-        if (!target || !scroller?.contains(target)) return;
-        stuckToBottomRef.current = false;
-        setFollowing(false);
-        const before = scroller.scrollTop;
-        if (!jump.fromSearch) target.focus({ preventScroll: true });
-        target.scrollIntoView({ behavior: "instant", block: "center" });
-        const after = scroller.scrollTop;
-        lastScrollTopRef.current = after;
-        saveReadingPosition();
-        if (after !== before) jumpScrollTopRef.current = after;
-        syncLatestVisible();
-      }, 100);
+      stuckToBottomRef.current = false;
+      setFollowing(false);
+      const before = scroller.scrollTop;
+      if (!jump.fromSearch) target.focus({ preventScroll: true });
+      target.scrollIntoView({ behavior: "instant", block: "center" });
+      const after = scroller.scrollTop;
+      lastScrollTopRef.current = after;
+      saveReadingPosition();
+      if (after !== before) jumpScrollTopRef.current = after;
+      syncLatestVisible();
       jumpHighlightTimerRef.current = setTimeout(() => setHighlightMsgId(null), 2000);
       return;
     }

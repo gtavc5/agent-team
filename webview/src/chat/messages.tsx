@@ -427,6 +427,8 @@ export const EventItem = memo(function EventItem({
 }) {
   const [resultOpen, setResultOpen] = useState(false);
   const [bodyOpen, setBodyOpen] = useState(false);
+  const resultFold = useBottomCollapse(resultOpen, () => setResultOpen(false));
+  const bodyFold = useBottomCollapse(bodyOpen, () => setBodyOpen(false));
   const summarized = !!onLoadDetails;
   const running = useContext(TurnRunningContext) && isRunningTool(ev);
   const runningSecs = useElapsed(running ? ev.startedAt : undefined);
@@ -516,6 +518,8 @@ export const EventItem = memo(function EventItem({
             <button
               className="btn-inline"
               {...telemetryTarget("trace.tool_toggle")}
+              ref={bodyFold.toggle}
+              aria-expanded={bodyOpen}
               onClick={toggleBody}
             >
               {bodyOpen ? "Hide" : "Details"}
@@ -524,6 +528,7 @@ export const EventItem = memo(function EventItem({
           {(isResult || hasResult) && (
             <button
               className="btn-inline btn-diff"
+              ref={resultFold.toggle}
               aria-expanded={resultOpen}
               {...telemetryTarget("trace.tool_toggle")}
               onClick={toggleResult}
@@ -583,6 +588,13 @@ export const EventItem = memo(function EventItem({
                 )}
               </div>
             )}
+          {hasHiddenBody && bodyOpen && (
+            <BottomCollapse
+              onClick={bodyFold.collapse}
+              label="Collapse tool details"
+              action="trace.tool_toggle"
+            />
+          )}
           {hasResult && resultOpen && ev.toolResult != null && (
             <div className="event-content event-result">
               {ev.toolResultIsMarkdown ? (
@@ -596,6 +608,13 @@ export const EventItem = memo(function EventItem({
           )}
         </>
       )}
+      {resultOpen && (isResult ? ev.content : ev.toolResult) && (
+        <BottomCollapse
+          onClick={resultFold.collapse}
+          label="Collapse tool result"
+          action="trace.tool_toggle"
+        />
+      )}
     </div>
   );
 });
@@ -608,14 +627,15 @@ function useBottomCollapse(open: boolean, close: () => void) {
     scroller ? scroller.getBoundingClientRect().top + scroller.clientTop : 0;
 
   useLayoutEffect(() => {
-    if (open || !pending.current || !header.current) return;
+    const el = header.current ?? toggle.current;
+    if (open || !pending.current || !el) return;
     const { scroller, clipped } = pending.current;
     pending.current = null;
     toggle.current?.focus({ preventScroll: true });
     if (!clipped) return;
     // Measure again after the body is removed: the browser may already have
     // clamped the scroll offset, particularly at the end of the transcript.
-    const delta = header.current.getBoundingClientRect().top - topOfViewport(scroller);
+    const delta = el.getBoundingClientRect().top - topOfViewport(scroller);
     if (delta < 0) (scroller ?? window).scrollBy({ top: delta, behavior: "instant" });
   }, [open]);
 
@@ -623,7 +643,7 @@ function useBottomCollapse(open: boolean, close: () => void) {
     header,
     toggle,
     collapse: () => {
-      const el = header.current;
+      const el = header.current ?? toggle.current;
       if (el) {
         let scroller = el.parentElement;
         while (scroller && !/^(auto|scroll|overlay)$/.test(getComputedStyle(scroller).overflowY)) {
@@ -646,7 +666,7 @@ function BottomCollapse({
 }: {
   onClick: () => void;
   label: string;
-  action: "trace.step_toggle" | "trace.subagent_toggle";
+  action: "trace.step_toggle" | "trace.subagent_toggle" | "trace.tool_toggle";
 }) {
   return (
     <div className="trace-collapse-footer">
