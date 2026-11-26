@@ -575,7 +575,7 @@ export const EventItem = memo(function EventItem({
             (!liveThinking || body) && (
               <div className="event-content">
                 {isThinking ? (
-                  <StreamingMdBlock>{body}</StreamingMdBlock>
+                  <StreamingMdBlock thinking>{body}</StreamingMdBlock>
                 ) : (
                   <MdBlock>{body}</MdBlock>
                 )}

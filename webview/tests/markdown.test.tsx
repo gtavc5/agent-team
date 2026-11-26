@@ -21,7 +21,7 @@ import {
   loadMath,
   ProsePathContext,
 } from "../src/chat/markdown";
-import { MessageItem } from "../src/chat/messages";
+import { EventItem, MessageItem } from "../src/chat/messages";
 import type { AgentInfo, Message } from "../src/state/useServer";
 import { FileOpenContext } from "../src/chat/fileRef";
 
@@ -306,6 +306,92 @@ describe("math", () => {
 
   it("keeps a display block whole while streaming across a blank line", () => {
     expect(markdownBlocks("a\n\n$$\nx\n\ny\n$$\n\nb")).toEqual(["a\n", "$$\nx\n\ny\n$$\n", "b"]);
+  });
+});
+
+describe("thinking Markdown", () => {
+  it("shows shell text and paths verbatim alongside real math and emphasis", async () => {
+    await loadMath();
+    const shell = String.raw`find . \( -name '*.ts' -o -name '*.tsx' \); echo $(cmd1):$(cmd2); \[ -f foo_bar.ts \]; test \[ $a = $b \]; sed 's/\(foo\)/bar/'; grep '\(a\|b\)'; git log --grep="*foo*"; awk '{ print $1/$2 }'; $HOME/$USER`;
+    const paths = "/a/_b_/c, /tmp/_test_dir_/file.ts, src/foo/*/bar/*/baz.ts, rm *.tmp *.bak";
+    const { container } = render(
+      <EventItem
+        ev={{
+          kind: "thinking",
+          content: `${shell}; $O(n \\log n)$; ${paths}; *见下文* **重点** _note_`,
+        }}
+      />,
+    );
+    const body = container.querySelector(".event-thinking .event-content p")!;
+    expect(body.textContent).toContain(shell);
+    expect(body.textContent).toContain(paths);
+    expect([...body.querySelectorAll("em, strong")].map((node) => node.textContent)).toEqual([
+      "见下文",
+      "重点",
+      "note",
+    ]);
+    expect(body.querySelectorAll(".katex")).toHaveLength(1);
+    expect(body.querySelector(".katex-error")).toBeNull();
+  });
+
+  it.each([
+    String.raw`find . \( -name '*.ts'`,
+    'git log --grep="*foo*',
+    'printf "*foo*"',
+    "echo $(printf $x$)",
+    "$HOME:$(pwd) and PATH=$PATH:$(pwd)/bin and $HOME:${USER}",
+    String.raw`test \[ ! -f foo_bar.ts \]; test \[ "$a" = "$b" \]; \[ $? -eq 0 \]; \[ ${"${#arr[@]}"} -gt 0 \]`,
+    String.raw`find . \( ! -name '*.ts' -o \( -name '*.tsx' \) \)`,
+    String.raw`find . -name '*foo*'; grep --color=always -e 'a|b' -e '\(c\)'; sed -e 's/\(a\)/b/' -e 's/\(c\)/d/'`,
+    "rm **/foo/** */foo/*",
+  ])("keeps draft or shell syntax literal in %s", async (source) => {
+    await loadMath();
+    const { container } = render(<MdBlock thinking>{source}</MdBlock>);
+    expect(container.textContent).toBe(source);
+    expect(container.querySelector("em, strong, .katex, .katex-error")).toBeNull();
+  });
+
+  it("distinguishes unary minus and emphasis around a path from shell markers", async () => {
+    await loadMath();
+    const source = String.raw`\( -x \) and \( -x + y \) and \(-x_1 + x_2\) and \[ -a + b = 0 \]; **src/foo/*/bar.ts**`;
+    const { container } = render(<MdBlock thinking>{source}</MdBlock>);
+    expect(container.querySelectorAll(".katex")).toHaveLength(4);
+    expect(container.querySelector(".katex-error")).toBeNull();
+    expect(container.querySelector("strong")?.textContent).toBe("src/foo/*/bar.ts");
+  });
+
+  it("keeps ordinary Markdown and TeX in a thinking block", async () => {
+    await loadMath();
+    const content = [
+      "## Plan",
+      "- **Use** *this*: `echo $x$`",
+      "> [Docs](https://example.test/$v$/a), https://example.test/a?$x=$y",
+      "",
+      String.raw`$a + b$; \(\sum_i x_i\); SiO$_2$`,
+      "",
+      String.raw`\[\frac{a}{b}\]`,
+      "",
+      String.raw`$$\text{sample}$$`,
+      "",
+      "```sh",
+      String.raw`rm /tmp/_a_/*.tmp; find . \( -name '*x*' \)`,
+      "```",
+    ];
+    const { container } = render(
+      <EventItem ev={{ kind: "thinking", content: content.join("\n") }} />,
+    );
+    const body = container.querySelector(".event-thinking .event-content")!;
+    expect(body.querySelector("h2")?.textContent).toBe("Plan");
+    expect(body.querySelector("li strong")?.textContent).toBe("Use");
+    expect(body.querySelector("li em")?.textContent).toBe("this");
+    expect(body.querySelector("li code")?.textContent).toBe("echo $x$");
+    expect(
+      [...body.querySelectorAll("blockquote a")].map((link) => link.getAttribute("href")),
+    ).toEqual(["https://example.test/$v$/a", "https://example.test/a?$x=$y"]);
+    expect(body.querySelector("pre code")?.textContent).toBe(`${content.at(-2)}\n`);
+    expect(body.querySelectorAll(".katex")).toHaveLength(5);
+    expect(body.querySelectorAll(".katex-display")).toHaveLength(2);
+    expect(body.querySelector(".katex-error")).toBeNull();
   });
 });
 

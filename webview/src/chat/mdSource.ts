@@ -19,6 +19,9 @@
 // punctuation and is written as an explicit <…> autolink, so emphasis
 // around it still pairs up. Nothing inside a URL is taken for math.
 //
+// Thinking also contains unformatted command fragments. Keep the punctuation
+// in recognizable shell arguments and path/glob words as visible text, not
+// Markdown delimiters. Leave neighboring prose and math to the usual parser.
 // Every search is bounded or cached: this runs on each streamed frame.
 
 const FENCE = /^([ \t>]*)(`{3,}|~{3,})(.*?)\r?$/;
@@ -119,18 +122,22 @@ function finder(md: string, needle: string, skipEscaped = false) {
   };
 }
 
-export function prepareSource(md: string): PreparedSource {
-  if (!QUICK.test(md)) return { text: md, hasMath: false };
+export function prepareSource(md: string, thinking = false): PreparedSource {
+  if (!QUICK.test(md) && !(thinking && /[*_~[<>&]/.test(md))) {
+    return { text: md, hasMath: false };
+  }
   const n = md.length;
   const lines = new Lines(md);
   const nextParen = finder(md, "\\)", true);
   const nextParenOpen = finder(md, "\\(", true);
-  const nextBracket = finder(md, "\\]");
+  const nextBracket = finder(md, "\\]", thinking);
+  const nextBracketOpen = finder(md, "\\[", true);
   const nextDouble = finder(md, "$$");
   const runFinders = new Map<number, (pos: number) => number>();
   let out = "";
   let hasMath = false;
   let i = 0;
+  const shellCloses: string[] = [];
 
   const display = (body: string, indent: string) =>
     `$$\n${indent}${textMode(body.trim())}\n${indent}$$`;
@@ -163,6 +170,7 @@ export function prepareSource(md: string): PreparedSource {
 
   while (i < n) {
     if (i === 0 || md[i - 1] === "\n") {
+      shellCloses.length = 0;
       const l = lines.of(i);
       const fence = FENCE.exec(md.slice(i, lines.end(l)));
       if (fence && !(fence[2][0] === "`" && fence[3].includes("`"))) {
@@ -195,14 +203,35 @@ export function prepareSource(md: string): PreparedSource {
 
     if (ch === "\\") {
       const next = md[i + 1];
+      if (shellCloses.length && shellCloses.at(-1) === next) {
+        shellCloses.pop();
+        out += escapeShell(md.slice(i, i + 2));
+        i += 2;
+        continue;
+      }
       if (next === "(" || next === "[") {
         const end = next === "(" ? nextParen(i + 2) : nextBracket(i + 2);
         const limit = next === "(" ? lines.end(lines.of(i)) : lines.paragraphEnd(i);
         // A nested opener is not inline TeX. Stop before slicing so a run
         // of rejected openers cannot repeatedly validate the same suffix.
-        const body =
-          end < limit && (next === "[" || end < nextParenOpen(i + 2)) ? md.slice(i + 2, end) : "";
-        if (body.trim() && (next === "(" ? parenMath(md, i, end, body) : TEXISH.test(body))) {
+        const nested =
+          next === "(" ? nextParenOpen(i + 2) : thinking ? nextBracketOpen(i + 2) : Infinity;
+        const body = end < limit && end < nested ? md.slice(i + 2, end) : "";
+        if (thinking && (shellCloses.length || shellGroup(body || md.slice(i + 2, i + 82), next))) {
+          // Nested or draft groups have no usable close yet. Keep the raw
+          // opener and any later shell closers on this line.
+          const upto = body ? end + 2 : i + 2;
+          if (!body) shellCloses.push(next === "(" ? ")" : "]");
+          out += escapeShell(md.slice(i, upto));
+          i = upto;
+          continue;
+        }
+        if (
+          body.trim() &&
+          (next === "("
+            ? parenMath(md, i, end, body)
+            : TEXISH.test(body) && (!thinking || (balancedBraces(body) && !neverMath(body))))
+        ) {
           const after = end + 2;
           const indent = next === "[" ? lines.indentBefore(i) : null;
           if (indent !== null && lines.blankFrom(after)) {
@@ -260,12 +289,21 @@ export function prepareSource(md: string): PreparedSource {
     }
 
     if (ch === "$") {
-      const close = inlineClose(md, i);
+      const close = inlineClose(md, i, thinking);
       if (close >= 0) {
         hasMath = true;
         out += `$$${textMode(md.slice(i + 1, close))}$$`;
         i = close + 1;
         continue;
+      }
+      if (thinking && md[i + 1] === "(") {
+        SUBSTITUTION.lastIndex = i;
+        const substitution = SUBSTITUTION.exec(md);
+        if (substitution) {
+          out += escapeShell(substitution[0]);
+          i = SUBSTITUTION.lastIndex;
+          continue;
+        }
       }
     }
 
@@ -295,15 +333,86 @@ export function prepareSource(md: string): PreparedSource {
       continue;
     }
 
+    if (thinking) {
+      const literal = thinkingLiteral(md, i);
+      if (literal) {
+        out += literal.text;
+        i = literal.end;
+        continue;
+      }
+    }
+
     out += ch;
     i++;
   }
   return { text: out, hasMath };
 }
 
+const SHELL_GROUP_FLAG = /^[ \t]*(?:![ \t]+)?--?[A-Za-z][A-Za-z0-9-]*[ \t]+(?=[\w.'"/~$*?])/;
+const SHELL_TEST =
+  /^[ \t]*(?:![ \t]+)?(?:["']?\$(?:\{[^{}\r\n]*\}|[A-Za-z_]\w*|\d+|[?!#@*$-])["']?|["'][^"'\r\n]*["'])[ \t]+(?:[!=<>]=?|-[a-z]{2})(?=[ \t]|$)/;
+function shellGroup(body: string, open: string): boolean {
+  return SHELL_GROUP_FLAG.test(body) || (open === "[" && SHELL_TEST.test(body));
+}
+const SUBSTITUTION = /\$\((?:[^()\\\r\n`]|\\[^\r\n])*\)/y;
+const OPTION_ASSIGN = /--?[\w-]+=/y;
+const QUOTED_ARG = /'[^'\r\n]*(?:'|(?=[\r\n]|$))|"(?:[^"\\\r\n]|\\[^\r\n])*(?:"|\\?(?=[\r\n]|$))/y;
+// A bounded suffix of the same shell segment. A separator inside an
+// already-quoted argument does not end that segment.
+const SHELL_ARG =
+  /(?:^|[^\w.-])(?:awk|sed|[ef]?grep|rg|find|echo|printf|rm)(?=[ \t])(?:[^;|&'"\r\n]|'[^'\r\n]*'|"(?:[^"\\\r\n]|\\[^\r\n])*")*[ \t]$/;
+const FILE_CHAR = /[\w./~*?%-]/;
+const FILE_WORD = /[\w./~*?%-]+/y;
+const FILE_GLOB = /(?:[*?]\.\w|\w[*?]+\w)/;
+
+function escapeShell(s: string): string {
+  return s.replace(/[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/g, "\\$&");
+}
+
+function thinkingLiteral(md: string, i: number): { text: string; end: number } | undefined {
+  const ch = md[i];
+  const before = md[i - 1] ?? "";
+  if (FILE_CHAR.test(before)) return;
+  let valueStart = i;
+  if (ch === "-") {
+    OPTION_ASSIGN.lastIndex = i;
+    if (OPTION_ASSIGN.test(md)) valueStart = OPTION_ASSIGN.lastIndex;
+  }
+  if (md[valueStart] === "'" || md[valueStart] === '"') {
+    if (valueStart !== i || SHELL_ARG.test(md.slice(Math.max(0, i - 80), i))) {
+      QUOTED_ARG.lastIndex = valueStart;
+      const quoted = QUOTED_ARG.exec(md);
+      if (quoted) {
+        return {
+          text: md.slice(i, valueStart) + escapeShell(quoted[0]),
+          end: QUOTED_ARG.lastIndex,
+        };
+      }
+    }
+    return;
+  }
+  if (!FILE_CHAR.test(md[valueStart] ?? "")) return;
+  FILE_WORD.lastIndex = valueStart;
+  const word = FILE_WORD.exec(md)![0];
+  const end = FILE_WORD.lastIndex;
+  if (!/[*_]/.test(word)) return;
+  // Paired markers wrapped around a path can still be real emphasis. For
+  // instance, **src/foo/*/bar.ts** keeps its inner glob but is bold.
+  const wrap = valueStart === i ? /^(\*{1,3})([^*].*?)\1\.?$/.exec(word) : null;
+  // **/dir/** and */dir/* are also complete glob words.
+  const wrapped = wrap && !(wrap[2].startsWith("/") && wrap[2].endsWith("/"));
+  const body = wrapped ? wrap[2] : word;
+  if (valueStart === i && !body.includes("/") && !FILE_GLOB.test(body)) return;
+  const escaped = body.replace(/[*_]/g, "\\$&");
+  return {
+    text: wrapped ? word.replace(body, () => escaped) : md.slice(i, valueStart) + escaped,
+    end,
+  };
+}
+
 // The closing $ of an inline pair opened at `open`, or -1. The body ends at
 // the first unescaped $ on the line; a code span or line end means no pair.
-function inlineClose(md: string, open: number): number {
+function inlineClose(md: string, open: number, thinking: boolean): number {
   if (md[open + 1] === undefined || /\s/.test(md[open + 1])) return -1;
   let j = open + 1;
   while (j < md.length && md[j] !== "$" && md[j] !== "\n" && md[j] !== "`") {
@@ -314,6 +423,14 @@ function inlineClose(md: string, open: number): number {
   if (neverMath(body) || !balancedBraces(body)) return -1;
   const before = md[open - 1] ?? "";
   const after = md[j + 1] ?? "";
+  // A shell expansion's next dollar is not a closing math delimiter.
+  if (
+    thinking &&
+    (after === "{" ||
+      (after === "(" && (body[0] === "(" || /[:/=]$/.test(body))) ||
+      (body[0] === "(" && /\)[:/]$/.test(body)))
+  )
+    return -1;
   // "$x$" quoted is talking about the syntax.
   if ((before === "'" || before === '"') && after === before) return -1;
   // "${name}" is a template placeholder, not TeX.

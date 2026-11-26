@@ -473,8 +473,9 @@ function useMathPlugins(needed: boolean): MathPlugins | null {
 // Markdown parsing + highlighting is the hottest path during streaming.
 // Memoized so a re-render only re-parses blocks whose text actually changed
 // (inline plugin arrays would defeat react-markdown's own memoization).
-export const MdBlock = memo(function MdBlock({ children }: { children: string }) {
-  const { text, hasMath } = useMemo(() => prepareSource(children), [children]);
+type MdBlockProps = { children: string; thinking?: boolean };
+export const MdBlock = memo(function MdBlock({ children, thinking }: MdBlockProps) {
+  const { text, hasMath } = useMemo(() => prepareSource(children, thinking), [children, thinking]);
   const math = useMathPlugins(hasMath);
   const refs = useContext(IssueRefContext);
   const paths = useProsePaths();
@@ -648,13 +649,13 @@ export function markdownBlocks(text: string): string[] {
 // A streaming reply grows at its end: parsed block by block, the finished
 // blocks keep their memoized output and only the last one re-parses per
 // frame, instead of the whole reply (quadratic over a long answer).
-export function StreamingMdBlock({ children }: { children: string }) {
+export function StreamingMdBlock({ children, thinking }: MdBlockProps) {
   return (
     <>
       {markdownBlocks(children).map((block, i) => (
         <Fragment key={i}>
           {i > 0 && "\n"}
-          <MdBlock>{block}</MdBlock>
+          <MdBlock thinking={thinking}>{block}</MdBlock>
         </Fragment>
       ))}
     </>

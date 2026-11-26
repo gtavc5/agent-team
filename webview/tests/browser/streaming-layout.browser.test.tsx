@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
+import { loadMath } from "../../src/chat/markdown";
 import { MessageItem } from "../../src/chat/messages";
 import { buildFrames, DEMO_WS_ID, frameDelay, LAYOUT_TURN_ID } from "../../src/dev/replayFixture";
 import { applyEventsToMessage, withoutLiveTiming } from "../../src/state/stream";
@@ -251,3 +252,58 @@ it.each([390, 520, 600, 960])("keeps standalone thinking stable at %ipx", async 
   expect(footer.textContent).toBe("Read · 3s");
   expect(rect(footer).height).toBe(footerHeight);
 });
+
+it.each([
+  [390, "dark"],
+  [960, "light"],
+] as const)(
+  "reads the same thinking while streaming and after reopen at %ipx (%s)",
+  async (width, theme) => {
+    await page.viewport(width, 800);
+    await loadMath();
+    document.documentElement.dataset.theme = theme;
+    try {
+      const now = Date.now();
+      const initial: Message = {
+        id: "sample",
+        kind: "agent",
+        agentId: "a1",
+        content: "",
+        timestamp: now,
+        status: "streaming",
+      };
+      const command = String.raw`find . \( -name '*.ts' \)`;
+      const argument = "/tmp/_test_/*.ts";
+      const tail = String.raw` and ${argument}, $O(n \log n)$, then *read this*.`;
+      const view = (msg: Message) => <MessageItem msg={msg} agents={[]} />;
+      let msg = applyEventsToMessage(initial, [
+        { kind: "thinking_delta", content: command, startedAt: now },
+      ]);
+      const live = render(view(msg));
+      const expand = (dom: ReturnType<typeof render>) =>
+        fireEvent.click(dom.getByRole("button", { name: "Expand steps" }));
+      expand(live);
+      msg = applyEventsToMessage(msg, [{ kind: "thinking_delta", content: tail, startedAt: now }]);
+      live.rerender(view(msg));
+      const read = (container: HTMLElement) => {
+        const body = container.querySelector<HTMLElement>(".event-thinking .event-content")!;
+        expect(body.innerText).toContain(`${command} and ${argument}`);
+        expect(body.querySelector("em")?.textContent).toBe("read this");
+        expect(body.querySelectorAll(".katex")).toHaveLength(1);
+        expect(body.querySelector(".katex-display, .katex-error, pre, code")).toBeNull();
+        expect(rect(body).height).toBeGreaterThan(0);
+        return body.innerHTML;
+      };
+      const visible = read(live.container);
+      const done = applyEventsToMessage(msg, [
+        { kind: "thinking", content: command + tail, durationMs: 1 },
+      ]);
+      live.unmount();
+      const reopened = render(view({ ...withoutLiveTiming(done), status: "done" }));
+      expand(reopened);
+      expect(read(reopened.container)).toBe(visible);
+    } finally {
+      delete document.documentElement.dataset.theme;
+    }
+  },
+);
