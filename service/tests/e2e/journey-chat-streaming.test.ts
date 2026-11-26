@@ -295,7 +295,7 @@ it("streams Replay Demo thinking, drills into a subagent, jumps to a quote and c
   const turn = page.locator("#msg-demo-layout-turn");
   // Use the first, longer streaming turn for liveness. Short thinking phases
   // and their exact timing are tested with a controlled clock in Browser Mode.
-  await page.locator("#msg-demo-msg-1 .turn-footer").waitFor({ state: "attached" });
+  await page.locator("#msg-demo-msg-1 .streaming-dot").waitFor({ state: "attached" });
   await page.waitForFunction("window.__yaatDemoReplay?.done === true", undefined, {
     timeout: 25_000,
   });

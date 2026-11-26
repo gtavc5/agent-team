@@ -50,7 +50,7 @@ describe("the transcript", () => {
       expect(footer()).toBe("Bash · 40s");
       const ended = { ...call, toolResult: "done", durationMs: 63_000 };
       rerender(<MessageItem msg={{ ...msg, events: [ended] }} agents={[agent]} />);
-      expect([footer(), row()]).toEqual(["", "1m 3s"]);
+      expect([footer(), row()]).toEqual([undefined, "1m 3s"]);
       // A turn that stopped with the call open (a restart) counts nothing.
       rerender(<MessageItem msg={{ ...msg, status: "done" }} agents={[agent]} />);
       expect(container.querySelector(".event-row")).not.toBeNull();

@@ -499,40 +499,42 @@ export const EventItem = memo(function EventItem({
     <div
       className={`event event-${ev.kind}${failed ? " event-failed" : ""}${liveThinking ? " live-thinking" : ""}`}
     >
-      <div className="event-row" aria-hidden={liveThinking || undefined}>
-        {!liveThinking && <span className={`event-chip ${chipClass}`}>{label}</span>}
-        {isToolUse && ev.durationMs != null && (
-          <span className="event-time" title="From the call to its result">
-            {formatRunTime(ev.durationMs)}
-          </span>
-        )}
-        {running && ev.startedAt != null && (
-          <span className="event-time event-time-live" title="Running for">
-            {formatDuration(runningSecs * 1000)}
-          </span>
-        )}
-        {hasHiddenBody && (
-          <button
-            className="btn-inline"
-            {...telemetryTarget("trace.tool_toggle")}
-            onClick={toggleBody}
-          >
-            {bodyOpen ? "Hide" : "Details"}
-          </button>
-        )}
-        {(isResult || hasResult) && (
-          <button
-            className="btn-inline btn-diff"
-            aria-expanded={resultOpen}
-            {...telemetryTarget("trace.tool_toggle")}
-            onClick={toggleResult}
-          >
-            {isResult ? (resultOpen ? "Hide" : "Show") : resultOpen ? "Hide result" : "Result"} ·{" "}
-            {resultLabel(resultLen)}
-            {failed ? " · failed" : ""}
-          </button>
-        )}
-      </div>
+      {!liveThinking && (
+        <div className="event-row">
+          <span className={`event-chip ${chipClass}`}>{label}</span>
+          {isToolUse && ev.durationMs != null && (
+            <span className="event-time" title="From the call to its result">
+              {formatRunTime(ev.durationMs)}
+            </span>
+          )}
+          {running && ev.startedAt != null && (
+            <span className="event-time event-time-live" title="Running for">
+              {formatDuration(runningSecs * 1000)}
+            </span>
+          )}
+          {hasHiddenBody && (
+            <button
+              className="btn-inline"
+              {...telemetryTarget("trace.tool_toggle")}
+              onClick={toggleBody}
+            >
+              {bodyOpen ? "Hide" : "Details"}
+            </button>
+          )}
+          {(isResult || hasResult) && (
+            <button
+              className="btn-inline btn-diff"
+              aria-expanded={resultOpen}
+              {...telemetryTarget("trace.tool_toggle")}
+              onClick={toggleResult}
+            >
+              {isResult ? (resultOpen ? "Hide" : "Show") : resultOpen ? "Hide result" : "Result"} ·{" "}
+              {resultLabel(resultLen)}
+              {failed ? " · failed" : ""}
+            </button>
+          )}
+        </div>
+      )}
       {isToolUse && summary && (
         <div className="event-summary-line">
           {!summaryCut && <CopyButton text={() => summary} />}
@@ -1024,13 +1026,13 @@ function StepTools({ tools }: { tools: string[] }) {
 function StepBox({
   events,
   live,
-  standaloneSince,
+  liveSince,
   onLoadDetails,
   defaultOpen = false,
 }: {
   events: StreamEvent[];
   live?: string;
-  standaloneSince?: number;
+  liveSince?: number;
   onLoadDetails?: () => void;
   defaultOpen?: boolean;
 }) {
@@ -1038,7 +1040,7 @@ function StepBox({
   const hasBody = !!live?.trim() || events.some(hasVisibleEventBody);
   const open = hasBody && (toggled ?? defaultOpen);
   const bottom = useBottomCollapse(open, () => setToggled(false));
-  if (events.length === 0 && live == null) return null;
+  if (events.length === 0 && live == null && liveSince == null) return null;
   const toggle = () => {
     if (!open) onLoadDetails?.();
     setToggled(!open);
@@ -1076,7 +1078,7 @@ function StepBox({
           <span className="trace-header-placeholder" aria-hidden="true" />
         )}
         {events.length > 0 && <span className="step-summary">{stepSummary(events)}</span>}
-        {standaloneSince != null && <StepThinkingStatus since={standaloneSince} />}
+        {liveSince != null && <StepThinkingStatus since={liveSince} />}
         {!open && tools.length > 0 && <StepTools tools={tools} />}
       </div>
       {open && (
@@ -1104,7 +1106,7 @@ type StepTimelineProps = {
   defaultOpen?: boolean;
   // A thinking block streaming in or between its closing delta and final event.
   live?: string;
-  standaloneSince?: number;
+  liveSince?: number;
 };
 
 export function StepGroup({
@@ -1121,9 +1123,9 @@ function StepTimeline({
   onLoadDetails,
   defaultOpen = false,
   live,
-  standaloneSince,
+  liveSince,
 }: StepTimelineProps) {
-  if (live != null && blocks.at(-1)?.kind !== "steps") {
+  if ((live != null || liveSince != null) && blocks.at(-1)?.kind !== "steps") {
     blocks = [...blocks, { kind: "steps", events: [] }];
   }
   return (
@@ -1135,7 +1137,7 @@ function StepTimeline({
               key={`s${i}`}
               events={block.events}
               live={i === blocks.length - 1 ? live : undefined}
-              standaloneSince={i === blocks.length - 1 ? standaloneSince : undefined}
+              liveSince={i === blocks.length - 1 ? liveSince : undefined}
               onLoadDetails={onLoadDetails}
               defaultOpen={defaultOpen}
             />
@@ -1187,17 +1189,14 @@ function TimelineBlockItem({
   }
 }
 
-function LiveChip({ secs }: { secs: number }) {
+function StepThinkingStatus({ since }: { since: number }) {
+  const secs = useElapsed(since);
   return (
     <span className="event-chip chip-thinking chip-live">
       <span className="streaming-dot" />
       Thinking · {secs}s
     </span>
   );
-}
-
-function StepThinkingStatus({ since }: { since: number }) {
-  return <LiveChip secs={useElapsed(since)} />;
 }
 
 const CALL_SHOWN_AFTER_S = 3;
@@ -1216,30 +1215,21 @@ function workInFlight(events: StreamEvent[]): boolean {
 
 const WAIT_SHOWN_AFTER_S = 15;
 
-function QuietWait({ since }: { since: number }) {
-  const now = Date.now();
-  const elapsed = elapsedSeconds(now, since);
-  const show = elapsed >= WAIT_SHOWN_AFTER_S;
-  useRenderAt(show ? nextSecondAt(now, since) : since + WAIT_SHOWN_AFTER_S * 1000);
-  return show ? `No new events for ${elapsed}s` : null;
-}
-
 function TurnFooter({
   msg,
   activity,
   detailEvents,
-  thinkingInHeader,
 }: {
   msg: Message;
   activity?: string | null;
   detailEvents: StreamEvent[];
-  thinkingInHeader: boolean;
 }) {
   const now = Date.now();
-  const thinkingSince = msg.liveThinkingSince;
+  const thinkingLive = msg.liveThinkingSince != null;
   let call: StreamEvent | undefined;
+  let waitElapsed: number | null = null;
   let tickAt = Infinity;
-  if (!thinkingInHeader && !activity) {
+  if (!activity && !thinkingLive) {
     for (let i = detailEvents.length - 1; i >= 0; i--) {
       const e = detailEvents[i];
       if (!isRunningTool(e) || e.startedAt == null) continue;
@@ -1250,8 +1240,21 @@ function TurnFooter({
       }
       tickAt = Math.min(tickAt, showAt);
     }
-    const since = call?.startedAt ?? thinkingSince;
-    if (since != null) tickAt = Math.min(tickAt, nextSecondAt(now, since));
+    if (call?.startedAt != null) {
+      tickAt = Math.min(tickAt, nextSecondAt(now, call.startedAt));
+    } else if (
+      msg.waitingSince != null &&
+      !workInFlight(detailEvents) &&
+      !detailEvents.some((e) => e.kind === "retry")
+    ) {
+      const elapsed = elapsedSeconds(now, msg.waitingSince);
+      if (elapsed >= WAIT_SHOWN_AFTER_S) {
+        waitElapsed = elapsed;
+        tickAt = Math.min(tickAt, nextSecondAt(now, msg.waitingSince));
+      } else {
+        tickAt = Math.min(tickAt, msg.waitingSince + WAIT_SHOWN_AFTER_S * 1000);
+      }
+    }
   }
   useRenderAt(tickAt);
 
@@ -1261,17 +1264,11 @@ function TurnFooter({
       ? `${chipLabelFor(toolNameOf(call) ?? "tool")} · ${formatDuration(elapsedSeconds(now, call.startedAt!) * 1000)}`
       : null);
 
+  if (!label && waitElapsed == null) return null;
+
   return (
     <div className="turn-footer">
-      {thinkingInHeader ? null : label ? (
-        <span className="turn-activity">{label}</span>
-      ) : thinkingSince != null ? (
-        <LiveChip secs={elapsedSeconds(now, thinkingSince)} />
-      ) : msg.waitingSince != null &&
-        !workInFlight(detailEvents) &&
-        !detailEvents.some((e) => e.kind === "retry") ? (
-        <QuietWait since={msg.waitingSince} />
-      ) : null}
+      {label ? <span className="turn-activity">{label}</span> : `No new events for ${waitElapsed}s`}
     </div>
   );
 }
@@ -1471,9 +1468,9 @@ export const MessageItem = memo(function MessageItem({
     tailAt = joinsLastEvents ? segments.length - 2 : segments.length - 1;
   }
   const liveSince = msg.liveThinkingSince;
-  const liveBlock = liveSince != null ? (msg.liveThinking ?? "") : msg.closingThinking;
+  const headerLiveSince = agent?.activity ? undefined : liveSince;
+  const liveBlock = headerLiveSince != null ? (msg.liveThinking ?? "") : msg.closingThinking;
   const tailBlocks = tailAt >= 0 ? timelineBlocks(segments[tailAt].events) : [];
-  const standaloneSince = tailBlocks.at(-1)?.kind === "steps" ? undefined : liveSince;
 
   const time = formatMessageTime(
     msg.timestamp,
@@ -1671,7 +1668,7 @@ export const MessageItem = memo(function MessageItem({
                             onCancelSubagent={handleCancelSubagent}
                             onLoadDetails={handleLoadDetails}
                             live={si === tailAt ? liveBlock : undefined}
-                            standaloneSince={si === tailAt ? standaloneSince : undefined}
+                            liveSince={si === tailAt ? headerLiveSince : undefined}
                           />
                         )}
                       </div>
@@ -1679,12 +1676,7 @@ export const MessageItem = memo(function MessageItem({
                   </div>
                 )}
             {!isUser && streaming && (
-              <TurnFooter
-                msg={msg}
-                activity={agent?.activity}
-                detailEvents={detailEvents}
-                thinkingInHeader={standaloneSince != null}
-              />
+              <TurnFooter msg={msg} activity={agent?.activity} detailEvents={detailEvents} />
             )}
           </div>
         </div>

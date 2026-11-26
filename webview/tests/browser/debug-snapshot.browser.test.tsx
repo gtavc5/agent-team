@@ -150,15 +150,16 @@ it("captures real Chromium active-turn layout geometry in folded and live open s
   expect(foldedStep.open).toBe(false);
   expect(foldedStep.header!.rect.height).toBeGreaterThan(0);
   expect(foldedStep.summary).toMatchObject({ text: "4 tool calls", lineCount: 1 });
-  expect(foldedStep.liveChip).toBeUndefined();
+  expect(foldedStep.liveChip).toMatchObject({
+    selector: ".step-header .chip-live",
+    text: "Thinking · 6s",
+  });
+  expect(foldedStep.liveChip!.rect.height).toBeGreaterThan(0);
   expect(foldedStep.toolsStrip?.scrollWidth).toBeGreaterThan(foldedStep.toolsStrip!.clientWidth);
   expect(foldedStep.toolChips).toHaveLength(4);
   expect(foldedStep.toolChipRowCount).toBe(1);
   expect(foldedStep.toolChips.every((c) => c.row === 0 && c.rect.width > 0)).toBe(true);
-
-  expect(folded.activeTurn!.turnFooter?.state).toBe("thinking");
-  expect(folded.activeTurn!.turnFooter?.liveChip?.text).toBe("Thinking · 6s");
-  expect(folded.activeTurn!.turnFooter?.liveChip?.rect.height).toBeGreaterThan(0);
+  expect(folded.activeTurn!.turnFooter).toBeUndefined();
 
   // Open the trailing step group so tool events and live thinking are visible in the DOM.
   fireEvent.click(view.container.querySelector("#msg-turn-live .step-header")!);
@@ -168,9 +169,13 @@ it("captures real Chromium active-turn layout geometry in folded and live open s
   expect(opened.activeTurn!.stepGroup!.open).toBe(true);
   expect(opened.activeTurn!.stepGroup!.toolChips).toHaveLength(4);
   expect(opened.activeTurn!.stepGroup!.toolChipRowCount).toBe(4);
+  expect(opened.activeTurn!.stepGroup!.liveChip).toMatchObject({
+    selector: ".step-header .chip-live",
+    text: "Thinking · 6s",
+  });
   expect(opened.activeTurn!.stepGroup!.liveThinking).toBeDefined();
   expect(opened.activeTurn!.stepGroup!.liveThinking!.rect.height).toBeGreaterThan(0);
-  expect(opened.activeTurn!.turnFooter?.state).toBe("thinking");
+  expect(opened.activeTurn!.turnFooter).toBeUndefined();
 
   // Neither folded nor open snapshots leak tool payloads.
   for (const snap of [folded, opened]) {
@@ -184,7 +189,7 @@ it("captures real Chromium active-turn layout geometry in folded and live open s
   }
 });
 
-it("reports standalone thinking in the step header and a quiet footer of the same height", async () => {
+it("reports live thinking in the step header without a quiet footer both standalone and after steps", async () => {
   await page.viewport(390, 800);
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(NOW);
@@ -194,7 +199,14 @@ it("reports standalone thinking in the step header and a quiet footer of the sam
     </div>
   );
   const { rerender } = render(view(activeTurn));
-  const initial = collectSnapshot().activeTurn!;
+  const afterSteps = collectSnapshot().activeTurn!;
+  expect(afterSteps.stepGroup?.summary).toMatchObject({ text: "4 tool calls", lineCount: 1 });
+  expect(afterSteps.stepGroup?.liveChip).toMatchObject({
+    selector: ".step-header .chip-live",
+    text: "Thinking · 6s",
+  });
+  expect(afterSteps.turnFooter).toBeUndefined();
+
   rerender(view({ ...activeTurn, content: "", events: [] }));
   const standalone = collectSnapshot().activeTurn!;
   expect(standalone.stepGroup?.summary).toBeUndefined();
@@ -203,6 +215,5 @@ it("reports standalone thinking in the step header and a quiet footer of the sam
     text: "Thinking · 6s",
   });
   expect(standalone.stepGroup!.liveChip!.rect.height).toBeGreaterThan(0);
-  expect(standalone.turnFooter).toMatchObject({ state: "quiet", text: "" });
-  expect(standalone.turnFooter?.rect.height).toBe(initial.turnFooter?.rect.height);
+  expect(standalone.turnFooter).toBeUndefined();
 });

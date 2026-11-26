@@ -1704,9 +1704,11 @@ button {
 .turn-activity {
   color: var(--accent-text);
 }
-/* Reserve the chip row the completed thinking item will show. */
-.live-thinking > .event-row {
-  height: 18px;
+.live-thinking:empty {
+  display: none;
+}
+.live-thinking > .event-content {
+  margin-top: 0;
 }
 .chip-live {
   display: inline-flex;
@@ -2003,6 +2005,7 @@ span.katex-display {
   min-height: 22px;
 }
 .step-header .chip-live {
+  flex-shrink: 0;
   justify-self: start;
   font-variant-numeric: tabular-nums;
 }
@@ -2102,16 +2105,28 @@ span.katex-display {
 }
 @container step-box (max-width: 460px) {
   .step-header {
-    display: grid;
-    grid-template-columns: 10px minmax(0, 1fr);
+    position: relative;
+    flex-wrap: wrap;
     row-gap: 2px;
+    padding-left: 16px;
+  }
+  .step-header > .events-toggle,
+  .step-header > .trace-header-placeholder {
+    position: absolute;
+    left: 0;
+    top: 2px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
   .step-summary {
+    flex: 0 1 auto;
+    min-width: 0;
     white-space: normal;
   }
   .step-tools {
-    grid-column: 2;
-    justify-self: start;
+    flex: 0 0 100%;
     max-width: 100%;
   }
 }
