@@ -806,88 +806,110 @@ describe("Project v2", () => {
 });
 
 describe("stream and message rendering", () => {
-  it("derives the same starting rows from live messages and a fresh transcript snapshot", () => {
-    vi.useFakeTimers();
-    try {
-      const target = { ...agent, id: "a2", name: "Bob", avatar: "B", isDefault: false };
-      const ws = workspace("w1", [agent, target]);
-      const first: Message = {
-        id: "input-1",
-        kind: "user",
-        agentId: null,
-        content: "start Bob",
-        timestamp: NOW,
-        status: "starting",
-        queuedFor: target.id,
-      };
-      const second: Message = {
-        ...first,
-        id: "input-2",
-        content: "start Alice",
-        queuedFor: agent.id,
-      };
-      const reply: Message = {
-        id: "reply",
-        kind: "agent",
-        agentId: target.id,
-        content: "",
-        timestamp: NOW + 1,
-        status: "streaming",
-      };
-      const mount = (messages: Message[]) => {
-        const view = render(<App />);
-        const sock = FakeSocket.instances.at(-1)!;
-        act(() => sock.open());
-        receive(sock, initFrame([ws]));
-        receive(sock, { type: "workspace_messages", workspaceId: ws.id, messages, hasMore: false });
-        const rows = () => [...view.container.querySelectorAll(".message-starting")];
-        return { view, sock, rows };
-      };
-      const add = (sock: FakeSocket, message: Message) =>
-        receive(sock, { type: "new_message", workspaceId: ws.id, message });
-      const finish = (sock: FakeSocket, msg: Message, status: Message["status"]) =>
-        receive(sock, {
-          type: "message_done",
-          workspaceId: ws.id,
-          messageId: msg.id,
-          content: msg.content,
-          status,
-          queuedFor: null,
-        });
-      const waitForDelay = () => act(() => void vi.advanceTimersByTime(350));
+  it("keeps live and fresh transcripts in sync during cold and warm dispatch", () => {
+    const target = { ...agent, id: "a2", name: "Bob", avatar: "B", isDefault: false };
+    const liveTarget = { ...target, effort: null, effectiveEffort: "high", fast: true };
+    const ws = workspace("w1", [agent, target]);
+    const first: Message = {
+      id: "input-1",
+      kind: "user",
+      agentId: null,
+      content: "start Bob",
+      timestamp: NOW,
+      status: "starting",
+      queuedFor: target.id,
+    };
+    const second: Message = {
+      ...first,
+      id: "input-2",
+      content: "start Alice",
+      queuedFor: agent.id,
+    };
+    const reply: Message = {
+      id: "reply",
+      kind: "agent",
+      agentId: target.id,
+      content: "",
+      timestamp: NOW + 1,
+      status: "streaming",
+      replyTo: first.id,
+    };
+    const mount = (messages: Message[], agents = ws.agents) => {
+      const view = render(<App />);
+      const sock = FakeSocket.instances.at(-1)!;
+      act(() => sock.open());
+      receive(sock, initFrame([{ ...ws, agents }]));
+      receive(sock, { type: "workspace_messages", workspaceId: ws.id, messages, hasMore: false });
+      const rows = () => [...view.container.querySelectorAll(".message-starting")];
+      return { view, sock, rows };
+    };
+    const add = (sock: FakeSocket, message: Message) =>
+      receive(sock, { type: "new_message", workspaceId: ws.id, message });
+    const update = (sock: FakeSocket, msg: Message, patch: Partial<Message>) =>
+      receive(sock, {
+        type: "message_done",
+        workspaceId: ws.id,
+        messageId: msg.id,
+        content: msg.content,
+        queuedFor: null,
+        ...patch,
+      });
 
-      const live = mount([]);
-      add(live.sock, first);
-      add(live.sock, second);
-      expect(live.rows()).toHaveLength(0);
-      waitForDelay();
-      expect(live.rows().map((row) => row.querySelector(".message-author")?.textContent)).toEqual([
-        "Bob",
-        "Alice",
-      ]);
-      expect(live.rows().map((row) => row.previousElementSibling?.id)).toEqual([
-        "msg-input-1",
-        "msg-input-2",
-      ]);
-      const markup = () => live.rows().map((row) => row.outerHTML);
-      const fresh = mount([first, second]);
-      waitForDelay();
-      expect(fresh.rows().map((row) => row.outerHTML)).toEqual(markup());
-      fresh.view.unmount();
+    const live = mount([]);
+    add(live.sock, first);
+    add(live.sock, second);
+    expect(live.rows()).toHaveLength(0);
+    const opened = {
+      status: "starting",
+      queuedFor: target.id,
+      pendingDelivery: "starting",
+    } as const;
+    update(live.sock, first, opened);
+    const row = live.rows()[0];
+    expect(row.previousElementSibling?.id).toBe("msg-input-1");
+    expect(row.querySelector(".message-author")?.textContent).toBe("Bob");
+    expect(row.querySelector(".message-status")).toBeNull();
+    receive(live.sock, { type: "agent_updated", workspaceId: ws.id, agent: liveTarget });
+    expect(live.rows()).toEqual([row]);
+    expect(row.querySelector(".message-status")?.textContent).toBe("effort high⚡ fast");
+    const cold = { ...opened, status: "dispatching" } as const;
+    const warm = {
+      status: "dispatching",
+      queuedFor: agent.id,
+      pendingDelivery: "sending",
+    } as const;
+    update(live.sock, first, cold);
+    update(live.sock, second, { status: warm.status, queuedFor: warm.queuedFor });
+    expect(live.rows()).toEqual([row]);
+    const inline = (root: ParentNode) => root.querySelector('[id="msg-input-2"] .delivery-inline');
+    expect(inline(live.view.container)).toBeNull();
+    update(live.sock, second, warm);
+    const fresh = mount(
+      [
+        { ...first, ...cold },
+        { ...second, ...warm },
+      ],
+      [agent, liveTarget],
+    );
+    expect(fresh.rows()[0].outerHTML).toBe(row.outerHTML);
+    expect(inline(live.view.container)?.textContent?.trim()).toBe("Sending…");
+    expect(inline(fresh.view.container)?.outerHTML).toBe(inline(live.view.container)?.outerHTML);
+    fresh.view.unmount();
 
-      // A real streaming reply takes precedence, even before the input status is cleared.
-      add(live.sock, reply);
-      expect(live.rows().map((row) => row.previousElementSibling?.id)).toEqual(["msg-input-2"]);
-      finish(live.sock, first, "done");
-      finish(live.sock, second, "error");
-      expect(live.rows()).toHaveLength(0);
-      expect(
-        [...live.view.container.querySelectorAll(".message-agent")].map((row) => row.id),
-      ).toEqual(["msg-reply"]);
-      live.view.unmount();
-    } finally {
-      vi.useRealTimers();
-    }
+    // A reply takes over even if it finishes before the delivery receipt does.
+    const early = { ...reply, status: "done" as const };
+    add(live.sock, early);
+    expect(live.rows()).toHaveLength(0);
+    const duringReceipt = mount([{ ...first, ...cold }, { ...second, ...warm }, early]);
+    expect(duringReceipt.rows()).toHaveLength(0);
+    duringReceipt.view.unmount();
+    update(live.sock, first, { status: "done" });
+    update(live.sock, second, { status: "error" });
+    expect(live.rows()).toHaveLength(0);
+    expect(
+      [...live.view.container.querySelectorAll(".message-agent")].map((row) => row.id),
+    ).toEqual(["msg-reply"]);
+    live.view.unmount();
   });
 
   it("warns that a message with an unknown delivery outcome will not be sent again", () => {

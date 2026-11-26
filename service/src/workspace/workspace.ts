@@ -68,6 +68,10 @@ export interface Message {
   queuedFor?: string;
   queuedEnvelope?: PromptEnvelope;
   dispatchAttempt?: DispatchAttempt;
+  // The delayed status already shown to readers; keep it stable through the write.
+  pendingDelivery?: "starting" | "sending";
+  // First agent reply opened for a pending input, independent of delivery receipt.
+  replyTo?: string;
   // Handed to the running turn (Codex steer) and not yet read by the model:
   // the queue leaves it alone and it cannot be cancelled. A turn that ends
   // without reading it, or a restart, gives it back to the queue.
@@ -109,6 +113,8 @@ export interface AgentRuntimeInfo extends AgentInfo {
   lastStreamAt?: number;
   retryLabel?: string;
   effort: string | null;
+  // Backend default when known; does not change the configured override above.
+  effectiveEffort?: string;
   // The levels /effort takes for its model.
   effortLevels: string[];
   fast: boolean;
@@ -312,6 +318,7 @@ export interface WorkspaceCallbacks {
     patch?: Partial<Pick<Message, "context" | "effort" | "thinking">> & {
       queuedFor?: string | null;
       steering?: boolean;
+      pendingDelivery?: Message["pendingDelivery"];
     },
   ) => void;
   onLeadTerminal?: (
@@ -826,7 +833,11 @@ export class Workspace {
     const msg = this.findMessage(id);
     const queue =
       msg?.kind === "user"
-        ? { queuedFor: msg.queuedFor ?? null, steering: msg.steering ?? false }
+        ? {
+            queuedFor: msg.queuedFor ?? null,
+            steering: msg.steering ?? false,
+            ...(msg.pendingDelivery && { pendingDelivery: msg.pendingDelivery }),
+          }
         : undefined;
     this.cb?.onMessageDone(this.id, id, status, content, events, { ...patch, ...queue });
   }
@@ -920,6 +931,7 @@ export class Workspace {
       if (entry.openingPrompt) entry.openingPrompt.replied = true;
       else if (!entry.retryPending) entry.lastEnvelope = undefined;
       entry.currentMsg = this.makeAgentMsg(entry.info.id);
+      if (entry.openingPrompt?.input) entry.currentMsg.replyTo = entry.openingPrompt.input.id;
       entry.input?.replies.push(entry.currentMsg.id);
       this.pushMessage(entry.currentMsg);
     }
@@ -2090,6 +2102,7 @@ export class Workspace {
       envelope.text.trimStart().startsWith("/")
     )
       return;
+    let deliveryTimer: ReturnType<typeof setTimeout> | undefined;
     return {
       envelope: { ...envelope, trigger: inputTrigger(msg) },
       claim: () => {
@@ -2110,12 +2123,15 @@ export class Workspace {
           throw error;
         }
         this.finished(msg.id, msg.status, msg.content);
+        deliveryTimer = this.revealPendingDelivery(msg, available);
         return true;
       },
       finish: (outcome) => {
+        clearTimeout(deliveryTimer);
         if (msg.status !== "dispatching") return;
         if (outcome === "rejected") {
           msg.status = "queued";
+          delete msg.pendingDelivery;
           this.finished(msg.id, msg.status, msg.content);
         } else if (outcome === "read") this.steered(agentId, msg.id);
         else this.completeDispatch(msg, outcome === "handled" ? "done" : outcome);
@@ -2147,6 +2163,7 @@ export class Workspace {
     delete msg.steering;
     delete msg.queuedFor;
     delete msg.queuedEnvelope;
+    delete msg.pendingDelivery;
     msg.status = "done";
     this.finished(msg.id, "done", msg.content);
     const current = entry.currentMsg;
@@ -2232,6 +2249,15 @@ export class Workspace {
     return "steered";
   }
 
+  // Choose the surface once so a fresh transcript and a live reader see the same status.
+  private revealPendingDelivery(input: Message, isCurrent: () => boolean | undefined) {
+    return setTimeout(() => {
+      if (!isCurrent() || (input.status !== "starting" && input.status !== "dispatching")) return;
+      input.pendingDelivery = input.status === "starting" ? "starting" : "sending";
+      this.finished(input.id, input.status, input.content);
+    }, 350);
+  }
+
   // `banner` opens the reply of a turn no message of the user's started.
   private async dispatchPrompt(
     agent: AgentEntry,
@@ -2264,11 +2290,15 @@ export class Workspace {
       /^\/compact(?:\s|$)/.test(envelope.text.trim());
     this.beganTurn(agent, !standaloneCompact);
 
+    let deliveryTimer: ReturnType<typeof setTimeout> | undefined;
+    const isOpeningReply = () => agent.openingPrompt === opening && !opening.replied;
     try {
       if (input?.status === "queued") {
         input.status = "starting";
         this.finished(input.id, input.status, input.content);
       }
+      if (input?.status === "starting")
+        deliveryTimer = this.revealPendingDelivery(input, isOpeningReply);
       if (banner) {
         this.ensureAgentMsg(agent);
         agent.handler(banner);
@@ -2346,6 +2376,9 @@ export class Workspace {
         input?.status === "dispatching" ? "outcome_unknown" : "error",
         err instanceof Error ? err.message : String(err),
       );
+    } finally {
+      // A Pi `started` RPC receipt can precede proof of acceptance.
+      if (!isOpeningReply()) clearTimeout(deliveryTimer);
     }
   }
 
@@ -2353,6 +2386,7 @@ export class Workspace {
   private requeueReport(msg: Message): void {
     this.touch([msg.id]);
     msg.status = "queued";
+    delete msg.pendingDelivery;
     delete msg.dispatchAttempt;
     this.cb?.onSaveNow?.();
     if (msg.queuedEnvelope?.reportId)
@@ -2428,10 +2462,12 @@ export class Workspace {
     msg: Message,
     status: "done" | "error" | "outcome_unknown",
     errorMessage?: string,
+    beforeBroadcast?: () => void,
   ): void {
     const reportId = msg.dispatchAttempt?.reportId ?? msg.queuedEnvelope?.reportId;
     this.touch([msg.id]);
     msg.status = status;
+    delete msg.pendingDelivery;
     delete msg.queuedEnvelope;
     delete msg.queuedFor;
     delete msg.steering;
@@ -2442,6 +2478,7 @@ export class Workspace {
         status === "done" ? "sent_to_pi" : status,
         status === "done" ? { acceptedByPiAt: Date.now() } : { errorMessage },
       );
+    beforeBroadcast?.();
     this.finished(msg.id, status, msg.content);
     if (status === "outcome_unknown") {
       this.postSystemMessage(
@@ -2454,12 +2491,16 @@ export class Workspace {
   private acceptDispatch(entry: AgentEntry, inputId?: string, started = false): void {
     const opening = entry.openingPrompt;
     if (!opening || inputId !== opening.envelope.inputId) return;
-    const msg = opening.input;
-    if (msg) {
+    const openReply = () => {
+      if (started && entry.session.isRunning && !opening.replied) this.ensureAgentMsg(entry);
+    };
+    if (opening.input) {
       entry.activeReportId = opening.envelope.reportId;
-      this.completeDispatch(msg, "done");
+      // Commit the receipt first, then announce the replacement before clearing the pending row.
+      this.completeDispatch(opening.input, "done", undefined, openReply);
+    } else {
+      openReply();
     }
-    if (started && entry.session.isRunning && !opening.replied) this.ensureAgentMsg(entry);
     entry.openingPrompt = undefined;
     setTimeout(() => this.dequeueNext(entry.info.id), 0);
   }
@@ -3145,6 +3186,7 @@ export class Workspace {
   agentInfo(a: AgentEntry): AgentRuntimeInfo {
     const state = a.session.getState();
     const context = this.lastContext(a);
+    const effectiveEffort = a.session.effectiveEffort;
     return {
       ...a.info,
       canSwitchBackend: this.canSwitchBackend(a, state),
@@ -3155,6 +3197,7 @@ export class Workspace {
       ...(a.lastStreamAt != null && { lastStreamAt: a.lastStreamAt }),
       ...(a.retryLabel && { retryLabel: a.retryLabel }),
       effort: state.config.effort ?? null,
+      ...(effectiveEffort && { effectiveEffort }),
       effortLevels: this.effortLevels(a, a.info.model) ?? [],
       fast: Boolean(state.config.fast),
       backgroundTasks: a.session.backgroundTaskList ?? [],

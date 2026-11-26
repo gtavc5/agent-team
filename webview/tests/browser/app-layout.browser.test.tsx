@@ -184,9 +184,19 @@ it("follows a delayed starting row without moving a reader who has scrolled up",
     receive({ type: "new_message", message: input });
     return input;
   };
+  const reveal = (input: Message) =>
+    receive({
+      type: "message_done",
+      messageId: input.id,
+      status: "starting",
+      content: input.content,
+      queuedFor: agent.id,
+      pendingDelivery: "starting",
+    });
   const input = start(99);
   expect(scroll.querySelector(".message-starting")).toBeNull();
-  await expect.poll(() => get(`#msg-${input.id} + .message-starting`)).not.toBeNull();
+  reveal(input);
+  expect(get(`#msg-${input.id} + .message-starting`)).not.toBeNull();
   await nextPaint();
   expect(gap(scroll)).toBeLessThanOrEqual(1);
   receive({
@@ -199,7 +209,8 @@ it("follows a delayed starting row without moving a reader who has scrolled up",
 
   move(scroll, 200);
   const next = start(100);
-  await expect.poll(() => get(`#msg-${next.id} + .message-starting`)).not.toBeNull();
+  reveal(next);
+  expect(get(`#msg-${next.id} + .message-starting`)).not.toBeNull();
   await nextPaint();
   expect(scroll.scrollTop).toBe(200);
 });

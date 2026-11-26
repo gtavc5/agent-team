@@ -1615,20 +1615,18 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.message-starting .message-header {
+.message-agent .message-header {
   flex-wrap: nowrap;
 }
-.message-starting .message-author {
+.message-agent .message-author {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.message-starting .delivery-inline {
-  flex-shrink: 0;
-  color: var(--text-muted);
-  font-size: 10.5px;
-  white-space: nowrap;
+/* Starting… gives way to the reply time without moving the model or live dot. */
+.message-live-time {
+  min-width: 5em;
 }
 .delivery-inline .streaming-dot {
   display: inline-block;

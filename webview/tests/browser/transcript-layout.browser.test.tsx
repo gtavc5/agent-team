@@ -426,7 +426,7 @@ it("keeps attached images unstretched and gives queue cancellation a larger targ
   expect(rect(cancel).width - glyph.getBoundingClientRect().width).toBeGreaterThanOrEqual(10);
 });
 
-it("replaces the delayed starting row with a real reply or removes it on failure", async () => {
+it("replaces the delayed starting row with a real reply or removes it on failure", () => {
   const cancelled: string[] = [];
   const input: Message = {
     ...message,
@@ -436,10 +436,14 @@ it("replaces the delayed starting row with a real reply or removes it on failure
     content: "Please start",
     queuedFor: agent.id,
   };
-  const view = (status: Message["status"], replies: Message[] = []) => (
+  const view = (
+    status: Message["status"],
+    pendingDelivery?: "starting",
+    replies: Message[] = [],
+  ) => (
     <div className="messages">
       <MessageItem
-        msg={{ ...input, status }}
+        msg={{ ...input, status, pendingDelivery }}
         agents={[agent]}
         onCancelQueued={(id) => cancelled.push(id)}
       />
@@ -458,29 +462,27 @@ it("replaces the delayed starting row with a real reply or removes it on failure
   expect(container.querySelector(".queued-cancel")).toBeNull();
   expect(container.querySelectorAll(".message-agent")).toHaveLength(0);
 
-  rerender(view("starting"));
-  await expect.element(page.getByRole("status")).toHaveTextContent("Starting…");
+  rerender(view("starting", "starting"));
+  expect(queryByRole("status")?.textContent).toBe("Starting…");
   const row = get(container, ".message-starting");
   expect(get(container, "#msg-input").nextElementSibling).toBe(row);
   expect(get(row, ".message-author").textContent).toBe(agent.name);
   expect(get(row, ".agent-avatar").textContent).toBe(agent.avatar);
   expect(get(container, "#msg-input .message-header").textContent).not.toContain("Starting");
 
-  rerender(view("done", [{ ...message, status: "streaming" }]));
+  rerender(view("done", undefined, [{ ...message, status: "streaming" }]));
   expect(container.querySelectorAll(".message-agent")).toHaveLength(1);
   expect(container.querySelector(".message-starting")).toBeNull();
   expect(get(container, "#msg-input").nextElementSibling?.id).toBe("msg-m");
 
   const first = { ...message, status: "done" as const };
-  rerender(view("queued", [first]));
+  rerender(view("queued", undefined, [first]));
   fireEvent.click(get(container, ".queued-cancel"));
   expect(cancelled).toEqual([input.id]);
-  rerender(view("starting", [first]));
-  expect(queryByRole("status")).toBeNull();
+  rerender(view("starting", "starting", [first]));
   expect(container.querySelector(".queued-cancel")).toBeNull();
-  expect(container.querySelectorAll(".message-agent")).toHaveLength(1);
-  await expect.element(page.getByRole("status")).toHaveTextContent("Starting…");
-  rerender(view("error", [first]));
+  expect(queryByRole("status")?.textContent).toBe("Starting…");
+  rerender(view("error", undefined, [first]));
   expect(container.querySelector(".message-starting")).toBeNull();
   expect(container.querySelectorAll(".message-agent")).toHaveLength(1);
 });
@@ -488,7 +490,7 @@ it("replaces the delayed starting row with a real reply or removes it on failure
 it.each([320, 1200])("shows Sending… inline with zero layout shift at %ipx", async (width) => {
   await page.viewport(width, 720);
   const target = { ...agent, name: long };
-  const view = (status: Message["status"]) => (
+  const view = (status: Message["status"], pendingDelivery?: "sending") => (
     <div className="messages">
       <MessageItem
         msg={{
@@ -498,6 +500,7 @@ it.each([320, 1200])("shows Sending… inline with zero layout shift at %ipx", a
           agentId: null,
           status,
           queuedFor: target.id,
+          pendingDelivery,
         }}
         agents={[target]}
         user={{ name: width === 320 ? long.replaceAll(" ", "") : long, avatar: "A" }}
@@ -532,9 +535,9 @@ it.each([320, 1200])("shows Sending… inline with zero layout shift at %ipx", a
   expect(queryByRole("status")).toBeNull();
   expect(layout()).toEqual(before);
 
-  const status = page.getByRole("status");
-  await expect.element(status).toHaveTextContent("Sending…");
-  const inline = status.element() as HTMLElement;
+  rerender(view("dispatching", "sending"));
+  const inline = get(container, '[role="status"]');
+  expect(inline.textContent?.trim()).toBe("Sending…");
   expect(inline.closest(".message-header")).toBe(header);
   expect(time.nextElementSibling?.contains(inline)).toBe(true);
   expect(layout()).toEqual(before);
@@ -556,20 +559,131 @@ it.each([320, 1200])("shows Sending… inline with zero layout shift at %ipx", a
   rerender(view("done"));
   expect(queryByRole("status")).toBeNull();
   expect(layout()).toEqual(before);
-
-  rerender(view("starting"));
-  await expect.element(status).toHaveTextContent("Starting…");
-  const starting = get(container, ".message-starting");
-  const startingHeader = get(starting, ".message-header");
-  const name = get(startingHeader, ".message-author");
-  expect(name.title).toBe(target.name);
-  expect(lines(name)).toBe(1);
-  const statusRect = rect(status.element());
-  expect(statusRect.left).toBeGreaterThanOrEqual(rect(name).right);
-  expect(statusRect.top).toBeLessThan(rect(name).bottom);
-  expect(statusRect.right).toBeLessThanOrEqual(rect(startingHeader).right);
-  expect(header.querySelector('[role="status"]')).toBeNull();
 });
+
+it.each([320, 390, 1200])(
+  "keeps the cold reply slot still at %ipx in both themes",
+  async (width) => {
+    await page.viewport(width, 720);
+    const target = {
+      ...agent,
+      name: long,
+      model: "provider/" + "long-model-identifier-".repeat(6),
+      effort: null,
+      effectiveEffort: "medium",
+      fast: true,
+    };
+    const input: Message = {
+      ...message,
+      id: "input",
+      kind: "user",
+      agentId: null,
+      content: "Start the agent",
+      queuedFor: target.id,
+      timestamp: Date.now(),
+      status: "starting",
+    };
+    const reply: Message = {
+      ...message,
+      content: "",
+      events: [],
+      timestamp: input.timestamp + 1_000,
+      replyTo: input.id,
+      status: "streaming",
+      model: target.model,
+      effort: target.effectiveEffort,
+      fast: target.fast,
+    };
+    const view = (input: Message, hasReply = false) => (
+      <div className="messages">
+        <MessageItem msg={input} agents={[target]} hasReply={hasReply} />
+        {hasReply && <MessageItem msg={reply} agents={[target]} />}
+        <div data-tail />
+      </div>
+    );
+    const root = document.documentElement;
+    const themeBefore = root.getAttribute("data-theme");
+    await cdp().send("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+    });
+    try {
+      for (const theme of ["light", "dark"]) {
+        root.setAttribute("data-theme", theme);
+        const { container, queryByRole, rerender, unmount } = render(view(input));
+        await document.fonts.ready;
+        expect(queryByRole("status")).toBeNull();
+        expect(container.querySelector(".message-agent")).toBeNull();
+        // The Workspace publishes the reveal after the 350ms startup delay.
+        const opened = { ...input, pendingDelivery: "starting" } as const;
+        rerender(view(opened));
+        const row = get(container, ".message-starting");
+        expect(queryByRole("status")?.textContent).toBe("Starting…");
+        expect(get(container, "#msg-input").nextElementSibling).toBe(row);
+        const cold = { ...opened, status: "dispatching" } as const;
+        // Compare element boxes, plus the visible author/model/chip text line positions and colors.
+        const selectors = [
+          ".message-gutter .agent-avatar",
+          ".message-header",
+          ".message-author",
+          ".message-model",
+          ".message-time",
+          ".streaming-dot",
+          ".message-status",
+          ".status-chip:not(.fast-chip)",
+          ".fast-chip",
+        ];
+        const measure = (row: HTMLElement) => ({
+          boxes: [row, ...selectors.map((selector) => get(row, selector))].map((el) => {
+            const { x, y, width, height } = rect(el);
+            return { x, y, width, height };
+          }),
+          text: [
+            ".message-author",
+            ".message-model",
+            ".status-chip:not(.fast-chip)",
+            ".fast-chip",
+          ].map((selector) => {
+            const el = get(row, selector);
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            const { x, y, height } = range.getBoundingClientRect();
+            return { x, y, height, color: getComputedStyle(el).color, text: el.textContent };
+          }),
+          tailY: rect(get(container, "[data-tail]")).y,
+        });
+        const before = measure(row);
+        expect(getComputedStyle(get(row, ".streaming-dot")).animationName).toBe("none");
+        for (const selector of [".message-author", ".message-model", ".message-time"]) {
+          const mark = get(row, selector);
+          expect(lines(mark)).toBe(1);
+          expect(rect(mark).width).toBeGreaterThan(0);
+          expect(rect(mark).right).toBeLessThanOrEqual(rect(get(row, ".message-header")).right);
+        }
+        rerender(view(cold));
+        expect(get(container, ".message-starting")).toBe(row);
+        expect(queryByRole("status")?.textContent).toBe("Starting…");
+        expect(measure(row)).toEqual(before);
+
+        // An individually delivered new_message takes over before the input's message_done.
+        rerender(view(cold, true));
+        const actual = get(container, "#msg-m");
+        expect(container.querySelectorAll(".message-agent")).toHaveLength(1);
+        expect(get(container, "#msg-input").nextElementSibling).toBe(actual);
+        expect(queryByRole("status")).toBeNull();
+        expect(measure(actual)).toEqual(before);
+        rerender(view({ ...input, status: "done", queuedFor: undefined }, true));
+        expect(get(container, "#msg-m")).toBe(actual);
+        expect(measure(actual)).toEqual(before);
+        expect(container.scrollWidth).toBeLessThanOrEqual(container.clientWidth + 1);
+        unmount();
+      }
+    } finally {
+      if (themeBefore === null) root.removeAttribute("data-theme");
+      else root.setAttribute("data-theme", themeBefore);
+      await cdp().send("Emulation.setEmulatedMedia", { features: [] });
+    }
+  },
+);
 
 it("fits a workspace dialog and board detail on a narrow phone", async () => {
   await page.viewport(320, 820);

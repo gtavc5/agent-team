@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent, act } from "@testing-library/react";
 import { SubAgentItem, StepGroup, MessageItem, CreateWorkspaceDialog } from "../src/App";
 import { HostInfo } from "../src/state/useServer";
@@ -443,16 +443,17 @@ describe("CreateWorkspaceDialog", () => {
 });
 
 describe("MessageItem delivery state", () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
-
-  const advance = (ms: number) => {
-    act(() => {
-      vi.advanceTimersByTime(ms);
-    });
-  };
   const agents: AgentInfo[] = [
-    { id: "a1", name: "Alice", model: "m", avatar: "A", color: "#888", isDefault: true },
+    {
+      id: "a1",
+      name: "Alice",
+      model: "m",
+      avatar: "A",
+      color: "#888",
+      isDefault: true,
+      effort: "high",
+      fast: true,
+    },
   ];
   const queuedMsg: Message = {
     id: "mq",
@@ -464,8 +465,17 @@ describe("MessageItem delivery state", () => {
     queuedFor: "a1",
   };
 
-  const view = (status: Message["status"], queuedFor = "a1") => (
-    <MessageItem msg={{ ...queuedMsg, status, queuedFor }} agents={agents} />
+  const view = (
+    status: Message["status"],
+    queuedFor = "a1",
+    pendingDelivery?: Message["pendingDelivery"],
+    hasReply = false,
+  ) => (
+    <MessageItem
+      msg={{ ...queuedMsg, status, queuedFor, pendingDelivery }}
+      agents={agents}
+      hasReply={hasReply}
+    />
   );
 
   it.each([
@@ -476,11 +486,7 @@ describe("MessageItem delivery state", () => {
     const { container, rerender } = render(view(pending));
     const status = () => container.querySelector('[role="status"], [role="alert"], .queued-badge');
     expect(status()).toBeNull();
-    advance(349);
-    expect(status()).toBeNull();
     rerender(view(settled));
-    expect(vi.getTimerCount()).toBe(0);
-    advance(350);
     expect(status()).toBeNull();
   });
 
@@ -489,12 +495,12 @@ describe("MessageItem delivery state", () => {
     ["missing", "Agent", "?"],
     ["", "Agent", "?"],
   ])(
-    "shows a delayed starting row for target %s, then moves Sending… to the user header",
+    "keeps the starting row for target %s throughout dispatch until a reply appears",
     (id, name, avatar) => {
       const { container, getByRole, queryByRole, rerender } = render(view("starting", id));
       expect(queryByRole("status")).toBeNull();
       expect(container.querySelector(".message-starting")).toBeNull();
-      advance(350);
+      rerender(view("starting", id, "starting"));
       const input = container.querySelector(".message-user")!;
       const row = input.nextElementSibling!;
       expect(row.matches(".message-agent.message-starting")).toBe(true);
@@ -505,31 +511,31 @@ describe("MessageItem delivery state", () => {
       expect(input.querySelector('[role="status"]')).toBeNull();
       expect(container.querySelector(".queued-badge, .queued-cancel, .delivery-status")).toBeNull();
 
-      rerender(view("dispatching", id));
-      expect(container.querySelector(".message-starting")).toBeNull();
-      expect(getByRole("status").closest(".message-user .message-header")).not.toBeNull();
-      expect(getByRole("status").textContent?.trim()).toBe("Sending…");
+      if (id === "a1") {
+        expect(row.querySelector(".message-model")?.textContent).toBe("m");
+        expect(row.querySelector(".message-status")?.textContent).toBe("effort high⚡ fast");
+      }
+      rerender(view("dispatching", id, "starting"));
+      expect(input.nextElementSibling).toBe(row);
+      expect(getByRole("status").closest(".message-starting")).toBe(row);
+      expect(getByRole("status").textContent).toBe("Starting…");
       expect(container.querySelector(".queued-badge, .queued-cancel, .delivery-status")).toBeNull();
+      rerender(view("dispatching", id, "starting", true));
+      expect(queryByRole("status")).toBeNull();
       rerender(view("done"));
       expect(queryByRole("status")).toBeNull();
     },
   );
 
-  it("carries time spent starting into dispatch and clears a later timer on unmount", () => {
-    const { getByRole, queryByRole, rerender, unmount } = render(view("starting"));
-    advance(200);
-    rerender(view("dispatching"));
-    advance(149);
+  it("shows the revealed warm status inline and hides it when the reply appears", () => {
+    const { getByRole, queryByRole, rerender } = render(view("dispatching"));
     expect(queryByRole("status")).toBeNull();
-    advance(1);
-    expect(getByRole("status").textContent?.trim()).toBe("Sending…");
-
-    rerender(view("queued"));
-    rerender(view("dispatching"));
+    rerender(view("dispatching", "a1", "sending"));
+    const inline = getByRole("status");
+    expect(inline.closest(".message-user .message-header")).not.toBeNull();
+    expect(inline.textContent?.trim()).toBe("Sending…");
+    rerender(view("dispatching", "a1", "sending", true));
     expect(queryByRole("status")).toBeNull();
-    expect(vi.getTimerCount()).toBe(1);
-    unmount();
-    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("shows the outcome-unknown alert immediately instead of a pending indicator", () => {

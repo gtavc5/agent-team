@@ -262,17 +262,7 @@ it.each([
         <div className="sealed-banner">Sealed project</div>
       </div>
       <div id="audit-status-chip">
-        <MessageStatus
-          msg={{
-            id: "message",
-            kind: "agent",
-            agentId: "agent",
-            content: "",
-            timestamp: NOW,
-            status: "done",
-            effort: "high",
-          }}
-        />
+        <MessageStatus msg={{ effort: "high" }} />
       </div>
       <div id="audit-event-chip">
         <EventItem

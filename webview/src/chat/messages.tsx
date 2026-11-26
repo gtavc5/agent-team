@@ -304,20 +304,23 @@ export function chipLabelFor(toolName: string): string {
 
 // Effort, fast mode and context occupancy line under an agent message
 // header. Thinking time and tokens show on the blocks in the steps.
-export function MessageStatus({ msg }: { msg: Message }) {
-  if (!msg.effort && !msg.fast && msg.context === undefined) return null;
-  const ctx = msg.context;
+export function MessageStatus({
+  msg: { effort, fast, context: ctx },
+}: {
+  msg: Pick<AgentInfo, "effort" | "fast" | "context">;
+}) {
+  if (!effort && !fast && ctx === undefined) return null;
   const pct =
     ctx && ctx.window > 0 ? Math.min(100, Math.round((ctx.tokens / ctx.window) * 100)) : null;
   const tone = pct == null ? "" : pct >= 90 ? " ctx-high" : pct >= 70 ? " ctx-warn" : "";
   return (
     <div className="message-status">
-      {msg.effort && (
+      {effort && (
         <span className="status-chip" title="Reasoning effort">
-          effort {msg.effort}
+          effort {effort}
         </span>
       )}
-      {msg.fast && (
+      {fast && (
         <span className="status-chip fast-chip" title="Fast mode">
           ⚡ fast
         </span>
@@ -1321,24 +1324,59 @@ function systemAvatar(content: string): [string | null, string] {
   return m ? [m[1], m[2]] : [null, content];
 }
 
-const DELIVERY_STATUS_DELAY_MS = 350;
-
-function usePendingDeliveryStatus(pending: boolean, messageId: string): boolean {
-  const [visibleFor, setVisibleFor] = useState<string>();
-  useEffect(() => {
-    setVisibleFor(undefined);
-    if (!pending) return;
-    const timer = setTimeout(() => setVisibleFor(messageId), DELIVERY_STATUS_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, [pending, messageId]);
-  return pending && visibleFor === messageId;
-}
-
 function PendingDeliveryStatus({ label }: { label: string }) {
   return (
     <span className="delivery-inline" role="status">
       <span className="streaming-dot" aria-hidden="true" /> {label}
     </span>
+  );
+}
+
+function ReplyAvatar({ agent }: { agent?: AgentInfo }) {
+  return agent ? <AgentAvatar agent={agent} size={32} /> : <div className="avatar-user">?</div>;
+}
+
+function AgentHeading({
+  agent,
+  model,
+  time,
+  timeTitle,
+  streaming,
+  starting,
+}: {
+  agent?: AgentInfo;
+  model?: string;
+  time?: string;
+  timeTitle?: string;
+  streaming?: boolean;
+  starting?: boolean;
+}) {
+  const modelLabel = agent && shortModel(model ?? agent.model);
+  return (
+    <>
+      {(agent || starting) && (
+        <span
+          className="message-author"
+          title={agent?.name}
+          style={agent ? { color: agentNameColor(agent.color) } : undefined}
+        >
+          {agent?.name ?? "Agent"}
+        </span>
+      )}
+      {modelLabel !== undefined && (
+        <span className="message-model" title={modelLabel}>
+          {modelLabel}
+        </span>
+      )}
+      <span
+        className={`message-time${starting || streaming ? " message-live-time" : ""}`}
+        title={timeTitle}
+        role={starting ? "status" : undefined}
+      >
+        {starting ? "Starting…" : time}
+      </span>
+      {(starting || streaming) && <span className="streaming-dot" aria-hidden="true" />}
+    </>
   );
 }
 
@@ -1348,7 +1386,7 @@ export const MessageItem = memo(function MessageItem({
   agents,
   compact,
   highlight,
-  hasStreamingReply,
+  hasReply,
   onStartingRow,
   onQuote,
   onJumpToMessage,
@@ -1362,7 +1400,7 @@ export const MessageItem = memo(function MessageItem({
   user?: typeof DEFAULT_USER;
   compact?: boolean;
   highlight?: boolean;
-  hasStreamingReply?: boolean;
+  hasReply?: boolean;
   onStartingRow?: (row: HTMLDivElement | null) => void;
   onOpenWorkspace?: (workspaceId: string) => void;
   onQuote?: (msg: Message) => void;
@@ -1396,9 +1434,9 @@ export const MessageItem = memo(function MessageItem({
   const isUser = msg.kind === "user";
   const starting = isUser && msg.status === "starting";
   const sending = isUser && msg.status === "dispatching";
-  // Starting and dispatching share one delay even though they render in different rows.
-  const showDelivery = usePendingDeliveryStatus(starting || sending, msg.id);
-  const showStarting = showDelivery && starting && !hasStreamingReply;
+  const pending = (starting || sending) && !hasReply;
+  const showStarting = pending && msg.pendingDelivery === "starting";
+  const showSending = pending && msg.pendingDelivery === "sending";
   const target = showStarting ? agents.find((a) => a.id === msg.queuedFor) : undefined;
 
   if (msg.kind === "system") {
@@ -1414,7 +1452,7 @@ export const MessageItem = memo(function MessageItem({
   }
 
   const from = isUser ? msg.from : undefined;
-  const agent = !isUser ? agents.find((a) => a.id === msg.agentId) : null;
+  const agent = !isUser ? agents.find((a) => a.id === msg.agentId) : undefined;
   const streaming = msg.status === "streaming";
   const deliveryClass =
     msg.status === "queued"
@@ -1542,10 +1580,8 @@ export const MessageItem = memo(function MessageItem({
                   user.avatar
                 )}
               </div>
-            ) : agent ? (
-              <AgentAvatar agent={agent} size={32} />
             ) : (
-              <div className="avatar-user">?</div>
+              <ReplyAvatar agent={agent} />
             )}
           </div>
           <div className="message-body">
@@ -1585,31 +1621,24 @@ export const MessageItem = memo(function MessageItem({
                         )}
                       </span>
                     )}
-                  </>
-                ) : agent ? (
-                  <>
-                    <span className="message-author" style={{ color: agentNameColor(agent.color) }}>
-                      {agent.name}
+                    <span className="message-time" title={timeTitle}>
+                      {time}
                     </span>
-                    {(() => {
-                      const modelLabel = shortModel(msg.model ?? agent.model);
-                      return (
-                        <span className="message-model" title={modelLabel}>
-                          {modelLabel}
-                        </span>
-                      );
-                    })()}
+                    {msg.status !== "queued" && (
+                      <span className="delivery-inline-slot">
+                        {showSending && <PendingDeliveryStatus label="Sending…" />}
+                      </span>
+                    )}
                   </>
-                ) : null}
-                <span className="message-time" title={timeTitle}>
-                  {time}
-                </span>
-                {isUser && msg.status !== "queued" && (
-                  <span className="delivery-inline-slot">
-                    {sending && showDelivery && <PendingDeliveryStatus label="Sending…" />}
-                  </span>
+                ) : (
+                  <AgentHeading
+                    agent={agent}
+                    model={msg.model}
+                    time={time}
+                    timeTitle={timeTitle}
+                    streaming={streaming}
+                  />
                 )}
-                {streaming && <span className="streaming-dot" />}
                 {!streaming && quoteButton}
               </div>
             )}
@@ -1703,23 +1732,17 @@ export const MessageItem = memo(function MessageItem({
         {showStarting && (
           <div className="message message-agent message-starting" ref={onStartingRow}>
             <div className="message-gutter">
-              {target ? (
-                <AgentAvatar agent={target} size={32} />
-              ) : (
-                <div className="avatar-user">?</div>
-              )}
+              <ReplyAvatar agent={target} />
             </div>
             <div className="message-body">
               <div className="message-header">
-                <span
-                  className="message-author"
-                  title={target?.name}
-                  style={target ? { color: agentNameColor(target.color) } : undefined}
-                >
-                  {target?.name ?? "Agent"}
-                </span>
-                <PendingDeliveryStatus label="Starting…" />
+                <AgentHeading agent={target} starting />
               </div>
+              {target && (
+                <MessageStatus
+                  msg={{ effort: target.effort ?? target.effectiveEffort, fast: target.fast }}
+                />
+              )}
             </div>
           </div>
         )}
