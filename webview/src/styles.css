@@ -6368,9 +6368,13 @@ button.from-author {
   border-radius: var(--radius-sm);
   cursor: pointer;
 }
-.fp-btn:hover {
+.fp-btn:hover:not(:disabled) {
   color: var(--text-primary);
   border-color: var(--border);
+}
+.fp-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .fp-up {
   padding: 0 5px;
@@ -7284,11 +7288,16 @@ button.from-author {
       justify-self: stretch;
     }
   }
-  .fp-bar {
+  .fp-bar,
+  .bn-image-bar {
     flex-wrap: wrap;
   }
   .fp-path {
     flex-basis: 0;
+  }
+  .fp-image-bar .fp-path,
+  .bn-image-bar .bn-path {
+    min-width: 10ch;
   }
   .fp-roots {
     order: -1;

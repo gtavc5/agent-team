@@ -3,6 +3,7 @@ import { MdBlock, ProsePathContext } from "../chat/markdown";
 import { FileOpenContext, splitFileRef, WIN_DRIVE, type FileRef } from "../chat/fileRef";
 import { CodeView, languageFor, type FileView } from "../panels/FilesPanel";
 import { FileIcon, Icon } from "../panels/Icon";
+import { CopyImageButton, ImagePreview, useImagePreview } from "../panels/ImagePreview";
 import { formatSize, utf8Length } from "../format";
 import { inVSCode } from "../vscode";
 
@@ -248,6 +249,8 @@ export function FilePreview({
 }) {
   const result = useJson<FileView & { ref?: string }>(fileUrl(project, file.path));
   const view = result && "value" in result ? result.value : null;
+  const raw = fileUrl(project, file.path, true);
+  const image = useImagePreview(raw, view?.kind === "image" ? view.size : null);
   const found = view?.ref;
   useEffect(() => {
     const bare = (p: string) => p.replace(/\/+$/, "");
@@ -273,7 +276,7 @@ export function FilePreview({
   const notice = failed ?? file.notice;
   return (
     <section className="bn-preview" aria-label={name}>
-      <div className="bn-bar">
+      <div className={view?.kind === "image" ? "bn-bar bn-image-bar" : "bn-bar"}>
         <button className="bp-back bn-back" aria-label="Back" onClick={onClose}>
           ‹
         </button>
@@ -295,6 +298,7 @@ export function FilePreview({
             VS Code
           </button>
         )}
+        {view?.kind === "image" && <CopyImageButton key={raw} raw={raw} preview={image} />}
         <button className="side-panel-btn bn-close" aria-label="Close the file" onClick={onClose}>
           <Icon name="close" />
         </button>
@@ -344,9 +348,7 @@ export function FilePreview({
             <CodeView content={view.content} lang={languageFor(file.path)} target={file} />
           )
         ) : view?.kind === "image" ? (
-          <div className="file-image">
-            <img src={fileUrl(project, file.path, true)} alt={name} />
-          </div>
+          <ImagePreview preview={image} alt={name} />
         ) : (
           <div className="file-note">A binary file: nothing to show.</div>
         )}

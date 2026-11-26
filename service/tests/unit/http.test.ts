@@ -190,10 +190,47 @@ describe("session cookies", () => {
   });
 });
 
+it.each([
+  ["GET", "/api"],
+  ["GET", "/api/file/raw?ws=w1&path=preview.png"],
+  ["POST", "/upload"],
+  ["POST", "/debug/snapshot"],
+])("returns JSON rather than a login redirect for unauthenticated %s %s", async (method, route) => {
+  const res = await request(route, { method });
+  expect(res.status).toBe(401);
+  expect(res.headers.location).toBeUndefined();
+  expect(res.headers["cache-control"]).toBe("no-store");
+  expect(res.headers["content-type"]).toBe("application/json; charset=utf-8");
+  expect(JSON.parse(res.body.toString())).toEqual({ error: "Authentication required" });
+});
+
+it.each([
+  ["/", "login"],
+  ["/index.html", "login"],
+  ["/uploads/x.png", "../login"],
+  ["/a/b/c", "../../login"],
+  ["/a/b/", "../../login"],
+  ["/nested/login", "../login"],
+  ["/icons/..%2fsecret.jsonl", "../login"],
+])("redirects %s in one hop, including under a proxy mount", async (route, location) => {
+  const res = await request(route);
+  expect(res.status).toBe(302);
+  expect(res.headers.location).toBe(location);
+  const origin = "https://example.test";
+  for (const prefix of ["", "/yaat"]) {
+    // The proxy strips its mount prefix before handing the path to YAAT.
+    const next = new URL(res.headers.location!, `${origin}${prefix}${route}`);
+    expect(next.pathname).toBe(`${prefix}/login`);
+    const login = await request(next.pathname.slice(prefix.length));
+    expect(login.status).toBe(200);
+    expect(login.body.toString()).toContain('<form method="POST"');
+  }
+});
+
 it("requires auth for bounded usage queries and never serves the retired full-history response", async () => {
   const headers = { Cookie: await login() };
   for (const route of ["overview", "journey"])
-    expect((await request(`/api/usage/${route}`)).status).toBe(302);
+    expect((await request(`/api/usage/${route}`)).status).toBe(401);
   expect((await request("/api/usage", { headers })).status).toBe(404);
   expect((await request("/api/usage/overview?unit=all", { headers })).status).toBe(400);
   expect((await request("/api/usage/journey?cursor=invalid", { headers })).status).toBe(400);
@@ -273,7 +310,7 @@ it("imports a newly arrived native fact only on an explicit usage refresh", asyn
 it("serves the same runtime facts in both formats only after authentication", async () => {
   const headers = { Cookie: await login() };
   for (const suffix of ["", "?format=text"]) {
-    expect((await request(`/api/diagnostics${suffix}`)).status).toBe(302);
+    expect((await request(`/api/diagnostics${suffix}`)).status).toBe(401);
     const response = await request(`/api/diagnostics${suffix}`, { headers });
     expect(response.headers["cache-control"]).toBe("no-store");
     if (suffix) {

@@ -15,6 +15,7 @@ import { MdBlock } from "../chat/markdown";
 import { FileOpenContext, splitFileRef, WIN_DRIVE, type FileRef } from "../chat/fileRef";
 import { formatSize, utf8Length } from "../format";
 import { FileIcon, Icon } from "./Icon";
+import { CopyImageButton, ImagePreview, useImagePreview } from "./ImagePreview";
 import {
   ChangeCount,
   ChangesList,
@@ -356,8 +357,12 @@ export function FilesPanel({
   const view = "view" in load ? load.view : null;
   const path = view?.path ?? ("path" in load && load.path ? load.path : ref.path);
   const raw = `api/file/raw?ws=${encodeURIComponent(wsId)}&path=${encodeURIComponent(path)}${literal}`;
+  const image = useImagePreview(raw, !changesOn && view?.kind === "image" ? view.size : null);
   const isMarkdown = view?.kind === "text" && languageFor(path) === "markdown";
   const go = (next: FileRef) => {
+    if (next.path !== ref.path || Boolean(next.literalPath) !== Boolean(ref.literalPath)) {
+      setLoad({ loading: true });
+    }
     setSource(!!next.line);
     setRef(next);
     onOpen?.(next);
@@ -476,7 +481,7 @@ export function FilesPanel({
 
   return (
     <div className="files-panel">
-      <div className="fp-bar">
+      <div className={view?.kind === "image" ? "fp-bar fp-image-bar" : "fp-bar"}>
         <button className="fp-btn fp-up" title="Parent folder" onClick={() => open(parentOf(path))}>
           <Icon name="up" />
         </button>
@@ -514,8 +519,9 @@ export function FilesPanel({
             });
           }}
         >
-          {copied ? "Copied" : "Copy"}
+          {copied ? "Copied" : view?.kind === "image" ? "Copy path" : "Copy"}
         </button>
+        {view?.kind === "image" && <CopyImageButton key={raw} raw={raw} preview={image} />}
         {view && view.kind !== "dir" && (
           <a className="fp-btn" href={raw} target="_blank" rel="noopener noreferrer">
             Raw
@@ -549,11 +555,7 @@ export function FilesPanel({
             Showing the first {formatSize(utf8Length(view.content))} of {formatSize(view.size)}.
           </div>
         )}
-        {view?.kind === "image" && (
-          <div className="file-image">
-            <img src={raw} alt={path} />
-          </div>
-        )}
+        {view?.kind === "image" && <ImagePreview preview={image} alt={path} />}
         {view?.kind === "binary" && (
           <div className="file-note">
             Binary file · {formatSize(view.size)} ·{" "}

@@ -85,8 +85,17 @@ export class HttpHandler {
         // manifest and icons when adding to the home screen.
         const publicAsset = pathname === "/manifest.webmanifest" || pathname.startsWith("/icons/");
         if (!publicAsset && !this.auth.isAuthenticated(req)) {
+          if (
+            pathname === "/api" ||
+            pathname.startsWith("/api/") ||
+            (req.method === "POST" && (pathname === "/upload" || pathname === "/debug/snapshot"))
+          ) {
+            return json(res, 401, { error: "Authentication required" });
+          }
+          // Resolve from the browser's encoded path, below any proxy mount prefix.
+          const depth = url.pathname.slice(1).split("/").length - 1;
           res.statusCode = 302;
-          res.setHeader("Location", "login");
+          res.setHeader("Location", `${"../".repeat(depth)}login`);
           res.end();
           return;
         }
