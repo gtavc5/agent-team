@@ -281,11 +281,11 @@ describe("panel tool arguments", () => {
     );
   });
 
-  it.each([undefined, "", "   ", "Icelandic", "简体中文"])(
-    "keeps the internal English rule unconditional and scopes optional user-facing language (%s)",
+  it.each([undefined, "", "   ", "  Icelandic  ", "简体中文"])(
+    "keeps English as the internal default with a scoped explicit exemption, independent of chat language (%s)",
     (language) => {
       const englishRule =
-        "Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English. Preserve quoted user text, identifiers, paths, and error messages verbatim.";
+        "Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English unless the user explicitly asks for another language for that content. Preserve quoted user text, identifiers, paths, and error messages verbatim.";
       const trimmed = language?.trim();
       const expectedDirect = trimmed
         ? [
@@ -300,13 +300,10 @@ describe("panel tool arguments", () => {
         workerToolset(api, "ws-w", project, "/notes", false, false, language).instructions,
         workerToolset(api, "ws-w", project, "/notes", true, false, language).instructions,
         workerToolset(api, "ws-w", project, "/notes", false, true, language).instructions,
+        workerToolset(api, "ws-w", project, "/notes", true, true, language).instructions,
       ]) {
-        expect(text).toContain(englishRule);
-        if (trimmed) {
-          expect(text).toContain(
-            `Write chat messages addressed to the user, including questions and summaries, in ${trimmed}. ${englishRule}`,
-          );
-        } else {
+        expect(text.split("\n\n")[1]).toBe(expectedDirect[0]);
+        if (!trimmed) {
           expect(text).not.toContain("Write chat messages addressed to the user");
         }
       }
@@ -492,7 +489,8 @@ describe("panel tool arguments", () => {
       /\[From session …\][^\n]*tasks to review[^\n]*tasks done[^\n]*dropped[^\n]*delete the objective/,
     );
     expect(lead.length).toBeLessThan(5200);
-    expect(worker.length).toBeLessThan(3800);
+    // Allow the 70 characters of the explicit language exemption.
+    expect(worker.length).toBeLessThan(3870);
     // Nothing the CLI would cut.
     const tools = [
       ...leadToolset(api, project, "/notes", ["m"]).tools,

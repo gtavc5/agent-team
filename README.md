@@ -53,9 +53,9 @@ new work. The panel provides the orchestration and UI, not a model of its own.
   Writing during the wait sends the pending context alongside your message
   in one turn. Authentication, quota and unknown errors use their usual paths.
 - By default (`init-config` / `config.example.toml`), `[user].language` tells leads
-  and workers to address you in Simplified Chinese while repository artifacts,
-  project-board entries, and agent-to-agent instructions stay English
-  (`service/src/project/tools.ts`).
+  and workers to address you in Simplified Chinese. Repository artifacts,
+  project-board entries, and agent-to-agent instructions and reports default to
+  English unless you explicitly request another language for that content.
 
 ## The panel
 
@@ -250,9 +250,11 @@ offline = true               # set false to allow Pi npm access on startup
 ```
 
 Omitting `[user].language` omits only the user-facing chat language rule (agents
-choose how to reply to you), while keeping the English rule for repository
-artifacts, project-board entries, and agent-to-agent instructions and reports. A
-language change is reflected in Pi's project instructions on the next turn and in
+choose how to reply to you). With or without this setting, agents write repository
+artifacts, project-board entries, and agent-to-agent instructions and reports in
+English unless you explicitly request another language for that content. For
+example, asking for Chinese code comments leaves unrelated reports in English.
+A change to `[user].language` is reflected in Pi's project instructions on the next turn and in
 Codex on thread start or resume in a new app-server process.
 
 If upgrading from a config with `[providers.*]`, migrate custom Pi providers to

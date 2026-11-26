@@ -213,7 +213,7 @@ const ISSUES =
   "Known defects are the project's issues; write_issues says how they are kept and fixed.";
 
 const INTERNAL_ENGLISH_RULE =
-  "Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English. Preserve quoted user text, identifiers, paths, and error messages verbatim.";
+  "Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English unless the user explicitly asks for another language for that content. Preserve quoted user text, identifiers, paths, and error messages verbatim.";
 
 // How the panel's agents talk to the user and keep internal writing consistent.
 export function languageInstructions(language?: string): string[] {

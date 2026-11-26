@@ -97,7 +97,8 @@ type = "local"
 # name = "You"
 # avatar = "avatars/header.jpg"
 # User-facing project chat language only; omit to let agents choose chat language.
-# Repository artifacts, project-board entries, and agent-to-agent instructions stay English.
+# Repository artifacts, project-board entries, and agent-to-agent instructions and reports
+# default to English unless you explicitly request another language for that content.
 language = "简体中文"
 
 # Repeat to replace the built-in agent presets; omitted or empty uses built-ins.
