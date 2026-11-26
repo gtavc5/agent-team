@@ -34,11 +34,11 @@ Open **# → Service diagnostics** in the sidebar for the running service's effe
 After building, you can diagnose an instance even if the service did not start:
 
 ```bash
-AGENT_TEAM_BASE_DIR="$HOME/.yaat" scripts/start-server.sh --doctor
-AGENT_TEAM_BASE_DIR="$HOME/.yaat" scripts/start-server.sh --doctor --json
+./scripts/yaat-service.sh doctor --base-dir "$HOME/.yaat"
+./scripts/yaat-service.sh doctor --base-dir "$HOME/.yaat" --json
 ```
 
-This uses the instance toolchain and config, probes the real model catalog and native Codex account without a model turn, and exits nonzero if there is no usable model or config. The CLI inherits the environment of its caller: use the panel report when comparing a terminal to the actual `systemd --user` or `launchd` environment.
+`doctor` uses the instance's Node pin and the current release (or `dist/` before the first staged deployment). It reads configuration and local startup inputs and exits nonzero on a startup blocker. Optional ACP profile, runtime and local credential problems are reported separately and do not block panel startup. The offline check starts no backend or provider extension, makes no network or quota calls, and does not write to the instance or host profiles. Remote authorization and the live model catalog are unverified offline. Use the panel report to see the running instance's model discovery and to compare its `systemd --user` or `launchd` environment with the terminal's.
 
 ### Optional Antigravity ACP runtime
 
@@ -47,6 +47,8 @@ YAAT does not install a missing ACP runtime on startup, first prompt, or quota r
 Catalog probes use Pi's offline mode. If ACP is loaded but its runtime is missing, normal Pi sessions also skip online background model refresh: the provider can otherwise start its installer while refreshing the catalog, even for a non-ACP session. Other providers can still serve prompts. Once a runtime exists, a new session uses the configured online/offline policy; `automatic` explicitly permits managed-runtime updates.
 
 YAAT manages `permissions` and `runtimeUpdates` in its own `pi-agent-home/antigravity-acp-provider/config.json`, not the host profile. Defaults are `yolo` (commands and edits without confirmation) and `manual` (no automatic runtime upgrades). To request confirmation, set `[pi.acp].permissions = "default"`. With a custom runtime, diagnostics report enforcement as **unverified**. Configure outbound proxies in `[server.proxy]`; see `config.example.toml`. Restart the service after changing these ACP or proxy settings.
+
+For Google OAuth, run `/login antigravity-acp` in standalone host Pi as the service user, then start a new YAAT Pi session. YAAT links only `antigravity-acp-provider/gemini` from the host Pi profile when the managed path is absent or an empty directory. An existing link to the host stays in place; re-login updates are available without redeploying. Without a host directory, YAAT leaves an existing local directory alone. If separate directories exist and the managed one is nonempty, YAAT disables ACP for the new session without modifying either store, even if their files look identical or the managed store contains only runtime subdirectories. Stop sessions using the managed copy, choose the login to keep, and move the managed `gemini` aside before trying again. Diagnostics show both paths and the next step. The ACP profile and `sessions.json` remain managed by YAAT.
 
 ### Standalone CCPA proxy
 
@@ -129,9 +131,9 @@ npm run check && npm test
 
 Pass the installed `--base-dir`, `--label`, and `--port` when they are not inherited. On Linux, `systemd-run --user` starts a separate controller. On macOS, `launchctl bootstrap` starts a one-shot LaunchAgent in the same GUI domain but with its own label and process group. Restarting the server therefore does not kill the controller. Its build output and errors go to the private (0600) `.agent-team/releases/jobs/<id>/controller.log` in the installed checkout. On both platforms, the command returns the job ID before building. If you schedule from a session, finish your turn rather than polling in it. Your own active turn, background runs, queued work, and scheduled retries prevent cutover. Timeout includes the build and idle wait. Timeout and cancellation before commit do not change either live release pointer or restart the service.
 
-The job builds into `.agent-team/releases/<generation>` using the installed runtime pins. The first staged deploy snapshots the legacy `dist/` as its rollback generation. Do not edit staged releases or change shared `node_modules` while deploying. The running launcher resolves `current` once, so an old process never loads assets from the replacement. After sealing admission, the controller records the prior generation, switches the symlink atomically, and verifies the new process identity and public static assets. If verification fails, it restores and verifies the prior generation. This rolls back release files, not application data; use maintenance for incompatible data or dependency changes.
+The job builds into `.agent-team/releases/<generation>` using the installed runtime pins. Before it waits for idle or seals admission, it runs the built candidate's offline `doctor` with writes, network and subprocesses disabled. A startup blocker or a doctor failure stops the job before cutover; optional ACP warnings do not. The first staged deploy snapshots the legacy `dist/` as its rollback generation. Do not edit staged releases or change shared `node_modules` while deploying. The running launcher resolves `current` once, so an old process never loads assets from the replacement. After sealing admission, the controller records the prior generation, switches the symlink atomically, and verifies the new process identity and public static assets. If verification fails, it restores and verifies the prior generation. This rolls back release files, not application data; use maintenance for incompatible data or dependency changes.
 
-`deploy-status` shows the job phase and aggregate blockers. The transient service journal contains build output. Job state and the rollback journal are under `.agent-team/releases/`. If `recoveryRequired` is true, inspect `transaction.json`, `current`, and the target unit before taking manual action. A boot from an unfinished transaction does not admit work; clear the journal only after you verify the intended release and unit are healthy. No staged release is automatically deleted.
+`deploy-status` shows the job phase, the candidate's `preflight` result (including optional ACP auth warnings and unverified remote authorization), and aggregate activity blockers while waiting. The transient service journal contains build output. Job state and the rollback journal are under `.agent-team/releases/`. If `recoveryRequired` is true, inspect `transaction.json`, `current`, and the target unit before taking manual action. A boot from an unfinished transaction does not admit work; clear the journal only after you verify the intended release and unit are healthy. No staged release is automatically deleted.
 
 Run `./scripts/yaat-service.sh deploy-gc` in the installed checkout to prune staging jobs finished at least a day ago and their unused generations. It keeps the current and rollback generations, any generation still used by a running process, and unfinished jobs. An unresolved cutover blocks pruning.
 
@@ -162,6 +164,7 @@ To register a separate background service for dev, pass distinct `--label`, `--p
 | `install`                                     | Init config if missing, `npm run build` (unless `--no-build`), write & load service (unless `--no-start`) |
 | `start` / `stop` / `restart`                  | Control the registered `launchd` / `systemd --user` service                                               |
 | `status`                                      | Print `launchctl print` or `systemctl --user status`                                                      |
+| `doctor [--json]`                             | Check startup inputs and local ACP auth offline without writing                                           |
 | `logs`                                        | Tail logs (`-n <lines>`, `--no-follow`)                                                                   |
 | `health`                                      | Probe `http://127.0.0.1:<port>/manifest.webmanifest` (`--wait <sec>`)                                     |
 | `deploy`                                      | Optional `--verify`, build (unless `--no-build`), restart, `health --wait 15`                             |

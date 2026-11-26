@@ -504,6 +504,107 @@ describe("prepareControlledPiAgentHome", () => {
     expect(fs.lstatSync(link, { throwIfNoEntry: false })).toBeUndefined();
   });
 
+  it("maps the first host ACP login and sees a subsequent relogin without preparing a new release", () => {
+    const { sourceAgentDir, dataDir } = makeSource();
+    const options = { mode: "runtime", sourceAgentDir, dataDir } as const;
+    const providerDir = "antigravity-acp-provider";
+    const tokenPath = "gemini/antigravity-acp/acp_token.json";
+    const host = path.join(sourceAgentDir, providerDir);
+    const initial = prepareControlledPiAgentHome(options);
+    const managed = path.join(initial.piAgentDir, providerDir);
+    expect(fs.existsSync(path.join(managed, "gemini"))).toBe(false);
+    fs.mkdirSync(path.join(managed, "gemini")); // Legacy empty store can be replaced safely.
+    fs.mkdirSync(path.dirname(path.join(host, tokenPath)), { recursive: true });
+    fs.writeFileSync(path.join(host, tokenPath), '{"refresh_token":"fake-first"}');
+    fs.writeFileSync(path.join(host, "sessions.json"), "host sessions");
+    fs.writeFileSync(path.join(host, "config.json"), "host config");
+    fs.writeFileSync(path.join(sourceAgentDir, "unowned.json"), "private host file");
+    fs.writeFileSync(path.join(managed, "sessions.json"), "managed sessions");
+
+    const next = prepareControlledPiAgentHome(options);
+    expect(next.piAcpAuthError).toBeUndefined();
+    expect(next.resolvedPackages.piAntigravityEntryPath).toBe(
+      initial.resolvedPackages.piAntigravityEntryPath,
+    );
+    expect(fs.realpathSync(path.join(managed, "gemini"))).toBe(
+      fs.realpathSync(path.join(host, "gemini")),
+    );
+    expect(fs.readFileSync(path.join(managed, tokenPath), "utf8")).toBe(
+      '{"refresh_token":"fake-first"}',
+    );
+    expect(fs.readFileSync(path.join(managed, "sessions.json"), "utf8")).toBe("managed sessions");
+    expect(fs.lstatSync(path.join(managed, "config.json")).isFile()).toBe(true);
+    expect(fs.lstatSync(next.settingsPath).isFile()).toBe(true);
+    expect(fs.readFileSync(path.join(host, "config.json"), "utf8")).toBe("host config");
+    expect(fs.existsSync(path.join(next.piAgentDir, "unowned.json"))).toBe(false);
+
+    const link = fs.lstatSync(path.join(managed, "gemini"));
+    fs.writeFileSync(path.join(host, tokenPath + ".new"), '{"refresh_token":"fake-next"}');
+    fs.renameSync(path.join(host, tokenPath + ".new"), path.join(host, tokenPath));
+    const latest = prepareControlledPiAgentHome(options);
+    expect(latest.piAcpAuthError).toBeUndefined();
+    expect(fs.lstatSync(path.join(managed, "gemini")).ino).toBe(link.ino);
+    expect(fs.readFileSync(path.join(managed, tokenPath), "utf8")).toBe(
+      '{"refresh_token":"fake-next"}',
+    );
+  });
+
+  it.each(["different credentials", "identical credentials", "runtime subdirectories"])(
+    "leaves a separate nonempty managed ACP store intact with %s",
+    (contents) => {
+      const { sourceAgentDir, dataDir } = makeSource();
+      const options = { mode: "runtime", sourceAgentDir, dataDir } as const;
+      const relative = "antigravity-acp-provider/gemini/antigravity-acp";
+      const host = path.join(sourceAgentDir, relative);
+      const managed = path.join(dataDir, "pi-agent-home", relative);
+      fs.mkdirSync(host, { recursive: true });
+      fs.mkdirSync(managed, { recursive: true });
+      const file = "acp_token.json";
+      const hostToken = '{"refresh_token":"fake-host"}';
+      const managedToken =
+        contents === "identical credentials" ? hostToken : '{"refresh_token":"fake-managed"}';
+      fs.writeFileSync(path.join(host, file), hostToken);
+      if (contents === "runtime subdirectories") fs.mkdirSync(path.join(managed, "conversations"));
+      else fs.writeFileSync(path.join(managed, file), managedToken);
+
+      const home = prepareControlledPiAgentHome(options);
+      expect(home.piAcpAuthError).toContain("separate");
+      expect(home.piAcpAuthError).toContain("move the managed gemini directory");
+      expect(home.resolvedPackages.piAntigravityEntryPath).toBeUndefined();
+      expect(home.resolvedPackages.piSubagentsRoot).toBeDefined();
+      expect(fs.readFileSync(home.settingsPath, "utf8")).not.toContain(
+        "pi-antigravity-acp-provider",
+      );
+      expect(fs.lstatSync(path.dirname(managed)).isDirectory()).toBe(true);
+      expect(fs.readFileSync(path.join(host, file), "utf8")).toBe(hostToken);
+      if (contents === "runtime subdirectories")
+        expect(fs.readdirSync(managed)).toEqual(["conversations"]);
+      else expect(fs.readFileSync(path.join(managed, file), "utf8")).toBe(managedToken);
+    },
+  );
+
+  it.each(["test-synthetic", "test-copied-creds"] as const)(
+    "never maps host ACP login in %s",
+    (mode) => {
+      const { sourceAgentDir, sourceGeminiDir } = makeSource();
+      fs.mkdirSync(path.join(sourceAgentDir, "antigravity-acp-provider/gemini"), {
+        recursive: true,
+      });
+      const home = prepareControlledPiAgentHome({
+        mode,
+        sourceAgentDir,
+        sourceGeminiDir,
+        isolateGeminiHome: true,
+        packages: [providerSource],
+      });
+      temporaryDirectories.push(home.piAgentDir, home.geminiHome!, home.env.PI_SUBAGENTS_TEMP_ROOT);
+      expect(home.resolvedPackages.piAntigravityEntryPath).toBeDefined();
+      expect(fs.existsSync(path.join(home.piAgentDir, "antigravity-acp-provider/gemini"))).toBe(
+        false,
+      );
+    },
+  );
+
   it("preserves existing runtime agent definitions when switching to host agents", () => {
     const { sourceAgentDir, dataDir } = makeSource();
     const piAgentDir = path.join(dataDir, "pi-agent-home");

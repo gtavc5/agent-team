@@ -4,6 +4,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
 BASE_DIR="${AGENT_TEAM_BASE_DIR:-$REPO_DIR}"
+case "$BASE_DIR" in /*) ;; *) BASE_DIR="$PWD/$BASE_DIR" ;; esac
 source "$REPO_DIR/scripts/runtime-paths.sh"
 runtime_init_path
 runtime_load_pins "$BASE_DIR"
@@ -44,6 +45,11 @@ fi
 # Preserve missing Pi pins so the server can report degraded Pi without affecting Codex.
 runtime_select_pi || true
 runtime_use_paths
+if [ -d "$BASE_DIR" ]; then BASE_DIR="$(cd "$BASE_DIR" && pwd -P)"; fi
 cd "$REPO_DIR"
-export AGENT_TEAM_INSTALLED_REPO="$REPO_DIR" AGENT_TEAM_BASE_DIR="$(cd "$BASE_DIR" && pwd -P)"
+export AGENT_TEAM_INSTALLED_REPO="$REPO_DIR" AGENT_TEAM_BASE_DIR="$BASE_DIR"
+if [ "$doctor" -eq 1 ]; then
+  NODE_OPTIONS= NODE_V8_COVERAGE= NODE_DISABLE_COMPILE_CACHE=1 \
+    exec "$YAAT_NODE_BIN" --permission '--allow-fs-read=*' "$RELEASE_DIR/server.js" "$@"
+fi
 exec "$YAAT_NODE_BIN" "$RELEASE_DIR/server.js" "$@"

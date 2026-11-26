@@ -1,9 +1,15 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 import type { AppConfig } from "./config";
 import type { ProxyHealth } from "../acp-proxy/metrics";
-import { inspectPiAcpProfile } from "../session/pi-agent-home";
+import {
+  inspectPiAcpProfile,
+  inspectRuntimePiPackages,
+  packageName,
+} from "../session/pi-agent-home";
+import { inspectPiAcpLocalAuth, PI_ACP_PACKAGE } from "../session/pi-acp-auth";
 import type { ModelDiscoverySnapshot } from "../server/model-discovery";
 import { inspectAcpRuntime, ACP_PREPARE_STEP } from "../session/acp-readiness";
 
@@ -60,6 +66,10 @@ export function runtimeReport(
         value: pi ?? "not found",
         source: env.YAAT_RUNTIME_PINS ?? (env.YAAT_PI_BIN ? "YAAT_PI_BIN" : "PATH"),
       },
+      acpRemoteAuth: {
+        value: "unverified offline",
+        source: "no ACP request or token refresh performed by diagnostics",
+      },
     },
     issues: [],
     ccpaProxy: null,
@@ -77,18 +87,23 @@ export function runtimeReport(
 export function serviceReport(
   baseDir: string,
   config: AppConfig,
-  discovery: ModelDiscoverySnapshot,
+  discovery: ModelDiscoverySnapshot | undefined,
   env = process.env,
   ccpaProxy: ProxyHealth | null = null,
 ): RuntimeReport {
   const report = runtimeReport(baseDir, env);
   report.ccpaProxy = ccpaProxy;
-  const acp = inspectAcpRuntime(env);
   const settings = config.pi?.acp;
-  report.facts.models = {
-    value: String(discovery.models.length),
-    source: "Pi catalog and native Codex account probe",
-  };
+  const acpExcluded = config.pi?.exclude_packages?.some(
+    (entry) => packageName(entry) === PI_ACP_PACKAGE,
+  );
+  const acp = inspectAcpRuntime(settings?.binary ? { ...env, AGY_ACP_BIN: settings.binary } : env);
+  report.facts.models = discovery
+    ? {
+        value: String(discovery.models.length),
+        source: "Pi catalog and native Codex account probe",
+      }
+    : { value: "unverified offline", source: "no backend or extension started by preflight" };
   report.facts.acpReadiness = {
     value: acp.ready ? "executable found" : "not ready",
     source: "local executable check (no download)",
@@ -106,21 +121,20 @@ export function serviceReport(
     value: settings?.runtime_updates ?? "manual",
     source: settings?.runtime_updates ? "config.toml: pi.acp.runtime_updates" : "YAAT default",
   };
-  report.facts.defaultModel = {
-    value: discovery.defaultModel ?? "none",
-    source:
-      discovery.defaultModel && discovery.defaultModel === config.projects.model
-        ? "config.toml: projects.model"
-        : discovery.defaultModel && discovery.defaultModel === config.pi?.default_model
-          ? "config.toml: pi.default_model"
-          : "available model catalog",
-  };
-  const profile = inspectPiAcpProfile(path.resolve(baseDir, "pi-agent-home"), settings);
+  if (discovery)
+    report.facts.defaultModel = {
+      value: discovery.defaultModel ?? "none",
+      source:
+        discovery.defaultModel && discovery.defaultModel === config.projects.model
+          ? "config.toml: projects.model"
+          : discovery.defaultModel && discovery.defaultModel === config.pi?.default_model
+            ? "config.toml: pi.default_model"
+            : "available model catalog",
+    };
+  const managedHome = path.resolve(baseDir, "pi-agent-home");
+  const profile = inspectPiAcpProfile(managedHome, settings);
   report.facts.acpProfile = { value: profile.status, source: profile.path };
-  if (
-    profile.status === "invalid" &&
-    !config.pi?.exclude_packages?.includes("pi-antigravity-acp-provider")
-  ) {
+  if (profile.status === "invalid" && !acpExcluded) {
     report.issues.push({
       stage: "acp",
       code: "acp_profile_invalid",
@@ -130,14 +144,67 @@ export function serviceReport(
       nextStep: "Repair the profile JSON, then restart the affected Pi session.",
     });
   }
-  for (const key of Object.keys(config.server.proxy ?? {}))
-    report.facts[key.toUpperCase()].source = `config.toml: server.proxy.${key}`;
-  report.issues.push(...discovery.issues);
+  const hostHome = path.resolve(
+    (process.platform === "win32" ? env.USERPROFILE : env.HOME) || os.homedir(),
+    ".pi",
+    "agent",
+  );
+  let acpEnabled = false;
+  try {
+    acpEnabled = Boolean(
+      inspectRuntimePiPackages(hostHome, config.pi?.packages, config.pi?.exclude_packages)
+        .piAntigravityEntryPath,
+    );
+  } catch {
+    report.issues.push({
+      stage: "pi-local",
+      code: "pi_package_resolution_failed",
+      value: "unable to read Pi settings or resolve configured local packages",
+      source: hostHome,
+      impact:
+        "Pi may not start with these packages. This does not prevent the panel from starting.",
+      nextStep: "Check host Pi settings and the package paths in config.toml.",
+    });
+  }
+  if (acpEnabled) {
+    const auth = inspectPiAcpLocalAuth(hostHome, managedHome, env);
+    report.facts.acpLocalAuth = {
+      value: auth.status === "present" ? auth.reason : auth.status,
+      source: auth.source,
+    };
+    if (auth.nextStep)
+      report.issues.push({
+        stage: "acp-local-auth",
+        code: `acp_auth_${auth.status}`,
+        value: auth.reason,
+        source: auth.source,
+        impact: "ACP may not be usable. Other configured providers are not blocked.",
+        nextStep: auth.nextStep,
+      });
+  } else if (settings && !acpExcluded) {
+    report.issues.push({
+      stage: "acp-local-auth",
+      code: "acp_provider_unavailable",
+      value: "no enabled local ACP provider extension found",
+      source: hostHome,
+      impact: "ACP cannot use the configured profile without the provider extension.",
+      nextStep:
+        "Check that the service user's Pi has pi-antigravity-acp-provider installed and enabled.",
+    });
+  }
+  for (const [key, value] of Object.entries(config.server.proxy ?? {}))
+    report.facts[key.toUpperCase()] = {
+      value: value ? "set (redacted)" : "unset",
+      source: `config.toml: server.proxy.${key}`,
+    };
+  report.issues.push(...(discovery?.issues ?? []));
   if (
+    !acpExcluded &&
     !acp.ready &&
-    (settings ||
+    (acpEnabled ||
+      settings ||
       env.AGY_ACP_BIN ||
-      discovery.models.some((m) => m.id.startsWith("antigravity-acp/")))
+      discovery?.models.some((m) => m.id.startsWith("antigravity-acp/")))
   ) {
     report.issues.push({
       stage: "acp",
@@ -147,7 +214,7 @@ export function serviceReport(
       nextStep: ACP_PREPARE_STEP,
     });
   }
-  if (env.AGY_ACP_BIN)
+  if (!acpExcluded && (settings?.binary || env.AGY_ACP_BIN))
     report.issues.push({
       stage: "acp",
       code: "acp_permissions_unverified",

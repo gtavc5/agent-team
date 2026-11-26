@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SessionConfig } from "./types";
+import { PI_ACP_PACKAGE, preparePiAcpMapping } from "./pi-acp-auth";
 
 export type ControlledPiAgentHomeMode = "runtime" | "test-synthetic" | "test-copied-creds";
 
@@ -36,6 +37,7 @@ export interface ControlledPiAgentHome {
   };
   geminiHome?: string;
   piAcpProfileError?: string;
+  piAcpAuthError?: string;
 }
 
 type SourceSettings = {
@@ -66,14 +68,14 @@ export function packageSource(entry: PiPackageEntry): string {
   return typeof entry === "string" ? entry : entry.source;
 }
 
-function packageName(entry: PiPackageEntry): string {
+export function packageName(entry: PiPackageEntry): string {
   const source = packageSource(entry);
   if (path.isAbsolute(source)) {
     try {
       const manifest = JSON.parse(
         fs.readFileSync(path.join(source, "package.json"), "utf8").replace(/^\uFEFF/, ""),
       ) as { name?: unknown };
-      if (manifest?.name === "pi-antigravity-acp-provider") return manifest.name;
+      if (manifest?.name === PI_ACP_PACKAGE) return manifest.name;
     } catch {
       // Pi also accepts local directories without a package manifest.
     }
@@ -126,10 +128,9 @@ function orderPackages(packages: PiPackageEntry[]): PiPackageEntry[] {
   }
   const unique = [...uniqueBySource.values()];
   const subagents = unique.find((entry) => packageName(entry) === "pi-subagents");
-  const provider = unique.find((entry) => packageName(entry) === "pi-antigravity-acp-provider");
+  const provider = unique.find((entry) => packageName(entry) === PI_ACP_PACKAGE);
   const ordered = unique.filter(
-    (entry) =>
-      packageName(entry) !== "pi-subagents" && packageName(entry) !== "pi-antigravity-acp-provider",
+    (entry) => packageName(entry) !== "pi-subagents" && packageName(entry) !== PI_ACP_PACKAGE,
   );
   if (subagents) ordered.push(subagents);
   if (provider) ordered.push(provider);
@@ -575,7 +576,7 @@ function resolveLocalPiPackages(
       .filter(isIncluded),
   );
   const subagents = packages.find((entry) => packageName(entry) === "pi-subagents");
-  const provider = packages.find((entry) => packageName(entry) === "pi-antigravity-acp-provider");
+  const provider = packages.find((entry) => packageName(entry) === PI_ACP_PACKAGE);
   let providerEntry: string | undefined;
   if (provider) {
     const enabled = resolvePackageExtensions(provider);
@@ -601,6 +602,16 @@ export function discoverLocalPiPackages(
     fs.existsSync(candidatePath(packageSource(entry), sourceAgentDir)),
   );
   return resolveLocalPiPackages(entries, sourceAgentDir, excludePackages);
+}
+
+export function inspectRuntimePiPackages(
+  sourceAgentDir: string,
+  packages?: readonly PiPackageEntry[],
+  excludePackages?: readonly string[],
+): LocalPiPackages {
+  return packages?.length
+    ? resolveLocalPiPackages(packages, sourceAgentDir, excludePackages)
+    : discoverLocalPiPackages(sourceAgentDir, excludePackages);
 }
 
 function freshDirectory(prefix: string): string {
@@ -756,19 +767,23 @@ export function prepareControlledPiAgentHome(
 
   const sourceAgentDir = options.sourceAgentDir ?? defaultSource ?? piAgentDir;
   const synthetic = options.mode === "test-synthetic";
-  const discovered =
-    options.packages?.length || synthetic
-      ? resolveLocalPiPackages(options.packages ?? [], sourceAgentDir, options.excludePackages)
-      : discoverLocalPiPackages(sourceAgentDir, options.excludePackages);
+  const discovered = synthetic
+    ? resolveLocalPiPackages(options.packages ?? [], sourceAgentDir, options.excludePackages)
+    : inspectRuntimePiPackages(sourceAgentDir, options.packages, options.excludePackages);
   let piAcpProfileError: string | undefined;
+  let piAcpAuthError: string | undefined;
   if (discovered.piAntigravityEntryPath) {
     try {
       preparePiAcpProfile(piAgentDir, options.piAcp);
     } catch {
       piAcpProfileError = `Antigravity ACP is disabled. Repair the managed profile at ${piAcpProfilePath(piAgentDir)} and restart the session.`;
+    }
+    if (!piAcpProfileError && options.mode === "runtime")
+      piAcpAuthError = preparePiAcpMapping(sourceAgentDir, piAgentDir);
+    if (piAcpProfileError || piAcpAuthError) {
       discovered.piAntigravityEntryPath = undefined;
       discovered.packages = discovered.packages.filter(
-        (entry) => packageName(entry) !== "pi-antigravity-acp-provider",
+        (entry) => packageName(entry) !== PI_ACP_PACKAGE,
       );
     }
   }
@@ -872,5 +887,6 @@ export function prepareControlledPiAgentHome(
     },
     ...(geminiHome && { geminiHome }),
     ...(piAcpProfileError && { piAcpProfileError }),
+    ...(piAcpAuthError && { piAcpAuthError }),
   };
 }

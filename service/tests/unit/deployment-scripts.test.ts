@@ -450,6 +450,9 @@ describe.skipIf(process.platform === "win32")("yaat-service.sh and start-server.
     stubBundle();
     const diagnostic: unknown = JSON.parse(ok("start-server", ["--doctor", "--json"]));
     expect(diagnostic).toEqual({ args: ["--doctor", "--json"], cwd: root, node: nvm.node });
+    expect(JSON.parse(ok("yaat-service", ["doctor", "--json", "--base-dir", base]))).toEqual(
+      diagnostic,
+    );
     const regular = run("start-server", []);
     expect(regular.status).toBe(1);
     expect(regular.stderr).toContain("config.toml not found");

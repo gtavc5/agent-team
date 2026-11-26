@@ -63,6 +63,7 @@ function harness(
     delayedQuota?: boolean;
     retire?: { trailing?: object };
     holdPromptReply?: boolean;
+    promptError?: string;
     contextUsage?: { tokens: number | null; contextWindow: number };
     enabledModels?: string[];
     startupModel?: { provider: string; id: string };
@@ -154,7 +155,7 @@ function harness(
         id: frame.id,
         success,
         data,
-        ...(!success && { error: "preflight denied" }),
+        ...(!success && { error: override.promptError ?? "preflight denied" }),
       });
     const stdin = new Writable({
       write(chunk: Buffer, _, callback) {
@@ -579,6 +580,99 @@ describe("PiSession ACP readiness", () => {
     expect(h.clients[0].wire.filter(({ type }) => type === "prompt").map((f) => f.message)).toEqual(
       ["/quota", "hello"],
     );
+  });
+
+  it.each([
+    ["RPC error -32000: Authentication required", "antigravity-acp", true],
+    [
+      "No saved Google login for this Pi profile. Run /login antigravity-acp.",
+      "antigravity-acp",
+      true,
+    ],
+    ["Antigravity authentication required: Authentication required", "antigravity-acp", true],
+    ["RPC error -32000: Rate limit exceeded", "antigravity-acp", false],
+    ["RPC error -32000: Authentication required", "mock", false],
+  ])("makes %s actionable only for ACP (model %s)", async (errorMessage, provider, acp) => {
+    const runtime = path.join(temp(), "agy");
+    fs.writeFileSync(runtime, "not run", { mode: 0o700 });
+    const model = { provider, id: "test" };
+    const h = harness({
+      startupModel: model,
+      models: [model],
+      options: { env: { AGY_ACP_BIN: runtime } },
+    });
+    await h.session.ensureStarted();
+    const terminal = new Promise<StreamEvent>((resolve) => h.session.once("done", resolve));
+    await h.session.send("hello");
+    const client = h.clients[0];
+    client.event(piFrame("agent_start"));
+    client.event(piFrame("message_end", { role: "user" }));
+    const failed = assistantEnd([], "error");
+    client.event({ ...failed, message: { ...failed.message, errorMessage } });
+    client.event(piFrame("agent_settled"));
+    const event = await terminal;
+    expect(event.kind).toBe("error");
+    expect(event.content).toBe(
+      acp
+        ? "Antigravity ACP authentication failed. Run /login antigravity-acp in standalone host Pi as the YAAT service user, then start a new YAAT Pi session."
+        : errorMessage,
+    );
+  });
+
+  it("returns host login guidance for an ACP prompt rejected by Pi RPC", async () => {
+    const runtime = path.join(temp(), "agy");
+    fs.writeFileSync(runtime, "not run", { mode: 0o700 });
+    const model = { provider: "antigravity-acp", id: "test" };
+    const h = harness({
+      startupModel: model,
+      models: [model],
+      options: { env: { AGY_ACP_BIN: runtime } },
+      disposition: "rejected",
+      promptError: "No saved Google login for this Pi profile.",
+    });
+    const receipt = await h.session.send("hello");
+    expect(receipt.disposition).toBe("rejected");
+    expect(receipt.error).toContain("/login antigravity-acp in standalone host Pi");
+    expect(h.clients[0].wire.some((frame) => frame.type === "prompt")).toBe(true);
+  });
+
+  it("keeps other models usable and rejects ACP prompts when runtime stores conflict", async () => {
+    const home = temp();
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("USERPROFILE", home);
+    const dataDir = temp();
+    const provider = path.join(dataDir, "pi-antigravity-acp-provider");
+    const store = "antigravity-acp-provider/gemini/antigravity-acp";
+    const host = path.join(home, ".pi/agent", store);
+    const managed = path.join(dataDir, "pi-agent-home", store);
+    for (const [folder, token] of [
+      [host, "fake-host"],
+      [managed, "fake-managed"],
+    ]) {
+      fs.mkdirSync(folder, { recursive: true });
+      fs.writeFileSync(
+        path.join(folder, "acp_token.json"),
+        JSON.stringify({ refresh_token: token }),
+      );
+    }
+    fs.mkdirSync(path.join(provider, "extensions"), { recursive: true });
+    fs.writeFileSync(path.join(provider, "extensions/index.ts"), "export {};");
+    const h = harness({
+      config: { piAgentDir: undefined, dataDir, piPackages: [provider] },
+      disposition: "handled",
+    });
+    await h.session.ensureStarted();
+    expect(h.factory.mock.calls[0][0].env?.YAAT_PI_ANTIGRAVITY_ENTRY).toBeUndefined();
+    expect(await h.session.send("other model")).toEqual({ disposition: "handled" });
+    h.session.setModel("antigravity-acp/sample");
+    const receipt = await h.session.send("ACP model");
+    expect(receipt.disposition).toBe("rejected");
+    expect(receipt.error).toContain("move the managed gemini directory");
+    expect(
+      h.clients[0].wire.filter((frame) => frame.type === "prompt").map((frame) => frame.message),
+    ).toEqual(["other model"]);
+    expect(fs.readFileSync(path.join(managed, "acp_token.json"), "utf8")).toContain("fake-managed");
+    expect(fs.readFileSync(path.join(host, "acp_token.json"), "utf8")).toContain("fake-host");
   });
 
   it("keeps an online non-catalog Pi online unless its loaded ACP runtime is missing", async () => {

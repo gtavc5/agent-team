@@ -144,7 +144,7 @@ cd agent-team
 ./scripts/yaat-service.sh install
 ```
 
-For setup problems, open **# → Service diagnostics** in the sidebar (an indicator dot appears on **#** while collapsed and on **Service diagnostics** when expanded if the panel is offline or unhealthy), or run `AGENT_TEAM_BASE_DIR="$HOME/.yaat" scripts/start-server.sh --doctor --json` after building. The report identifies the failed step and how to fix it. ACP is optional; prepare its runtime explicitly before using ACP models ([instructions](docs/DEPLOY.md#optional-antigravity-acp-runtime)).
+For setup problems, open **# → Service diagnostics** in the sidebar (an indicator dot appears on **#** while collapsed and on **Service diagnostics** when expanded if the panel is offline or unhealthy), or run `scripts/yaat-service.sh doctor --json` after building. The offline check separates startup blockers from optional ACP login issues and leaves remote authorization unverified. ACP is optional; prepare its runtime explicitly before using ACP models ([instructions](docs/DEPLOY.md#optional-antigravity-acp-runtime)).
 
 Or run directly in the foreground:
 
@@ -261,6 +261,12 @@ If upgrading from a config with `[providers.*]`, migrate custom Pi providers to
 `~/.pi/agent/models.json` and remove those tables from `config.toml`. The managed
 Pi home links `models.json`; start a new Pi process to pick up changes. Its
 `models-store.json` cache is separate and seeded from the user cache only once.
+YAAT owns its Pi `settings.json` and the ACP provider's `config.json` and
+`sessions.json`. New runtime Pi sessions share only the provider's explicit
+`antigravity-acp-provider/gemini` login directory with host Pi. After
+`/login antigravity-acp` in host Pi, start a new YAAT Pi session without
+redeploying. See [ACP login conflicts](docs/DEPLOY.md#optional-antigravity-acp-runtime)
+if both directories already contain local state.
 If a package is unsuitable for headless Pi on your machine, list it in
 `[pi].exclude_packages`.
 

@@ -14,6 +14,7 @@ import { applyNonInteractiveGitEnv } from "./git-env";
 import type { BoundarySteer, HostSessionHandle } from "./host";
 import { PanelHttpServer, type PanelHttpAddress, type SessionCheckpoint } from "./panel-http";
 import { discoverLocalPiPackages, prepareControlledPiAgentHome } from "./pi-agent-home";
+import { piAcpAuthGuidance } from "./pi-acp-auth";
 import { signPiRecoveryPrompt } from "./pi-recovery-context";
 import {
   PiRpcClient,
@@ -895,9 +896,10 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     return {
       agentDir,
       settings,
-      providerEntry: this.home?.piAcpProfileError
-        ? undefined
-        : (this.config.piAntigravityEntryPath ?? packages.piAntigravityEntryPath),
+      providerEntry:
+        this.home?.piAcpProfileError || this.home?.piAcpAuthError
+          ? undefined
+          : (this.config.piAntigravityEntryPath ?? packages.piAntigravityEntryPath),
     };
   }
 
@@ -1224,9 +1226,17 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     return model ? (this.resolveModel(model)?.id ?? model) : undefined;
   }
 
+  private usesAcpModel(): boolean {
+    return [this.model.desired, this.model.applied].some(
+      (model) =>
+        !!model && (model.startsWith(`${ACP}/`) || this.resolveModel(model)?.provider === ACP),
+    );
+  }
+
   private acpPromptError(input: string, compact: boolean): string | undefined {
     const runtimeError = () =>
       this.home?.piAcpProfileError ??
+      this.home?.piAcpAuthError ??
       (inspectAcpRuntime(this.rpcEnv, this.normalizedCwd).ready
         ? undefined
         : `Antigravity ACP runtime is not ready. ${ACP_PREPARE_STEP}`);
@@ -1254,13 +1264,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       )
         return;
     }
-    if (
-      [this.model.desired, this.model.applied].some(
-        (model) =>
-          model && (model.startsWith(`${ACP}/`) || this.resolveModel(model)?.provider === ACP),
-      )
-    )
-      return runtimeError();
+    if (this.usesAcpModel()) return runtimeError();
   }
 
   async send(input: string | PromptEnvelope, hooks?: SendHooks): Promise<SendReceipt> {
@@ -1402,7 +1406,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         }
         return {
           disposition: "rejected",
-          error: error.message,
+          error: piAcpAuthGuidance(error.message, this.usesAcpModel()) ?? error.message,
           ...(retryable && { retryable: true }),
         };
       }
@@ -2109,13 +2113,16 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         return context;
       })
       .catch(() => null);
+    const authGuidance = turn.error && piAcpAuthGuidance(turn.error, this.usesAcpModel());
     this.finish(
       turn,
       turn.error && !this.interrupting
         ? {
-            ...(turn.recovery && (turn.recoveryNotEmpty || !turn.accepted || reply.output !== 0)
-              ? { kind: "error" as const, content: turn.error }
-              : piTerminalError(turn.error)),
+            ...(authGuidance
+              ? { kind: "error" as const, content: authGuidance }
+              : turn.recovery && (turn.recoveryNotEmpty || !turn.accepted || reply.output !== 0)
+                ? { kind: "error" as const, content: turn.error }
+                : piTerminalError(turn.error)),
             context: null,
           }
         : {
