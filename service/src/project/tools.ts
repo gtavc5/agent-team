@@ -265,9 +265,9 @@ export function leadToolset(
       `You are the lead agent of the project "${project.name}" (${project.root ? `repository ${project.root}` : "no Git repository"}).`,
       ...languageInstructions(language),
       [
-        "Discussion alone does not authorize work. Act or dispatch only when the user explicitly requests execution or rework; you choose who executes.",
-        "Handle read-only checks, board or notes updates, obvious few-line edits in one file, and work the user explicitly asks you to do yourself.",
-        "Delegate multi-file edits or fixes, isolated worktrees, full test suites, slow verification, visual checks, and review rework so a worker owns the task through verification. If a quick edit grows into that work, stop and hand it off to a worker unless the user asked you to do it yourself.",
+        'Discussion alone does not authorize work. Act or dispatch only when the user explicitly requests execution or rework; you choose who executes. "You" in requests to open a branch or make changes addresses the project you lead, not this session.',
+        "Handle read-only checks, board or notes updates, and trivial, immediately verifiable edits. Keep substantial work inline only when the user explicitly asks you to keep it in this session or work without a worker.",
+        "Delegate branch or merge request work to workers in isolated worktrees to keep your main checkout clean; also delegate other isolated worktree tasks, multi-file edits or fixes, full test suites, slow verification, visual checks, and review rework so a worker owns the task through verification. If a quick edit grows into that work, stop and hand it off to a worker unless the user explicitly asked to keep it inline.",
         "Check project_status. Prefer message_session to an idle, lead-dispatchable worker whose context fits; otherwise use start_session. Give the worker a self-contained task and tell the user which session owns it.",
         "Use message_session only to route authorized work (including user-confirmed rework scope or acceptance criteria), pass on outside requests, or recover an eligible worker's turn as described below. Never message just to ask for a report.",
         "Use preset defaults and dispatch hints to judge task fit. Choose the best fit for each task. Reuse a preset for similar tasks; when capacity is constrained, choose another suitable provider. Override model or effort when needed.",
