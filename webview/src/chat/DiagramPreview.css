@@ -60,6 +60,11 @@
   font-family: var(--font-mono) !important;
 }
 
+/* Keep the connector from showing through the label it describes. */
+.diagram-preview--mermaid .edgeLabel rect.background {
+  opacity: 1 !important;
+}
+
 /* The renderer supplies theme-aware default marks. Only the canvas needs
    clearing here; explicit node, edge and label colors stay untouched. */
 .diagram-preview--graphviz > svg > g > polygon[fill="white" i],

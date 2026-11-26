@@ -48,9 +48,14 @@ function contrastOf(foreground: string, background: string): number {
   const context = canvas.getContext("2d", { willReadFrequently: true })!;
   const paint = (color: string) => {
     context.clearRect(0, 0, 1, 1);
+    // Invalid assignments leave fillStyle unchanged. Start transparent so
+    // invalid, missing, and non-opaque paints cannot yield a contrast ratio.
+    context.fillStyle = "transparent";
     context.fillStyle = color;
     context.fillRect(0, 0, 1, 1);
-    return luminance(context.getImageData(0, 0, 1, 1).data);
+    const pixel = context.getImageData(0, 0, 1, 1).data;
+    if (pixel[3] !== 255) throw new Error(`Expected opaque paint: ${color}`);
+    return luminance(pixel);
   };
   const bg = paint(background);
   const fg = paint(foreground);
@@ -66,6 +71,13 @@ afterEach(async () => {
 });
 
 describe("diagram previews", () => {
+  it.each(["none", "transparent", "", "not-a-color"])(
+    "rejects non-paintable contrast input %j",
+    (color) => {
+      expect(() => contrastOf(color, "white")).toThrow("Expected opaque paint");
+    },
+  );
+
   it(
     "previews Mermaid in place, supports keyboard focus, and copies source while previewing",
     { timeout: 20_000 },
@@ -284,7 +296,17 @@ describe("diagram previews", () => {
       document.documentElement.dataset.theme = "light";
       const { container, getAllByRole } = render(
         <Chat>
-          <MdBlock>{fence("mermaid", "flowchart LR\nA[Start] --> B[Finish]")}</MdBlock>
+          <MdBlock>
+            {fence(
+              "mermaid",
+              `flowchart LR
+  User["User Input"] --> WS["Workspace Queue"]
+  WS -->|"starting → streaming"| Session["Pi / Codex Session"]
+  Session -->|"stream_event"| Server["YAAT WS Hub"]
+  Server --> UI["Webview Transcript"]
+  UI -.->|"Jump to latest"| UI`,
+            )}
+          </MdBlock>
           <MdBlock>{fence("dot", "digraph G { a -> b; }")}</MdBlock>
         </Chat>,
       );
@@ -299,17 +321,60 @@ describe("diagram previews", () => {
         document.documentElement.dataset.theme = theme;
         await waitFor(
           () => {
-            for (const node of container.querySelectorAll(".diagram-preview")) {
+            const nodes = container.querySelectorAll(".diagram-preview");
+            expect(nodes).toHaveLength(2);
+            for (const node of nodes) {
               expect(node.getAttribute("data-theme")).toBe(theme);
             }
           },
           { timeout: 20_000 },
         );
-        for (const rendered of container.querySelectorAll<HTMLElement>(".diagram-preview")) {
+        const nodes = container.querySelectorAll<HTMLElement>(".diagram-preview");
+        expect(nodes).toHaveLength(2);
+        for (const rendered of nodes) {
           const text = rendered.querySelector("svg text")!;
           const background = getComputedStyle(rendered).backgroundColor;
           expect(contrastOf(getComputedStyle(text).fill, background)).toBeGreaterThanOrEqual(4.5);
-          const line = rendered.querySelector(".flowchart-link, ellipse[stroke]")!;
+          if (rendered.matches(".diagram-preview--mermaid")) {
+            expect(rendered.querySelector("svg style")).not.toBeNull();
+            const rects = rendered.querySelectorAll(".node > rect");
+            expect(rects).toHaveLength(5);
+            for (const rect of rects) {
+              const paint = getComputedStyle(rect);
+              expect(paint.fill).toBe(theme === "dark" ? "rgb(41, 41, 41)" : "rgb(255, 255, 255)");
+              expect(paint.filter).toBe("none");
+              expect(
+                contrastOf(
+                  getComputedStyle(rect.parentElement!.querySelector("text")!).fill,
+                  paint.fill,
+                ),
+              ).toBeGreaterThanOrEqual(4.5);
+            }
+            const links = rendered.querySelectorAll(".flowchart-link");
+            expect(links).toHaveLength(5);
+            for (const link of links) {
+              expect(getComputedStyle(link).fill).toBe("none");
+              expect(contrastOf(getComputedStyle(link).stroke, background)).toBeGreaterThanOrEqual(
+                3,
+              );
+            }
+            const loop = rendered.querySelector('[data-id="L_UI_UI_0"]')!;
+            expect(getComputedStyle(loop).strokeDasharray).not.toBe("none");
+            const labels = Array.from(rendered.querySelectorAll(".edgeLabel text"));
+            expect(labels.map((label) => label.textContent)).toEqual(
+              expect.arrayContaining(["starting → streaming", "stream_event", "Jump to latest"]),
+            );
+            for (const label of labels) {
+              const backing = label.closest(".edgeLabel")!.querySelector("rect.background")!;
+              expect(getComputedStyle(backing).fill).toBe(background);
+              expect(getComputedStyle(backing).opacity).toBe("1");
+              expect(contrastOf(getComputedStyle(label).fill, background)).toBeGreaterThanOrEqual(
+                4.5,
+              );
+            }
+            continue;
+          }
+          const line = rendered.querySelector("ellipse[stroke]")!;
           const stroke = getComputedStyle(line).stroke;
           expect(
             contrastOf(stroke, background),

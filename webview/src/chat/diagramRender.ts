@@ -24,10 +24,16 @@ const BLOCKED_TAGS = [
 ];
 
 function safeGeneratedCss(css: string): boolean {
-  const readable = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  return !/(?:\\|@import\b|url\s*\(|image-set\s*\(|expression\s*\(|javascript:|data:|https?:|\/\/|-moz-binding|behavior\s*:)/i.test(
-    readable,
-  );
+  // Inspect the original tokens: deleting comments can change a quoted URL.
+  if (
+    /(?:\\|\/\*|@(?!media\b|keyframes\b)|image-set\s*\(|(?:src|image|expression)\s*\(|javascript:|data:|https?:|\/\/|-moz-binding|behavior\s*:)/i.test(
+      css,
+    )
+  )
+    return false;
+  // Every url() must contain exactly one local fragment and its closing ')'.
+  // Use CSS whitespace, not JS \s (which includes valid URL characters).
+  return !/url\s*\((?![\t\n\f\r ]*(['"]?)#[\w:.-]+\1[\t\n\f\r ]*\))/i.test(css);
 }
 
 function stripUnsafeStyles(raw: string): string {

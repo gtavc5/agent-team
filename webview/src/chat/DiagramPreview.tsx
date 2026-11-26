@@ -80,9 +80,9 @@ export function DiagramPreview({ language, source, onPreviewChange, copy }: Diag
   useEffect(() => {
     if (requestedSource === null || requestedSource !== source) return;
     const id = ++renderId.current;
-    setStatus("loading");
+    // Keep an open preview in place until its replacement theme is ready.
+    setStatus((previous) => (previous === "ready" ? previous : "loading"));
     setError("");
-    onPreviewChange(false);
     let active = true;
     void import("./diagramRender")
       .then(({ renderDiagram }) => renderDiagram(requestedSource, language, theme))

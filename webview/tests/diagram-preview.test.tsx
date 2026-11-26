@@ -144,7 +144,16 @@ describe("diagram preview controls", () => {
     );
     fireEvent.click(getByRole("button", { name: "Preview diagram" }));
     await waitFor(() => expect(container.querySelector(".diagram-preview")).not.toBeNull());
+    let finish!: (svg: string) => void;
+    renderDiagram.mockReturnValueOnce(new Promise<string>((resolve) => (finish = resolve)));
     document.documentElement.dataset.theme = "dark";
+    await waitFor(() => expect(renderDiagram).toHaveBeenCalledTimes(2));
+    expect(container.querySelector(".diagram-preview")?.getAttribute("data-theme")).toBe("light");
+    expect(container.querySelector("pre")!.hidden).toBe(true);
+    await act(async () => {
+      finish(SAFE_SVG);
+      await Promise.resolve();
+    });
     await waitFor(() =>
       expect(container.querySelector(".diagram-preview")?.getAttribute("data-theme")).toBe("dark"),
     );
