@@ -142,7 +142,7 @@ function SessionCard({
   const busy = state === "working" || state === "waiting";
   const canStop =
     state === "working" ||
-    (connected && state !== "archived" && w.agents.some((a) => a.networkWaiting));
+    (connected && state !== "archived" && w.agents.some((a) => a.networkWaiting || a.retryPending));
   const name = sessionName(w, project);
   const tasks = workCount([w]);
   // Where it works, when that is not the project's own checkout.

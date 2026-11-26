@@ -105,6 +105,76 @@ it("forwards headers and SSE chunks before completion and cancels on client disc
   await cancelled.promise;
 });
 
+it("isolates session routes, observes only model-specific exhaustion, and forwards the original URL and bytes", async () => {
+  let body: unknown,
+    status = 200;
+  const paths: string[] = [];
+  const { proxy } = await setup((req, res) => {
+    paths.push(req.url!);
+    res.writeHead(status);
+    res.end(JSON.stringify(body));
+  });
+  const a = vi.fn(),
+    b = vi.fn();
+  const one = proxy.registerSession(() => a),
+    two = proxy.registerSession(() => b);
+  const at = Math.floor(Date.now() / 1000) + 600,
+    resetTime = new Date(at * 1000).toISOString();
+  const send = async (url: string, operation: string) => {
+    const response = await fetch(`${url}/v1internal:${operation}?alt=sse`, {
+      method: "POST",
+      body: JSON.stringify({ model: "sample" }),
+    });
+    expect(await response.json()).toEqual(body);
+    expect(paths.at(-1)).toBe(`/v1internal:${operation}?alt=sse`);
+  };
+  body = {
+    models: {
+      full: { quotaInfo: { remainingFraction: 1, resetTime } },
+      sample: { quotaInfo: { remainingFraction: 0, resetTime } },
+    },
+  };
+  await send(one.url, "fetchAvailableModels");
+  expect(a).toHaveBeenLastCalledWith({ kind: "quota", exhausted: new Map([["sample", at]]) });
+  body = {
+    groups: [{ displayName: "Gemini Models", buckets: [{ remainingFraction: 0, resetTime }] }],
+  };
+  await send(one.url, "retrieveUserQuotaSummary");
+  expect(a).toHaveBeenLastCalledWith({ kind: "quota", exhausted: new Map() });
+  status = 429;
+  body = {
+    error: {
+      status: "RESOURCE_EXHAUSTED",
+      details: [
+        {
+          "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+          reason: "QUOTA_EXHAUSTED",
+          metadata: { quotaResetTimeStamp: resetTime },
+        },
+      ],
+    },
+  };
+  await send(two.url, "streamGenerateContent");
+  expect(b).toHaveBeenLastCalledWith({
+    kind: "response",
+    model: "sample",
+    limited: true,
+    resetsAt: at,
+  });
+  body = { error: { status: "PERMISSION_DENIED" } };
+  await send(two.url, "streamGenerateContent");
+  expect(b).toHaveBeenLastCalledWith({ kind: "response", model: "sample", limited: false });
+  for (const message of ["insufficient_quota", "usage_not_included"]) {
+    body = { error: { status: "RESOURCE_EXHAUSTED", message } };
+    await send(two.url, "streamGenerateContent");
+    expect(b).toHaveBeenLastCalledWith({ kind: "response", model: "sample", limited: false });
+  }
+  expect(a).toHaveBeenCalledTimes(2);
+  one.dispose();
+  two.dispose();
+  expect((await fetch(`${one.url}/v1internal:fetchAvailableModels`)).status).toBe(410);
+});
+
 it("never retries after response headers or bytes", async () => {
   let calls = 0;
   const cut = latch();

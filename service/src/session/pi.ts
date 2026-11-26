@@ -1,3 +1,6 @@
+import type { CcpaProxy } from "../acp-proxy/proxy";
+import type { ObserveRequest } from "../acp-proxy/limit-evidence";
+import { futureReset, refusalText, type PiTurnLimit } from "./pi-rate-limit";
 import { lifecycleWriter } from "../usage/lifecycle";
 import { estimatedContext, type ContextUsage } from "../../../shared/context-usage";
 import { execFile } from "node:child_process";
@@ -96,7 +99,7 @@ export interface PiSessionOptions {
   panelHttp?: PanelHttpServer;
   rpcFactory?: (options: PiRpcSpawnOptions) => PiRpcClient;
   env?: NodeJS.ProcessEnv;
-  ccpaProxyUrl?: string;
+  ccpaProxy?: Pick<CcpaProxy, "url" | "registerSession">;
   piBinary?: string;
   piArgs?: string[];
   interruptTimeoutMs?: number;
@@ -478,6 +481,8 @@ interface Turn {
   finalText: string;
   error?: string;
   compact?: boolean;
+  acpAttempt?: { model?: string; reset?: number };
+  limit?: PiTurnLimit;
 }
 
 type ChildSourceFormat = "async_events" | "transcript" | "session_v3";
@@ -610,6 +615,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   private readonly panelHttp: PanelHttpServer;
   private readonly sessionKey = randomUUID();
   private readonly ownsPanel: boolean;
+  private acpRoute?: ReturnType<CcpaProxy["registerSession"]>;
+  private acpVariants = new Map<string, Json>();
   private readonly statsTimeoutMs: number;
   private readonly readyTimeoutMs: number;
   private readonly model: Setting;
@@ -1020,8 +1027,10 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         ...this.options.env,
         ...this.home?.env,
       });
-      if (this.options.ccpaProxyUrl !== undefined) {
-        env.AGY_ACP_CCPA_BASE_URL ??= this.options.ccpaProxyUrl;
+      if (this.options.ccpaProxy) {
+        if (env.AGY_ACP_CCPA_BASE_URL === undefined && !this.options.catalogOnly)
+          this.acpRoute = this.options.ccpaProxy.registerSession(this.acpObserver(generation));
+        env.AGY_ACP_CCPA_BASE_URL ??= this.acpRoute?.url ?? this.options.ccpaProxy.url;
         const bypass = (value: string | undefined) =>
           [
             ...new Set([
@@ -1125,10 +1134,13 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         rpc.getAvailableThinkingLevels(timeout),
       ]);
       if (!this.current(generation, rpc)) throw new Error("Pi startup cancelled");
+      this.acpVariants.clear();
       const available = models.flatMap((row) => {
         const model = object(row);
         const provider = text(model.provider),
           modelId = text(model.id ?? model.modelId);
+        if (provider === ACP && modelId)
+          this.acpVariants.set(modelId, object(model.thinkingLevelMap));
         return provider && modelId
           ? [
               {
@@ -1213,6 +1225,53 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
       this.processGeneration === turn.generation &&
       !this.disposed
     );
+  }
+
+  private acpObserver(generation: number): ObserveRequest {
+    const snapshots = new Map<string, Map<string, number>>();
+    const latest = new Map<string, symbol>();
+    return (op) => {
+      if (generation !== this.processGeneration || this.disposed) return;
+      if (op !== "streamGenerateContent") {
+        const request = Symbol();
+        latest.set(op, request);
+        return (observation) => {
+          if (observation.kind === "quota" && latest.get(op) === request)
+            snapshots.set(op, observation.exhausted);
+        };
+      }
+      const turn = this.activeTurn;
+      if (
+        !turn ||
+        !this.live(turn) ||
+        !(turn.started || turn.written) ||
+        // ACP descendants inherit the environment. Never attribute a shared
+        // route's traffic while a child could be making its own model calls.
+        this.activeAsyncRuns.length ||
+        this.foregroundTrackers.size ||
+        [...turn.tools.values()].some((tool) => tool.name === "subagent") ||
+        !this.model.applied?.startsWith(`${ACP}/`)
+      )
+        return;
+      const model = this.model.applied.slice(ACP.length + 1);
+      const variants = this.acpVariants.get(model);
+      const attempt: NonNullable<Turn["acpAttempt"]> = {};
+      turn.acpAttempt = attempt; // even a transport failure supersedes the previous 429
+      return (response) => {
+        if (
+          !this.live(turn) ||
+          turn.acpAttempt !== attempt ||
+          response.kind !== "response" ||
+          !response.limited ||
+          (model !== response.model && !Object.values(variants ?? {}).includes(response.model))
+        )
+          return;
+        attempt.model = response.model;
+        attempt.reset =
+          futureReset(response.resetsAt) ??
+          futureReset(Math.max(...[...snapshots.values()].map((s) => s.get(response.model) ?? 0)));
+      };
+    };
   }
 
   private resolveModel(desired: string): PiAvailableModel | undefined {
@@ -1599,6 +1658,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     turn: Turn,
     terminal?: StreamEvent,
     contextPending?: Promise<ContextUsage | null>,
+    limit?: PiTurnLimit,
   ): void {
     if (this.activeTurn !== turn || turn.settled) return;
     turn.settled = true;
@@ -1608,7 +1668,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     }
     this.emit("runState", this.runState);
     if (terminal) {
-      this.emit("event", terminal, contextPending);
+      this.emit("event", terminal, contextPending, limit);
       if (terminal.kind === "error" && this.listenerCount("error"))
         this.emit("error", new Error(terminal.content));
       this.emit("done", terminal);
@@ -1801,6 +1861,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
           turn.blocks.clear();
           turn.finalText = "";
           turn.error = undefined;
+          turn.limit = undefined;
         }
         break;
       case "message_update": {
@@ -1899,6 +1960,33 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
             msg.stopReason === "error"
               ? (text(msg.errorMessage) ?? "Pi assistant failed")
               : undefined;
+          const acp = msg.provider === ACP;
+          const model = turn.acpAttempt?.model;
+          const acpError =
+            model &&
+            turn.error &&
+            (turn.error.startsWith(`Antigravity quota exceeded for ${model}.`) ||
+              turn.error.startsWith(
+                "Antigravity quota exceeded: the model path refused requests with HTTP 429 RESOURCE_EXHAUSTED (rate limit or entitlement);",
+              ));
+          const reportedAt =
+            acpError &&
+            turn.error?.startsWith(`Antigravity quota exceeded for ${model}. Resets at `)
+              ? Date.parse(
+                  turn.error.slice(
+                    `Antigravity quota exceeded for ${model}. Resets at `.length,
+                    -1,
+                  ),
+                ) / 1000
+              : undefined;
+          const reset = futureReset(
+            acp ? acpError && (turn.acpAttempt?.reset ?? reportedAt) : msg.yaatLimitReset,
+          );
+          turn.limit =
+            reset && turn.error
+              ? { resetsAt: reset, refusalText: refusalText(turn.finalText, turn.error, acp) }
+              : undefined;
+          turn.acpAttempt = undefined;
           // Some providers omit a block-end event; the completed message is authoritative.
           blocks.forEach((block, index) => {
             if (turn.blocks.get(index)?.ended) return;
@@ -1930,9 +2018,11 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         this.endTool(turn, event);
         break;
       case "agent_settled":
-        this.settle(turn);
+        this.settle(turn, event.aborted === true);
         break;
       case "auto_retry_start": {
+        turn.limit = undefined;
+        turn.acpAttempt = undefined;
         turn.modelTrigger = "retry";
         const attempt = num(event.attempt);
         const maxAttempts = num(event.maxAttempts);
@@ -1954,7 +2044,10 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
         break;
       }
       case "auto_retry_end":
-        if (event.success === false) turn.error = text(event.finalError) ?? turn.error;
+        if (event.success === false) {
+          if (turn.error !== (text(event.finalError) ?? turn.error)) turn.limit = undefined;
+          turn.error = text(event.finalError) ?? turn.error;
+        } else turn.limit = undefined;
         this.event({ kind: "retry", content: "" });
         break;
     }
@@ -2057,7 +2150,7 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
     });
   }
 
-  private settle(turn: Turn): void {
+  private settle(turn: Turn, aborted: boolean): void {
     this.hasConfirmedTurns = true;
     if (turn.anchorInput && this.rpc) this.schedulePersistedAnchor(turn, this.rpc, true);
     if (turn.paired && !turn.accepted && turn.inputId) {
@@ -2133,6 +2226,14 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
             context: null,
           },
       contextPending,
+      turn.error &&
+        !aborted &&
+        !this.interrupting &&
+        (!turn.inputId || turn.accepted) &&
+        !turn.recovery &&
+        futureReset(turn.limit?.resetsAt)
+        ? turn.limit
+        : undefined,
     );
   }
 
@@ -4292,6 +4393,8 @@ export class PiSession extends EventEmitter implements HostSessionHandle {
   }
 
   private unregisterRoute(): void {
+    this.acpRoute?.dispose();
+    this.acpRoute = undefined;
     if (this.registered) this.panelHttp.unregisterSession(this.sessionKey);
     this.registered = false;
     this.panelToken = undefined;

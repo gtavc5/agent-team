@@ -1,3 +1,4 @@
+import type { CcpaProxy } from "../acp-proxy/proxy";
 import type { PiQuotaReader, QuotaSnapshot } from "./quota-schema";
 import type { RateLimitSnapshot } from "./codex-rpc";
 import { EventEmitter } from "events";
@@ -126,7 +127,7 @@ export class LocalHost implements Host {
       codex: (limits: RateLimitSnapshot) => void;
     },
     private readonly usageRecorder?: UsageRecorder,
-    private readonly ccpaProxyUrl?: () => string | undefined,
+    private readonly ccpaProxy?: () => CcpaProxy | undefined,
   ) {
     this.id = id;
     this.label = label;
@@ -176,7 +177,7 @@ export class LocalHost implements Host {
         {
           panelHttp: this.getPanelHttp(),
           recordUsage: recorder?.recordUsage,
-          ccpaProxyUrl: this.ccpaProxyUrl?.(),
+          ccpaProxy: this.ccpaProxy?.(),
         },
       );
     } else {
@@ -225,7 +226,7 @@ export class LocalHost implements Host {
         {
           panelHttp: this.getPanelHttp(),
           recordUsage: recorder?.recordUsage,
-          ccpaProxyUrl: this.ccpaProxyUrl?.(),
+          ccpaProxy: this.ccpaProxy?.(),
         },
       );
     } else {
@@ -239,7 +240,7 @@ export class LocalHost implements Host {
     const agentId = `model-catalog-${Math.random().toString(36).slice(2)}`;
     const session = new PiSession(
       { ...config, agentId },
-      { catalogOnly: true, panelHttp: this.getPanelHttp(), ccpaProxyUrl: this.ccpaProxyUrl?.() },
+      { catalogOnly: true, panelHttp: this.getPanelHttp(), ccpaProxy: this.ccpaProxy?.() },
     );
     this.sessions.set(agentId, session);
     try {

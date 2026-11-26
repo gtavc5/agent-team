@@ -54,6 +54,7 @@ const files = [
   "server.js",
   "history-worker.js",
   "pi-panel-bridge.ts",
+  "pi-rate-limit.ts",
   "pi-quota.ts",
   "quota-schema.ts",
   "acp-readiness.ts",

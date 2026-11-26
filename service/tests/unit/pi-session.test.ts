@@ -1759,6 +1759,117 @@ describe("PiSession dispatch and stream state", () => {
     expect(h.done).toHaveBeenCalledTimes(1);
   });
 
+  it("binds ACP transport evidence to the admitted request's turn and final provider failure", async () => {
+    const model = { provider: "antigravity-acp", id: "test" };
+    let observe!: import("../../src/acp-proxy/limit-evidence").ObserveRequest;
+    const url = "http://127.0.0.1:12345";
+    const h = harness({
+      startupModel: model,
+      models: [model],
+      options: {
+        env: { AGY_ACP_CCPA_BASE_URL: undefined, AGY_ACP_BIN: process.execPath },
+        ccpaProxy: {
+          url,
+          registerSession: (callback) => {
+            observe = callback;
+            return { url, dispose: () => {} };
+          },
+        },
+      },
+    });
+    const resetsAt = Math.floor(Date.now() / 1000) + 900;
+    const limits: unknown[] = [];
+    h.session.on("event", (_e, _context, limit) => {
+      if (limit) limits.push(limit);
+    });
+    const begin = async () => {
+      await h.session.send("work");
+      h.clients[0].event(piFrame("agent_start"));
+      h.clients[0].event(piFrame("message_end", { role: "user" }));
+      h.clients[0].event(assistantStart());
+    };
+    const end = (error = "Antigravity quota exceeded for test.") => {
+      const refusal = "Usage Limit Reached\n\nYou have reached your current quota for this period.";
+      const frame = assistantEnd([{ type: "text", text: refusal }], error ? "error" : "stop");
+      h.clients[0].event({
+        ...frame,
+        message: {
+          ...frame.message,
+          provider: model.provider,
+          model: model.id,
+          errorMessage: error,
+        },
+      });
+      h.clients[0].event(piFrame("agent_settled"));
+    };
+    const response = { kind: "response" as const, model: "test", limited: true };
+    await begin();
+    observe("fetchAvailableModels")!({ kind: "quota", exhausted: new Map([["test", resetsAt]]) });
+    const previous = observe("streamGenerateContent")!;
+    end(); // quota alone
+    await begin();
+    previous(response);
+    end(); // delayed previous turn
+    await begin();
+    observe("streamGenerateContent")!(response);
+    end("403 permission denied");
+    await begin();
+    observe("streamGenerateContent")!(response);
+    end("");
+    await begin();
+    observe("streamGenerateContent")!({ ...response, model: "other" });
+    end();
+    await begin();
+    observe("streamGenerateContent")!(response);
+    observe("streamGenerateContent")!({ ...response, limited: false });
+    end();
+    expect(limits).toEqual([]);
+    await begin();
+    observe("streamGenerateContent")!(response);
+    end();
+    expect(limits).toEqual([
+      {
+        resetsAt,
+        refusalText: "Usage Limit Reached\n\nYou have reached your current quota for this period.",
+      },
+    ]);
+  });
+
+  it.each(["final", "retry-success", "unknown-delivery", "bare"])(
+    "only promotes turn-final native evidence (%s)",
+    async (scenario) => {
+      const h = harness();
+      const resetsAt = Math.floor(Date.now() / 1000) + 90;
+      const limits: unknown[] = [];
+      h.session.on("event", (_e, _context, limit) => {
+        if (limit) limits.push(limit);
+      });
+      await h.session.send("work");
+      const { event } = h.clients[0];
+      event(piFrame("agent_start"));
+      if (scenario !== "unknown-delivery") event(piFrame("message_end", { role: "user" }));
+      event(assistantStart());
+      const frame = assistantEnd([{ type: "text", text: "429 refusal" }], "error");
+      event({
+        ...frame,
+        message: {
+          ...frame.message,
+          errorMessage: "429 refusal",
+          ...(scenario !== "bare" && { yaatLimitReset: resetsAt }),
+        },
+      });
+      if (scenario === "retry-success") {
+        event(piFrame("auto_retry_start"));
+        event(assistantStart());
+        event(assistantEnd([{ type: "text", text: "success" }]));
+      }
+      event(piFrame("agent_settled"));
+      expect(limits).toEqual(
+        scenario === "final" ? [{ resetsAt, refusalText: "429 refusal" }] : [],
+      );
+    },
+  );
+
   it("marks confirmed transport on the terminal Pi error, not the retry banner", async () => {
     const h = harness();
     await h.session.send("work");
@@ -1786,10 +1897,16 @@ describe("PiSession dispatch and stream state", () => {
       vi.stubEnv("NO_PROXY", upper);
       // On Windows the two names refer to a single native environment entry.
       if (!windows) vi.stubEnv("no_proxy", lower);
-      const { session, factory } = harness({ options: { ccpaProxyUrl: endpoint } });
+      const registerSession = vi.fn(() => ({
+        url: `${endpoint}/_yaat/session`,
+        dispose: () => {},
+      }));
+      const { session, factory } = harness({
+        options: { ccpaProxy: { url: endpoint, registerSession } },
+      });
       await session.ensureStarted();
       expect(factory.mock.calls[0][0].env).toMatchObject({
-        AGY_ACP_CCPA_BASE_URL: override ?? endpoint,
+        AGY_ACP_CCPA_BASE_URL: override ?? `${endpoint}/_yaat/session`,
         NO_PROXY: "upper.test,localhost,127.0.0.1",
         no_proxy: windows ? "upper.test,localhost,127.0.0.1" : "lower.test,127.0.0.1,localhost",
       });

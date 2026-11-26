@@ -17,7 +17,9 @@ const WORKSPACE = {
   agents: ["Alpha", "Beta"].map((name, i) => ({
     id: name,
     name,
-    state: "working",
+    // A limit-paused agent has the same Stop affordance as a running turn.
+    state: i === 1 ? "idle" : "working",
+    retryPending: i === 1,
     model: "claude-opus-5-5",
     avatar: name[0],
     color: "#888",

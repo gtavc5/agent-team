@@ -1335,7 +1335,11 @@ export function App() {
   const targetBusy = !!targetAgent && agentQueues(targetAgent);
   const stoppableAgents = connected
     ? (activeWs?.agents.filter(
-        (a) => a.networkWaiting || agentQueues(a) || (a.busy && a.lastStreamAt != null),
+        (a) =>
+          a.networkWaiting ||
+          a.retryPending ||
+          agentQueues(a) ||
+          (a.busy && a.lastStreamAt != null),
       ) ?? [])
     : [];
 

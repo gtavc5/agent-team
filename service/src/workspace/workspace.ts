@@ -108,6 +108,7 @@ export interface AgentRuntimeInfo extends AgentInfo {
   canSwitchBackend: boolean;
   busy: boolean;
   networkWaiting: boolean;
+  retryPending: boolean;
   state: RunState;
   activity: string | null;
   lastStreamAt?: number;
@@ -356,7 +357,7 @@ export interface WorkspaceCallbacks {
   onRateLimit?: (
     wsId: string,
     agentId: string,
-    info: { rateLimitType?: string; resetsAt?: number },
+    info: { rateLimitType?: string; resetsAt?: number; turnFinal?: true },
   ) => void;
   onAgentActivity?: (wsId: string, agentId: string, activity: string | null) => void;
   onAgentState?: (wsId: string, agentId: string, state: RunState) => void;
@@ -1135,7 +1136,11 @@ export class Workspace {
   }
 
   private createEventHandler(agentId: string) {
-    return (event: StreamEvent, contextPending?: Promise<ContextUsage | null>) => {
+    return (
+      event: StreamEvent,
+      contextPending?: Promise<ContextUsage | null>,
+      limit?: import("../session/pi-rate-limit").PiTurnLimit,
+    ) => {
       const entry = this.agents.get(agentId);
       if (!entry) return;
 
@@ -1349,10 +1354,23 @@ export class Workspace {
         const input = entry.input;
         const msg = this.ensureAgentMsg(entry);
         const from = input && this.findMessage(input.id)?.from;
+        // Classify before the server announces and persists the recovery mode.
+        // The refusal remains in the transcript; only its exact final span is
+        // omitted from the progress check. Tools/thinking and earlier text count.
+        const confirmed =
+          limit && limit.resetsAt * 1000 > Date.now() && this.isWritable() && !input?.stopped;
+        if (confirmed) {
+          const before =
+            limit.refusalText && msg.content.endsWith(limit.refusalText)
+              ? msg.content.slice(0, -limit.refusalText.length)
+              : msg.content;
+          if (answered(msg, before)) entry.lastEnvelope = undefined;
+        }
         const failedWorkerTurn =
           activeTurn &&
           input &&
           !input.stopped &&
+          !confirmed &&
           !entry.retryPending &&
           this.projectLink?.role === "worker" &&
           !this.projectLink.unreported &&
@@ -1362,13 +1380,16 @@ export class Workspace {
         }
         clearRetry(msg);
         // The model saw the prompt a waiting retry would send: it carries on.
-        if (entry.retryPending && answered(msg)) entry.lastEnvelope = undefined;
+        if (!confirmed && entry.retryPending && answered(msg)) entry.lastEnvelope = undefined;
         msg.status = "error";
         this.recordResult("failed");
         clearLiveTiming(msg);
         this.recordTerminalContext(entry, msg, event.context, contextPending);
         event.contentOffset = msg.content.length;
         msg.events!.push(event);
+        this.touch([msg.id]);
+        if (confirmed)
+          this.cb?.onRateLimit?.(this.id, agentId, { resetsAt: limit.resetsAt, turnFinal: true });
         this.streamed(msg, event);
         this.finished(
           msg.id,
@@ -2888,6 +2909,7 @@ export class Workspace {
     if (!entry) return;
     entry.pausedUntil = until;
     entry.retryPending = retry;
+    if (retry) this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry), true);
   }
 
   // A spacing pause is over: lift it and move the queue. Its timer can fire
@@ -2907,6 +2929,7 @@ export class Workspace {
     if (!entry.retryPending) return;
     entry.retryPending = false;
     entry.pausedUntil = undefined;
+    this.cb?.onAgentUpdated?.(this.id, this.agentInfo(entry));
   }
 
   // Rate-limit recovery, if a retry is still pending (a stop or an archive
@@ -2922,8 +2945,7 @@ export class Workspace {
       this.dispatchHeld(entry)
     )
       return false;
-    entry.pausedUntil = undefined;
-    entry.retryPending = false;
+    this.dropRetry(entry);
     if (entry.lastEnvelope) {
       void this.dispatchPrompt(entry, entry.lastEnvelope, undefined, undefined, "retry");
       return true;
@@ -3192,6 +3214,7 @@ export class Workspace {
       canSwitchBackend: this.canSwitchBackend(a, state),
       busy: a.session.isRunning || !!a.openingPrompt,
       networkWaiting: a.networkWaiting ?? false,
+      retryPending: a.retryPending ?? false,
       state: this.agentState(a),
       activity: a.activity ?? null,
       ...(a.lastStreamAt != null && { lastStreamAt: a.lastStreamAt }),
@@ -3477,9 +3500,9 @@ function restoreMessage(
 
 // The model answered in the reply: text, thinking or a tool call, not just
 // the notices and retry banners of a turn the API refused.
-function answered(msg: Message): boolean {
+function answered(msg: Message, content = msg.content): boolean {
   const output = ["thinking", "tool_use", "subagent_start"];
-  return !!msg.content.trim() || !!msg.events?.some((e) => output.includes(e.kind));
+  return !!content.trim() || !!msg.events?.some((e) => output.includes(e.kind));
 }
 
 // A plan or preamble before the last tool call is not the turn's conclusion.

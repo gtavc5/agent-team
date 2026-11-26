@@ -205,6 +205,57 @@ async function registerParameters(
   return schemas;
 }
 
+describe("native provider evidence on the bridge", () => {
+  it.each([true, false])(
+    "keeps an optional transport hook local to its assistant failure (supported=%s)",
+    (supported) => {
+      vi.stubEnv("YAAT_PANEL_URL", "http://127.0.0.1");
+      vi.stubEnv("YAAT_PANEL_TOKEN", "token");
+      const hooks = new Map<
+        string,
+        (e: object) => { message: Record<string, unknown> } | undefined
+      >();
+      const api = {
+        on(name: string, cb: (e: object) => { message: Record<string, unknown> } | undefined) {
+          if (!supported && ["after_provider_response", "provider_stream_event"].includes(name))
+            throw Error("unsupported");
+          hooks.set(name, cb);
+        },
+        events: { on: () => () => {} },
+      };
+      piPanelBridge(api as unknown as Parameters<typeof piPanelBridge>[0]);
+      const error = (errorMessage: string) =>
+        hooks.get("message_end")!({
+          message: { role: "assistant", stopReason: "error", errorMessage },
+        })?.message.yaatLimitReset;
+      const http = (status: number, headers: object) =>
+        hooks.get("after_provider_response")?.({ status, headers });
+      const at = Math.floor(Date.now() / 1000) + 300;
+      http(429, { "anthropic-ratelimit-unified-reset": String(at) });
+      expect(error("429 too many requests")).toBe(supported ? at : undefined);
+      http(429, {});
+      expect(error("429")).toBeUndefined();
+      http(429, { "retry-after": "60" });
+      http(200, {});
+      expect(error("429")).toBeUndefined();
+      http(429, { "retry-after": "60" });
+      expect(error("403 forbidden")).toBeUndefined();
+      for (const cause of ["insufficient quota", "usage_not_included"]) {
+        http(429, { "retry-after": "60" });
+        expect(error(`429 ${cause}`)).toBeUndefined();
+      }
+      hooks.get("provider_stream_event")?.({
+        data: {
+          type: "error",
+          error: { code: "usage_limit_reached", resets_at: at, message: "spent" },
+        },
+      });
+      expect(error("Codex error: spent")).toBe(supported ? at : undefined);
+      expect(error("Codex error: spent")).toBeUndefined();
+    },
+  );
+});
+
 describe("panel schema bridge", () => {
   it("registers Gemini-compatible TypeBox parameters for every production tool", async () => {
     const api = new Proxy({} as PanelApi, {

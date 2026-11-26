@@ -1,4 +1,5 @@
 import { CONFIGURED_EVENT, piSnapshotSchema, REFRESH_EVENT, SNAPSHOT_EVENT } from "./quota-schema";
+import { NativeLimitObservation } from "./pi-rate-limit";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -124,6 +125,12 @@ interface PiExtensionApi {
     on(channel: string, handler: (data: unknown) => void): Unsubscribe;
     emit(channel: string, data: unknown): void;
   };
+  on(
+    event: "after_provider_response",
+    handler: (event: { status: number; headers: Record<string, string> }) => void,
+  ): Unsubscribe;
+  on(event: "provider_stream_event", handler: (event: { data: unknown }) => void): Unsubscribe;
+  on(event: "turn_start", handler: () => void): Unsubscribe;
   on(event: "session_start", handler: (event: unknown, ctx: ExtensionContext) => void): Unsubscribe;
   on(
     event: "message_end",
@@ -762,7 +769,32 @@ export default function piPanelBridge(pi: PiExtensionApi): void {
     })().catch(() => undefined);
   });
 
+  const transport = new NativeLimitObservation();
+  pi.on("turn_start", () => transport.clear());
+  // Hook availability and provider/transport coverage vary independently. A
+  // missing hook must neither break startup nor manufacture reset evidence.
+  try {
+    pi.on("after_provider_response", ({ status, headers }) => transport.response(status, headers));
+  } catch {
+    /* unsupported */
+  }
+  try {
+    pi.on("provider_stream_event", ({ data }) => transport.stream(data));
+  } catch {
+    /* unsupported */
+  }
   pi.on("message_end", ({ message }) => {
+    if (message.role === "assistant") {
+      const msg = asObject(message);
+      const reset =
+        message.stopReason === "error" &&
+        msg.provider !== "antigravity-acp" &&
+        transport.finish(msg.errorMessage);
+      transport.clear();
+      // Pi applies message_end replacements before emitting the RPC frame. No
+      // out-of-band observation can race the next retry or assistant message.
+      if (reset) return { message: { ...message, yaatLimitReset: reset } };
+    }
     const authenticated = authenticatePiRecoveryMessage(message, panelToken);
     if (authenticated) return { message: authenticated };
   });

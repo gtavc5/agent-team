@@ -310,6 +310,7 @@ export interface AgentInfo {
   canSwitchBackend?: boolean;
   busy?: boolean;
   networkWaiting?: boolean;
+  retryPending?: boolean;
   state?: RunState;
   lastStreamAt?: number;
   retryLabel?: string;
