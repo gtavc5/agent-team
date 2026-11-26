@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import type {} from "@vitest/browser-playwright";
 import { BannerItem, EventItem, MessageStatus } from "../../src/chat/messages";
 import { MdBlock } from "../../src/chat/markdown";
@@ -75,7 +75,9 @@ const actions: AgentsPanelActions = {
   onCancelWake: no,
 };
 
-function contentInsets(element: HTMLElement) {
+// Atomic controls contribute their border box even when transparent; text contributes
+// a layout Range, not glyph pixels. This guard is not an audit of painted spacing.
+function boxAndRangeInsets(element: HTMLElement) {
   const bounds = element.getBoundingClientRect();
   const computed = getComputedStyle(element);
   const topBorder = bounds.top + element.clientTop;
@@ -165,16 +167,16 @@ const selectors = {
   "quota-details": "#audit-quota-panel .quota-details",
   "ap-collapsed": "#audit-ap-collapsed .ap-session",
   "ap-collapsed-busy": "#audit-ap-collapsed-busy .ap-session",
-  "ap-expanded": "#audit-ap-expanded .ap-session",
-  "ap-expanded-readonly": "#audit-ap-expanded-readonly .ap-session",
+  "ap-expanded-footer-targets": "#audit-ap-expanded .ap-session-foot",
+  "ap-sealed-footer-label": "#audit-ap-expanded-readonly .ap-session-foot",
   "bp-card": "#audit-bp-card > .bp-card",
   "bp-node": "#audit-bp-node > .bp-node",
   "bi-row": "#audit-bi-row > .bi-row",
   "usage-card": "#audit-usage-card > .usage-card",
   "stats-collapsed": "#audit-stats .session-stats-turn:nth-of-type(1)",
   "stats-no-steps": "#audit-stats .session-stats-turn:nth-of-type(2)",
-  "stats-expanded": "#audit-stats .session-stats-turn:nth-of-type(3)",
-  "stats-step-expanded": "#audit-stats .session-stats-turn:nth-of-type(4)",
+  "stats-expanded-row": "#audit-stats .session-stats-turn:nth-of-type(3) li",
+  "stats-open-row": "#audit-stats .session-stats-turn:nth-of-type(4) li",
   dialog: "#audit-dialog > .dialog",
   "command-popup": "#audit-command-popup > .command-popup",
   "ui-option": "#audit-ui-option > .ui-dialog-option",
@@ -190,7 +192,7 @@ afterEach(() => {
 it.each([
   { layout: "desktop", width: 1280, height: 900 },
   { layout: "mobile", width: 390, height: 844 },
-])("audits representative bordered content geometry on $layout", async ({ width, height }) => {
+])("audits control-box and text-range insets on $layout", async ({ width, height }) => {
   await page.viewport(width, height);
   vi.stubGlobal(
     "fetch",
@@ -218,7 +220,11 @@ it.each([
         </div>
         <div id="audit-banner-list">
           <BannerItem
-            ev={{ kind: "notice", level: "schedule", content: "Scheduled prompt\n\n- one\n- two" }}
+            ev={{
+              kind: "notice",
+              level: "schedule",
+              content: "Scheduled prompt\n\n- one\n- two",
+            }}
           />
         </div>
         <div id="audit-banner-list-only">
@@ -235,7 +241,11 @@ it.each([
         </div>
         <div id="audit-banner-schedule">
           <BannerItem
-            ev={{ kind: "notice", level: "schedule", content: "Scheduled prompt\n\n> quoted task" }}
+            ev={{
+              kind: "notice",
+              level: "schedule",
+              content: "Scheduled prompt\n\n> quoted task",
+            }}
           />
         </div>
         <div id="audit-banner-compact">
@@ -465,7 +475,7 @@ it.each([
 
   fireEvent.click(document.querySelector("#audit-banner-list .banner-toggle")!);
   fireEvent.click(document.querySelector("#audit-banner-schedule .banner-toggle")!);
-  const collapsedQuota = contentInsets(
+  const collapsedQuota = boxAndRangeInsets(
     document.querySelector<HTMLElement>("#audit-quota-panel > .quota-panel")!,
   );
   fireEvent.click(document.querySelector("#audit-quota-panel .quota-row-toggle")!);
@@ -473,7 +483,7 @@ it.each([
   const results = Object.entries(selectors).map(([name, selector]) => {
     const element = document.querySelector<HTMLElement>(selector);
     expect(element, selector).not.toBeNull();
-    return { name, ...contentInsets(element!) };
+    return { name, ...boxAndRangeInsets(element!) };
   });
   for (const { name, top, bottom } of [
     { name: "quota-collapsed", ...collapsedQuota },
@@ -485,11 +495,181 @@ it.each([
   }
 });
 
+// Read ink from a themed Chromium crop without font- or platform-specific snapshots.
+async function inkBounds(label: HTMLElement) {
+  const base64 = await page.elementLocator(label).screenshot({ save: false, scale: "css" });
+  const image = new Image();
+  image.src = `data:image/png;base64,${base64}`;
+  await image.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(image, 0, 0);
+  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  // At rest the top-left pixel is the unpainted label/button background.
+  let left = image.width,
+    right = 0,
+    top = image.height,
+    bottom = 0;
+  for (let y = 0; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      const i = 4 * (y * image.width + x);
+      if ([0, 1, 2].every((c) => Math.abs(data[i + c] - data[c]) < 28)) continue;
+      left = Math.min(left, x);
+      right = Math.max(right, x + 1);
+      top = Math.min(top, y);
+      bottom = Math.max(bottom, y + 1);
+    }
+  }
+  expect(bottom).toBeGreaterThan(top);
+  const box = label.getBoundingClientRect();
+  // The Vitest runner can scale its iframe to fit the host viewport.
+  const sx = box.width / image.width,
+    sy = box.height / image.height;
+  return {
+    left: box.left + left * sx,
+    right: box.left + right * sx,
+    top: box.top + top * sy,
+    bottom: box.top + bottom * sy,
+  };
+}
+
+function footerImbalance(card: HTMLElement, mark: { top: number; bottom: number }) {
+  const foot = card.querySelector<HTMLElement>(".ap-session-foot")!;
+  return Math.abs(
+    mark.top -
+      foot.getBoundingClientRect().top -
+      foot.clientTop -
+      (card.getBoundingClientRect().bottom -
+        parseFloat(getComputedStyle(card).borderBottomWidth) -
+        mark.bottom),
+  );
+}
+
+function contourGap(card: HTMLElement, button: HTMLElement, leading: boolean) {
+  const cardBox = card.getBoundingClientRect(),
+    box = button.getBoundingClientRect();
+  const style = getComputedStyle(button);
+  const outset =
+    style.outlineStyle === "none"
+      ? 0
+      : Math.max(0, parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset));
+  // The active inset shadow paints the first two pixels inside the border.
+  return (
+    (leading
+      ? box.left - cardBox.left - card.clientLeft - (card.classList.contains("active") ? 2 : 0)
+      : cardBox.right - box.right - parseFloat(getComputedStyle(card).borderRightWidth)) - outset
+  );
+}
+
+it.each([390, 1280].flatMap((width) => ["light", "dark"].map((theme) => ({ width, theme }))))(
+  "separates footer ink, section rhythm and action contours at $width in $theme",
+  async ({ width, theme }) => {
+    await page.viewport(width, 844);
+    const previous = document.documentElement.dataset.theme;
+    document.documentElement.dataset.theme = theme;
+    try {
+      const view = (active: boolean, folded = false, sealed = false) => (
+        <div style={{ width: 350 }}>
+          <AgentsPanel
+            sessions={[{ ...workspace, agents: [{ ...agent, busy: true }] }]}
+            project={sealed ? { ...project, status: "sealed" } : project}
+            activeWsId={active ? workspace.id : null}
+            connected
+            models={[]}
+            actions={actions}
+            overview={folded}
+          />
+        </div>
+      );
+      const { container, rerender } = render(view(true));
+      for (const active of [true, false])
+        for (const folded of [false, true]) {
+          rerender(view(active, folded));
+          const card = container.querySelector<HTMLElement>(".ap-session")!;
+          for (const button of card.querySelectorAll<HTMLButtonElement>(
+            ".ap-add,.ap-actions > :last-child",
+          )) {
+            await page.elementLocator(card.querySelector("header")!).hover();
+            const leading = button.classList.contains("ap-add");
+            const ink = await inkBounds(button);
+            const axis = card
+              .querySelector(leading ? ".ap-agents" : ".ap-when")!
+              .getBoundingClientRect();
+            expect(
+              Math.abs(leading ? ink.left - axis.left - 12 : axis.right - ink.right),
+              `${button.textContent} resting ink axis, folded=${folded}`,
+            ).toBeLessThanOrEqual(2);
+            // Rendered glyphs have different ascenders/descenders; a few pixels
+            // of optical variation are independent of the symmetric button contour.
+            if (!folded)
+              expect(footerImbalance(card, ink), button.textContent).toBeLessThanOrEqual(5);
+            if (matchMedia("(hover: hover)").matches) {
+              await page.elementLocator(button).hover();
+              expect(getComputedStyle(button).borderTopColor).not.toBe("rgba(0, 0, 0, 0)");
+              expect(contourGap(card, button, leading)).toBeGreaterThanOrEqual(4);
+              if (!folded)
+                expect(footerImbalance(card, button.getBoundingClientRect())).toBeLessThanOrEqual(
+                  1,
+                );
+            }
+            await userEvent.keyboard("{Tab}");
+            button.focus();
+            expect(button.matches(":focus-visible")).toBe(true);
+            expect(getComputedStyle(button).outlineStyle).not.toBe("none");
+            expect(contourGap(card, button, leading)).toBeGreaterThanOrEqual(4);
+            button.blur();
+          }
+        }
+      rerender(view(true, false, true));
+      const card = container.querySelector<HTMLElement>(".ap-session")!;
+      expect(
+        footerImbalance(card, await inkBounds(card.querySelector(".ap-readonly")!)),
+        "sealed label",
+      ).toBeLessThanOrEqual(4);
+    } finally {
+      if (previous === undefined) delete document.documentElement.dataset.theme;
+      else document.documentElement.dataset.theme = previous;
+    }
+  },
+);
+
+it("rejects section and contour regressions hidden by outer-box and resting-label checks", async () => {
+  await page.viewport(1280, 900);
+  const { container } = render(
+    <AgentsPanel
+      sessions={[workspace]}
+      project={project}
+      activeWsId={workspace.id}
+      connected
+      models={[]}
+      actions={actions}
+    />,
+  );
+  const card = container.querySelector<HTMLElement>(".ap-session")!;
+  const foot = card.querySelector<HTMLElement>("footer")!;
+  const add = foot.querySelector<HTMLElement>(".ap-add")!;
+  foot.style.paddingBlock = "4px 10px";
+  const outer = boxAndRangeInsets(card);
+  expect(Math.abs(outer.top - outer.bottom)).toBeLessThanOrEqual(1.5);
+  expect(footerImbalance(card, add.getBoundingClientRect())).toBeGreaterThan(1.5);
+  const rest = await inkBounds(add);
+  add.style.paddingLeft = "8px";
+  add.style.marginLeft = "-9px";
+  expect(Math.abs((await inkBounds(add)).left - rest.left)).toBeLessThanOrEqual(1);
+  expect(add.getBoundingClientRect().height).toBeGreaterThanOrEqual(24);
+  await page.elementLocator(add).hover();
+  expect(getComputedStyle(add).borderTopColor).not.toBe("rgba(0, 0, 0, 0)");
+  expect(contourGap(card, add, true)).toBeLessThan(4);
+});
+
 it("keeps the mobile collapsed Stop target inside its card and clickable", async () => {
   await page.viewport(390, 844);
   const stop = vi.fn();
   render(
-    <div style={{ width: 350 }}>
+    <div style={{ width: 350, height: 200, overflowY: "auto" }}>
+      <div style={{ height: 400 }} />
       <AgentsPanel
         sessions={[{ ...workspace, agents: [{ ...agent, busy: true }] }]}
         project={project}
@@ -502,6 +682,8 @@ it("keeps the mobile collapsed Stop target inside its card and clickable", async
     </div>,
   );
   const button = document.querySelector<HTMLElement>(".ap-brief .panel-btn")!;
+  button.scrollIntoView({ block: "center" });
+  expect(button.closest(".agents-panel")!.parentElement!.scrollTop).toBeGreaterThan(0);
   const buttonBounds = button.getBoundingClientRect();
   const card = document.querySelector<HTMLElement>(".ap-session")!;
   const cardBounds = card.getBoundingClientRect();

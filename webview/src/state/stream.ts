@@ -301,7 +301,7 @@ export function mergeLatestPage(existing: Message[], incoming: Message[]): Messa
 
 // Messages whose bodies the client had (streamed live or expanded) but that
 // came back from the resync as summaries. Their full events must be
-// re-fetched, or what the user was reading turns into "tap to load".
+// re-fetched, or what the user was reading turns back into a placeholder.
 export function downgradedMessageIds(existing: Message[], merged: Message[]): string[] {
   const hadBodies = new Set(
     existing.filter((m) => m.detail !== "summary" && m.events?.length).map((m) => m.id),

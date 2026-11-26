@@ -321,3 +321,106 @@ it.each(["light", "dark"] as const)(
     expect(style(pill).color).toBe(accentHover);
   },
 );
+
+it("uses a calm passive surface for .archived-banner (with actionable Restore) and themed shadow for .session-silence-tip", async () => {
+  await page.viewport(1280, 800);
+  healthyProbe();
+  vi.spyOn(Date, "now").mockReturnValue(NOW);
+
+  const luminance = (channels: Uint8ClampedArray) => {
+    const [r, g, b] = Array.from(channels.slice(0, 3), (byte) => {
+      const c = byte / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const contrastOf = (fg: string, bg: string) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, 1, 1);
+    const a = luminance(ctx.getImageData(0, 0, 1, 1).data);
+    ctx.fillStyle = fg;
+    ctx.fillRect(0, 0, 1, 1);
+    const b = luminance(ctx.getImageData(0, 0, 1, 1).data);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  };
+
+  const shadows: Record<string, string> = {};
+  for (const theme of ["light", "dark"] as const) {
+    document.documentElement.dataset.theme = theme;
+    const restored = vi.fn();
+    const { container, unmount } = render(
+      <>
+        <div className="panel-header">
+          <div className="sealed-banner" role="status">
+            This project is sealed.
+          </div>
+          <div className="archived-banner">
+            <span>Archived 3d ago. Sending a message restores it.</span>
+            <button type="button" className="btn-inline" onClick={restored}>
+              Restore
+            </button>
+          </div>
+          <div className="banner banner-warning">
+            <span className="banner-icon">!</span>
+            <div className="banner-text">Live warning</div>
+          </div>
+        </div>
+        <div style={{ width: 300 }}>
+          <Sidebar
+            {...sidebarProps([
+              lead,
+              workspace("Quiet", 6, {
+                agents: [{ ...agent, busy: true, lastStreamAt: NOW - 120_000 }],
+              }),
+            ])}
+          />
+        </div>
+      </>,
+    );
+
+    const probe = document.createElement("div");
+    probe.style.background = "var(--warning-soft)";
+    probe.style.color = "var(--warning)";
+    probe.style.boxShadow = "var(--shadow-small)";
+    probe.style.borderColor = "var(--accent)";
+    document.body.append(probe);
+    const warningSoft = style(probe).backgroundColor;
+    const warningColor = style(probe).color;
+    const smallShadow = style(probe).boxShadow;
+    const accentColor = style(probe).borderTopColor;
+    probe.remove();
+
+    const archived = container.querySelector<HTMLElement>(".archived-banner")!;
+    const restoreBtn = archived.querySelector<HTMLButtonElement>(".btn-inline")!;
+    const liveWarn = container.querySelector<HTMLElement>(".banner-warning")!;
+
+    // Archived banner stays calm/passive while live warning keeps amber emphasis.
+    expect(style(archived).backgroundColor).not.toBe(warningSoft);
+    expect(style(archived).color).not.toBe(warningColor);
+    expect(style(liveWarn).color).toBe(warningColor);
+
+    // Restore remains clearly actionable with >=4.5:1 contrast at rest and hover.
+    const restRestoreBg = style(restoreBtn).backgroundColor;
+    expect(contrastOf(style(restoreBtn).color, restRestoreBg)).toBeGreaterThanOrEqual(4.5);
+    await page.elementLocator(restoreBtn).hover();
+    expect(style(restoreBtn).borderTopColor).toBe(accentColor);
+    expect(
+      contrastOf(style(restoreBtn).color, style(restoreBtn).backgroundColor),
+    ).toBeGreaterThanOrEqual(4.5);
+    fireEvent.click(restoreBtn);
+    expect(restored).toHaveBeenCalledTimes(1);
+
+    // Quiet tooltip uses the theme --shadow-small token instead of hardcoded rgba.
+    const quietBadge = row("Quiet").querySelector<HTMLElement>(".session-silence-quiet")!;
+    fireEvent.focus(quietBadge);
+    const tip = quietBadge.querySelector<HTMLElement>(".session-silence-tip")!;
+    expect(style(tip).boxShadow).toBe(smallShadow);
+    shadows[theme] = style(tip).boxShadow;
+
+    unmount();
+  }
+  expect(shadows.light).not.toBe(shadows.dark);
+});

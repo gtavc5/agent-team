@@ -468,9 +468,14 @@ describe("extension UI", () => {
     expect(above()?.textContent).toContain("updated");
     send({ kind: "widget", key: "w", placement: "aboveEditor" });
     send({ kind: "status", key: "k" });
-    expect(above()).toBeNull();
+    const liveRegion = above()?.querySelector('[role="status"]');
+    expect(liveRegion?.textContent).toBe("");
     send({ kind: "notify", id: "n", level: "error", message: "transient" });
-    expect(above()?.querySelector(".extension-notice.error")?.textContent).toContain("transient");
+    expect(above()?.querySelector('[role="status"]')).toBe(liveRegion);
+    expect(liveRegion?.querySelector(".extension-notice.error")?.textContent).toContain(
+      "transient",
+    );
+    expect(above()?.querySelector('[role="alert"]')).toBeNull();
     fireEvent.click(view.getByRole("button", { name: "Dismiss notification" }));
     expect(view.queryByText("transient")).toBeNull();
     send({ kind: "notify", id: "n2", level: "warning", message: "not replayed" });
@@ -707,7 +712,10 @@ describe("Project v2", () => {
     const path = view.getByLabelText("Repository path");
     fireEvent.change(path, { target: { value: "/repo/co" } });
     expect(view.getByText("/repo/code/")).toBeTruthy();
-    fireEvent.keyDown(path, { key: "Tab" });
+    fireEvent.keyDown(path, { key: "ArrowDown" });
+    fireEvent.keyDown(path, { key: "Enter" });
+    expect(view.queryByRole("listbox")).toBeNull();
+    expect(onCreate).not.toHaveBeenCalled();
     fireEvent.click(view.getByRole("button", { name: "Create project" }));
     expect(onCreate).toHaveBeenCalledWith("Code", "/repo/code/");
   });

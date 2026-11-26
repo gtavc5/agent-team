@@ -186,3 +186,47 @@ it("fits at 390×844 and toggles, dismisses and stops a turn using real touch in
     { type: "interrupt", workspaceId: "w", agentId: "Beta" },
   ]);
 });
+
+it.each(["light", "dark"])(
+  "draws the composer Stop menu divider flat outside the rounded button box at rest, hover, and focus (%s)",
+  async (theme) => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      await page.viewport(1280, 850);
+      const { trigger, popup } = boot();
+      await page.elementLocator(trigger).click();
+      await expect.element(popup).toBeVisible();
+
+      const beta = popup.getByRole("button", { name: "Stop Beta" }).element() as HTMLElement;
+      const stopAll = popup.getByRole("button", { name: "Stop all (2)" }).element() as HTMLElement;
+      const probe = document.createElement("div");
+      probe.style.background = "var(--border)";
+      document.body.append(probe);
+      const borderColor = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+
+      const checkDivider = () => {
+        const btnStyle = getComputedStyle(stopAll);
+        const dividerStyle = getComputedStyle(stopAll, "::before");
+        expect(btnStyle.borderTopWidth).toBe("0px");
+        expect(btnStyle.borderRadius).toBe("6px");
+        expect(dividerStyle.height).toBe("1px");
+        expect(dividerStyle.borderRadius).toBe("0px");
+        expect(dividerStyle.backgroundColor).toBe(borderColor);
+        expect(stopAll.getBoundingClientRect().top - beta.getBoundingClientRect().bottom).toBe(9);
+      };
+
+      checkDivider();
+      await page.elementLocator(beta).hover();
+      checkDivider();
+      await page.elementLocator(stopAll).hover();
+      checkDivider();
+      trigger.focus();
+      await userEvent.keyboard("{ArrowUp}");
+      await expect.element(popup.getByRole("button", { name: "Stop all (2)" })).toHaveFocus();
+      checkDivider();
+    } finally {
+      delete document.documentElement.dataset.theme;
+    }
+  },
+);

@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import type {} from "@vitest/browser-playwright";
@@ -23,6 +23,8 @@ function bounds(element: Element) {
 afterEach(() => {
   cleanup();
   document.getElementById("root")?.remove();
+  document.body.style.zoom = "";
+  delete document.documentElement.dataset.theme;
   vi.unstubAllGlobals();
 });
 
@@ -50,6 +52,19 @@ it("opens the mobile overview without shifting chat and renders a bounded token 
   const dialog = page.getByRole("dialog", { name: "Usage dashboard" });
   await expect.element(dialog.getByRole("img", { name: "Token types by UTC day" })).toBeVisible();
   await expect.element(dialog.getByRole("list", { name: "Ranked model totals" })).toBeVisible();
+  const usageViews = screen.getByRole("group", { name: "Usage views" });
+  const quickFilters = document.querySelector(".usage-quick-filters")!;
+  const viewBounds = bounds(usageViews);
+  const quickBounds = bounds(quickFilters);
+  expect(
+    viewBounds.y < quickBounds.y ||
+      (viewBounds.y === quickBounds.y && viewBounds.x < quickBounds.x),
+  ).toBe(true);
+  screen.getByRole("button", { name: "Overview" }).focus();
+  await userEvent.keyboard("{Tab}");
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Records" }));
+  await userEvent.keyboard("{Tab}");
+  expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Window (UTC)" }));
   const panel = screen.getByRole("dialog");
   const { left, top, right, bottom } = panel.getBoundingClientRect();
   expect(left).toBeGreaterThanOrEqual(0);
@@ -204,4 +219,222 @@ it("shares instant picks and Enter-applied fuzzy filters with responsive numbere
     .element(dialog.getByRole("list", { name: "Active filters" }))
     .not.toBeInTheDocument();
   expect(params()).toEqual({ range: "7d", unit: "turn", granularity: "day", page: "1" });
+});
+
+it("keeps results, geometry, scroll and focus continuous through delayed reloads", async () => {
+  await page.viewport(1000, 620);
+  let finishRefresh!: (response: Response) => void;
+  let finishFailure!: (response: Response) => void;
+  let finishSuccess!: (response: Response) => void;
+  const request = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(overviewResponse())
+    .mockReturnValueOnce(new Promise<Response>((resolve) => (finishRefresh = resolve)))
+    .mockReturnValueOnce(new Promise<Response>((resolve) => (finishFailure = resolve)))
+    .mockReturnValueOnce(new Promise<Response>((resolve) => (finishSuccess = resolve)));
+  vi.stubGlobal("fetch", request);
+  render(<UsageDashboard onClose={vi.fn()} />);
+  await screen.findByText("Inference records");
+  await page.getByText("Measurement details and benchmarks").click();
+
+  const dialog = screen.getByRole("dialog");
+  const body = dialog.querySelector<HTMLElement>(".usage-body")!;
+  const refresh = screen.getByRole("button", { name: "Refresh" });
+  const filterSummary = dialog.querySelector(".usage-filters > summary")!;
+  const loadState = dialog.querySelector(".usage-load-state")!;
+  expect(body.scrollHeight).toBeGreaterThan(body.clientHeight);
+  body.scrollTop = Math.min(120, body.scrollHeight - body.clientHeight);
+  const scrollTop = body.scrollTop;
+  expect(scrollTop).toBeGreaterThan(0);
+  const snapshot = () => ({
+    dialog: bounds(dialog),
+    refresh: bounds(refresh),
+    filterSummary: bounds(filterSummary),
+    loadState: bounds(loadState),
+  });
+  const initial = snapshot();
+
+  refresh.focus();
+  fireEvent.click(refresh);
+  await screen.findByText("Updating usage…");
+  expect(snapshot()).toEqual(initial);
+  expect(body.scrollTop).toBe(scrollTop);
+  expect(body.getAttribute("aria-busy")).toBe("true");
+  expect(document.activeElement).toBe(refresh);
+  expect(screen.getByText("Inference records")).toBeTruthy();
+  await act(async () => {
+    finishRefresh(overviewResponse());
+    await Promise.resolve();
+  });
+  await expect.element(page.getByText("Updating usage…")).not.toBeInTheDocument();
+
+  const unit = screen.getByRole<HTMLSelectElement>("combobox", { name: "Reporting unit" });
+  const beforeFailure = snapshot();
+  unit.focus();
+  fireEvent.change(unit, { target: { value: "turn" } });
+  await screen.findByText("Updating usage…");
+  expect(snapshot()).toEqual(beforeFailure);
+  expect(body.scrollTop).toBe(scrollTop);
+  expect(document.activeElement).toBe(unit);
+  expect(screen.getByText("Inference records")).toBeTruthy();
+  expect(screen.queryByText("Turn records")).toBeNull();
+  await act(async () => {
+    finishFailure(new Response(null, { status: 503 }));
+    await Promise.resolve();
+  });
+  await screen.findByText("Update failed · previous results");
+  expect(snapshot()).toEqual(beforeFailure);
+  expect(body.scrollTop).toBe(scrollTop);
+  expect(body.getAttribute("aria-busy")).toBe("false");
+  expect(document.activeElement).toBe(unit);
+  expect(screen.getByText("Inference records")).toBeTruthy();
+  expect(screen.queryByText("Turn records")).toBeNull();
+
+  refresh.focus();
+  fireEvent.click(refresh);
+  await screen.findByText("Updating usage…");
+  expect(snapshot()).toEqual(beforeFailure);
+  expect(body.scrollTop).toBe(scrollTop);
+  expect(document.activeElement).toBe(refresh);
+  await act(async () => {
+    finishSuccess(overviewResponse());
+    await Promise.resolve();
+  });
+  await screen.findByText("Turn records");
+  expect(screen.queryByText("Inference records")).toBeNull();
+  expect(screen.queryByText("Update failed · previous results")).toBeNull();
+  expect(screen.queryByText("Updating usage…")).toBeNull();
+});
+
+it("gates retained Records pagination while a new query is pending or failed", async () => {
+  await page.viewport(1000, 700);
+  let finishFilter!: (response: Response) => void;
+  const request = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(overviewResponse())
+    .mockResolvedValueOnce(journeyResponse([observation], { total: 91 }))
+    .mockReturnValueOnce(new Promise<Response>((resolve) => (finishFilter = resolve)));
+  vi.stubGlobal("fetch", request);
+  render(<UsageDashboard onClose={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Records" }));
+  await screen.findByText("Page 1 of 4 · 91 records");
+  const next = screen.getByRole<HTMLButtonElement>("button", { name: "Next" });
+  expect(next.disabled).toBe(false);
+
+  fireEvent.click(document.querySelector(".usage-filters > summary")!);
+  fireEvent.change(screen.getByRole("combobox", { name: "Source" }), {
+    target: { value: "pi" },
+  });
+  await screen.findByText("Updating usage…");
+  expect(next.disabled).toBe(true);
+  expect(request).toHaveBeenCalledTimes(3);
+  fireEvent.click(next);
+  expect(request).toHaveBeenCalledTimes(3);
+
+  await act(async () => {
+    finishFilter(new Response(null, { status: 503 }));
+    await Promise.resolve();
+  });
+  await screen.findByText("Update failed · previous results");
+  expect(next.disabled).toBe(true);
+  fireEvent.click(next);
+  expect(request).toHaveBeenCalledTimes(3);
+});
+
+it.each(["light", "dark"])(
+  "keeps narrow heading status and long filter chips bounded in %s",
+  async (theme) => {
+    document.documentElement.dataset.theme = theme;
+    await page.viewport(280, 700);
+    const longModel = "enterprise-model-with-a-long-name-and-a-quantized-variant";
+    const ranking = [{ model: longModel, tokens: 104 }];
+    let finishFailure!: (response: Response) => void;
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(overviewResponse({ ranking }))
+      .mockResolvedValueOnce(overviewResponse({ ranking, count: 3, promptBearing: 3 }))
+      .mockResolvedValueOnce(overviewResponse({ ranking, count: 4, promptBearing: 4 }))
+      .mockReturnValueOnce(new Promise<Response>((resolve) => (finishFailure = resolve)));
+    vi.stubGlobal("fetch", request);
+    render(<UsageDashboard onClose={vi.fn()} />);
+    const rank = await screen.findByRole("button", { name: `${longModel}, 104 tokens` });
+    fireEvent.click(rank);
+    await screen.findByText("3 of 3 records with prompt tokens");
+    fireEvent.click(document.querySelector(".usage-filters > summary")!);
+    fireEvent.change(screen.getByRole("combobox", { name: "Source" }), {
+      target: { value: "pi" },
+    });
+    await screen.findByText("4 of 4 records with prompt tokens");
+
+    const modelChip = screen.getByRole("button", { name: `Remove model filter: ${longModel}` });
+    const sourceChip = screen.getByRole("button", { name: "Remove source filter: Pi" });
+    expect(getComputedStyle(modelChip).minHeight).toBe("28px");
+    expect(getComputedStyle(sourceChip).minHeight).toBe("28px");
+    expect(getComputedStyle(modelChip).whiteSpace).toBe("normal");
+    expect(bounds(modelChip).height).toBeGreaterThan(bounds(sourceChip).height);
+    expect(modelChip.scrollWidth).toBeLessThanOrEqual(modelChip.clientWidth + 1);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Reporting unit" }), {
+      target: { value: "turn" },
+    });
+    await screen.findByText("Updating usage…");
+    const dialog = screen.getByRole("dialog");
+    const heading = dialog.querySelector(".ui-dialog-heading")!;
+    const title = dialog.querySelector(".dialog-title")!;
+    const status = dialog.querySelector(".usage-load-state")!;
+    for (const animation of dialog.getAnimations()) animation.finish();
+    const pendingStatus = bounds(status);
+    const expectBoundedHeading = () => {
+      const titleBox = bounds(title);
+      const statusBox = bounds(status);
+      const dialogBox = bounds(dialog);
+      expect(statusBox.x).toBeGreaterThanOrEqual(titleBox.x + titleBox.width);
+      for (const box of [titleBox, statusBox]) {
+        expect(box.x).toBeGreaterThanOrEqual(dialogBox.x);
+        expect(box.x + box.width).toBeLessThanOrEqual(dialogBox.x + dialogBox.width);
+      }
+      expect(statusBox.y + statusBox.height).toBeLessThanOrEqual(
+        bounds(heading).y + bounds(heading).height,
+      );
+    };
+    expectBoundedHeading();
+    await act(async () => {
+      finishFailure(new Response(null, { status: 503 }));
+      await Promise.resolve();
+    });
+    await screen.findByText("Update failed · previous results");
+    expect(bounds(status)).toEqual(pendingStatus);
+    expectBoundedHeading();
+  },
+);
+
+it("aligns ranked bar origins with long labels at browser zoom", async () => {
+  await page.viewport(1000, 800);
+  const longModel = "enterprise-very-long-model-name-with-a-version-and-a-quantized-variant";
+  vi.stubGlobal(
+    "fetch",
+    vi.fn<typeof fetch>().mockResolvedValue(
+      overviewResponse({
+        ranking: [
+          { model: longModel, tokens: 100 },
+          { model: "short", tokens: 50 },
+        ],
+      }),
+    ),
+  );
+  render(<UsageDashboard onClose={vi.fn()} />);
+  const chart = await screen.findByRole("img", { name: "Ranked model tokens chart" });
+  const label = document.querySelector(".usage-overview-rank-label")!;
+  const bar = chart.querySelector("rect")!;
+  for (const zoom of ["100%", "175%"]) {
+    document.body.style.zoom = zoom;
+    await new Promise(requestAnimationFrame);
+    const scale = Number.parseInt(zoom, 10) / 100;
+    const divergence = Math.abs(bounds(bar).x - bounds(label).x) / scale;
+    // SVG rasterization is subpixel; the old one-CSS-pixel inset gap remains a failure.
+    expect(
+      divergence,
+      `${zoom}: ${JSON.stringify({ bar: bounds(bar), label: bounds(label) })}`,
+    ).toBeLessThan(0.5);
+  }
 });

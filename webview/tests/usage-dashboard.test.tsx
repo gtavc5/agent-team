@@ -27,7 +27,9 @@ it("opens Usage from the sidebar and displays server aggregates and distinct pri
   opener.focus();
   fireEvent.click(opener);
   const dialog = within(screen.getByRole("dialog", { name: "Usage dashboard" }));
-  expect(dialog.getByRole("status").textContent).toBe("Loading usage…");
+  expect(dialog.getByRole("group", { name: "Usage views" }).classList).toContain("bp-views");
+  expect(dialog.getByRole("button", { name: "Overview" }).classList).not.toContain("btn-secondary");
+  expect(dialog.getByText("Loading usage…")).toBeTruthy();
   expect(await dialog.findByText("92.31%")).toBeTruthy();
   expect(dialog.getByText("2 of 2 records with prompt tokens")).toBeTruthy();
   expect(dialog.getByText(/Inferences with ≥96% cache reads: 50%/).textContent).toContain(
@@ -37,7 +39,7 @@ it("opens Usage from the sidebar and displays server aggregates and distinct pri
   expect(dialog.getByText("API-equivalent").nextElementSibling?.textContent).toBe("$0.125");
   expect(dialog.getByText("Channel estimate").nextElementSibling?.textContent).toBe("—");
   expect(dialog.getByText("2 sources unavailable or partially read")).toBeTruthy();
-  expect(dialog.getByRole("status").textContent).toBe("Source scan pending");
+  expect(dialog.getByText("Source scan pending")).toBeTruthy();
   expect(request.mock.calls[0][0]).toBe(
     "api/usage/overview?range=30d&unit=inference&granularity=day",
   );
@@ -63,7 +65,7 @@ it("suppresses superseded view results and refreshes an error", async () => {
     return Promise.resolve();
   });
   expect(screen.queryByText("92.31%")).toBeNull();
-  expect(screen.getByRole("status").textContent).toContain("Could not load usage");
+  expect(screen.getByText(/Could not load usage/)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
   expect(await screen.findByText("No records match these filters.")).toBeTruthy();
   expect(request.mock.calls.slice(1).map(([url]) => url)).toEqual([
@@ -169,7 +171,10 @@ it.each([
   fireEvent.click(within(details).getByRole("button", { name: label }));
   expect(usageParams(request.mock.lastCall![0]).get(field)).toBe(value);
   expect(usageParams(request.mock.lastCall![0]).get("page")).toBe("1");
-  fireEvent.click(screen.getByRole("button", { name: `Remove ${field} filter: ${value}` }));
+  const remover = screen.getByRole("button", { name: `Remove ${field} filter: ${value}` });
+  expect(remover.classList).toContain("bp-chip");
+  expect(remover.getAttribute("aria-pressed")).toBe("true");
+  fireEvent.click(remover);
   expect(usageParams(request.mock.lastCall![0]).has(field)).toBe(false);
   await screen.findByText("example-model");
 });

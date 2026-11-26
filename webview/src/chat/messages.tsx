@@ -544,13 +544,14 @@ export const EventItem = memo(function EventItem({
         </div>
       )}
       {(bodyMissing || (toolBodyMissing && !bodyOpen)) && (
-        <div
+        <button
+          type="button"
           className="event-content event-placeholder"
           {...telemetryTarget("trace.tool_toggle")}
           onClick={isResult ? toggleResult : toggleBody}
         >
-          {formatSize(bodyMissing ? (ev.contentLength ?? 0) : bodyLen)} · tap to load
-        </div>
+          Load details · {formatSize(bodyMissing ? (ev.contentLength ?? 0) : bodyLen)}
+        </button>
       )}
       {isResult ? (
         resultOpen &&
@@ -1388,7 +1389,9 @@ export const MessageItem = memo(function MessageItem({
     return (
       <div className="system-message">
         {avatar && <img className="system-avatar" src={avatar} alt="" />}
-        <MdBlock>{text}</MdBlock>
+        <div className="system-message-body">
+          <MdBlock>{text}</MdBlock>
+        </div>
       </div>
     );
   }
@@ -1480,7 +1483,12 @@ export const MessageItem = memo(function MessageItem({
 
   const quoteButton =
     !isUser && onQuote && segments.length > 0 ? (
-      <button className="btn-quote" title="Quote this message" onClick={() => onQuote(msg)}>
+      <button
+        className="btn-quote"
+        aria-label="Quote this message"
+        title="Quote this message"
+        onClick={() => onQuote(msg)}
+      >
         ↩
       </button>
     ) : null;
@@ -1499,7 +1507,7 @@ export const MessageItem = memo(function MessageItem({
         >
           <div className="message-gutter">
             {compact ? null : from ? (
-              <div className="avatar-user avatar-from">{ORIGIN_GLYPH[from.role]}</div>
+              <div className="avatar-from">{ORIGIN_GLYPH[from.role]}</div>
             ) : isUser ? (
               <div className="avatar-user">
                 {isImageAvatar(user.avatar) ? (
@@ -1528,14 +1536,16 @@ export const MessageItem = memo(function MessageItem({
               <div className="message-header">
                 {isUser ? (
                   <>
-                    {from ? (
+                    {from && onOpenWorkspace ? (
                       <button
                         className="message-author from-author"
                         title="Open that session"
-                        onClick={() => onOpenWorkspace?.(from.workspaceId)}
+                        onClick={() => onOpenWorkspace(from.workspaceId)}
                       >
                         {originLabel(from)}
                       </button>
+                    ) : from ? (
+                      <span className="message-author from-author">{originLabel(from)}</span>
                     ) : (
                       <span className="message-author user-author" title={user.name}>
                         {user.name}

@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
 import type { SessionStatsPage, StatsTurn } from "../../../shared/session-stats";
 import type { TelemetryBatch } from "../../../shared/telemetry";
+import { SessionStats } from "../../src/panels/SessionStats";
 import { App } from "../../src/App";
 import { buildFrames, DEMO_WS_ID } from "../../src/dev/replayFixture";
 import type { Project, Workspace } from "../../src/state/useServer";
@@ -194,6 +195,21 @@ it.each([
     await expect.element(panel.getByText("pi", { exact: true })).toBeVisible();
     await expect.element(panel.getByText("parent-session", { exact: true })).toBeVisible();
     const steps = panel.element().querySelectorAll(".session-stats-step");
+    const list = steps[0].closest("ol")!;
+    const turn = list.parentElement!;
+    const inside = turn.getBoundingClientRect().left + turn.clientLeft;
+    expect(getComputedStyle(list).listStyleType).toBe("none");
+    for (const [index, step] of [...steps].entries()) {
+      const summary = step.querySelector("summary")!;
+      expect(summary.textContent).toMatch(new RegExp(`^${index + 1}\\. `));
+      expect(getComputedStyle(summary).display).toBe("list-item");
+      const row = step.closest("li")!;
+      expect(getComputedStyle(row).borderTopWidth).toBe("1px");
+      expect(row.getBoundingClientRect().left).toBe(inside);
+      expect(row.getBoundingClientRect().right).toBe(inside + turn.clientWidth);
+      if (layout === "narrow")
+        expect(summary.getBoundingClientRect().height).toBeGreaterThanOrEqual(44);
+    }
     const [user, model, legacy, tool, compaction, afterCompaction, afterSwitch] = steps;
     const toggle = (step: Element) => page.elementLocator(step.querySelector("summary")!);
     const detail = (step: Element, value: string) =>
@@ -279,6 +295,17 @@ it.each([
   },
 );
 
+it("keeps step disclosures touch-sized on a landscape phone", async () => {
+  await page.viewport(844, 390);
+  vi.stubGlobal("fetch", () => Promise.resolve(statsPage(0)));
+  const { getByText } = render(<SessionStats workspaceId={ws.id} connected agents={[]} />);
+  await page.getByText("Turn 21 · manual · 7 steps").click();
+  const summary = getByText("1. User");
+  expect(summary.getBoundingClientRect().height).toBeGreaterThanOrEqual(44);
+  await page.elementLocator(summary).click();
+  expect(summary.closest("details")!.open).toBe(true);
+});
+
 it("aborts the previous workspace request and retries an error without leaking stale stats", async () => {
   await page.viewport(1440, 820);
   let finishPrevious!: (response: Response) => void;
@@ -299,12 +326,20 @@ it("aborts the previous workspace request and retries an error without leaking s
   await page.getByRole("button", { name: "Session stats", exact: true }).click();
   const panel = page.getByRole("complementary", { name: "Session stats" });
   await expect.element(panel.getByText("Loading session stats…")).toBeVisible();
+  const muted = getComputedStyle(panel.getByText("Loading session stats…").element()).color;
   const signal = fetchStats.mock.calls[0][1].signal;
   await page
     .elementLocator(document.querySelector(".sidebar")!)
     .getByText(other.name, { exact: true })
     .click();
   await expect.element(panel.getByRole("alert")).toHaveTextContent("Could not load session stats.");
+  const alert = panel.getByRole("alert").element();
+  const token = document.createElement("span");
+  token.style.color = "var(--error)";
+  alert.append(token);
+  expect(getComputedStyle(alert).color).toBe(getComputedStyle(token).color);
+  expect(getComputedStyle(alert).color).not.toBe(muted);
+  token.remove();
   expect(signal?.aborted).toBe(true);
   await panel.getByRole("button", { name: "Retry" }).click();
   await expect.element(panel.getByText("No session stats recorded.")).toBeVisible();

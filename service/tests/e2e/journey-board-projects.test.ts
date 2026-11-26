@@ -79,7 +79,7 @@ it("filters the real board, follows dependency and issue links, and reopens a no
       const openBoard = () => button(page, "Objectives of agent-team").click();
       await openBoard();
       expect(page.url()).toBe(chatUrl);
-      const board = page.getByRole("dialog", { name: "agent-team objectives" });
+      const board = page.getByRole("dialog");
       const cards = board.locator(".bp-card");
       const card = (title: string) => cards.filter({ hasText: title });
       await visible(card("Panels on phones"));
@@ -231,7 +231,7 @@ it("filters the real board, follows dependency and issue links, and reopens a no
       expect(page.url()).toBe(chatUrl);
       await page.getByTitle("Open the lead of Empty board", { exact: true }).click();
       await button(page, "Objectives of Empty board").click();
-      const empty = page.getByRole("dialog", { name: "Empty board objectives" });
+      const empty = page.getByRole("dialog");
       await visible(empty.getByText(/No objectives yet/));
       await button(empty, "Issues").click();
       await visible(empty.getByText(/No issues yet/));

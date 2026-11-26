@@ -200,8 +200,11 @@ type UsageSourceStatus = {
   since: number;
   until: number;
 };
-type UsageData = UsageSourceStatus &
-  ({ view: "overview"; payload: OverviewData } | { view: "journey"; payload: UsageJourney });
+type UsageData = UsageSourceStatus & {
+  unit: UsageObservation["unit"];
+  granularity: UsageGranularity;
+  filters: typeof emptyFilters;
+} & ({ view: "overview"; payload: OverviewData } | { view: "journey"; payload: UsageJourney });
 type UsageLoad =
   { version: number; status: "error" } | { version: number; status: "ready"; data: UsageData };
 
@@ -236,6 +239,7 @@ export function UsageDashboard({
   });
   const [jump, setJump] = useState("1");
   const [load, setLoad] = useState<UsageLoad>();
+  const [retained, setRetained] = useState<Extract<UsageLoad, { status: "ready" }>>();
   const { version } = request;
   const navigate = (page = 1, until?: number, refresh = false) => {
     setRequest((previous) => ({ version: previous.version + 1, refresh, page, until }));
@@ -297,7 +301,7 @@ export function UsageDashboard({
             throw new Error("Usage overview missing");
           const models = payload.ranking.flatMap(({ model }) => (model ? [model] : []));
           setKnownModels((previous) => [...new Set([...previous, ...models])]);
-          data = { view, payload: payload as OverviewData, ...status };
+          data = { view, payload: payload as OverviewData, unit, granularity, filters, ...status };
         } else {
           const { total, page, pageSize } = payload;
           if (
@@ -313,25 +317,31 @@ export function UsageDashboard({
             pageSize < 1
           )
             throw new Error("Records page missing");
-          data = { view, payload: payload as UsageJourney, ...status };
+          data = { view, payload: payload as UsageJourney, unit, granularity, filters, ...status };
           setJump(String(page));
         }
-        setLoad({ version, status: "ready", data });
+        const ready = { version, status: "ready" as const, data };
+        setRetained(ready);
+        setLoad(ready);
       } catch {
         if (!controller.signal.aborted) setLoad({ version, status: "error" });
       }
     }
     void fetchUsage();
     return () => controller.abort();
-  }, [url, version, view]);
+  }, [url, version, view, filters, granularity, unit]);
 
   const current = load?.version === version ? load : undefined;
-  const data = current?.status === "ready" ? current.data : null;
+  const previous = retained?.data.view === view ? retained : undefined;
+  const displayed = current?.status === "ready" ? current : previous;
+  const data = displayed?.data ?? null;
   const journey = data?.view === "journey" ? data.payload : null;
   const activeFilters = filterKeys.filter((field) => filters[field]);
   const lastPage = journey ? Math.max(1, Math.ceil(journey.total / journey.pageSize)) : 1;
+  const canPaginate = current?.status === "ready";
   const goToPage = (page: number) => {
     if (
+      canPaginate &&
       journey &&
       data &&
       Number.isSafeInteger(page) &&
@@ -342,10 +352,31 @@ export function UsageDashboard({
       navigate(page, request.until ?? data.until);
   };
   const selectedWorkspace = workspaces.find(({ id }) => id === filters.workspace);
+  const loadState = data
+    ? !current
+      ? "Updating usage…"
+      : current.status === "error"
+        ? "Update failed · previous results"
+        : ""
+    : "";
   return (
-    <DialogFrame title="Usage dashboard" className="usage-dialog" onClose={onClose}>
+    <DialogFrame
+      title="Usage dashboard"
+      className="usage-dialog"
+      onClose={onClose}
+      titleAside={
+        <span
+          className={`usage-load-state${data && current?.status === "error" ? " usage-warning" : ""}`}
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {loadState}
+        </span>
+      }
+    >
       <div className="usage-toolbar">
-        <div className="usage-controls usage-views" role="group" aria-label="Usage views">
+        <div className="bp-views usage-views" role="group" aria-label="Usage views">
           {(
             [
               ["overview", "Overview"],
@@ -355,7 +386,6 @@ export function UsageDashboard({
             <button
               key={value}
               type="button"
-              className="btn-secondary"
               aria-pressed={view === value}
               onClick={() => {
                 if (view !== value) {
@@ -419,7 +449,7 @@ export function UsageDashboard({
           </label>
         </div>
       </div>
-      <div className="dialog-body usage-body">
+      <div className="dialog-body usage-body" aria-busy={!current}>
         <details className="usage-filters">
           <summary tabIndex={0}>
             Filters{activeFilters.length > 0 && ` · ${activeFilters.length} active`}
@@ -525,7 +555,7 @@ export function UsageDashboard({
           </form>
         </details>
         {activeFilters.length > 0 && (
-          <ul className="usage-controls usage-chips" aria-label="Active filters">
+          <ul className="bp-chips usage-chips" aria-label="Active filters">
             {activeFilters.map((field) => {
               const value =
                 field === "workspace" && selectedWorkspace
@@ -537,7 +567,8 @@ export function UsageDashboard({
                 <li key={field}>
                   <button
                     type="button"
-                    className="btn-secondary"
+                    className="bp-chip"
+                    aria-pressed={true}
                     aria-label={`Remove ${filterLabels[field].toLowerCase()} filter: ${value}`}
                     onClick={() => changeFilter(field, "")}
                   >
@@ -548,12 +579,12 @@ export function UsageDashboard({
             })}
           </ul>
         )}
-        {!current && (
+        {!current && !data && (
           <p className="usage-notice" role="status">
             Loading usage…
           </p>
         )}
-        {current?.status === "error" && (
+        {current?.status === "error" && !data && (
           <p className="usage-notice" role="status">
             Could not load usage. Use Refresh to try again.
           </p>
@@ -578,17 +609,17 @@ export function UsageDashboard({
             sourcesPending={data.sourcesPending}
             since={data.since}
             until={data.until}
-            granularity={granularity}
-            unit={unit}
-            model={filters.model}
+            granularity={data.granularity}
+            unit={data.unit}
+            model={data.filters.model}
             onModelChange={(model: string) => changeFilter("model", model)}
           />
         )}
-        {journey && (
+        {journey && data && (
           <section aria-label="Records">
             <p className="usage-journey-note">
               Newest first · UTC and local time
-              {(filters.model || filters.channel) &&
+              {(data.filters.model || data.filters.channel) &&
                 " · Events excluded by model or channel filter"}
             </p>
             {!journey.rows.length ? (
@@ -600,7 +631,7 @@ export function UsageDashboard({
                 className="usage-journey"
                 aria-label="Recorded observations and events"
                 role="list"
-                key={version}
+                key={displayed?.version}
               >
                 {journey.rows.map((row) => (
                   <li key={JSON.stringify(["kind" in row, row.source, row.sessionId, row.id])}>
@@ -632,7 +663,7 @@ export function UsageDashboard({
               className="btn-secondary usage-page-button"
               aria-label="First"
               title="First page"
-              disabled={!journey || journey.page <= 1}
+              disabled={!canPaginate || !journey || journey.page <= 1}
               onClick={() => goToPage(1)}
             >
               <Icon name="first" />
@@ -642,7 +673,7 @@ export function UsageDashboard({
               className="btn-secondary usage-page-button"
               aria-label="Previous"
               title="Previous page"
-              disabled={!journey || journey.page <= 1}
+              disabled={!canPaginate || !journey || journey.page <= 1}
               onClick={() => journey && goToPage(journey.page - 1)}
             >
               <Icon name="previous" />
@@ -653,11 +684,11 @@ export function UsageDashboard({
               min={1}
               max={lastPage}
               value={jump}
-              disabled={!journey}
+              disabled={!canPaginate || !journey}
               required
               onChange={(event) => setJump(event.target.value)}
             />
-            <button type="submit" className="btn-secondary" disabled={!journey}>
+            <button type="submit" className="btn-secondary" disabled={!canPaginate || !journey}>
               Jump
             </button>
             <button
@@ -665,7 +696,7 @@ export function UsageDashboard({
               className="btn-secondary usage-page-button"
               aria-label="Next"
               title="Next page"
-              disabled={!journey || journey.page >= lastPage}
+              disabled={!canPaginate || !journey || journey.page >= lastPage}
               onClick={() => journey && goToPage(journey.page + 1)}
             >
               <Icon name="next" />
@@ -675,7 +706,7 @@ export function UsageDashboard({
               className="btn-secondary usage-page-button"
               aria-label="Last"
               title="Last page"
-              disabled={!journey || journey.page >= lastPage}
+              disabled={!canPaginate || !journey || journey.page >= lastPage}
               onClick={() => goToPage(lastPage)}
             >
               <Icon name="last" />

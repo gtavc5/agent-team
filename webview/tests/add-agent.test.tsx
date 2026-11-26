@@ -275,6 +275,29 @@ describe("CodexSetupDialog", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("distinguishes a pending status, unavailable CLI and failure without error detail", () => {
+    const setup = (codexAuth: CodexAuthState | null, rechecking = false) => (
+      <CodexSetupDialog
+        codexAuth={codexAuth}
+        rechecking={rechecking}
+        onRecheck={() => {}}
+        onClose={() => {}}
+      />
+    );
+    const view = render(setup(null));
+    const status = () => view.getByRole("status").textContent;
+    expect(status()).toBe("Waiting for the Codex sign-in status…");
+    view.rerender(setup({ ...unauthedCodex, checkedAt: 0 }));
+    expect(status()).toBe("Waiting for the Codex sign-in status…");
+    const failed = { ...unauthedCodex, status: "error" } as const;
+    view.rerender(setup(failed, true));
+    expect(status()).toBe("Checking Codex sign-in…");
+    view.rerender(setup(failed));
+    expect(status()).toBe("Check failed. Try Re-check again.");
+    view.rerender(setup({ ...unauthedCodex, status: "unavailable", cliAvailable: false }));
+    expect(status()).toBe("Codex CLI binary is unavailable on the server.");
+  });
+
   it("closes only the stacked setup modal on Escape when AddAgentDialog is suspended", () => {
     const closeAdd = vi.fn();
     const closeSetup = vi.fn();

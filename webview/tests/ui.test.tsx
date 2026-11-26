@@ -83,7 +83,7 @@ describe("EventItem", () => {
         <EventItem ev={history} onLoadDetails={onLoadDetails} />,
       );
       expect(container.querySelector(".event-content pre")).toBeNull();
-      fireEvent.click(getByText(/tap to load/));
+      fireEvent.click(getByText(/Load details/));
       expect(onLoadDetails).toHaveBeenCalledTimes(1);
       rerender(<EventItem ev={event} />);
       expect(container.querySelector(".event-chip")?.textContent).toBe("bash");
@@ -900,7 +900,7 @@ describe("summary pages and lazy details", () => {
       />,
     );
     expect(container.querySelector(".event-placeholder")!.textContent).toContain("4.2k chars");
-    fireEvent.click(getByText(/tap to load/));
+    fireEvent.click(getByText(/Load details/));
     expect(onLoad).toHaveBeenCalledTimes(1);
   });
 

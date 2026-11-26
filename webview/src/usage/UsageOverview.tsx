@@ -120,21 +120,11 @@ function TokenTrend({
           <h3>Token usage over time</h3>
           <span>Tokens by UTC {granularity}</span>
         </div>
-        <div className="usage-overview-modes" role="group" aria-label="Chart breakdown">
-          <button
-            type="button"
-            className="btn-secondary"
-            aria-pressed={mode === "types"}
-            onClick={() => setMode("types")}
-          >
+        <div className="bp-views usage-overview-modes" role="group" aria-label="Chart breakdown">
+          <button type="button" aria-pressed={mode === "types"} onClick={() => setMode("types")}>
             Token types
           </button>
-          <button
-            type="button"
-            className="btn-secondary"
-            aria-pressed={mode === "models"}
-            onClick={() => setMode("models")}
-          >
+          <button type="button" aria-pressed={mode === "models"} onClick={() => setMode("models")}>
             Top models
           </button>
         </div>

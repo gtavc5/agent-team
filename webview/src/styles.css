@@ -216,7 +216,7 @@ button {
   color: var(--text-primary);
   border-color: var(--border-strong);
 }
-.btn-secondary:hover {
+.btn-secondary:hover:not(:disabled) {
   background: var(--bg-hover);
 }
 .btn-danger {
@@ -237,9 +237,19 @@ button {
   padding: 1px 6px;
   border-radius: 4px;
 }
-.btn-inline:hover {
-  color: var(--text-primary);
-  background: var(--bg-hover);
+@media (hover: hover) {
+  .btn-inline:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+}
+.btn-secondary:disabled,
+.btn-inline:disabled,
+.panel-btn:disabled,
+.side-panel-btn:disabled,
+.ui-dialog-option:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .btn-ghost {
   background: transparent;
@@ -673,7 +683,7 @@ button {
   font-size: var(--fs-tag);
   line-height: 1.2;
   white-space: nowrap;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-small);
   pointer-events: none;
 }
 /* Project header actions stay out of flex flow while hidden so they never
@@ -1434,15 +1444,28 @@ button {
   margin-top: 8px;
   padding: 6px 10px;
   border-radius: var(--radius);
-  background: var(--warning-soft);
-  border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
-  color: var(--warning);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 .archived-banner .btn-inline {
-  color: var(--warning);
-  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+  flex-shrink: 0;
+  color: var(--accent-text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
   padding: 2px 10px;
+  font-weight: 500;
+}
+.archived-banner .btn-inline:hover:not(:disabled) {
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-elevated));
+  border-color: var(--accent);
+}
+.archived-banner .btn-inline:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
 }
 
 /* ---- Avatars ------------------------------------------------------------ */
@@ -1788,7 +1811,8 @@ code code,
   margin: -4px -6px 0 8px;
 }
 .code-block:hover .copy-btn,
-.event-summary-line:hover .copy-btn {
+.event-summary-line:hover .copy-btn,
+.copy-btn:focus-visible {
   opacity: 1;
 }
 /* No hover on touch screens: keep the button shown, opaque over the code it
@@ -1801,9 +1825,11 @@ code code,
     padding: 4px 11px;
   }
 }
-.code-block .copy-btn:hover,
-.event-summary-line .copy-btn:hover {
-  color: var(--text-primary);
+@media (hover: hover) {
+  .code-block .copy-btn:hover,
+  .event-summary-line .copy-btn:hover {
+    color: var(--text-primary);
+  }
 }
 .message-content blockquote {
   border-left: 3px solid var(--border-strong);
@@ -1935,9 +1961,11 @@ span.katex-display {
     opacity: 1;
   }
 }
-.btn-quote:hover {
-  color: var(--accent-text);
-  border-color: var(--accent);
+@media (hover: hover) {
+  .btn-quote:hover {
+    color: var(--accent-text);
+    border-color: var(--accent);
+  }
 }
 
 /* ---- Step groups and events --------------------------------------------- */
@@ -2001,7 +2029,7 @@ span.katex-display {
 }
 .trace-collapse:hover {
   color: var(--text-primary);
-  background: var(--bg-elevated);
+  background: var(--bg-hover);
 }
 .trace-collapse:focus-visible {
   outline: 2px solid var(--accent);
@@ -2545,8 +2573,10 @@ button.action-target:hover {
   user-select: none;
   min-width: 0;
 }
-.subagent-header:hover {
-  opacity: 0.85;
+@media (hover: hover) {
+  .subagent-header:hover {
+    opacity: 0.85;
+  }
 }
 .subagent-status-icon {
   font-size: 11px;
@@ -2614,13 +2644,29 @@ button.action-target:hover {
   color: var(--error);
   cursor: pointer;
 }
-.btn-cancel-subagent:hover {
-  background: var(--error-soft);
-  border-color: var(--error);
+@media (hover: hover) {
+  .btn-cancel-subagent:hover {
+    background: var(--error-soft);
+    border-color: var(--error);
+  }
+}
+/* When a running subagent also reports duration, keep the trailing metadata
+   and Cancel clustered at the right edge instead of splitting auto margin. */
+.subagent-time ~ .btn-cancel-subagent {
+  margin-left: 0;
 }
 .subagent-details {
-  padding: 4px 0 0 18px;
+  padding-top: 6px;
   font-size: 12px;
+}
+.subagent-details > :not(.trace-collapse-footer) {
+  padding-left: 18px;
+}
+.subagent-loading + .subagent-trace-page {
+  margin-top: 4px;
+}
+.subagent-trace-page > :last-child {
+  margin-bottom: 0;
 }
 .subagent-events {
   margin-bottom: 6px;
@@ -2656,7 +2702,6 @@ button.action-target:hover {
 .subagent-failed > .subagent-details > .subagent-trace-page > .subagent-summary,
 .subagent-rejected > .subagent-details > .subagent-trace-page > .subagent-summary {
   border-left-color: var(--error);
-  background: color-mix(in srgb, var(--error) 6%, transparent);
 }
 .subagent-partial > .subagent-details > .subagent-trace-page > .subagent-summary {
   border-left-color: var(--warning);
@@ -2664,7 +2709,6 @@ button.action-target:hover {
 .subagent-paused > .subagent-details > .subagent-trace-page > .subagent-summary,
 .subagent-stopped > .subagent-details > .subagent-trace-page > .subagent-summary {
   border-left-color: var(--text-muted);
-  background: transparent;
 }
 .subagent-summary p {
   margin: 2px 0;
@@ -2675,7 +2719,7 @@ button.action-target:hover {
   margin-top: 4px;
 }
 .subagent-prompt {
-  padding: 6px 10px;
+  padding: 6px 8px;
   margin-bottom: 8px;
   border-left: 2px solid var(--purple);
   background: color-mix(in srgb, var(--purple) 6%, transparent);
@@ -2685,6 +2729,12 @@ button.action-target:hover {
 }
 .subagent-prompt p {
   margin: 2px 0;
+}
+:is(.subagent-prompt, .subagent-summary) > .code-block {
+  margin: 4px 0;
+}
+:is(.subagent-prompt, .subagent-summary) > .code-block > pre {
+  margin: 0;
 }
 /* The accent block owns its vertical inset, regardless of markdown shape. */
 :is(.subagent-prompt, .subagent-summary) > :first-child,
@@ -2700,6 +2750,11 @@ button.action-target:hover {
   padding: 1px 4px;
   border-radius: 3px;
   background: var(--bg-elevated);
+}
+.subagent-prompt pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
 }
 /* The card already carries a status tint; anything inside renders flat. */
 .subagent-details .event,
@@ -2720,16 +2775,46 @@ button.action-target:hover {
   font-size: 12px;
   text-align: center;
 }
+.system-message-body {
+  min-width: 0;
+}
+.system-message pre {
+  position: relative;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin: 6px 0;
+  overflow-x: auto;
+  text-align: left;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.system-message pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+}
 .system-message p {
   margin: 0;
 }
+.system-message p + p {
+  margin-top: 4px;
+}
+.system-message ul,
+.system-message ol {
+  text-align: left;
+}
 .system-avatar {
+  flex-shrink: 0;
   width: 16px;
   height: 16px;
   margin-right: 6px;
+  margin-top: 1px;
   border-radius: 50%;
   object-fit: cover;
-  align-self: center;
+  align-self: flex-start;
 }
 .system-message strong {
   color: var(--text-secondary);
@@ -2745,6 +2830,10 @@ button.action-target:hover {
   font-weight: 600;
   margin-right: 4px;
   vertical-align: baseline;
+}
+/* Keep a leading @mention inline with the opening paragraph instead of breaking onto its own line. */
+.mention-pill + p {
+  display: inline;
 }
 
 .empty-header {
@@ -2794,14 +2883,27 @@ button.action-target:hover {
   flex-shrink: 0;
 }
 .event-placeholder {
+  display: block;
+  width: 100%;
+  text-align: left;
+  line-height: inherit;
+  background: transparent;
+  border: 0;
   color: var(--text-muted);
   font-style: italic;
   font-size: 11.5px;
   cursor: pointer;
   padding: 2px 0;
 }
-.event-placeholder:hover {
-  color: var(--text-secondary);
+.event-placeholder:focus-visible,
+.copy-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+@media (hover: hover) {
+  .event-placeholder:hover {
+    color: var(--text-secondary);
+  }
 }
 
 .extension-ui {
@@ -2812,15 +2914,17 @@ button.action-target:hover {
   font-size: 12px;
   color: var(--text-secondary);
 }
-.extension-ui section {
+.extension-ui section:has(.extension-notice, .extension-status, .extension-widget) {
   padding: 3px 0;
 }
-.extension-ui strong {
-  margin-inline-end: 6px;
+.extension-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
 }
 .extension-status {
   padding: 2px 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
 }
 .extension-widget {
@@ -2830,7 +2934,7 @@ button.action-target:hover {
 }
 .extension-notice {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
   color: var(--accent-text);
 }
@@ -2840,8 +2944,23 @@ button.action-target:hover {
 .extension-notice.error {
   color: var(--error);
 }
-.extension-notice button {
+.extension-notice .btn-inline {
   flex: none;
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  line-height: 1;
+}
+.extension-notice .btn-inline:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+@media (max-width: 768px), (pointer: coarse) {
+  .extension-notice .btn-inline {
+    min-width: 40px;
+    min-height: 40px;
+  }
 }
 
 /* ---- Composer ----------------------------------------------------------- */
@@ -2855,20 +2974,36 @@ button.action-target:hover {
 .jump-latest {
   position: absolute;
   z-index: 1;
-  inset-block-end: calc(100% + 6px);
+  inset-block-end: calc(100% + 8px);
   inset-inline-end: 16px;
   min-height: 34px;
   padding: 0 12px;
   border: 1px solid var(--border-strong);
   border-radius: 20px;
-  background: var(--bg-secondary);
+  background: var(--bg-elevated);
   color: var(--text-primary);
   font: inherit;
-  box-shadow: 0 1px 4px var(--border-strong);
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: var(--shadow-small);
   cursor: pointer;
+  transition:
+    background var(--motion-quick),
+    border-color var(--motion-quick),
+    color var(--motion-quick);
 }
 .jump-latest:hover {
-  background: var(--bg-elevated);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-elevated));
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.jump-latest:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+.jump-latest:active {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-elevated));
 }
 .input-row {
   display: flex;
@@ -2997,8 +3132,20 @@ button.action-target:hover {
   background: var(--bg-tertiary);
 }
 .input-row .stop-actions button:last-child {
-  border-top: 1px solid var(--border);
+  position: relative;
+  margin-top: 9px;
   color: var(--error);
+}
+/* Draw the divider outside the rounded button box so border-radius never curves its ends. */
+.input-row .stop-actions button:last-child::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -5px;
+  height: 1px;
+  background: var(--border);
+  pointer-events: none;
 }
 /* Fixed-width primary slot so Send ↔ Queue morphing causes no layout shift. */
 .btn-primary-slot {
@@ -3357,6 +3504,7 @@ button.quote-bar-content:focus-visible {
   max-width: 420px;
 }
 .usage-dialog {
+  position: relative;
   width: 960px;
   max-width: calc(100vw - 24px);
   display: flex;
@@ -3374,6 +3522,17 @@ button.quote-bar-content:focus-visible {
 .usage-dialog .usage-body {
   overflow-y: auto;
   min-height: 0;
+}
+.usage-load-state {
+  flex: 0 0 min(38vw, 12em);
+  min-height: 2.8em;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: right;
+  overflow-wrap: anywhere;
+  pointer-events: none;
 }
 .usage-toolbar,
 .usage-quick-filters,
@@ -3397,10 +3556,10 @@ button.quote-bar-content:focus-visible {
   width: 100%;
   text-overflow: ellipsis;
 }
-.usage-views [aria-pressed="true"] {
-  color: var(--text-strong);
-  background: var(--bg-active);
-  border-color: var(--accent);
+/* Board headers put their secondary view group on a later mobile row;
+   Usage keeps its DOM and visual order aligned instead. */
+.usage-dialog .bp-views:not(.bp-modes) {
+  order: 0;
 }
 .usage-filters,
 .usage-method {
@@ -3424,9 +3583,15 @@ button.quote-bar-content:focus-visible {
   padding: 0;
   margin: 8px 0;
 }
-.usage-chips li,
-.usage-chips button {
+.usage-chips li {
   max-width: 100%;
+}
+.usage-chips .bp-chip {
+  max-width: 100%;
+  height: auto;
+  min-height: 22px;
+  padding-block: 2px;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 .usage-filter-grid,
@@ -3716,6 +3881,11 @@ button.quote-bar-content:focus-visible {
 .usage-pages > span {
   margin-inline-end: 4px;
 }
+@media (max-width: 768px), (max-height: 500px) {
+  .usage-chips .bp-chip {
+    min-height: 28px;
+  }
+}
 @media (max-width: 680px) {
   .usage-dialog {
     padding: 14px;
@@ -3789,6 +3959,11 @@ button.quote-bar-content:focus-visible {
 .dialog-field select:focus {
   border-color: var(--accent);
 }
+.dialog-field input:disabled,
+.dialog-field select:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -3856,7 +4031,7 @@ button.quote-bar-content:focus-visible {
 }
 .preset-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(88px, 100%), 1fr));
   gap: 8px;
   margin-bottom: 16px;
 }
@@ -3869,13 +4044,20 @@ button.quote-bar-content:focus-visible {
   border-radius: var(--radius);
   cursor: pointer;
   border: 2px solid transparent;
+  background: transparent;
+  overflow-wrap: anywhere;
   font-size: 11px;
+  line-height: 1.4;
   color: var(--text-secondary);
 }
 .preset-item:hover {
   background: var(--bg-hover);
 }
-.preset-item.selected {
+.preset-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.preset-item[aria-pressed="true"] {
   border-color: var(--accent);
   background: var(--bg-active);
 }
@@ -4394,6 +4576,7 @@ button.quote-bar-content:focus-visible {
     width: 28px;
   }
   .avatar-user,
+  .avatar-from,
   .message-gutter .agent-avatar {
     width: 28px !important;
     height: 28px !important;
@@ -4420,8 +4603,12 @@ button.quote-bar-content:focus-visible {
   .subagent-item {
     padding: 5px 6px;
   }
-  .subagent-details {
+  .subagent-details > :not(.trace-collapse-footer) {
     padding-left: 8px;
+  }
+  .subagent-prompt,
+  .subagent-summary {
+    padding-inline: 4px;
   }
   .banner {
     padding: 4px 8px;
@@ -4554,12 +4741,17 @@ button.quote-bar-content:focus-visible {
   background: var(--warning-soft);
 }
 .avatar-from {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-elevated);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
   color: var(--text-muted);
   font-size: 14px;
+  font-weight: 600;
 }
 .from-author {
   min-width: 0;
@@ -4572,23 +4764,14 @@ button.quote-bar-content:focus-visible {
   padding: 0;
   color: var(--text-primary);
   font-family: inherit;
+}
+button.from-author {
   cursor: pointer;
 }
-.from-author:hover {
-  text-decoration: underline;
-}
-.dialog-check {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin-bottom: 12px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.dialog-check input {
-  margin-top: 2px;
-  accent-color: var(--purple);
+@media (hover: hover) {
+  button.from-author:hover {
+    text-decoration: underline;
+  }
 }
 
 /* ---- Board page ---------------------------------------------------------- */
@@ -4629,29 +4812,50 @@ button.quote-bar-content:focus-visible {
   background: var(--bg-secondary);
   min-width: 0;
 }
+.bp-name-slot {
+  position: relative;
+  display: grid;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(18em, 40vw);
+}
+.bp-name-slot > :is(.bp-name, .bp-name-input) {
+  grid-area: 1 / 1;
+  width: 100%;
+}
+.bp-name-slot > .bp-name-input {
+  position: absolute;
+  inset: 0;
+}
+.bp-name-slot.is-editing > .bp-name {
+  visibility: hidden;
+}
 .bp-name,
 .bp-name-input {
+  box-sizing: border-box;
+  height: 28px;
   min-width: 0;
+  margin: 0;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
   font-family: inherit;
   font-size: 14px;
   font-weight: 600;
+  line-height: 20px;
+  text-align: left;
   color: var(--text-primary);
 }
 .bp-name {
   background: none;
-  border: none;
-  padding: 0;
   cursor: text;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .bp-name-input {
-  width: min(18em, 40vw);
-  padding: 2px 6px;
   background: var(--bg-tertiary);
-  border: 1px solid var(--accent);
-  border-radius: 4px;
+  border-color: var(--accent);
   outline: none;
 }
 .bp-summary {
@@ -4697,12 +4901,13 @@ button.quote-bar-content:focus-visible {
   color: var(--text-primary);
   background: var(--bg-active);
 }
-/* Out of the way, at the foot of the filters: not beside Close. */
+/* Out of the way, at the foot of the filters: not beside Close. Only the
+   first action supplies the spring, however many actions are present. */
 .bp-archive,
 .bp-delete {
   flex-shrink: 0;
   align-self: flex-start;
-  margin-top: auto;
+  margin-top: 0;
   padding: 4px 8px;
   font: inherit;
   font-size: var(--fs-meta);
@@ -4720,8 +4925,8 @@ button.quote-bar-content:focus-visible {
   color: var(--text-primary);
   border-color: var(--border);
 }
-.bp-archive + .bp-delete {
-  margin-top: 0;
+.bp-filters + :is(.bp-archive, .bp-delete) {
+  margin-top: auto;
 }
 .bp-back {
   flex-shrink: 0;
@@ -4925,7 +5130,7 @@ button.quote-bar-content:focus-visible {
   box-shadow: 0 0 0 1px var(--accent);
 }
 .bp-node.prio-high {
-  border-left-color: var(--error);
+  border-left-color: var(--warning);
 }
 .bp-node.prio-normal {
   border-left-color: var(--accent);
@@ -5234,6 +5439,11 @@ button.quote-bar-content:focus-visible {
   color: var(--warning);
   border-left: 2px solid var(--warning);
   background: color-mix(in srgb, var(--warning) 6%, transparent);
+}
+.bp-reason.st-done {
+  color: var(--text-secondary);
+  border-left-color: var(--border-strong);
+  background: transparent;
 }
 /* Room between sections and between lines: the details are read, not
    scanned. */
@@ -5707,19 +5917,23 @@ button.quote-bar-content:focus-visible {
     gap: 8px;
   }
   .bp-summary,
-  .bp-delete,
   .bp-detail-head .bp-detail-close {
     display: none;
   }
   .bp-head .bp-close {
     margin-left: auto;
   }
+  .bp-name-slot {
+    width: 6em;
+  }
   /* The second row: search, and the objectives' views beside it. */
   .bp-search {
     order: 5;
     flex: 1 1 50%;
     width: auto;
+    height: 42px;
     margin-left: 0;
+    padding-block: 0;
   }
   .bp-views:not(.bp-modes) {
     order: 6;
@@ -5806,16 +6020,12 @@ button.quote-bar-content:focus-visible {
   }
 }
 
-/* A phone on its side: the header and filters keep to two short rows. A
-   short desktop window keeps Archive project, the only place it is. */
+/* A phone on its side: the header and filters keep to two short rows. */
 @media (max-height: 500px) and (min-width: 600px) and (hover: none) {
   .bp-search {
     order: 0;
     flex: 1;
     width: auto;
-  }
-  .bp-archive {
-    display: none;
   }
 }
 
@@ -5984,9 +6194,11 @@ button.quote-bar-content:focus-visible {
   border-radius: var(--radius-sm);
   cursor: pointer;
 }
-.side-panel-btn:hover {
-  color: var(--text-primary);
-  background: var(--bg-hover);
+@media (hover: hover) {
+  .side-panel-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
 }
 .side-panel-btn[aria-pressed="true"] {
   color: var(--text-primary);
@@ -6007,11 +6219,11 @@ button.quote-bar-content:focus-visible {
 }
 /* Hover only where there is a pointer: a tap on a phone leaves it stuck. */
 @media (hover: hover) {
-  .panel-btn:hover {
+  .panel-btn:hover:not(:disabled) {
     color: var(--text-primary);
     border-color: var(--text-muted);
   }
-  .panel-btn.danger:hover {
+  .panel-btn.danger:hover:not(:disabled) {
     color: var(--error);
     border-color: var(--error);
   }
@@ -6372,7 +6584,6 @@ button.quote-bar-content:focus-visible {
 }
 :where(pre code.hljs) {
   display: block;
-  overflow-x: auto;
   padding: 1em;
 }
 .hljs-doctag,
@@ -6653,7 +6864,7 @@ button.quote-bar-content:focus-visible {
 .ap-session-foot {
   display: flex;
   align-items: center;
-  padding: 4px var(--ap-pad) 10px;
+  padding: 4px var(--ap-pad);
   border-top: 1px solid var(--border);
 }
 .ap-actions {
@@ -6662,7 +6873,15 @@ button.quote-bar-content:focus-visible {
   gap: 4px;
   margin-left: auto;
 }
-.ap-actions > :last-child,
+.ap-actions > :last-child {
+  padding-right: 4px;
+  margin-right: -5px;
+}
+.ap-actions .panel-btn:focus-visible,
+.ap-add:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 .tp-stop {
   margin-right: calc(-1px - var(--panel-btn-pad));
 }
@@ -6833,7 +7052,8 @@ button.quote-bar-content:focus-visible {
   }
 }
 .ap-add {
-  margin-left: calc(-1px - var(--panel-btn-pad));
+  padding-left: 4px;
+  margin-left: -5px;
 }
 .ap-archived > summary {
   cursor: pointer;
@@ -6961,9 +7181,6 @@ button.quote-bar-content:focus-visible {
     height: 32px;
     margin: -10px;
     padding-left: 10px;
-  }
-  .ap-session-foot {
-    padding-block: 0 2px;
   }
   .ap-agent-actions {
     margin-right: -12px;
@@ -7104,12 +7321,13 @@ button.quote-bar-content:focus-visible {
 }
 .delivery-outcome-unknown {
   display: block;
-  border: 1px solid var(--warning);
-  background: color-mix(in srgb, var(--warning) 12%, var(--bg-secondary));
-  color: var(--warning);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  background: var(--warning-soft);
+  color: var(--text-body);
 }
 .delivery-outcome-unknown strong {
-  color: var(--error);
+  color: var(--warning);
+  font-weight: 600;
 }
 .message-outcome-unknown .message-content {
   border-left: 2px solid var(--warning);
@@ -7200,6 +7418,9 @@ button.quote-bar-content:focus-visible {
 .ui-dialog-message {
   white-space: pre-wrap;
 }
+.ui-dialog-message + :is(.ui-dialog-options, .ui-dialog-response) {
+  margin-top: 12px;
+}
 .ui-dialog-options {
   display: flex;
   flex-direction: column;
@@ -7212,11 +7433,12 @@ button.quote-bar-content:focus-visible {
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
   color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
   text-align: left;
   cursor: pointer;
 }
-.ui-dialog-option:hover,
-.ui-dialog-option:focus {
+.ui-dialog-option:not(:disabled):is(:hover, :focus) {
   border-color: var(--accent);
   background: var(--bg-active);
   outline: none;
@@ -7267,15 +7489,38 @@ button.quote-bar-content:focus-visible {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--warning);
+  font-size: inherit;
   cursor: pointer;
+}
+@media (hover: hover) {
+  .ui-dialog-alert button:hover:not(:disabled) {
+    background: var(--warning-soft);
+  }
 }
 @media (max-width: 768px) {
   .ui-dialog-alert {
-    top: auto;
-    right: 12px;
-    bottom: 12px;
+    top: calc(12px + env(safe-area-inset-top, 0px));
     left: 12px;
     justify-content: space-between;
+  }
+  @supports (bottom: anchor(top)) {
+    /* Lay out the mobile panel before positioning the alert so the composer
+       anchor is available. The panel still fills .app, including its safe area. */
+    .app:has(> .ui-dialog-alert) > .main-panel {
+      position: relative;
+      inset: auto;
+    }
+    .app:has(> .ui-dialog-alert) .input-area {
+      anchor-name: --ui-dialog-composer;
+    }
+    .app:has(> .ui-dialog-alert) .jump-latest {
+      anchor-name: --ui-dialog-jump;
+    }
+    .app:has(.input-area) > .ui-dialog-alert {
+      position: absolute;
+      top: auto;
+      bottom: calc(anchor(--ui-dialog-jump top, anchor(--ui-dialog-composer top)) + 8px);
+    }
   }
   .command-source {
     order: 2;
@@ -7332,6 +7577,9 @@ button.quote-bar-content:focus-visible {
   margin: 0;
   color: var(--text-muted);
 }
+.session-stats p[role="alert"] {
+  color: var(--error);
+}
 .session-stats .panel-btn {
   justify-self: start;
 }
@@ -7349,11 +7597,12 @@ button.quote-bar-content:focus-visible {
 }
 .session-stats-steps {
   margin: 0;
-  padding: 0 10px 2px 30px;
+  padding: 0;
+  list-style: none;
 }
 .session-stats-steps > li {
   border-top: 1px solid var(--border);
-  padding-block: 8px;
+  padding: 8px 10px;
 }
 .session-stats-fields {
   display: grid;
@@ -7389,4 +7638,17 @@ button.quote-bar-content:focus-visible {
   padding-block: 4px;
   cursor: pointer;
   font-weight: 600;
+}
+@media (max-width: 768px), (max-height: 500px) {
+  .session-stats-steps > li {
+    padding-block: 0;
+  }
+  .session-stats-step > summary {
+    padding-block: 12px;
+    min-height: 44px;
+    align-content: center;
+  }
+  .session-stats-step[open] > dl {
+    margin-bottom: 8px;
+  }
 }

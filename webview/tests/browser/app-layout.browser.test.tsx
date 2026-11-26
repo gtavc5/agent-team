@@ -365,11 +365,14 @@ it("keeps the visible history anchored even if new content grows below while pag
     hasMore: false,
   });
   const paged = get("#msg-m-2");
-  const codeScroll = get("#msg-m-2 pre code");
+  const codeScroll = get("#msg-m-2 pre");
+  const codeInner = get("#msg-m-2 pre code");
   expect(codeScroll.scrollWidth).toBeGreaterThan(codeScroll.clientWidth + 100);
   expect(scroll.scrollWidth).toBe(scroll.clientWidth);
   codeScroll.scrollLeft = 100;
   expect(codeScroll.scrollLeft).toBe(100);
+  codeInner.scrollLeft = 100;
+  expect(codeInner.scrollLeft).toBe(0);
   expect(paged.getAnimations({ subtree: true })).toEqual([]);
   expect(target.getBoundingClientRect().top).toBeCloseTo(top, 0);
   await nextPaint();

@@ -5,5 +5,5 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 
 export const mathRemark = [remarkMath, { singleDollarTextMath: false }] as const;
-// A formula KaTeX cannot parse renders as its source in red, never throws.
-export const mathRehype = [rehypeKatex, { strict: "ignore" }] as const;
+// A formula KaTeX cannot parse renders as its source in the theme error colour, never throws.
+export const mathRehype = [rehypeKatex, { strict: "ignore", errorColor: "var(--error)" }] as const;

@@ -73,6 +73,8 @@ const TASK_MARK: Record<TaskState, string> = {
   done: "●",
   dropped: "⊘",
 };
+const FOCUSABLE =
+  ':is(button, input, textarea, select):not(:disabled), a[href], summary, [tabindex="0"]';
 
 // Brings the element for `id` into view inside its scroller.
 function reveal(root: HTMLElement | null, id: string | null): void {
@@ -321,9 +323,28 @@ export const BoardPage = memo(function BoardPage({
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.isComposing || e.defaultPrevented) return;
+      if (e.isComposing || e.defaultPrevented) return;
       const target = e.target as Node | null;
       if (target instanceof Element && target.closest(".dialog-overlay")) return;
+      if (e.key === "Tab") {
+        const page = pageRef.current;
+        if (!page) return;
+        const items = [...page.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+          (element) =>
+            element.tabIndex >= 0 &&
+            !element.closest("[hidden], [inert]") &&
+            (typeof element.checkVisibility !== "function" || element.checkVisibility()),
+        );
+        const active = document.activeElement as HTMLElement | null;
+        const index = items.indexOf(active as HTMLElement);
+        const outside = !active || active === page || !page.contains(active);
+        if (outside || (e.shiftKey ? index === 0 : index === items.length - 1)) {
+          e.preventDefault();
+          (items.at(e.shiftKey ? -1 : 0) ?? page).focus();
+        }
+        return;
+      }
+      if (e.key !== "Escape") return;
       const s = state.current;
       if (s.notes) {
         if (s.file) s.closeFile();
@@ -356,7 +377,7 @@ export const BoardPage = memo(function BoardPage({
         className={`board-page${detail ? " has-detail" : ""}`}
         role="dialog"
         aria-modal="true"
-        aria-label={`${project.name} objectives`}
+        aria-label={`${project.name} ${mode}`}
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
@@ -501,6 +522,7 @@ export const BoardPage = memo(function BoardPage({
               <div className="bp-areas">
                 <button
                   className={`bp-area${filter.area === null ? " active" : ""}`}
+                  aria-pressed={filter.area === null}
                   onClick={() => setFilter((f) => ({ ...f, area: null }))}
                 >
                   <span className="bp-area-name">All areas</span>
@@ -510,6 +532,7 @@ export const BoardPage = memo(function BoardPage({
                   <button
                     key={a.area}
                     className={`bp-area${filter.area === a.area ? " active" : ""}${a.count ? "" : " empty"}`}
+                    aria-pressed={filter.area === a.area}
                     onClick={() => setFilter((f) => ({ ...f, area: a.area }))}
                   >
                     <span className="bp-area-name">{a.area}</span>
@@ -694,7 +717,8 @@ function ObjectiveCard({
     <button
       data-objective={o.id}
       className={`bp-card prio-${o.priority} st-${o.status}${selected ? " selected" : ""}`}
-      aria-pressed={selected}
+      aria-expanded={selected}
+      aria-controls={selected ? "bp-objective-detail" : undefined}
       onClick={() => onSelect(o.id)}
     >
       <span className="bp-card-top">
@@ -842,6 +866,8 @@ function DependencyGraph({
           else nodes.current.delete(o.id);
         }}
         className={`bp-node prio-${o.priority} st-${o.status}${nodeClass(o.id)}${o.id === selected ? " selected" : ""}`}
+        aria-expanded={o.id === selected}
+        aria-controls={o.id === selected ? "bp-objective-detail" : undefined}
         onClick={() => onSelect(o.id)}
         // A tap raises pointer enter but never leave: hover is for mice.
         onPointerEnter={(e) => e.pointerType === "mouse" && setFocus(o.id)}
@@ -977,7 +1003,13 @@ function ObjectiveDetail({
   };
 
   return (
-    <aside ref={self} tabIndex={-1} className="bp-detail" aria-label={o.title}>
+    <aside
+      id="bp-objective-detail"
+      ref={self}
+      tabIndex={-1}
+      className="bp-detail"
+      aria-label={o.title}
+    >
       <div className="bp-detail-head">
         <button className="bp-back" aria-label="Back" onClick={onClose}>
           ‹
@@ -1006,7 +1038,7 @@ function ObjectiveDetail({
         <span className="bp-updated">updated {formatRelative(o.updatedAt)}</span>
       </div>
       {o.reason && (
-        <p className="bp-reason">
+        <p className={`bp-reason st-${o.status}`}>
           <InlineMd>{o.reason}</InlineMd>
         </p>
       )}
@@ -1150,22 +1182,27 @@ function ProjectName({
 }) {
   const [editing, setEditing] = useState(false);
   if (readOnly) return <span className="bp-name">{name}</span>;
-  if (!editing) {
-    return (
-      <button className="bp-name" title="Rename" onClick={() => setEditing(true)}>
+  return (
+    <span className={`bp-name-slot${editing ? " is-editing" : ""}`}>
+      <button
+        className="bp-name"
+        title="Rename"
+        tabIndex={editing ? -1 : undefined}
+        onClick={() => setEditing(true)}
+      >
         {name}
       </button>
-    );
-  }
-  return (
-    <NameInput
-      name={name}
-      label="Project name"
-      className="bp-name-input"
-      onDone={(renamed) => {
-        setEditing(false);
-        if (renamed) onRename(renamed);
-      }}
-    />
+      {editing && (
+        <NameInput
+          name={name}
+          label="Project name"
+          className="bp-name-input"
+          onDone={(renamed) => {
+            setEditing(false);
+            if (renamed) onRename(renamed);
+          }}
+        />
+      )}
+    </span>
   );
 }

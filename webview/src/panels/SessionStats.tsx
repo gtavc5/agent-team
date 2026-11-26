@@ -28,11 +28,13 @@ function StatField({ label, value }: { label: string; value?: string }) {
   );
 }
 
-export function SessionStatsStepInspector({ step }: { step: StatsStep }) {
+function SessionStatsStepInspector({ step, ordinal }: { step: StatsStep; ordinal: number }) {
   const { kind, promptDelta } = step;
   return (
     <details className="session-stats-step">
-      <summary {...telemetryTarget("stats.step_toggle")}>{stepLabels[kind]}</summary>
+      <summary {...telemetryTarget("stats.step_toggle")}>
+        {ordinal}. {stepLabels[kind]}
+      </summary>
       <dl className="session-stats-fields">
         <StatField label="Step ID" value={step.stepId} />
         {(kind === "user" || step.trigger !== undefined) && (
@@ -172,10 +174,10 @@ function SessionStatsPages({ workspaceId }: { workspaceId: string }) {
                 )}
               </dl>
               {turn.steps.length ? (
-                <ol className="session-stats-steps">
-                  {turn.steps.map((step) => (
+                <ol className="session-stats-steps" role="list">
+                  {turn.steps.map((step, index) => (
                     <li key={step.stepId}>
-                      <SessionStatsStepInspector step={step} />
+                      <SessionStatsStepInspector step={step} ordinal={index + 1} />
                     </li>
                   ))}
                 </ol>

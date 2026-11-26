@@ -18,6 +18,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   localStorage.clear();
   FakeSocket.instances = [];
+  delete document.documentElement.dataset.theme;
 });
 
 const statuses: SubagentStatus[] = [
@@ -477,6 +478,25 @@ it("retains one bounded reading window under repeated live growth, paging and op
     expect(latest.totalEvents).toBe(view.events.length);
     assertBound();
     const latestStart = latest.start;
+    if (cycle === 0) {
+      const pager = page.getByRole("navigation", { name: "Trace pages" });
+      const earlier = pager.getByRole("button", { name: "Earlier" });
+      const newer = pager.getByRole("button", { name: "Newer" });
+      await expect.element(earlier).toBeEnabled();
+      await expect.element(newer).toBeDisabled();
+      const controlPaint = (control: typeof newer) => {
+        const { backgroundColor, color, cursor, opacity } = getComputedStyle(control.element());
+        return { backgroundColor, color, cursor, opacity };
+      };
+      await earlier.hover();
+      const disabled = controlPaint(newer);
+      expect(disabled.cursor).toBe("default");
+      expect(+disabled.opacity).toBeLessThan(1);
+      expect(controlPaint(earlier).backgroundColor).not.toBe(disabled.backgroundColor);
+      await newer.hover();
+      expect(newer.element().matches(":hover")).toBe(true);
+      expect(controlPaint(newer)).toEqual(disabled);
+    }
     fireEvent.click(view.getByRole("button", { name: "Earlier" }));
     const earlier = view.answer();
     expect(earlier.end).toBe(latestStart);
@@ -508,5 +528,297 @@ it("retains one bounded reading window under repeated live growth, paging and op
       "trace.subagent_page",
       "trace.subagent_toggle",
     ]).flat(),
+  );
+});
+
+it.each([
+  { theme: "light", width: 1280 },
+  { theme: "dark", width: 1280 },
+  { theme: "light", width: 390 },
+  { theme: "dark", width: 390 },
+])(
+  "keeps summaries flat, resets edge and middle fenced-code margins, and aligns marks and BottomCollapse ($theme $width px)",
+  async ({ theme, width }) => {
+    document.documentElement.dataset.theme = theme;
+    await page.viewport(width, 800);
+    const view = mount();
+    const failedPrompt = "```ts\nconst input = 1;\n```\n\nCheck edge cases.";
+    const failedSummary = "Build failed.\n\n```sh\nexit 1\n```";
+    const completedPrompt =
+      "Before prompt fence.\n\n```ts\nconst midPrompt = 1;\n```\n\nAfter prompt fence.";
+    const completedSummary = "Before summary fence.\n\n```sh\necho ok\n```\n\nAfter summary fence.";
+    const child = {
+      taskId: "nested-failed",
+      description: "Inner check",
+      status: "failed" as const,
+      prompt: "```ts\nconst child = true;\n```",
+      summary: "```txt\nerror: boom\n```",
+      events: [{ kind: "thinking", content: "Inspecting failure" }],
+    };
+    const failedEvents = [
+      { kind: "thinking", content: "Tracing outer step" },
+      { kind: "subagent_start", content: "", subagent: child },
+      { kind: "subagent_done", content: "", subagent: child },
+    ];
+    const completedEvents = [{ kind: "thinking", content: "Verifying completed step" }];
+
+    view.receive({
+      type: "workspace_messages",
+      workspaceId: "work",
+      before: null,
+      hasMore: false,
+      messages: messages.map((msg) =>
+        msg === owner
+          ? {
+              ...owner,
+              events: [
+                {
+                  kind: "subagent_done",
+                  content: "",
+                  subagent: {
+                    ...task,
+                    taskId: "outer-failed",
+                    description: "Failed Review",
+                    status: "failed",
+                    transcriptRevision: 1,
+                    eventCount: failedEvents.length,
+                  },
+                },
+                {
+                  kind: "subagent_done",
+                  content: "",
+                  subagent: {
+                    ...task,
+                    taskId: "outer-completed",
+                    description: "Completed Review",
+                    status: "completed",
+                    transcriptRevision: 1,
+                    eventCount: completedEvents.length,
+                  },
+                },
+              ],
+            }
+          : msg,
+      ),
+    });
+
+    const outerSubagentEvents = [
+      {
+        kind: "subagent_done" as const,
+        content: "",
+        subagent: {
+          ...task,
+          taskId: "outer-failed",
+          prompt: failedPrompt,
+          summary: failedSummary,
+          usage: { totalTokens: 4000, toolUses: 3, durationMs: 6000 },
+          transcriptRevision: 1,
+          events: failedEvents,
+        },
+      },
+      {
+        kind: "subagent_done" as const,
+        content: "",
+        subagent: {
+          ...task,
+          taskId: "outer-completed",
+          prompt: completedPrompt,
+          summary: completedSummary,
+          usage: { totalTokens: 4000, toolUses: 3, durationMs: 6000 },
+          transcriptRevision: 1,
+          events: completedEvents,
+        },
+      },
+    ];
+    const answerLatest = () => {
+      const req = view.requests().at(-1)!;
+      const payload = readTracePage(
+        req.requestId as number,
+        outerSubagentEvents,
+        req.taskId as string,
+        req,
+      );
+      view.receive(payload);
+    };
+
+    fireEvent.click(view.getByRole("button", { name: "Expand subagent: Failed Review" }));
+    answerLatest();
+    fireEvent.click(view.getByRole("button", { name: "Expand subagent: Completed Review" }));
+    answerLatest();
+
+    const resolveColor = (cssColor: string) => {
+      const probe = document.createElement("span");
+      probe.style.color = cssColor;
+      document.body.append(probe);
+      const resolved = getComputedStyle(probe).color;
+      probe.remove();
+      return resolved;
+    };
+
+    const expectedIndent = width === 390 ? 8 : 18;
+    const expectedAxisInset = width === 390 ? 6 : 10;
+
+    const assertCardLayout = (card: HTMLElement, expectedBorder: string, checkNested = false) => {
+      const header = card.querySelector<HTMLElement>(":scope > .subagent-header")!;
+      const details = card.querySelector<HTMLElement>(":scope > .subagent-details")!;
+      const trace = details.querySelector<HTMLElement>(":scope > .subagent-trace-page")!;
+      const footer = details.querySelector<HTMLElement>(":scope > .trace-collapse-footer")!;
+      const prompt = trace.querySelector<HTMLElement>(":scope > .subagent-prompt")!;
+      const summary = trace.querySelector<HTMLElement>(":scope > .subagent-summary")!;
+      const event = trace.querySelector<HTMLElement>(":scope > .subagent-events > .event")!;
+      const eventRow = event.querySelector<HTMLElement>(".event-row")!;
+
+      if (!checkNested) {
+        expect(getComputedStyle(card).backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+      }
+      expect(getComputedStyle(summary).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+      expect(getComputedStyle(prompt).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+      expect(getComputedStyle(summary).borderLeftColor).toBe(expectedBorder);
+
+      // Every direct code-block pre inside prompt/summary has zero margins of its own.
+      for (const block of [prompt, summary]) {
+        for (const pre of block.querySelectorAll<HTMLElement>(":scope > .code-block > pre")) {
+          expect(getComputedStyle(pre).marginTop).toBe("0px");
+          expect(getComputedStyle(pre).marginBottom).toBe("0px");
+        }
+        const box = block.getBoundingClientRect();
+        const top = block.firstElementChild!.getBoundingClientRect().top - box.top;
+        const bottom = box.bottom - block.lastElementChild!.getBoundingClientRect().bottom;
+        expect(Math.abs(top - bottom)).toBeLessThanOrEqual(1);
+      }
+
+      // Trace indent and BottomCollapse flush alignment with header.
+      expect(parseFloat(getComputedStyle(trace).paddingLeft)).toBe(expectedIndent);
+      expect(
+        Math.abs(footer.getBoundingClientRect().left - header.getBoundingClientRect().left),
+      ).toBeLessThanOrEqual(0.5);
+      expect(
+        Math.abs(footer.getBoundingClientRect().right - header.getBoundingClientRect().right),
+      ).toBeLessThanOrEqual(0.5);
+
+      // Visible marks (outer left edge) and reading axes (prompt, event, summary, and fenced pre) align at both widths.
+      const markLeft = prompt.getBoundingClientRect().left;
+      expect(Math.abs(event.getBoundingClientRect().left - markLeft)).toBeLessThanOrEqual(0.5);
+      expect(Math.abs(summary.getBoundingClientRect().left - markLeft)).toBeLessThanOrEqual(0.5);
+
+      const expectedContentLeft = markLeft + expectedAxisInset;
+      const contentLefts = [
+        prompt.firstElementChild!.getBoundingClientRect().left,
+        prompt.querySelector<HTMLElement>(":scope > .code-block > pre")!.getBoundingClientRect()
+          .left,
+        eventRow.getBoundingClientRect().left,
+        summary.firstElementChild!.getBoundingClientRect().left,
+        summary.querySelector<HTMLElement>(":scope > .code-block > pre")!.getBoundingClientRect()
+          .left,
+      ];
+      for (const left of contentLefts) {
+        expect(Math.abs(left - expectedContentLeft)).toBeLessThanOrEqual(0.5);
+      }
+
+      return { markLeft, contentLeft: expectedContentLeft, prompt, summary, trace };
+    };
+
+    const failedCard = view.container.querySelector<HTMLElement>(".subagent-item.subagent-failed")!;
+    const completedCard = view.container.querySelector<HTMLElement>(
+      ".subagent-item.subagent-completed",
+    )!;
+    const failedMetrics = assertCardLayout(failedCard, resolveColor("var(--error)"));
+    const completedMetrics = assertCardLayout(completedCard, resolveColor("var(--success)"));
+
+    // Failed and completed cards share identical reading axes at both desktop and mobile widths.
+    expect(Math.abs(failedMetrics.markLeft - completedMetrics.markLeft)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(failedMetrics.contentLeft - completedMetrics.contentLeft)).toBeLessThanOrEqual(
+      0.5,
+    );
+
+    // Middle-fence wrappers in completed prompt & summary own the compact 4px rhythm while <pre> keeps 0px margins.
+    for (const block of [completedMetrics.prompt, completedMetrics.summary]) {
+      const middleWrap = block.querySelector<HTMLElement>(":scope > .code-block")!;
+      const middlePre = middleWrap.querySelector<HTMLElement>(":scope > pre")!;
+      expect(getComputedStyle(middleWrap).marginTop).toBe("4px");
+      expect(getComputedStyle(middleWrap).marginBottom).toBe("4px");
+      expect(getComputedStyle(middlePre).marginTop).toBe("0px");
+      expect(getComputedStyle(middlePre).marginBottom).toBe("0px");
+    }
+
+    // Nested failed card also renders flat with aligned reading axes, BottomCollapse, and zeroed fence margins.
+    const nestedCard = failedMetrics.trace.querySelector<HTMLElement>(
+      ".subagent-item.subagent-failed",
+    )!;
+    expect(getComputedStyle(nestedCard).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+    fireEvent.click(
+      within(nestedCard).getByRole("button", { name: "Expand subagent: Inner check" }),
+    );
+    answerLatest();
+    assertCardLayout(nestedCard, resolveColor("var(--error)"), true);
+  },
+);
+
+it("keeps duration and Cancel clustered on the right when a running subagent reports durationMs", async () => {
+  for (const width of [1200, 320]) {
+    await page.viewport(width, 720);
+    const cancelled: string[] = [];
+    const { container, unmount } = render(
+      <div className="messages">
+        <SubAgentItem
+          ev={{
+            kind: "subagent_start",
+            content: "",
+            subagent: {
+              taskId: "running-timed",
+              description: "Review",
+              model: "claude-opus-5-5",
+              effort: "high",
+              status: "running",
+              durationMs: 4200,
+              cancellable: true,
+            },
+          }}
+          onCancel={(id) => cancelled.push(id)}
+        />
+      </div>,
+    );
+    const header = container.querySelector<HTMLElement>(".subagent-header")!;
+    const time = header.querySelector<HTMLElement>(".subagent-time")!;
+    const dot = header.querySelector<HTMLElement>(".streaming-dot")!;
+    const cancel = header.querySelector<HTMLElement>(".btn-cancel-subagent")!;
+    const headerRect = header.getBoundingClientRect();
+    const timeRect = time.getBoundingClientRect();
+    const dotRect = dot.getBoundingClientRect();
+    const cancelRect = cancel.getBoundingClientRect();
+
+    // Cancel sits at the right edge; duration and live dot cluster beside it instead of mid-header.
+    expect(Math.abs(cancelRect.right - headerRect.right)).toBeLessThanOrEqual(1);
+    expect(dotRect.left - timeRect.right).toBeLessThanOrEqual(10);
+    expect(cancelRect.left - dotRect.right).toBeLessThanOrEqual(10);
+    expect(timeRect.left).toBeGreaterThan(headerRect.left);
+    expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth + 1);
+
+    fireEvent.click(cancel);
+    expect(cancelled).toEqual(["running-timed"]);
+    unmount();
+  }
+});
+
+it("keeps BottomCollapse reachable after scrolling a tall subagent trace and restores header on collapse", async () => {
+  await page.viewport(1280, 720);
+  const view = mount();
+  view.meta.summary = "Line of detailed output.\n\n".repeat(60);
+  view.snapshot(0);
+  const scroller = view.container.querySelector<HTMLElement>(".messages")!;
+  view.openTrace();
+  view.answer(0);
+  const header = view.container.querySelector<HTMLElement>(".subagent-header")!;
+  const collapseBtn = view.getByRole("button", { name: "Collapse subagent trace" });
+  scroller.scrollTop +=
+    collapseBtn.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom + 24;
+  expect(header.getBoundingClientRect().bottom).toBeLessThan(scroller.getBoundingClientRect().top);
+  expect(collapseBtn.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+    scroller.getBoundingClientRect().bottom,
+  );
+  fireEvent.click(collapseBtn);
+  expect(view.details()).toBeNull();
+  expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+    scroller.getBoundingClientRect().top - 1,
   );
 });
