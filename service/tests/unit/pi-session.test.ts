@@ -1685,19 +1685,23 @@ describe("PiSession dispatch and stream state", () => {
     "sets the CCPA proxy only for the Pi child when the endpoint override is %s",
     async (override) => {
       const endpoint = "http://127.0.0.1:12345";
+      const windows = process.platform === "win32";
+      const upper = "upper.test,localhost";
+      const lower = "lower.test, 127.0.0.1";
       vi.stubEnv("AGY_ACP_CCPA_BASE_URL", override);
-      vi.stubEnv("NO_PROXY", "upper.test,localhost");
-      vi.stubEnv("no_proxy", "lower.test, 127.0.0.1");
+      vi.stubEnv("NO_PROXY", upper);
+      // On Windows the two names refer to a single native environment entry.
+      if (!windows) vi.stubEnv("no_proxy", lower);
       const { session, factory } = harness({ options: { ccpaProxyUrl: endpoint } });
       await session.ensureStarted();
       expect(factory.mock.calls[0][0].env).toMatchObject({
         AGY_ACP_CCPA_BASE_URL: override ?? endpoint,
         NO_PROXY: "upper.test,localhost,127.0.0.1",
-        no_proxy: "lower.test,127.0.0.1,localhost",
+        no_proxy: windows ? "upper.test,localhost,127.0.0.1" : "lower.test,127.0.0.1,localhost",
       });
       expect(process.env.AGY_ACP_CCPA_BASE_URL).toBe(override);
-      expect(process.env.NO_PROXY).toBe("upper.test,localhost");
-      expect(process.env.no_proxy).toBe("lower.test, 127.0.0.1");
+      expect(process.env.NO_PROXY).toBe(upper);
+      expect(process.env.no_proxy).toBe(windows ? upper : lower);
     },
   );
 

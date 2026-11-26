@@ -149,8 +149,11 @@ it("reads persisted markdown, expands tool results, copies code and opens an ima
   await result.click();
   const output = bash.locator(".event-result", { hasText: "31 passed (31)" });
   await output.getByRole("button", { name: "Copy", exact: true }).click();
+  // The Windows clipboard represents line breaks as CRLF.
   await expect
-    .poll(() => page.evaluate("navigator.clipboard.readText()"))
+    .poll(async () =>
+      (await page.evaluate<string>("navigator.clipboard.readText()")).replaceAll("\r\n", "\n"),
+    )
     .toBe(" Test Files  2 passed (2)\n      Tests  31 passed (31)");
   await bash.getByRole("button", { name: /^Hide result ·/ }).click();
   await bash.locator(".event-result").waitFor({ state: "hidden" });

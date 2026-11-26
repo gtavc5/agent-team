@@ -682,7 +682,7 @@ describe("file previews", () => {
     expect(resolveFilePath("C:\\repo", " one.png", "win32", true)).toBe("C:\\repo\\ one.png");
   });
 
-  it("keeps literal dot segments through symlink resolution", async () => {
+  it("passes literal dot segments to the native filesystem", async () => {
     const root = path.join(dir, "resolve");
     const other = path.join(root, "other");
     fs.mkdirSync(path.join(other, "sub"), { recursive: true });
@@ -692,12 +692,22 @@ describe("file previews", () => {
     fs.writeFileSync(normalized, "normalized first");
     fs.writeFileSync(throughLink, "filesystem first");
     const input = `${root}${path.sep}link${path.sep}..${path.sep}one.txt`;
-    expect((await get("file/raw", input)).body.toString()).toBe("normalized first");
-    const literal = await request(`/api/file/raw?path=${encodeURIComponent(input)}&literal=1`, {
-      headers: { Cookie: cookie },
+    const headers = { Cookie: cookie };
+    const query = `path=${encodeURIComponent(input)}&literal=1`;
+    expect(JSON.parse((await get("file", input)).body.toString())).toMatchObject({
+      path: normalized,
     });
+    const preview = await request(`/api/file?${query}`, { headers });
+    expect(preview.status).toBe(200);
+    expect(JSON.parse(preview.body.toString())).toMatchObject({ path: input });
+
+    expect((await get("file/raw", input)).body.toString()).toBe("normalized first");
+    const literal = await request(`/api/file/raw?${query}`, { headers });
     expect(literal.status).toBe(200);
-    expect(literal.body.toString()).toBe("filesystem first");
+    // Win32 collapses `..` in a drive path before traversing the link.
+    expect(literal.body.toString()).toBe(
+      process.platform === "win32" ? "normalized first" : "filesystem first",
+    );
   });
 
   it("resolves Windows drive paths and RFC 8089 /C:/... file URIs without doubling drives", () => {

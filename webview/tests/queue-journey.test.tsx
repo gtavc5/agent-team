@@ -76,6 +76,7 @@ it("sends, streams, cancels, switches sessions, resyncs and stops through the Hu
         // Node's native WebSocket emits events from a different realm in jsdom.
         const sockets: PilotSocket[] = [];
         const hydrated = new Set<PilotSocket>();
+        const completed = new Map<PilotSocket, Set<string>>();
         const nativeFetch = fetch;
         // Socket updates come from actual I/O; synchronize on rendered outcomes.
         vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", false);
@@ -85,11 +86,22 @@ it("sends, streams, cancels, switches sessions, resyncs and stops through the Hu
             constructor(url: string) {
               super(new URL(new URL(url).pathname, origin.replace(/^http/, "ws")).href);
               sockets.push(this);
+              const replies = new Set<string>();
+              completed.set(this, replies);
               this.on("message", (data) => {
                 if (!Buffer.isBuffer(data)) return;
-                const frame = JSON.parse(data.toString()) as { type: string; workspaceId?: string };
-                if (frame.type === "workspace_messages" && frame.workspaceId === firstId)
+                const frame = JSON.parse(data.toString()) as {
+                  type: string;
+                  workspaceId?: string;
+                  before?: string | null;
+                  status?: string;
+                  content?: string;
+                };
+                if (frame.workspaceId !== firstId) return;
+                if (frame.type === "workspace_messages" && frame.before === null)
                   hydrated.add(this);
+                if (frame.type === "message_done" && frame.status === "done" && frame.content)
+                  replies.add(frame.content);
               });
             }
           },
@@ -105,6 +117,16 @@ it("sends, streams, cancels, switches sessions, resyncs and stops through the Hu
         localStorage.setItem("activeWsId", firstId);
         let app = render(<App />);
         try {
+          // The Hub performs real I/O. Bound the wire wait separately from the DOM
+          // assertion so a descheduled worker does not look like a rendering failure.
+          const wireWait = { timeout: 4_000, interval: 10 };
+          const waitForHydration = (index: number) =>
+            expect
+              .poll(() => hydrated.has(sockets[index]), {
+                ...wireWait,
+                message: `expected newest history page on socket ${index + 1}`,
+              })
+              .toBe(true);
           const messages = () => within(app.container.querySelector(".messages")!);
           const visible = (text: string) =>
             app.findByText(text, { exact: true, selector: ".messages *" });
@@ -126,6 +148,7 @@ it("sends, streams, cancels, switches sessions, resyncs and stops through the Hu
               dimmed: row.classList.contains("message-queued"),
               canRemove: !!row.querySelector(".queued-cancel"),
             }));
+          await waitForHydration(0);
           await visible("History 0:0");
           await send(prompt(0));
           await playPi(player!, first.slice(0, firstChunk + 1));
@@ -177,16 +200,27 @@ it("sends, streams, cancels, switches sessions, resyncs and stops through the Hu
             await disconnected;
             document.dispatchEvent(new Event("visibilitychange"));
           });
-          await expect.poll(() => hydrated.has(sockets[1]), { interval: 10 }).toBe(true);
+          await waitForHydration(1);
           expect(sockets).toHaveLength(2);
           expect(state()).toEqual(pending);
           app.unmount();
           app = render(<App />);
+          await waitForHydration(2);
           await visible(prompt(1));
+          expect(sockets).toHaveLength(3);
           expect(state()).toEqual(pending);
 
-          await playPi(player!, first.slice(firstChunk + 1));
-          await playPi(player!, second);
+          // Pi stdout replay does not wait for Hub delivery or the React commit.
+          await act(async () => {
+            await playPi(player!, first.slice(firstChunk + 1));
+            await playPi(player!, second);
+            await expect
+              .poll(() => completed.get(sockets[2])?.has(reply), {
+                ...wireWait,
+                message: "expected Hub completion for the queued reply on the live socket",
+              })
+              .toBe(true);
+          });
           await visible(reply);
           expect(state().filter(({ canRemove }) => canRemove)).toEqual([]);
           expect(
@@ -196,6 +230,7 @@ it("sends, streams, cancels, switches sessions, resyncs and stops through the Hu
           const settled = state();
           app.unmount();
           app = render(<App />);
+          await waitForHydration(3);
           await visible(reply);
           expect(state()).toEqual(settled);
 

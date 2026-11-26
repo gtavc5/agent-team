@@ -61,7 +61,7 @@ Run the printed `export AGY_ACP_CCPA_BASE_URL=http://127.0.0.1:<port>` in the te
 
 Omit `--port` (or use `0`) to select an available port. `--upstream-url` overrides the default upstream. If `--base-dir` is omitted, the proxy uses `AGENT_TEAM_BASE_DIR` or the current working directory. Stop it with Ctrl-C or `SIGTERM` to flush queued metrics. The bundled CLI only needs Node.js at runtime and does not start the YAAT panel.
 
-Use a separate base directory per proxy instance. Request metrics are appended to `.agent-team/ccpa-proxy-metrics.jsonl` under that directory, with mode `0600` and one rotated `.1` file (8 MiB per file). Logging is best effort: rows can be dropped when the write queue fills or disk writes fail. Health request statistics summarize the latest 1,024 requests in memory, independent of the log.
+Use a separate base directory per proxy instance. Request metrics are appended to `.agent-team/ccpa-proxy-metrics.jsonl` under that directory, with one rotated `.1` file (8 MiB per file). On Unix, the files use mode `0600`. On Windows, restrict access through the base directory's access control list (ACL). Logging is best effort: rows can be dropped when the write queue fills or disk writes fail. Health request statistics summarize the latest 1,024 requests in memory, independent of the log.
 
 ---
 

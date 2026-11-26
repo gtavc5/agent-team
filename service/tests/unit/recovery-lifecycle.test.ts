@@ -1,10 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { START_SPACING_MS } from "../../src/project/manager";
 import { Server } from "../../src/server/server";
-import { setupProjects } from "./projectHarness";
+import { setupProjects, useRecoveryClock } from "./projectHarness";
 
 async function waitingLead() {
-  vi.useFakeTimers();
+  useRecoveryClock();
   const h = setupProjects();
   const { lead, project } = h.create("recovery lifecycle");
   const session = h.session(lead);

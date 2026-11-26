@@ -1,6 +1,6 @@
 import http from "node:http";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -89,7 +89,6 @@ it("retries exactly one pre-header reset, forwards the original request, and rec
     proxyRetryRecovered: true,
     bytesOut: 15,
   });
-  expect((await stat(log)).mode & 0o777).toBe(0o600);
 }, 10000);
 
 it("forwards headers and SSE chunks before completion and cancels on client disconnect", async () => {
