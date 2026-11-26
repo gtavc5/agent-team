@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { splitEvents, timelineBlocks, hasOutstandingSubagents } from "../src/chat/events";
 import { StreamEvent } from "../src/state/useServer";

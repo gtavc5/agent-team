@@ -7,6 +7,24 @@ import { ensureWebviewBuilt } from "../../../scripts/bench-demo";
 import { seedDemo } from "../../../scripts/seed-demo";
 import { Server } from "../../src/server/server";
 import type { TelemetryStore } from "../../src/storage/telemetry";
+import { closeHistory } from "../../src/workspace/state";
+
+async function dispose(
+  dir: string,
+  browser: Awaited<ReturnType<typeof chromium.launch>> | undefined,
+  server: Server | undefined,
+) {
+  try {
+    await browser?.close();
+  } finally {
+    try {
+      await server?.close();
+    } finally {
+      closeHistory(dir);
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  }
+}
 
 const webDir = join(__dirname, "../../../dist/webview");
 const action = "confirm.clear_context";
@@ -116,12 +134,7 @@ it.each([true, false])(
         expect(readdirSync(dir).filter((name) => name.startsWith("telemetry.db"))).toEqual([]);
       }
     } finally {
-      try {
-        await browser?.close();
-        await server?.close();
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
+      await dispose(dir, browser, server);
     }
   },
   60_000,
@@ -174,11 +187,6 @@ it("counts a real workspace switch, chat file preview and explicit Files opening
       (await summary(origin)).recentChains.map((chain) => chain.map((row) => row.action)),
     ).toEqual([actions]);
   } finally {
-    try {
-      await browser?.close();
-      await server?.close();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    await dispose(dir, browser, server);
   }
 }, 60_000);

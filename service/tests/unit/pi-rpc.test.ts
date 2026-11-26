@@ -992,12 +992,7 @@ describe("prepareControlledPiAgentHome", () => {
       writePackages(sourceAgentDir, subagentsSource);
     }
 
-    const start = performance.now();
-    const packages = discoverLocalPiPackages(sourceAgentDir);
-    const elapsed = performance.now() - start;
-    expect(packages.piSubagentsRoot).toBeUndefined();
-    if (elapsed > 50)
-      console.warn(`Repeated-star ${mode}: ${elapsed.toFixed(1)}ms (reference 50ms)`);
+    expect(discoverLocalPiPackages(sourceAgentDir).piSubagentsRoot).toBeUndefined();
   });
 
   it("prefers a filtered object over an earlier bare string for duplicate package sources", () => {

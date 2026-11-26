@@ -138,19 +138,25 @@ it("shares instant picks and Enter-applied fuzzy filters with responsive numbere
   );
   const dialog = page.getByRole("dialog");
   const params = () => Object.fromEntries(usageUrl(request.mock.lastCall![0]).searchParams);
-  await dialog.getByRole("combobox", { name: "Window (UTC)" }).selectOptions("7d");
-  await dialog.getByRole("combobox", { name: "Reporting unit" }).selectOptions("turn");
+  const applied = async (action: () => Promise<unknown>, expected: Record<string, unknown>) => {
+    const before = request.mock.calls.length;
+    await action();
+    await expect.poll(() => request.mock.calls.length).toBeGreaterThan(before);
+    await expect.poll(params).toMatchObject(expected);
+  };
+  const select = (name: string, value: string) => () =>
+    dialog.getByRole("combobox", { name, exact: true }).selectOptions(value);
+  await applied(select("Window (UTC)", "7d"), { range: "7d" });
+  await applied(select("Reporting unit", "turn"), { unit: "turn" });
   const rank = dialog.getByRole("button", { name: "example-model, 104 tokens" });
-  await rank.click();
+  await applied(() => rank.click(), { model: "example-model" });
   await expect.element(rank).toHaveAttribute("aria-pressed", "true");
-  expect(params().model).toBe("example-model");
-  await rank.click();
+  await applied(() => rank.click(), {});
   await expect.element(rank).toHaveAttribute("aria-pressed", "false");
   expect(params().model).toBeUndefined();
   await dialog.getByText("Filters", { exact: true }).click();
   await expect.element(dialog.getByRole("textbox", { name: /turn/i })).not.toBeInTheDocument();
-  await dialog.getByRole("combobox", { name: "Source" }).selectOptions("pi");
-  expect(params().source).toBe("pi");
+  await applied(select("Source", "pi"), { source: "pi" });
   const workspace = dialog.getByRole("combobox", { name: "Workspace", exact: true });
   await expect
     .element(workspace.getByRole("option", { name: "Design workspace · ws-12345" }))
@@ -158,10 +164,8 @@ it("shares instant picks and Enter-applied fuzzy filters with responsive numbere
   await expect
     .element(workspace.getByRole("option", { name: "Design workspace · ws-98765" }))
     .toBeInTheDocument();
-  await workspace.selectOptions("ws-123456789");
-  expect(params().workspace).toBe("ws-123456789");
-  await dialog.getByRole("combobox", { name: "Model", exact: true }).selectOptions("example-model");
-  expect(params().model).toBe("example-model");
+  await applied(() => workspace.selectOptions("ws-123456789"), { workspace: "ws-123456789" });
+  await applied(select("Model", "example-model"), { model: "example-model" });
   const channel = dialog.getByRole("textbox", { name: "Channel contains" });
   await channel.fill("  a&b  ");
   const workspaceText = dialog.getByRole("textbox", { name: "Workspace contains" });
@@ -182,7 +186,7 @@ it("shares instant picks and Enter-applied fuzzy filters with responsive numbere
     workspace: "Archived title",
     session: "PI-sess",
   };
-  expect(params()).toEqual(filters);
+  await expect.poll(params).toEqual(filters);
   await dialog.getByRole("button", { name: "Records" }).click();
   const rows = dialog.getByRole("list", { name: "Recorded observations and events" });
   await expect.element(rows.getByText("example-model", { exact: true })).toBeVisible();
@@ -238,6 +242,8 @@ it("keeps results, geometry, scroll and focus continuous through delayed reloads
   await page.getByText("Measurement details and benchmarks").click();
 
   const dialog = screen.getByRole("dialog");
+  await document.fonts.ready;
+  for (const animation of dialog.getAnimations()) animation.finish();
   const body = dialog.querySelector<HTMLElement>(".usage-body")!;
   const refresh = screen.getByRole("button", { name: "Refresh" });
   const filterSummary = dialog.querySelector(".usage-filters > summary")!;
@@ -262,10 +268,8 @@ it("keeps results, geometry, scroll and focus continuous through delayed reloads
   expect(body.getAttribute("aria-busy")).toBe("true");
   expect(document.activeElement).toBe(refresh);
   expect(screen.getByText("Inference records")).toBeTruthy();
-  await act(async () => {
-    finishRefresh(overviewResponse());
-    await Promise.resolve();
-  });
+  expect(request).toHaveBeenCalledTimes(2);
+  finishRefresh(overviewResponse());
   await expect.element(page.getByText("Updating usage…")).not.toBeInTheDocument();
 
   const unit = screen.getByRole<HTMLSelectElement>("combobox", { name: "Reporting unit" });
@@ -278,10 +282,8 @@ it("keeps results, geometry, scroll and focus continuous through delayed reloads
   expect(document.activeElement).toBe(unit);
   expect(screen.getByText("Inference records")).toBeTruthy();
   expect(screen.queryByText("Turn records")).toBeNull();
-  await act(async () => {
-    finishFailure(new Response(null, { status: 503 }));
-    await Promise.resolve();
-  });
+  expect(request).toHaveBeenCalledTimes(3);
+  finishFailure(new Response(null, { status: 503 }));
   await screen.findByText("Update failed · previous results");
   expect(snapshot()).toEqual(beforeFailure);
   expect(body.scrollTop).toBe(scrollTop);
@@ -296,10 +298,8 @@ it("keeps results, geometry, scroll and focus continuous through delayed reloads
   expect(snapshot()).toEqual(beforeFailure);
   expect(body.scrollTop).toBe(scrollTop);
   expect(document.activeElement).toBe(refresh);
-  await act(async () => {
-    finishSuccess(overviewResponse());
-    await Promise.resolve();
-  });
+  expect(request).toHaveBeenCalledTimes(4);
+  finishSuccess(overviewResponse());
   await screen.findByText("Turn records");
   expect(screen.queryByText("Inference records")).toBeNull();
   expect(screen.queryByText("Update failed · previous results")).toBeNull();

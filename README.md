@@ -165,18 +165,17 @@ With pixi, `pixi run serve` builds and starts in one step.
 pixi run dev-webview         # Vite dev server with HMR
 npm run check                # tsc (strict) + ESLint + prettier, zero tolerance
 npm test                     # service + webview unit tests (Vitest, no browser)
-npm run test:fast            # smaller service + webview suites
+npm run test:fast            # core usability, in parallel without Chromium
 npm run fmt                  # prettier
 ```
 
 For layout changes, install Playwright's Chromium (`npx playwright install chromium`,
 or `npx playwright install --with-deps chromium` on Linux if system libraries are missing).
 Run `npm run test:browser` for headless geometry tests or `npm run test:slow` for
-local checks, unit, browser, and end-to-end tests. Pass a file filter to a workspace
-command (for example, `npm test -w service -- tests/unit/issues.test.ts`). Set
-`VERBOSE=1` or pass `-- --reporter=verbose` for Vitest's detailed output. The
-`test:fast` timing note uses a 15-second budget per workspace; set
-`YAAT_FAST_BUDGET_MS` to override it without changing the test exit status.
+local stability checks: exact geometry, reading continuity, bounded state, and recovery
+under stress. Pass a file filter to a workspace command (for example,
+`npm test -w service -- tests/unit/issues.test.ts`). Set `VERBOSE=1` or pass
+`-- --reporter=verbose` for Vitest's detailed output.
 
 To try the UI without touching your own data, seed a demo — a project with a
 lead, workers, history and a board; no session is started — into a separate
@@ -188,8 +187,10 @@ cp config.example.toml .agent-team/dev/config.toml
 AGENT_TEAM_PORT=9801 AGENT_TEAM_BASE_DIR=$PWD/.agent-team/dev node dist/server.js
 ```
 
-Linux and Windows CI run `check`, `test`, `build`, Chromium layout tests and the demo browser E2E.
-Linux also runs the real deterministic Pi RPC scenario with pinned Pi and pi-subagents, no account required.
+Linux and Windows CI run `npm run check` and `npm run test:ci`, which builds the app and
+runs reliability tests including both Chromium pilots and the offline Demo and browser journeys.
+Linux also runs real offline Pi RPC tests with pinned Pi and pi-subagents and verifies that a missing Pi
+fails closed. The CI jobs have a 10-minute limit and do not require a model account.
 The demo opens an archived parser session, follows recorded Markdown link forms and checks the real
 file's highlighted lines. Only the Markdown input is replayed; each target contains a fresh disk-only marker.
 

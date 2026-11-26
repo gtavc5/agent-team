@@ -1,3 +1,4 @@
+import { availableParallelism } from "node:os";
 import unit from "./vitest.config.ts";
 
 // A failure here blocks a turn, session ownership, or ordinary recovery.
@@ -6,12 +7,13 @@ export default {
   ...unit,
   test: {
     ...unit.test,
+    maxWorkers: Math.max(1, Math.min(5, Math.ceil(availableParallelism() / 2))),
     include:
       process.env.YAAT_TEST_REPORTER_FIXTURE === "1"
         ? ["tests/unit/test-output-governance.test.mjs"]
         : [
             "tests/snap/{snap,broadcast}.test.ts",
-            "tests/unit/{codex-session,deterministic-process-exit,lead-recovery,pi-workspace-regressions,recovery-lifecycle,server,workspace-bindings,workspace-lifecycle}.test.ts",
+            "tests/unit/{codex-session,deterministic-process-exit,pi-workspace-regressions}.test.ts",
           ],
   },
 };

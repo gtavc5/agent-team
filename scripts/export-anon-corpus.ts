@@ -262,7 +262,50 @@ export function exportCorpus(
   return serialized + "\n";
 }
 
+const journeyActions = new Set([
+  "workspace.switch",
+  "chat.send",
+  "chat.stop",
+  "chat.cancel_queued",
+]);
+const journeyKinds = ["user", "agent", "system"] as const;
+type JourneyKind = (typeof journeyKinds)[number];
+type JourneyCorpus = { actions: string[]; history: JourneyKind[][] };
+const isJourneyKind = (value: unknown): value is JourneyKind =>
+  journeyKinds.some((kind) => value === kind);
+
+// The published journey needs order and row kinds, not timestamps, text lengths,
+// identifiers (even aliases), or any other metadata from the structural export.
+export function projectJourney(corpus: AnonCorpus): JourneyCorpus {
+  return {
+    actions: corpus.telemetry.flatMap(({ action }) =>
+      typeof action === "string" && journeyActions.has(action) ? [action] : [],
+    ),
+    history: corpus.workspaces.map(({ messages }) =>
+      messages.flatMap(({ kind }) => (isJourneyKind(kind) ? [kind] : [])),
+    ),
+  };
+}
+
+export function assertJourneyCorpus(value: unknown): asserts value is JourneyCorpus {
+  const row = object(value);
+  if (
+    Object.keys(row).sort().join(",") !== "actions,history" ||
+    !Array.isArray(row.actions) ||
+    row.actions.length > 32 ||
+    !row.actions.every((v) => typeof v === "string" && journeyActions.has(v)) ||
+    !Array.isArray(row.history) ||
+    row.history.length < 1 ||
+    row.history.length > 20 ||
+    !row.history.every((v) => Array.isArray(v) && v.length <= 20 && v.every(isJourneyKind))
+  ) {
+    throw new Error("Invalid journey corpus: only approved actions and history kinds are allowed");
+  }
+}
+
 function run(args: string[]): void {
+  const journey = args[0] === "--journey";
+  if (journey) args.shift();
   const [base, output, selection, ...rows] = args;
   if (
     !base ||
@@ -271,7 +314,7 @@ function run(args: string[]): void {
     rows.some((row) => !/^\d+:\d+$/.test(row))
   ) {
     throw new Error(
-      "Usage: tsx scripts/export-anon-corpus.ts BASE NEW_OUTPUT WORKSPACE_ORDINAL[,ORDINAL...] [ORDINAL:MESSAGE_SEQ ...]",
+      "Usage: tsx scripts/export-anon-corpus.ts [--journey] BASE NEW_OUTPUT WORKSPACE_ORDINAL[,ORDINAL...] [ORDINAL:MESSAGE_SEQ ...]",
     );
   }
   const corpus = exportCorpus(
@@ -279,7 +322,12 @@ function run(args: string[]): void {
     selection.split(",").map(Number),
     rows.map((row) => row.split(":").map(Number) as [number, number]),
   );
-  writeFileSync(output, corpus, { flag: "wx", mode: 0o600 });
+  const projected = journey ? projectJourney(JSON.parse(corpus) as AnonCorpus) : undefined;
+  if (projected) assertJourneyCorpus(projected);
+  writeFileSync(output, projected ? JSON.stringify(projected) + "\n" : corpus, {
+    flag: "wx",
+    mode: 0o600,
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

@@ -5,7 +5,6 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   entryHint,
-  fastBudgetNote,
   formatFailure,
   formatSummary,
   rerunCommand,
@@ -40,7 +39,6 @@ if (process.env[marker]) {
           ...process.env,
           CI: "",
           VERBOSE: "",
-          YAAT_FAST_BUDGET_MS: "15000",
           [marker]: "1",
           ...env,
         },
@@ -48,7 +46,7 @@ if (process.env[marker]) {
     );
   }
 
-  it("prints just the compact pass summary and emits only a non-failing budget observation", () => {
+  it("prints just the compact pass summary", () => {
     expect(
       formatSummary("service", "fast", ["passed", "skipped"], ["passed", "skipped"], 1250),
     ).toBe("[service/fast] 2 files (1 passed, 1 skipped), 2 tests (1 passed, 1 skipped) in 1.25s");
@@ -59,28 +57,6 @@ if (process.env[marker]) {
       /^\[service\/fast\] 1 files \(1 passed, 0 skipped\), 3 tests \(1 passed, 2 skipped\) in \d+\.\d+s$/,
     );
     expect(normal.stderr).toBe("");
-    const over = run(["-t", "passes quietly"], { YAAT_FAST_BUDGET_MS: "0" });
-    expect(over.status).toBe(0);
-    expect(over.stdout).toContain(`slowest files: ${file}`);
-    expect(over.stdout).not.toContain("test:slow");
-    expect(
-      fastBudgetNote(
-        "webview",
-        "fast",
-        [
-          { file: "fourth", ms: 100 },
-          { file: "first", ms: 400 },
-          { file: "third", ms: 200 },
-          { file: "second", ms: 300 },
-        ],
-        16000,
-        {},
-      ),
-    ).toMatch(/first .*second .*third /);
-    expect(fastBudgetNote("service", "fast", [{ file, ms: 100 }], 14999, {})).toBeUndefined();
-    expect(
-      fastBudgetNote("service", "fast", [{ file, ms: 100 }], 14999, { YAAT_FAST_BUDGET_MS: "" }),
-    ).toBeUndefined();
   }, 25_000);
 
   it("reports the real failure and gives a rerun that selects its exact nested name", () => {

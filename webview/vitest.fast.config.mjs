@@ -1,11 +1,13 @@
+import { availableParallelism } from "node:os";
 import unit from "./vitest.config.ts";
 
-// Browser technology is not a tier boundary: keep the local reconnect and
-// composer/session contracts here, and run the real browser queue pilot from root Fast.
+// Exercise composer/session and reconnect contracts in jsdom, not Chromium.
 export default {
   ...unit,
   test: {
     ...unit.test,
-    include: ["tests/{app,events,liveness,stream}.test.{ts,tsx}"],
+    maxWorkers: Math.max(1, Math.min(5, Math.floor(availableParallelism() / 2))),
+    include: ["tests/{app,events,liveness,queue-journey,stream}.test.{ts,tsx}"],
+    tagsFilter: ["!history-stress && !app-detail"],
   },
 };
