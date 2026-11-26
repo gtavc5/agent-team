@@ -314,35 +314,82 @@ describe("panel tool arguments", () => {
     },
   );
 
-  it("guides the lead to choose worker presets and override defaults when needed", () => {
+  it("guides the lead from task fit to preset reuse or a suitable capacity fallback", () => {
     const { instructions } = leadToolset(api, project, "/notes", ["m"]);
-    expect(instructions).toContain(
-      "Choose a preset whose defaults and dispatch hints fit the task's complexity, domain and parallel load. Override model or effort when needed; do not default every worker to the same model.",
+    expect(instructions).toMatch(/preset defaults and dispatch hints[^\n]*task fit/i);
+    expect(instructions).toMatch(/best fit[^\n]*reuse a preset for similar tasks/i);
+    expect(instructions).toMatch(/capacity is constrained[^\n]*another suitable provider/i);
+    expect(instructions).toMatch(/override model or effort/i);
+  });
+
+  it("requires explicit execution and hands off a quick edit when its scope grows", () => {
+    const { instructions } = leadToolset(api, project, "/notes", ["m"]);
+    expect(instructions).toMatch(/discussion alone does not authorize work/i);
+    expect(instructions).toMatch(
+      /act or dispatch only when the user explicitly requests execution or rework/i,
+    );
+    expect(instructions).toMatch(
+      /quick edit grows[^\n]*hand it off to a worker[^\n]*unless the user/i,
     );
   });
 
-  it("separates discussion from confirmed execution routing while keeping anti-relay boundaries", () => {
+  it("routes direct work and delegated work to the right owner", () => {
     const { instructions } = leadToolset(api, project, "/notes", ["m"]);
-    expect(instructions).toContain("discussion alone starts no work");
-    expect(instructions).toContain("once the user explicitly asks you to do or rework something");
-    expect(instructions).toContain(
-      "Good — do it directly: read-only checks, board or notes updates, obvious few-line edits in one file",
+    const direct = instructions.split("\n").find((line) => line.startsWith("Handle "));
+    const delegated = instructions.split("\n").find((line) => line.startsWith("Delegate "));
+    for (const scope of [
+      "read-only checks",
+      "board or notes updates",
+      "few-line edits",
+      "do yourself",
+    ]) {
+      expect(direct).toContain(scope);
+    }
+    for (const scope of [
+      "multi-file",
+      "isolated worktrees",
+      "full test suites",
+      "slow verification",
+      "visual checks",
+      "review rework",
+    ]) {
+      expect(delegated).toContain(scope);
+    }
+    expect(instructions).toMatch(
+      /prefer message_session[^\n]*idle, lead-dispatchable[^\n]*otherwise use start_session/i,
     );
-    expect(instructions).toContain("work the user explicitly asks you to do yourself");
-    expect(instructions).toContain(
-      "Good — delegate: multi-file changes or bug fixes, isolated worktrees, full test suites, slow verification, visual checks, or review rework",
+    expect(instructions).toMatch(/self-contained task[^\n]*which session owns it/i);
+    expect(instructions).toMatch(
+      /message_session only[^\n]*authorized work[^\n]*outside requests[^\n]*recover/i,
     );
-    expect(instructions).toContain(
-      "Prefer message_session to an idle, lead-dispatchable worker whose context fits (check project_status); otherwise use start_session",
+    expect(instructions).toMatch(/never message[^\n]*just to ask for a report/i);
+  });
+
+  it("distinguishes a session the user owns from a worker waiting for the user", () => {
+    const { instructions } = leadToolset(api, project, "/notes", ["m"]);
+    const userOwned = instructions
+      .split("\n")
+      .find((line) => line.startsWith("User-owned sessions:"));
+    for (const state of ["created", "switched off", "took over", "stopped"]) {
+      expect(userOwned).toContain(state);
+    }
+    expect(userOwned).toMatch(/no notices[^\n]*never message, stop, or archive/i);
+    expect(instructions).toMatch(
+      /worker awaiting user input:[^\n]*one sentence[^\n]*which session is waiting/i,
     );
-    expect(instructions).toContain(
-      'because you already have context or "only a few steps remain."',
+    expect(instructions).toMatch(
+      /do not dispatch to that worker[^\n]*answer for the user[^\n]*relay[^\n]*chase[^\n]*poll/i,
     );
-    expect(instructions).toContain("stop immediately and hand off to a worker");
-    expect(instructions).toContain("do not answer for the user, relay, chase or poll");
-    expect(instructions).toContain(
-      "Never dispatch to a worker the user owns, took over, stopped, or is awaited by",
+  });
+
+  it("limits worker recovery and makes archiving a prerequisite for worktree cleanup", () => {
+    const { instructions } = leadToolset(api, project, "/notes", ["m"]);
+    const notice = instructions.split("\n").find((line) => line.startsWith("[From the panel,"));
+    expect(notice).toMatch(/retry a failed turn at most once[^\n]*fails again, tell the user/i);
+    expect(notice).toMatch(
+      /panel carries on[^\n]*restart[^\n]*second time[^\n]*worker to carry on/i,
     );
+    expect(instructions).toMatch(/before reusing or removing[^\n]*worktree[^\n]*archive_session/i);
   });
 
   it("shows selectable preset defaults and dispatch hints in the lead's start_session description", () => {
@@ -387,7 +434,9 @@ describe("panel tool arguments", () => {
       workerToolset(api, "ws-i", project, "/notes", true),
       workerToolset(api, "ws-u", project, "/notes", false, true),
     ]) {
+      expect(byName(worker).start_session).toBeUndefined();
       expect(worker.instructions).not.toContain("Dispatch hints");
+      expect(worker.instructions).not.toMatch(/another suitable provider|prefer message_session/i);
       for (const hint of [scoutHint, reviewHint]) {
         expect(worker.instructions).not.toContain(hint);
         for (const tool of worker.tools) expect(tool.description).not.toContain(hint);
@@ -419,7 +468,9 @@ describe("panel tool arguments", () => {
     ] as z.ZodType[]) {
       expect(field.description).toBe("The whole list");
     }
-    expect(lead).toContain("check the board keeps nothing about the old one");
+    expect(lead).toMatch(
+      /\[From session …\][^\n]*tasks to review[^\n]*tasks done[^\n]*dropped[^\n]*delete the objective/,
+    );
     expect(lead.length).toBeLessThan(5200);
     expect(worker.length).toBeLessThan(3800);
     // Nothing the CLI would cut.
