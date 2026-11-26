@@ -506,6 +506,12 @@ button {
   padding: 0 4px;
 }
 
+.task-list,
+.search-results,
+.quota-panel {
+  scrollbar-gutter: stable;
+}
+
 .search-results {
   flex: 1;
   overflow-y: auto;
@@ -1104,6 +1110,8 @@ button {
 }
 /* A group's archived sessions: one dim row under its live ones. */
 .ws-archive-toggle {
+  /* The expanded Clear button is 17px tall, plus 6px row padding. */
+  min-height: 23px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -4192,6 +4200,19 @@ button.quote-bar-content:focus-visible {
   font-weight: 600;
   flex-shrink: 0;
 }
+/* Keep window labels still when a summary changes from 9% to 100%. */
+.quota-metric .quota-pct {
+  text-align: right;
+}
+.quota-metric .quota-pct::before {
+  content: "100%";
+  display: block;
+  height: 0;
+  /* Inline text and block intrinsic widths can round in opposite directions. */
+  padding-inline-end: 1px;
+  visibility: hidden;
+  font-weight: 600;
+}
 .quota-pct-normal {
   color: var(--text-secondary);
   font-weight: 500;
@@ -4420,9 +4441,15 @@ button.quote-bar-content:focus-visible {
     width: 14px;
     height: 14px;
   }
+  /* The add action can enter flow on hover or when a touch group becomes
+     current. Let its hit target use the header's vertical padding. */
+  .ws-group-header:has(.ws-group-add) {
+    min-height: 32px;
+  }
   .ws-group-add {
     width: 32px;
     height: 32px;
+    margin-block: -5px;
   }
   .ws-group-toggle {
     width: 28px;
