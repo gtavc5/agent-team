@@ -110,6 +110,7 @@ export class Server {
   private recheckingCodexAuth: Promise<CodexAuthState> | null = null;
   private models: ModelOption[] = availableModelOptions([], { codexAuthenticated: false });
   private staleLeadToolWorkspaces = new Set<string>();
+  private projectedUserTookOver = new Map<string, boolean>();
   private readonly restoring: Promise<void>;
   private workspaceStateLoaded = false;
   private ccpaProxy?: CcpaProxy;
@@ -484,6 +485,7 @@ export class Server {
     });
 
     this.projects.showAllAwaiting();
+    this.syncAllUserTookOver();
     const userLanguage = this.config.user.language;
     const commandsByAgent = Object.fromEntries(
       [...this.workspaces.values()].map((w) => [
@@ -568,6 +570,7 @@ export class Server {
         "add_agent",
         "remove_agent",
         "set_reporting",
+        "hand_back_to_lead",
         "delete_workspace",
         "cancel_queued",
         "debug_rate_limit",
@@ -858,7 +861,9 @@ export class Server {
         const agentId = msg.agentId as string | undefined;
         if (!workspace) return;
         void this.track(
-          agentId ? workspace.interruptAgent(agentId) : workspace.interruptAll(),
+          (agentId ? workspace.interruptAgent(agentId) : workspace.interruptAll()).finally(() =>
+            this.syncUserTookOver(workspace),
+          ),
         ).catch((e: unknown) =>
           this.sendJson(ws, {
             type: "error",
@@ -874,6 +879,7 @@ export class Server {
           ? workspace.cancelWake(msg.agentId as string)
           : "No wake-up to cancel";
         if (refused) this.sendJson(ws, { type: "error", message: refused });
+        else if (workspace) this.syncUserTookOver(workspace);
         return;
       }
 
@@ -935,6 +941,10 @@ export class Server {
         );
         return;
 
+      case "hand_back_to_lead":
+        this.projectAction(ws, () => this.projects.handBackToLead(msg.workspaceId as string));
+        return;
+
       case "cancel_queued": {
         const workspace = this.workspaces.get(msg.workspaceId as string);
         if (!workspace || !this.ensureLoaded(workspace)) return;
@@ -946,6 +956,7 @@ export class Server {
             messageId: msg.messageId,
             queued: workspace.hasQueuedInput,
           });
+          this.syncUserTookOver(workspace);
           this.flushPendingLeadTools(workspace);
         }
         return;
@@ -990,6 +1001,7 @@ export class Server {
         const workspace = this.workspaces.get(msg.workspaceId as string);
         if (workspace && workspace.clearContext(msg.agentId as string)) {
           this.persistWorkspaceNow(workspace.id);
+          this.syncUserTookOver(workspace);
           this.flushPendingLeadTools(workspace);
         }
         return;
@@ -1072,11 +1084,13 @@ export class Server {
     }
     workspace.projectLink = projectLink;
     this.workspaces.set(id, workspace);
+    this.projectedUserTookOver.set(id, false);
     try {
       this.persistWorkspaceNow(id);
       this.persistIndex();
     } catch (e) {
       this.workspaces.delete(id);
+      this.projectedUserTookOver.delete(id);
       void workspace.dispose();
       throw e;
     }
@@ -1111,6 +1125,7 @@ export class Server {
     this.persistTimers.delete(workspaceId);
     this.workspaces.delete(workspaceId);
     this.staleLeadToolWorkspaces.delete(workspaceId);
+    this.projectedUserTookOver.delete(workspaceId);
     this.commandsByAgent.delete(workspaceId);
     this.refreshModels();
     deleteWorkspaceState(this.baseDir, workspaceId);
@@ -1282,6 +1297,7 @@ export class Server {
       });
     }
     this.broadcastUI({ type: "agent_removed", workspaceId, agentId });
+    this.syncUserTookOver(workspace);
     this.projects.leadAgentsChanged(workspace);
   }
 
@@ -1321,6 +1337,7 @@ export class Server {
     if (!workspace) throw new Error("Workspace not found");
     if (!this.unarchiveWorkspace(workspace)) throw new Error("Workspace could not be loaded");
     await workspace.sendMessage(content, target, images, quote, onAccepted);
+    this.syncUserTookOver(workspace);
     this.persistWorkspace(workspaceId);
   }
 
@@ -1333,6 +1350,7 @@ export class Server {
     if (!workspace || !this.unarchiveWorkspace(workspace)) return;
     try {
       await workspace.forwardMessage(messageId, targetAgentId);
+      this.syncUserTookOver(workspace);
     } catch (e) {
       this.broadcastUI({ type: "error", message: `${e instanceof Error ? e.message : String(e)}` });
     }
@@ -1347,6 +1365,7 @@ export class Server {
     } else {
       workspace.abortAll();
     }
+    this.syncUserTookOver(workspace);
   }
 
   private async restartServer(): Promise<void> {
@@ -1566,7 +1585,26 @@ export class Server {
   // A workspace as the list shows it: no history.
   private listInfo(w: Workspace): WorkspaceInfo {
     const info = w.getInfo(false);
-    return this.projects.awaitsUser(w) ? { ...info, awaitsUser: true } : info;
+    const awaitsUser = this.projects.awaitsUser(w);
+    const awaitsUserPrompt = awaitsUser ? this.projects.awaitsUserPrompt(w) : undefined;
+    const userTookOver = this.projects.userTookOver(w);
+    this.projectedUserTookOver.set(w.id, userTookOver);
+    return {
+      ...info,
+      ...(awaitsUser && { awaitsUser: true }),
+      ...(awaitsUserPrompt && { awaitsUserPrompt }),
+      ...(userTookOver && { userTookOver: true }),
+    };
+  }
+
+  private syncUserTookOver(w: Workspace): void {
+    const tookOver = this.projects.userTookOver(w);
+    if ((this.projectedUserTookOver.get(w.id) ?? false) === tookOver) return;
+    this.broadcastUI({ type: "workspace_updated", workspace: this.listInfo(w) });
+  }
+
+  private syncAllUserTookOver(): void {
+    for (const w of this.workspaces.values()) this.syncUserTookOver(w);
   }
 
   private projectHost(): ProjectHost {
@@ -1607,6 +1645,7 @@ export class Server {
       cancelWorkspaceTimers: (w) => this.cancelWorkspaceRetries(w),
       workspaceChanged: (w) =>
         this.broadcastUI({ type: "workspace_updated", workspace: this.listInfo(w) }),
+      ownershipChanged: (w) => this.syncUserTookOver(w),
       broadcast: (msg) => this.broadcastUI(msg),
     };
   }
@@ -1658,6 +1697,7 @@ export class Server {
     ws.archivedAt = Date.now();
     this.unload(ws);
     this.broadcastUI({ type: "workspace_archived", workspaceId: ws.id, archivedAt: ws.archivedAt });
+    this.syncUserTookOver(ws);
   }
 
   private unarchiveWorkspace(ws: Workspace): boolean {
@@ -1677,6 +1717,7 @@ export class Server {
       console.error(`[projects] ${ws.id} stays outside a project`, e);
     }
     this.projects.showAwaiting(ws);
+    this.syncUserTookOver(ws);
     return true;
   }
 
@@ -2010,6 +2051,7 @@ export class Server {
         this.broadcastUI({ type: "agent_busy", workspaceId: wsId, agentId, streamAt });
         const ws = this.workspaces.get(wsId);
         if (ws) this.projects.showAwaiting(ws);
+        if (ws) this.syncUserTookOver(ws);
       },
       onAgentIdle: (wsId, agentId) => {
         this.broadcastUI({ type: "agent_idle", workspaceId: wsId, agentId });
@@ -2018,6 +2060,7 @@ export class Server {
         const ws = this.workspaces.get(wsId);
         if (ws) this.git.requestPrRefresh(ws.cwd);
         if (ws) this.projects.workerIdle(ws);
+        if (ws) this.syncUserTookOver(ws);
         if (ws) this.flushPendingLeadTools(ws);
         const agent = ws?.agents.get(agentId);
         const provider = agent && this.quotaProviderForModel(agent.info.model);
@@ -2030,6 +2073,7 @@ export class Server {
         if (ws) this.projects.showAwaiting(ws);
         if (ws && state === "idle") {
           this.projects.workerIdle(ws);
+          this.syncUserTookOver(ws);
           this.flushPendingLeadTools(ws);
         }
       },

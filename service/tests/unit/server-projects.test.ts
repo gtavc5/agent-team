@@ -1490,6 +1490,335 @@ describe("server restart with projects", () => {
     fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
   });
 
+  it("projects awaitsUserPrompt and userTookOver and handles hand_back_to_lead across restarts", async () => {
+    const { base, web } = seed();
+    historyOf(base).save(
+      "ws-live",
+      [
+        {
+          id: "live-t",
+          kind: "user",
+          agentId: null,
+          content: "do it",
+          timestamp: 1000,
+          status: "done",
+          from: { workspaceId: "ws-lead", name: "lead", role: "lead" },
+        },
+        {
+          id: "live-r",
+          kind: "agent",
+          agentId: "a-live",
+          content: "Checked the repo.\n**Which branch should this go on?**",
+          timestamp: 1001,
+          status: "done",
+        },
+      ],
+      "all",
+    );
+    closeHistory(base);
+    type Info = {
+      id: string;
+      awaitsUser?: boolean;
+      awaitsUserPrompt?: string;
+      userTookOver?: boolean;
+    };
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const fetchInit = async (port: number): Promise<Info[]> => {
+      const client = new WebSocket(`ws://127.0.0.1:${port}/`);
+      const got: Array<Record<string, unknown>> = [];
+      client.on("message", (raw: Buffer) => got.push(JSON.parse(raw.toString()) as never));
+      await until(() => got.some((f) => f.type === "init"), "fresh init");
+      client.close();
+      return got.find((f) => f.type === "init")!.workspaces as Info[];
+    };
+    const latestUpdate = (frames: Array<Record<string, unknown>>, id: string): Info | undefined => {
+      const updates = frames
+        .filter((f) => f.type === "workspace_updated")
+        .map((f) => f.workspace as Info)
+        .filter((w) => w.id === id);
+      return updates[updates.length - 1];
+    };
+    const { frames, send, stop, port } = await start(base, web);
+    try {
+      const initInfos = frames.find((f) => f.type === "init")!.workspaces as Info[];
+      expect(initInfos.find((w) => w.id === "ws-live")).toMatchObject({
+        awaitsUser: true,
+        awaitsUserPrompt: "Which branch should this go on?",
+      });
+      expect(initInfos.find((w) => w.id === "ws-live")!.userTookOver).toBeUndefined();
+
+      // Direct user message sets userTookOver=true and clears awaitsUser/awaitsUserPrompt.
+      send({ type: "send_message", workspaceId: "ws-live", content: "use main" });
+      await until(() => launches.length === 1, "direct user turn");
+      await until(
+        () => latestUpdate(frames, "ws-live")?.userTookOver === true,
+        "live userTookOver true",
+      );
+      expect(latestUpdate(frames, "ws-live")!.awaitsUser).toBeUndefined();
+      expect(latestUpdate(frames, "ws-live")!.awaitsUserPrompt).toBeUndefined();
+      const freshTakenOver = (await fetchInit(port)).find((w) => w.id === "ws-live")!;
+      expect(freshTakenOver.userTookOver).toBe(true);
+      expect(freshTakenOver.awaitsUser).toBeUndefined();
+      expect(freshTakenOver.awaitsUserPrompt).toBeUndefined();
+
+      // Finish the user turn; worker is still taken over until handed back.
+      const workerSession = sessionsByAgent.get("a-live")!;
+      workerSession.emit("event", { kind: "text_delta", content: "Switched to main." });
+      workerSession.isRunning = false;
+      workerSession.emit("event", { kind: "result", content: "" });
+
+      // Hand back to lead via WebSocket clears userTookOver and awaitsUser on live + fresh clients.
+      send({ type: "hand_back_to_lead", workspaceId: "ws-live" });
+      await until(
+        () => latestUpdate(frames, "ws-live")?.userTookOver === undefined,
+        "live userTookOver cleared",
+      );
+      expect(latestUpdate(frames, "ws-live")!.awaitsUser).toBeUndefined();
+      const freshHandedBack = (await fetchInit(port)).find((w) => w.id === "ws-live")!;
+      expect(freshHandedBack.userTookOver).toBeUndefined();
+      expect(freshHandedBack.awaitsUser).toBeUndefined();
+
+      // Lead can message the worker again; user abort sets userTookOver=true, hand back clears it.
+      send({ type: "send_message", workspaceId: "ws-lead", content: "resume worker" });
+      await until(() => launches.length === 2, "lead turn");
+      const leadTools = Object.fromEntries(launches[1].panel!.tools.map((t) => [t.name, t]));
+      const res = await leadTools.message_session.handler({
+        session_id: "ws-live",
+        message: "continue task",
+      });
+      expect(res.content[0].text).toMatch(/Sent to "live"/);
+      await until(() => launches[0].prompts.length === 2, "resumed worker turn");
+
+      send({ type: "abort", workspaceId: "ws-live" });
+      await until(
+        () => latestUpdate(frames, "ws-live")?.userTookOver === true,
+        "userTookOver after abort",
+      );
+
+      send({ type: "hand_back_to_lead", workspaceId: "ws-live" });
+      await until(
+        () => latestUpdate(frames, "ws-live")?.userTookOver === undefined,
+        "userTookOver cleared after abort hand-back",
+      );
+
+      // Pending dialog populates awaitsUserPrompt with title and message.
+      workerSession.emit("ui_dialog_request", {
+        workspaceId: "ws-live",
+        agentId: "a-live",
+        processGeneration: 1,
+        requestId: "dlg-1",
+        method: "confirm",
+        title: "Proceed with push?",
+        message: "Target remote is origin/main",
+        timeoutMs: 60_000,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      });
+      await until(
+        () =>
+          latestUpdate(frames, "ws-live")?.awaitsUserPrompt ===
+          "Proceed with push? — Target remote is origin/main",
+        "dialog awaitsUserPrompt",
+      );
+      workerSession.emit("ui_dialog_resolved", {
+        workspaceId: "ws-live",
+        agentId: "a-live",
+        processGeneration: 1,
+        requestId: "dlg-1",
+      });
+      await until(
+        () => latestUpdate(frames, "ws-live")?.awaitsUser === undefined,
+        "dialog resolved clears awaitsUser",
+      );
+
+      // Non-worker hand_back_to_lead returns an error frame.
+      send({ type: "hand_back_to_lead", workspaceId: "ws-lead" });
+      await until(
+        () =>
+          frames.some((f) => f.type === "error" && String(f.message).includes("worker sessions")),
+        "non-worker hand_back_to_lead error",
+      );
+    } finally {
+      await stop();
+      log.mockRestore();
+    }
+
+    // Hand-back boundary persists across server restart.
+    const saved = readState(base, "ws-live");
+    expect(saved.handedBackAfterMessageId).toBeTruthy();
+    const log2 = vi.spyOn(console, "log").mockImplementation(() => {});
+    const restarted = await start(base, web);
+    try {
+      const infos = restarted.frames.find((f) => f.type === "init")!.workspaces as Info[];
+      expect(infos.find((w) => w.id === "ws-live")!.userTookOver).toBeUndefined();
+      expect(infos.find((w) => w.id === "ws-live")!.awaitsUser).toBeUndefined();
+    } finally {
+      await restarted.stop();
+      log2.mockRestore();
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
+  it("keeps live and fresh clients in sync across dialog prompt changes, finish_task, and archiving a taken-over worker", async () => {
+    const { base, web } = seed();
+    historyOf(base).save(
+      "ws-live",
+      [
+        {
+          id: "live-t",
+          kind: "user",
+          agentId: null,
+          content: "do it",
+          timestamp: 1000,
+          status: "done",
+          from: { workspaceId: "ws-lead", name: "lead", role: "lead" },
+        },
+        {
+          id: "live-r",
+          kind: "agent",
+          agentId: "a-live",
+          content: "Which branch should this go on?",
+          timestamp: 1001,
+          status: "done",
+        },
+      ],
+      "all",
+    );
+    closeHistory(base);
+    type Info = {
+      id: string;
+      unread?: number;
+      awaitsUser?: boolean;
+      awaitsUserPrompt?: string;
+      userTookOver?: boolean;
+    };
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const fetchInit = async (port: number): Promise<Info[]> => {
+      const client = new WebSocket(`ws://127.0.0.1:${port}/`);
+      const got: Array<Record<string, unknown>> = [];
+      client.on("message", (raw: Buffer) => got.push(JSON.parse(raw.toString()) as never));
+      await until(() => got.some((f) => f.type === "init"), "fresh init");
+      client.close();
+      return got.find((f) => f.type === "init")!.workspaces as Info[];
+    };
+    const latestUpdate = (frames: Array<Record<string, unknown>>, id: string): Info | undefined => {
+      const updates = frames
+        .filter((f) => f.type === "workspace_updated")
+        .map((f) => f.workspace as Info)
+        .filter((w) => w.id === id);
+      return updates[updates.length - 1];
+    };
+    const { frames, send, stop, port } = await start(base, web);
+    try {
+      const initLive = (frames.find((f) => f.type === "init")!.workspaces as Info[]).find(
+        (w) => w.id === "ws-live",
+      )!;
+      expect(initLive).toMatchObject({
+        awaitsUser: true,
+        awaitsUserPrompt: "Which branch should this go on?",
+      });
+      const initialUnread = initLive.unread ?? 0;
+
+      // Finding #2: dialog arriving on top of an already-waiting reply updates awaitsUserPrompt
+      // without double-incrementing unread, and resolving dlg-1 -> dlg-2 -> reply keeps live == init.
+      const workerSession = sessionsByAgent.get("a-live")!;
+      workerSession.emit("ui_dialog_request", {
+        workspaceId: "ws-live",
+        agentId: "a-live",
+        processGeneration: 1,
+        requestId: "dlg-1",
+        method: "confirm",
+        title: "First dialog?",
+        timeoutMs: 60_000,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      });
+      await until(
+        () => latestUpdate(frames, "ws-live")?.awaitsUserPrompt === "First dialog?",
+        "dlg-1 prompt update while already waiting",
+      );
+      expect(latestUpdate(frames, "ws-live")!.unread).toBe(initialUnread);
+
+      workerSession.emit("ui_dialog_request", {
+        workspaceId: "ws-live",
+        agentId: "a-live",
+        processGeneration: 1,
+        requestId: "dlg-2",
+        method: "confirm",
+        title: "Second dialog?",
+        timeoutMs: 60_000,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      });
+      workerSession.emit("ui_dialog_resolved", {
+        workspaceId: "ws-live",
+        agentId: "a-live",
+        processGeneration: 1,
+        requestId: "dlg-1",
+      });
+      await until(
+        () => latestUpdate(frames, "ws-live")?.awaitsUserPrompt === "Second dialog?",
+        "dlg-2 prompt after dlg-1 resolved",
+      );
+      expect((await fetchInit(port)).find((w) => w.id === "ws-live")!.awaitsUserPrompt).toBe(
+        "Second dialog?",
+      );
+
+      workerSession.emit("ui_dialog_resolved", {
+        workspaceId: "ws-live",
+        agentId: "a-live",
+        processGeneration: 1,
+        requestId: "dlg-2",
+      });
+      await until(
+        () =>
+          latestUpdate(frames, "ws-live")?.awaitsUserPrompt === "Which branch should this go on?",
+        "restored reply prompt after dlg-2 resolved",
+      );
+
+      // Finding #1 (finish_task): direct user message sets userTookOver=true; finish_task clears it
+      // immediately for already-connected clients without needing another event.
+      send({ type: "send_message", workspaceId: "ws-live", content: "use main and finish" });
+      await until(() => launches.length === 1, "worker user turn");
+      await until(
+        () => latestUpdate(frames, "ws-live")?.userTookOver === true,
+        "live userTookOver true before finish_task",
+      );
+      const workerTools = Object.fromEntries(launches[0].panel!.tools.map((t) => [t.name, t]));
+      await workerTools.finish_task.handler({ summary: "done on main" });
+      await until(
+        () => latestUpdate(frames, "ws-live")?.userTookOver === undefined,
+        "live userTookOver cleared by finish_task",
+      );
+      expect((await fetchInit(port)).find((w) => w.id === "ws-live")!.userTookOver).toBeUndefined();
+      workerSession.isRunning = false;
+      workerSession.emit("event", { kind: "result", content: "" });
+
+      // Finding #1 (archive): archiving a taken-over worker broadcasts userTookOver cleared
+      // so live Client A matches fresh Client B.
+      send({ type: "send_message", workspaceId: "ws-live", content: "one more check" });
+      await until(() => launches[0].prompts.length === 2, "second user turn");
+      await until(
+        () => latestUpdate(frames, "ws-live")?.userTookOver === true,
+        "live userTookOver true before archive",
+      );
+      workerSession.isRunning = false;
+      workerSession.emit("event", { kind: "result", content: "" });
+      send({ type: "archive_workspace", workspaceId: "ws-live" });
+      await until(
+        () =>
+          frames.some((f) => f.type === "workspace_archived" && f.workspaceId === "ws-live") &&
+          latestUpdate(frames, "ws-live")?.userTookOver === undefined,
+        "archive clears userTookOver on live client",
+      );
+      expect((await fetchInit(port)).find((w) => w.id === "ws-live")!.userTookOver).toBeUndefined();
+    } finally {
+      await stop();
+      log.mockRestore();
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
   it("reconciles a lead's persisted wait before showing a new dialog to connected clients", async () => {
     const { base, web } = seed();
     saveWorkspace(base, {
