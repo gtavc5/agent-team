@@ -133,6 +133,42 @@ it("opens on desktop hover, bridges the gap to actions, and supports click and E
   ).toEqual([["chat.stop"]]);
 });
 
+it.each([
+  ["light", 1280, 850],
+  ["dark", 390, 705],
+  ["dark", 1280, 850],
+  ["light", 390, 705],
+])("keeps the editor in place with room controls in %s at %ipx", async (theme, width, height) => {
+  await page.viewport(width, height);
+  const { row } = boot();
+  const previous = document.documentElement.dataset.theme;
+  document.documentElement.dataset.theme = theme;
+  try {
+    const textarea = row.querySelector("textarea")!;
+    const measure = () => {
+      const { left, right, bottom } = row.getBoundingClientRect();
+      return [left, right, bottom];
+    };
+    const resting = measure();
+    fireEvent.change(textarea, { target: { value: "@all ", selectionStart: 5 } });
+    const toggle = page.getByRole("button", { name: "No cross-review" });
+    await expect.element(toggle).toBeVisible();
+    await expect.element(page.getByText("Send to Alpha, Beta")).toBeVisible();
+    expect(measure()).toEqual(resting);
+    expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
+    const bar = row.previousElementSibling!.getBoundingClientRect();
+    expect(bar.bottom).toBeLessThanOrEqual(row.getBoundingClientRect().top);
+    expect(bar.left).toBeGreaterThanOrEqual(0);
+    expect(bar.right).toBeLessThanOrEqual(innerWidth);
+    await toggle.click();
+    await expect.element(page.getByRole("button", { name: "1 round" })).toBeVisible();
+    expect(measure()).toEqual(resting);
+  } finally {
+    if (previous) document.documentElement.dataset.theme = previous;
+    else delete document.documentElement.dataset.theme;
+  }
+});
+
 async function tap(el: Element) {
   const { x, y, width, height } = el.getBoundingClientRect();
   // The runner scales the test iframe to fit; CDP uses the outer viewport.

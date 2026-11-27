@@ -824,6 +824,23 @@ describe("codex app-server session", () => {
     expect(states).toEqual(["working", "idle"]);
   });
 
+  it("settles an automatic room discussion on capacity failure without a continuation turn", async () => {
+    CodexSession.hooks = { ...CodexSession.hooks, capacityRetryDelaysMs: [0] };
+    const { session, events } = makeSession();
+    const input = {
+      inputId: "review",
+      text: "read-only peer review",
+      roomDiscussion: true as const,
+    };
+    await session.send(input);
+    server.startTurn();
+    server.completeTurn("failed", overloaded);
+    await flush();
+    expect(events.map((event) => event.kind)).toEqual(["error"]);
+    expect(session.isRunning).toBe(false);
+    expect(server.sent("turn/start")).toHaveLength(1);
+  });
+
   it("gives up on capacity after the last retry, and a Stop while it waits ends the turn", async () => {
     CodexSession.hooks = { ...CodexSession.hooks, capacityRetryDelaysMs: [0] };
     const { session, events } = makeSession();

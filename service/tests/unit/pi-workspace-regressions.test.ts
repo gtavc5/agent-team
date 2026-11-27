@@ -640,7 +640,7 @@ describe("Pi workspace lifecycle regressions", () => {
     const outsideDir = tempDir("yaat-w5-outside-");
     fs.writeFileSync(path.join(outsideDir, "secret.md"), "top-secret");
     const symlinkNotes = path.join(projectDir, "notes");
-    fs.symlinkSync(outsideDir, symlinkNotes);
+    fs.symlinkSync(outsideDir, symlinkNotes, process.platform === "win32" ? "junction" : "dir");
 
     expect(() => listNotes(symlinkNotes)).toThrow(/symbolic link/i);
     expect(() => readNote(symlinkNotes, "secret")).toThrow(/symbolic link/i);

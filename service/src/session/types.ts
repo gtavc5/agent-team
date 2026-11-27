@@ -175,6 +175,8 @@ export interface PromptEnvelope {
   attachmentIds?: string[];
   panelContext?: string;
   reportId?: string;
+  // An automatic room turn is bounded by Workspace, not backend continuation.
+  roomDiscussion?: true;
   // For later native Codex attempts, delta is only new panel context (empty if unchanged).
   recovery?: { outageId: string; supersedes: string[]; delta?: string };
 }

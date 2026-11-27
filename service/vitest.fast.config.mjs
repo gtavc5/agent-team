@@ -13,7 +13,7 @@ export default {
         ? ["tests/unit/test-output-governance.test.mjs"]
         : [
             "tests/snap/{snap,broadcast}.test.ts",
-            "tests/unit/{codex-session,deterministic-process-exit,pi-workspace-regressions}.test.ts",
+            "tests/unit/{codex-session,deterministic-process-exit,pi-workspace-regressions,workspace-lifecycle}.test.ts",
           ],
   },
 };

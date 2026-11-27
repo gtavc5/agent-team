@@ -172,6 +172,7 @@ export class CodexSession extends EventEmitter {
   // The panel's turn runs on in a new one of codex's once this fires.
   private capacityRetry: NodeJS.Timeout | null = null;
   private capacityRetries = 0;
+  private roomDiscussion = false;
   private compacting = false;
   private recoveryAttempt: RecoveryAttempt | null = null;
   // Only settled proof survives process replacement, and reuse still requires a history read.
@@ -443,6 +444,7 @@ export class CodexSession extends EventEmitter {
     if (!previous) this.recoveryProof = null;
     this.beginTurn(!compact && texts.length > 0);
     this.inputTrigger = typeof input === "string" ? "user" : (input.trigger ?? "user");
+    this.roomDiscussion = typeof input !== "string" && input.roomDiscussion === true;
     this.rootLifecycle.trigger = this.inputTrigger;
     this.compacting = compact;
     // A turn stopped and replaced meanwhile: what this one's requests do
@@ -558,7 +560,12 @@ export class CodexSession extends EventEmitter {
 
   private retryAfterCapacity(error: TurnError): boolean {
     const delays = CodexSession.hooks?.capacityRetryDelaysMs ?? CAPACITY_RETRY_DELAYS_MS;
-    if (this.compacting || this.interruptRequested || this.capacityRetries >= delays.length) {
+    if (
+      this.roomDiscussion ||
+      this.compacting ||
+      this.interruptRequested ||
+      this.capacityRetries >= delays.length
+    ) {
       return false;
     }
     const delay = delays[this.capacityRetries++];
@@ -736,6 +743,7 @@ export class CodexSession extends EventEmitter {
     this.turnError = null;
     this.recoveryAttempt = null;
     this.capacityRetries = 0;
+    this.roomDiscussion = false;
     this.compacting = false;
     this.awaitingPrompt = withPrompt;
     this.steers = [];

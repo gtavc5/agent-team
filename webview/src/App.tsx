@@ -19,7 +19,6 @@ import { StopControl } from "./composer/StopControl";
 import { TargetAgentSelect } from "./composer/TargetAgentSelect";
 import {
   clearConflictingMention,
-  extractMentionName,
   getDefaultAgent,
   resolveTargetState,
 } from "./composer/targetRouting";
@@ -75,6 +74,7 @@ import {
 } from "./viewport/viewportHeal";
 import { collectSnapshot, uploadSnapshot } from "./dev/debugSnapshot";
 import { t, useT } from "./i18n/chat";
+import type { DiscussionRounds } from "../../shared/room-targets";
 import {
   readingAnchorElement,
   rememberReadingPosition,
@@ -1008,7 +1008,8 @@ export function App() {
       }
     }
     setHasInput(restored.trim().length > 0);
-    setMentionTarget(extractMentionName(restored));
+    setDraftRouting(restored);
+    setDiscussionRounds(0);
   }, [activeWsId]);
 
   // Also on every reconnect: the newest page resyncs in place, without
@@ -1339,22 +1340,22 @@ export function App() {
   const lockedTargetsRef = useRef(lockedTargets);
   lockedTargetsRef.current = lockedTargets;
 
-  // The agent a Send would go to: first @mention in the draft, else the
-  // locked target, else the default agent. The primary button morphs to Stop
-  // while it is busy.
-  const [mentionTarget, setMentionTarget] = useState<string | null>(null);
+  const [draftRouting, setDraftRouting] = useState("");
+  const [discussionRounds, setDiscussionRounds] = useState<DiscussionRounds>(0);
   const lockedAgentId = activeWs ? (lockedTargets[activeWs.id] ?? null) : null;
   const targetState = useMemo(
-    () =>
-      resolveTargetState(
-        activeWs?.agents ?? [],
-        lockedAgentId,
-        mentionTarget ? `@${mentionTarget}` : "",
-      ),
-    [activeWs?.agents, lockedAgentId, mentionTarget],
+    () => resolveTargetState(activeWs?.agents ?? [], lockedAgentId, draftRouting),
+    [activeWs?.agents, lockedAgentId, draftRouting],
   );
-  const targetAgent = targetState.effectiveAgent;
-  const targetBusy = !!targetAgent && agentQueues(targetAgent);
+  const { effectiveAgent: targetAgent, targetAgents } = targetState;
+  const multiTarget = targetAgents.length > 1;
+  const targetBusy = targetAgents.length > 0 && targetAgents.every(agentQueues);
+  const roomSendLabel = multiTarget
+    ? tr("sendTo", { name: targetAgents.map((agent) => agent.name).join(tr("roomNameSeparator")) })
+    : undefined;
+  useEffect(() => {
+    if (!multiTarget) setDiscussionRounds(0);
+  }, [multiTarget]);
   const stoppableAgents = connected
     ? (activeWs?.agents.filter(
         (a) =>
@@ -1423,9 +1424,9 @@ export function App() {
         el.style.height = Math.min(el.scrollHeight, 120) + "px";
       }
       setHasInput(text.trim().length > 0);
-      setMentionTarget(extractMentionName(text));
+      setDraftRouting(text);
     },
-    [activeWsId, setMentionTarget],
+    [activeWsId, setDraftRouting],
   );
 
   const handleSelectTarget = useCallback(
@@ -1594,11 +1595,11 @@ export function App() {
           setUploading(false);
         }
       }
-      const sendTarget = resolveTargetState(
+      const { sendTarget, targetAgents } = resolveTargetState(
         ws.agents,
         lockedTargetsRef.current[ws.id],
         text,
-      ).sendTarget;
+      );
       outcome = await sendMessage(
         ws.id,
         text,
@@ -1608,6 +1609,7 @@ export function App() {
           ? { messageId: quotedMsg.id, agentId: quotedMsg.agentId, content: quotedMsg.content }
           : undefined,
         "composer",
+        targetAgents.length > 1 ? discussionRounds : undefined,
       );
     } finally {
       sendingRef.current = false;
@@ -1628,10 +1630,11 @@ export function App() {
     if (activeWsRef.current?.id !== ws.id) return;
     if (el && el.value.trim() !== text) {
       inputMapRef.current.set(ws.id, el.value);
-      setMentionTarget(extractMentionName(el.value));
+      setDraftRouting(el.value);
       return;
     }
-    setMentionTarget(null);
+    setDraftRouting("");
+    setDiscussionRounds(0);
     setMentionQuery(null);
     setCmdQuery(null);
     if (el) {
@@ -1639,7 +1642,7 @@ export function App() {
       el.style.height = "36px";
     }
     setHasInput(false);
-  }, [sendMessage, showError, pendingImages, quotedMsg]);
+  }, [sendMessage, showError, pendingImages, quotedMsg, discussionRounds]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (isImeKeyEvent(e, composingRef.current, compositionEndTsRef.current)) return;
@@ -1704,7 +1707,7 @@ export function App() {
     const has = val.trim().length > 0;
     if (has !== hasInput) setHasInput(has);
     if (activeWsId) inputMapRef.current.set(activeWsId, val);
-    setMentionTarget(extractMentionName(val));
+    setDraftRouting(val);
 
     el.style.height = "36px";
     el.style.height = Math.min(el.scrollHeight, 120) + "px";
@@ -2134,6 +2137,29 @@ export function App() {
                   placement="aboveEditor"
                   dismiss={dismissNotice}
                 />
+                {roomSendLabel && (
+                  <div className="room-composer-meta">
+                    <span title={roomSendLabel}>{roomSendLabel}</span>
+                    <button
+                      type="button"
+                      className="btn-inline"
+                      disabled={projectSealed}
+                      onClick={() =>
+                        setDiscussionRounds(
+                          discussionRounds === 0 ? 1 : discussionRounds === 1 ? 2 : 0,
+                        )
+                      }
+                    >
+                      {tr(
+                        discussionRounds === 0
+                          ? "noCrossReview"
+                          : discussionRounds === 1
+                            ? "crossReviewOne"
+                            : "crossReviewTwo",
+                      )}
+                    </button>
+                  </div>
+                )}
                 <div className="input-row">
                   <input
                     ref={fileInputRef}
@@ -2220,11 +2246,12 @@ export function App() {
                         uploading ? tr("uploading") : targetBusy ? tr("queue") : tr("send")
                       }
                       title={
-                        targetBusy
+                        roomSendLabel ??
+                        (targetBusy && targetAgent
                           ? tr("busyNext", { name: targetAgent.name })
                           : targetAgent && activeWs.agents.length > 1
                             ? tr("sendTo", { name: targetAgent.name })
-                            : tr("send")
+                            : tr("send"))
                       }
                     >
                       <span className="btn-text">

@@ -60,8 +60,18 @@ new work. The panel provides the orchestration and UI, not a model of its own.
 ## The panel
 
 - **Workspaces** — a folder plus the agents working in it, project or not.
-  Each agent keeps a separate session, so two agents in the same repo do not
-  share context.
+  Each agent keeps a separate session. In a workspace with multiple agents,
+  the panel passes new finalized room replies to each agent as it takes its
+  next turn; sessions in different workspaces do not share this context.
+- **Same-room discussion** — write `@Alice @Bob`, `@all`, or `@全体` to send
+  one message to several agents. Each agent starts or queues independently.
+  Slash commands still go to one agent.
+  Choose one or two cross-review rounds in the composer to get independent
+  drafts, peer review, and a final synthesis from the first explicitly
+  mentioned agent (the default agent for `@all` alone). With no cross-review,
+  a reply can pass the discussion to a named peer, at most twice. Automatic
+  discussion prompts ask for read-only critique, not execution. Stop or send
+  a new message to end the discussion.
 - **A transcript that shows the work**, not just the answer: thinking blocks,
   tool calls with their run times, subagent and background-task cards, and a
   per-message row with effort level and context usage. Long histories page

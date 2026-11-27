@@ -1,8 +1,16 @@
 import type { AgentInfo } from "../state/useServer";
+import {
+  defaultRoomAgent,
+  firstMention,
+  isAllMention,
+  parseRoomTargets,
+} from "../../../shared/room-targets";
 
 export interface ResolvedTarget {
   /** The agent Send and slash commands actually target right now. */
   effectiveAgent: AgentInfo | null;
+  /** All recipients for the current draft, in mention order. */
+  targetAgents: AgentInfo[];
   /** The locked agent, when its id names a still-present agent. */
   lockedAgent: AgentInfo | null;
   /** The agent named by the first `@name` token in the draft, when present. */
@@ -17,17 +25,18 @@ export interface ResolvedTarget {
 }
 
 export function extractMentionName(text: string): string | null {
-  return text.match(/(?:^|\s)@(\S+)/)?.[1] ?? null;
+  return firstMention(text) ?? null;
 }
 
 export function findMentionedAgent(text: string, agents: AgentInfo[]): AgentInfo | null {
   const name = extractMentionName(text);
   if (!name) return null;
-  return agents.find((a) => a.name === name) ?? null;
+  if (isAllMention(name)) return getDefaultAgent(agents);
+  return agents.find((a) => a.name === name || a.id === name) ?? null;
 }
 
 export function getDefaultAgent(agents: AgentInfo[]): AgentInfo | null {
-  return agents.find((a) => a.isDefault) ?? agents[0] ?? null;
+  return defaultRoomAgent(agents);
 }
 
 export function resolveTargetState(
@@ -37,7 +46,14 @@ export function resolveTargetState(
 ): ResolvedTarget {
   const defaultAgent = getDefaultAgent(agents);
   const lockedAgent = lockedAgentId ? (agents.find((a) => a.id === lockedAgentId) ?? null) : null;
-  const mentionedAgent = findMentionedAgent(draftText, agents);
+  const { targets, slash, firstExplicit } = parseRoomTargets(draftText, agents);
+  const group = targets.length > 1;
+  const multi = group && !slash;
+  const mentionedAgent = multi
+    ? targets[0]
+    : group
+      ? (firstExplicit ?? defaultAgent)
+      : findMentionedAgent(draftText, agents);
   const effectiveAgent = mentionedAgent ?? lockedAgent ?? defaultAgent;
   const isMentionOverride =
     mentionedAgent !== null && mentionedAgent !== (lockedAgent ?? defaultAgent);
@@ -52,7 +68,15 @@ export function resolveTargetState(
     sendTarget = undefined;
   }
 
-  return { effectiveAgent, lockedAgent, mentionedAgent, isMentionOverride, sendTarget };
+  const targetAgents = multi ? targets : effectiveAgent ? [effectiveAgent] : [];
+  return {
+    effectiveAgent,
+    lockedAgent,
+    mentionedAgent,
+    isMentionOverride,
+    sendTarget,
+    targetAgents,
+  };
 }
 
 export function clearConflictingMention(
@@ -60,6 +84,8 @@ export function clearConflictingMention(
   targetAgent: AgentInfo,
   agents: AgentInfo[],
 ): string {
+  const { targets, clean } = parseRoomTargets(text, agents);
+  if (targets.length > 1) return clean;
   const match = text.match(/^\s*@(\S+)/);
   if (!match) return text;
   const name = match[1];

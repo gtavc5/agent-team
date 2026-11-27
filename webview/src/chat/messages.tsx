@@ -21,6 +21,7 @@ import {
 } from "./events";
 import { SubagentTraceContext, useTracePage } from "./subagentTrace";
 import { traceBytes, type TraceRow, type TraceWindow } from "../../../shared/subagent-trace";
+import { MAX_PEER_RELAY_HOPS } from "../../../shared/room-targets";
 import { isOutstandingSubagentStatus, type SubagentStatus } from "../../../shared/subagent-status";
 import { toolNameOf, toolSummary } from "../state/stream";
 import { copySelectionAsMarkdown } from "./clipboard";
@@ -310,17 +311,33 @@ export function chipLabelFor(toolName: string): string {
 // Effort, fast mode and context occupancy line under an agent message
 // header. Thinking time and tokens show on the blocks in the steps.
 export function MessageStatus({
-  msg: { effort, fast, context: ctx },
+  msg: { effort, fast, context: ctx, discussion },
 }: {
-  msg: Pick<AgentInfo, "effort" | "fast" | "context">;
+  msg: Pick<Message, "effort" | "fast" | "context" | "discussion">;
 }) {
   const tr = useT();
-  if (!effort && !fast && ctx === undefined) return null;
+  if (!effort && !fast && ctx === undefined && !discussion) return null;
   const pct =
     ctx && ctx.window > 0 ? Math.min(100, Math.round((ctx.tokens / ctx.window) * 100)) : null;
   const tone = pct == null ? "" : pct >= 90 ? " ctx-high" : pct >= 70 ? " ctx-warn" : "";
   return (
     <div className="message-status">
+      {discussion && (
+        <span className="status-chip">
+          {discussion.kind === "review"
+            ? tr("crossReviewLabel", { round: discussion.round, rounds: discussion.rounds })
+            : discussion.kind === "synthesis"
+              ? tr("finalSynthesis")
+              : tr("peerRelay", {
+                  name: discussion.from,
+                  hop: discussion.hop,
+                  max: MAX_PEER_RELAY_HOPS,
+                })}
+        </span>
+      )}
+      {discussion?.kind === "relay" && discussion.limitReached && (
+        <span className="status-chip">{tr("peerRelayLimit")}</span>
+      )}
       {effort && (
         <span className="status-chip" title={tr("reasoningEffort")}>
           {tr("effortChip", { effort })}

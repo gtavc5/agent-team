@@ -3086,6 +3086,26 @@ button.action-target:hover {
 .jump-latest:active {
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-elevated));
 }
+.room-composer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-inline: 8px;
+  color: var(--text-muted);
+  font-size: var(--fs-meta);
+}
+.room-composer-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.room-composer-meta .btn-inline {
+  flex-shrink: 0;
+  white-space: nowrap;
+  min-height: 28px;
+}
 .input-row {
   display: flex;
   gap: 8px;
