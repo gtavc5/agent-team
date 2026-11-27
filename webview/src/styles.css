@@ -7145,25 +7145,76 @@ button.from-author {
   color: var(--purple);
   background: var(--purple-soft);
 }
+.ap-awaits-prompt {
+  display: block;
+  width: calc(100% - 2 * (var(--ap-pad) - 6px));
+  min-width: 0;
+  margin: -4px calc(var(--ap-pad) - 6px) 8px;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: var(--fs-meta);
+  line-height: 1.4;
+  text-align: left;
+  color: var(--warning);
+  background: none;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (hover: hover) {
+  .ap-awaits-prompt:hover {
+    text-decoration: underline;
+  }
+}
+.ap-awaits-prompt:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+}
 /* Adding an agent and the session's own actions, their labels (not their
    borders) on the card's edges. */
 .ap-session-foot {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   padding: 4px var(--ap-pad);
   border-top: 1px solid var(--border);
+}
+.ap-actions-handoff {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
 }
 .ap-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 4px;
   margin-left: auto;
+}
+.ap-actions-handoff + .ap-actions {
+  margin-left: -4px;
 }
 .ap-actions > :last-child {
   padding-right: 4px;
   margin-right: -5px;
 }
+@container (max-width: 480px) {
+  .ap-actions-handoff > :last-child {
+    padding-right: 4px;
+    margin-right: -5px;
+  }
+  .ap-actions-handoff + .ap-actions {
+    flex-basis: 100%;
+    margin-left: auto;
+  }
+}
 .ap-actions .panel-btn:focus-visible,
+.ap-actions-handoff .panel-btn:focus-visible,
 .ap-add:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
@@ -7460,6 +7511,9 @@ button.from-author {
   .ap-brief .panel-btn {
     margin-block: -12px 0;
   }
+  .ap-brief:has(.ap-hand-back) .panel-btn {
+    margin-block: 2px 0;
+  }
   /* A finger's target, laid out as wide as the arrow, the arrow on the
      card's edge. */
   .ap-toggle {
@@ -7477,6 +7531,10 @@ button.from-author {
   }
   .ap-brief {
     padding-bottom: 2px;
+  }
+  .ap-awaits-prompt {
+    margin: 2px calc(var(--ap-pad) - 6px) 6px;
+    padding: 4px 6px;
   }
   .ap-session-name {
     padding: 8px 0;

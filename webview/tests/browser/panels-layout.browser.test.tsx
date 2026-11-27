@@ -491,3 +491,180 @@ it("exposes touch actions only on the open session and gives the lists a larger 
   expect(rect(get(inactive, ".ws-group-add")).width).toBeGreaterThan(0);
   expect(style(get(inactive, ".task-delete")).visibility).toBe("visible");
 });
+
+it("keeps worker awaiting prompt truncated and hand-back aligned across folded, unfolded, and mobile cards", async () => {
+  const actions: AgentsPanelActions = {
+    onOpen: no,
+    onStop: no,
+    onArchive: no,
+    onRestore: no,
+    onSetReporting: no,
+    onHandBackToLead: no,
+    onAddAgent: no,
+    onClearContext: no,
+    onRemoveAgent: no,
+    onSetModel: no,
+    onSetEffort: no,
+    onStopTask: no,
+    onCancelWake: no,
+    onStopAll: no,
+  };
+  const project = {
+    id: "p",
+    name: "repo",
+    root: "/repo",
+    leadWorkspaceId: "lead",
+    createdAt: 1,
+    objectives: [],
+  };
+  const waitingWorker = workspace("w1", {
+    name: "worker-1",
+    awaitsUser: true,
+    awaitsUserPrompt: long,
+    userTookOver: true,
+    lastMessageAt: 1,
+    projectLink: { projectId: "p", role: "worker" },
+    agents: [
+      {
+        id: "a1",
+        name: "Frontend Worker",
+        model: "anthropic/claude-opus-5-5",
+        avatar: "W",
+        color: "#fff",
+        isDefault: true,
+        context: { tokens: 42_000, window: 200_000 },
+        backgroundTasks: [{ id: "t1", type: "local_bash", description: "run check", since: 1 }],
+      },
+    ],
+  });
+
+  await page.viewport(1100, 800);
+  const { container, rerender } = render(
+    <div style={{ width: 336 }}>
+      <AgentsPanel
+        sessions={[waitingWorker]}
+        project={project}
+        activeWsId="w1"
+        connected={true}
+        models={[{ id: "anthropic/claude-opus-5-5", label: "Opus", backend: "pi" }]}
+        actions={actions}
+        overview={true}
+      />
+    </div>,
+  );
+  const box = container.firstElementChild as HTMLElement;
+  const card = get(container, ".ap-session");
+  const prompt = get<HTMLButtonElement>(container, ".ap-awaits-prompt");
+  const handBack = get<HTMLButtonElement>(container, ".ap-hand-back");
+  expect(style(prompt).textOverflow).toBe("ellipsis");
+  expect(prompt.scrollWidth).toBeGreaterThan(prompt.clientWidth);
+  expect(rect(prompt).right).toBeLessThanOrEqual(rect(box).right);
+  // Active card paints a 2px left inset bar; prompt focus contour must clear it by >= 4px and pad vertically symmetrically.
+  expect(rect(prompt).left - rect(card).left - card.clientLeft - 2).toBeGreaterThanOrEqual(4);
+  expect(style(prompt).paddingTop).toBe(style(prompt).paddingBottom);
+  expect(rect(handBack).right).toBeLessThanOrEqual(rect(box).right);
+  expect(textRect(handBack).right).toBeCloseTo(rect(get(container, ".ap-when")).right, 0);
+
+  // Wide desktop unfolded card keeps all footer actions on one row with Archive on the right edge.
+  rerender(
+    <div style={{ width: 680 }}>
+      <AgentsPanel
+        sessions={[waitingWorker]}
+        project={project}
+        activeWsId="w1"
+        connected={true}
+        models={[{ id: "anthropic/claude-opus-5-5", label: "Opus", backend: "pi" }]}
+        actions={actions}
+        overview={false}
+      />
+    </div>,
+  );
+  const wideHandBack = get<HTMLButtonElement>(container, ".ap-hand-back");
+  const wideArchive = get(container, ".ap-actions > :last-child");
+  expect(Math.abs(rect(wideHandBack).top - rect(wideArchive).top)).toBeLessThanOrEqual(1);
+  expect(rect(wideHandBack).right).toBeLessThanOrEqual(rect(wideArchive).left);
+  expect(textRect(wideArchive).right).toBeCloseTo(rect(get(container, ".ap-when")).right, 0);
+
+  // Narrow desktop unfolded card with background tasks wraps Hand back onto row 1 and aligns both right edges with .ap-when.
+  rerender(
+    <div style={{ width: 336 }}>
+      <AgentsPanel
+        sessions={[waitingWorker]}
+        project={project}
+        activeWsId="w1"
+        connected={true}
+        models={[{ id: "anthropic/claude-opus-5-5", label: "Opus", backend: "pi" }]}
+        actions={actions}
+        overview={false}
+      />
+    </div>,
+  );
+  const unfoldedPrompt = get<HTMLButtonElement>(container, ".ap-awaits-prompt");
+  const unfoldedHandBack = get<HTMLButtonElement>(container, ".ap-hand-back");
+  const archive = get(container, ".ap-actions > :last-child");
+  const whenRight = rect(get(container, ".ap-when")).right;
+  expect(unfoldedPrompt.scrollWidth).toBeGreaterThan(unfoldedPrompt.clientWidth);
+  expect(rect(unfoldedPrompt).top).toBeGreaterThanOrEqual(
+    textRect(get(container, ".ap-session-name .clip")).bottom,
+  );
+  expect(rect(unfoldedHandBack).bottom).toBeLessThanOrEqual(rect(archive).top);
+  expect(textRect(unfoldedHandBack).right).toBeCloseTo(whenRight, 0);
+  expect(textRect(archive).right).toBeCloseTo(whenRight, 0);
+  expect(rect(archive).right).toBeLessThanOrEqual(rect(container.firstElementChild!).right);
+
+  touch = true;
+  await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: true });
+  await page.viewport(390, 800);
+  rerender(
+    <div style={{ width: 358 }}>
+      <AgentsPanel
+        sessions={[waitingWorker]}
+        project={project}
+        activeWsId="lead"
+        connected={true}
+        models={[{ id: "anthropic/claude-opus-5-5", label: "Opus", backend: "pi" }]}
+        actions={actions}
+        overview={true}
+      />
+    </div>,
+  );
+  const mobileHandBack = get<HTMLButtonElement>(container, ".ap-hand-back");
+  const mobilePrompt = get<HTMLButtonElement>(container, ".ap-awaits-prompt");
+  const mobileCard = get(container, ".ap-session");
+  expect(rect(mobileHandBack).height).toBeGreaterThanOrEqual(40);
+  // Wrapped .ap-hand-back on mobile folded brief must not shoot upward over line 1 (.ap-brief-agent / .ap-brief-tasks).
+  expect(rect(mobileHandBack).top).toBeGreaterThanOrEqual(
+    rect(get(container, ".ap-brief-agent")).bottom,
+  );
+  expect(rect(mobileHandBack).top).toBeGreaterThanOrEqual(
+    rect(get(container, ".ap-brief-tasks")).bottom,
+  );
+  expect(rect(mobilePrompt).top).toBeGreaterThanOrEqual(rect(mobileHandBack).bottom);
+  expect(rect(mobilePrompt).bottom).toBeLessThanOrEqual(rect(mobileCard).bottom);
+  expect(rect(mobilePrompt).right).toBeLessThanOrEqual(rect(container.firstElementChild!).right);
+
+  // Mobile unfolded footer preserves >= 40px touch height and aligned right edges across both rows.
+  rerender(
+    <div style={{ width: 358 }}>
+      <AgentsPanel
+        sessions={[
+          { ...waitingWorker, agents: [{ ...waitingWorker.agents[0], backgroundTasks: [] }] },
+        ]}
+        project={project}
+        activeWsId="w1"
+        connected={true}
+        models={[{ id: "anthropic/claude-opus-5-5", label: "Opus", backend: "pi" }]}
+        actions={actions}
+        overview={false}
+      />
+    </div>,
+  );
+  const mobileUnfoldedHandBack = get<HTMLButtonElement>(container, ".ap-hand-back");
+  const mobileArchive = get(container, ".ap-actions > :last-child");
+  const mobileWhenRight = rect(get(container, ".ap-when")).right;
+  expect(rect(mobileUnfoldedHandBack).height).toBeGreaterThanOrEqual(40);
+  expect(rect(mobileArchive).height).toBeGreaterThanOrEqual(40);
+  expect(rect(mobileUnfoldedHandBack).bottom).toBeLessThanOrEqual(rect(mobileArchive).top);
+  expect(textRect(mobileUnfoldedHandBack).right).toBeCloseTo(mobileWhenRight, 0);
+  expect(textRect(mobileArchive).right).toBeCloseTo(mobileWhenRight, 0);
+});
