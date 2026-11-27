@@ -140,6 +140,8 @@ export interface ProjectHost {
   cancelWorkspaceTimers?(workspace: Workspace): void;
   // Its name or project link changed.
   workspaceChanged(workspace: Workspace): void;
+  // Ownership blocker (userTookOver) may have changed without an awaitsUser edge.
+  ownershipChanged?(workspace: Workspace): void;
   broadcast(msg: unknown): void;
 }
 
@@ -186,6 +188,7 @@ export class ProjectManager {
   private issueStores = new Map<string, IssueStore>();
   private settling = new Map<string, ReturnType<typeof setTimeout>>();
   private carrying = new Set<string>();
+  private projectedAwaitsPrompt = new Map<string, string | undefined>();
   private closed = false;
   readonly recovery = new LeadRecovery({
     journal: (w) => this.journal(w.projectLink!.projectId),
@@ -463,6 +466,7 @@ export class ProjectManager {
   // A worker session is being deleted: the objectives stop pointing at it,
   // and what it was doing goes back to todo. Never fails the delete itself.
   async forget(workspace: Workspace): Promise<void> {
+    this.projectedAwaitsPrompt.delete(workspace.id);
     const id = workspace.projectLink?.projectId;
     if (!id || this.store.get(id)?.status !== "active") return;
     await this.commitLock
@@ -678,6 +682,27 @@ export class ProjectManager {
     this.changed(link.projectId);
   }
 
+  // Explicitly hand a managed worker back to the lead, clearing prior
+  // user-takeover and user-stop ownership blockers while preserving future
+  // user takeover/stop protection after this message boundary.
+  handBackToLead(workspaceId: string): void {
+    const w = this.host.workspace(workspaceId);
+    const link = w?.projectLink;
+    if (!w || link?.role !== "worker") {
+      throw new Error("Only a project's worker sessions can be handed back to the lead");
+    }
+    this.requireActive(link.projectId);
+    this.checkReporting(w);
+    if (!w.messagesLoaded && !this.host.loadWorkspace(w)) {
+      throw new Error(`"${w.name}" cannot be loaded`);
+    }
+    w.markHandedBack();
+    const prevAwaiting = w.projectedAwaitsUser;
+    this.host.saveWorkspaceNow(w);
+    this.showAwaiting(w);
+    if (w.projectedAwaitsUser === prevAwaiting) this.host.workspaceChanged(w);
+  }
+
   // A worker's turn ended or its agent went idle: the check waits until it
   // has stayed so for SETTLE_MS.
   workerIdle(w: Workspace): void {
@@ -694,11 +719,46 @@ export class ProjectManager {
     return this.waits(w);
   }
 
-  // Only an edge into waiting counts, not each snapshot or later idle check.
+  awaitsUserPrompt(w: Workspace): string | undefined {
+    if (!this.waits(w)) return undefined;
+    if (w.hasPendingDialogs) {
+      return summarizePendingDialog(w.getPendingDialogs()[0]);
+    }
+    const reply = waitingReply(w);
+    return reply ? extractWaitingPrompt(reply.content) : undefined;
+  }
+
+  userTookOver(w: Workspace): boolean {
+    const link = w.projectLink;
+    if (link?.role !== "worker" || link.unreported || w.isArchived) return false;
+    const blocker = this.leadDispatchBlocker(w);
+    return blocker?.code === "taken_over" || blocker?.code === "user_stopped";
+  }
+
+  // Only an edge into waiting counts for unseen, while a prompt preview change
+  // while still waiting (e.g. pending dialog arriving or resolving) still
+  // broadcasts so live clients match a fresh init snapshot.
   showAwaiting(w: Workspace): void {
     const waiting = this.waits(w);
-    if (waiting === w.projectedAwaitsUser) return;
+    const prompt = waiting ? this.awaitsUserPrompt(w) : undefined;
+    const waitingChanged = waiting !== w.projectedAwaitsUser;
+    if (!waitingChanged) {
+      if (!waiting) {
+        this.projectedAwaitsPrompt.delete(w.id);
+        return;
+      }
+      if (!this.projectedAwaitsPrompt.has(w.id)) {
+        this.projectedAwaitsPrompt.set(w.id, prompt);
+        return;
+      }
+      if (this.projectedAwaitsPrompt.get(w.id) === prompt) return;
+      this.projectedAwaitsPrompt.set(w.id, prompt);
+      this.host.workspaceChanged(w);
+      return;
+    }
     w.projectedAwaitsUser = waiting;
+    if (waiting) this.projectedAwaitsPrompt.set(w.id, prompt);
+    else this.projectedAwaitsPrompt.delete(w.id);
     if (waiting) w.unseen++;
     this.host.persistWorkspace(w);
     this.host.workspaceChanged(w);
@@ -845,12 +905,21 @@ export class ProjectManager {
     for (const { input: got, replies, stopped, answered, since } of w.lastDelivered()) {
       const input = asked(messages, got);
       if (!fromLead(input, lead) || answered) continue;
-      if (
-        since ||
-        stopped === "user" ||
-        (input.id === task?.id && !stopped) ||
-        (replies.at(-1)?.status === "error" && !stopped)
-      ) {
+      if (since || stopped === "user" || (replies.at(-1)?.status === "error" && !stopped)) {
+        w.markAnswered(got.id);
+        this.host.persistWorkspace(w);
+        continue;
+      }
+      if (input.id === task?.id && !stopped) {
+        if (this.awaitsUser(w)) {
+          const body = awaitingUserNotice(w.name, this.awaitsUserPrompt(w));
+          this.deliver(
+            lead,
+            body,
+            { workspaceId: w.id, name: w.name, role: "panel" },
+            `${silentNoticeHeader(w.name, w.id)}\n\n${body}`,
+          );
+        }
         w.markAnswered(got.id);
         this.host.persistWorkspace(w);
         continue;
@@ -1093,20 +1162,24 @@ export class ProjectManager {
   private isUserTakenOver(w: Workspace): boolean {
     if (!w.messagesLoaded) return w.persistedOwnershipBlocker() === "taken_over";
     const messages = w.getMessages();
-    const lastFinish = lastFinishIndex(messages);
+    const lastRelease = lastReleaseIndex(w, messages);
     // Local commands bypass the queue. A queued user turn is still pending,
     // even if another agent reported after the user queued it.
     const hasQueuedUser = messages.some(
       (m) => m.kind === "user" && !m.from && m.status === "queued",
     );
-    return (
-      hasQueuedUser ||
-      w.lastDelivered().some((d) => {
-        if (!d.since) return false;
-        const lastUser = lastDirectUserIndex(messages);
-        return lastUser < 0 || lastUser > lastFinish;
-      })
-    );
+    if (hasQueuedUser) return true;
+    const lastUser = lastDirectUserIndex(messages);
+    const delivered = w.lastDelivered();
+    if (delivered.length > 0) {
+      return delivered.some((d) => d.since && (lastUser < 0 || lastUser > lastRelease));
+    }
+    const lastLead = lastLeadInputIndex(messages);
+    if (lastLead >= 0 && lastUser > lastLead && lastUser > lastRelease) {
+      const userId = messages[lastUser].id;
+      return !w.lastTurns().some((t) => t.input.id === userId && t.finished);
+    }
+    return false;
   }
 
   private leadDispatchBlocker(w: Workspace): {
@@ -1147,6 +1220,7 @@ export class ProjectManager {
     }
     const messages = w.getMessages();
     const lastFinish = lastFinishIndex(messages);
+    const handBackIdx = handBackIndex(w, messages);
     const turnStoppedByUser = (t: {
       input: Message;
       replies: Message[];
@@ -1159,6 +1233,7 @@ export class ProjectManager {
       if (t.finished) return true;
       const end = t.replies[t.replies.length - 1] ?? t.input;
       const idx = messages.indexOf(end);
+      if (handBackIdx >= 0 && idx >= 0 && idx <= handBackIdx) return false;
       return idx < 0 || idx >= lastFinish;
     };
     if (w.lastDelivered().some(turnStoppedByUser) || w.lastTurns().some(turnStoppedByUser)) {
@@ -2133,96 +2208,124 @@ export class ProjectManager {
     final: boolean,
     finish: FinishPatch = {},
     callId: string = randomUUID(),
+    handBack = false,
   ): Promise<string> {
     const w = this.host.workspace(workspaceId);
     const id = w?.projectLink?.role === "worker" ? w.projectLink.projectId : undefined;
     if (!w || !id) throw new Error("This session has no project lead");
     const receivedAt = Date.now();
     const stamp = final && finish.context ? await this.stamp(id, w.id) : undefined;
-    const { ack, online } = await this.commitLock.run(id, () => {
-      const project = this.requireActive(id);
-      this.checkReporting(w);
-      const journal = this.journal(id);
-      const online = this.leadOnline(project);
-      const waiting = online && !this.leadOf(id)?.resolveAgent();
-      const saved = waiting
-        ? "Report saved and awaiting a Lead agent."
-        : "Report saved for the offline lead.";
-      const duplicate = journal.findByCallId(callId);
-      if (duplicate)
+    const { ack, online, handedBack, shouldRefreshAwaiting, finished } = await this.commitLock.run(
+      id,
+      () => {
+        const project = this.requireActive(id);
+        this.checkReporting(w);
+        const journal = this.journal(id);
+        const online = this.leadOnline(project);
+        const waiting = online && !this.leadOf(id)?.resolveAgent();
+        const saved = waiting
+          ? "Report saved and awaiting a Lead agent."
+          : "Report saved for the offline lead.";
+        const duplicate = journal.findByCallId(callId);
+        if (duplicate)
+          return {
+            ack:
+              duplicate.leadDelivery.state === "pending" && (!online || waiting)
+                ? saved
+                : final
+                  ? "Reported to the lead."
+                  : "Sent to the lead.",
+            online,
+            handedBack: false,
+            shouldRefreshAwaiting: false,
+            finished: false,
+          };
+        if (!final && handBack && !w.messagesLoaded && !this.host.loadWorkspace(w)) {
+          throw new Error(`"${w.name}" cannot be loaded`);
+        }
+        let frozenPlan: FrozenReportPlan | null = null;
+        let unwritten = "";
+        if (final) {
+          let contextWrite: FrozenReportPlan["contextWrite"] = null;
+          if (finish.context && !w.projectLink?.isolated) {
+            let target: Objective | undefined;
+            try {
+              target = this.contextTarget(id, w.id, finish.objectiveId);
+            } catch (error) {
+              unwritten = ` The context was not written: ${error instanceof Error ? error.message : String(error)}.`;
+            }
+            if (finish.context !== target?.context) {
+              checkLength("The context", finish.context, LIMITS.context);
+              if (target)
+                contextWrite = {
+                  objectiveId: target.id,
+                  expectedPrevUpdatedAt: target.updatedAt,
+                  context: finish.context,
+                  stamp: { at: receivedAt, commit: stamp?.commit },
+                };
+            }
+          }
+          frozenPlan = {
+            answeredInputIds: w
+              .lastDelivered()
+              .filter(({ input }) => input.from?.role === "lead" || input.from?.role === "panel")
+              .map(({ input }) => input.id),
+            finishedInputIds: w.currentInputIds(),
+            contextWrite,
+            taskTransitions: this.objectives(id)
+              .filter((o) => !o.archived)
+              .flatMap((o) =>
+                o.tasks
+                  .filter((t) => t.session === w.id && t.state === "doing")
+                  .map((t) => ({ objectiveId: o.id, taskId: t.id, expectedSession: w.id })),
+              ),
+          };
+        }
+        journal.append({
+          reportId: randomUUID(),
+          callId,
+          kind: final ? "final" : "progress",
+          workerWsId: w.id,
+          workerName: w.name,
+          payload: { text, ...finish },
+          frozenPlan,
+          boardState: final ? "pending" : "not_applicable",
+          leadDelivery: { state: "pending" },
+          createdAt: receivedAt,
+        });
+        if (final) {
+          w.markFinished(frozenPlan?.finishedInputIds ?? []);
+          this.host.saveWorkspaceNow(w);
+        } else if (handBack) {
+          w.markHandedBack();
+          this.host.saveWorkspaceNow(w);
+        } else {
+          w.markReported(w.currentInputIds());
+          this.host.saveWorkspaceNow(w);
+        }
         return {
           ack:
-            duplicate.leadDelivery.state === "pending" && (!online || waiting)
-              ? saved
-              : final
-                ? "Reported to the lead."
-                : "Sent to the lead.",
+            online && !waiting
+              ? final
+                ? `Reported to the lead.${unwritten}`
+                : "Sent to the lead."
+              : `${saved}${unwritten}`,
           online,
+          handedBack: !final && handBack,
+          shouldRefreshAwaiting: !final && !handBack,
+          finished: final,
         };
-      let frozenPlan: FrozenReportPlan | null = null;
-      let unwritten = "";
-      if (final) {
-        let contextWrite: FrozenReportPlan["contextWrite"] = null;
-        if (finish.context && !w.projectLink?.isolated) {
-          let target: Objective | undefined;
-          try {
-            target = this.contextTarget(id, w.id, finish.objectiveId);
-          } catch (error) {
-            unwritten = ` The context was not written: ${error instanceof Error ? error.message : String(error)}.`;
-          }
-          if (finish.context !== target?.context) {
-            checkLength("The context", finish.context, LIMITS.context);
-            if (target)
-              contextWrite = {
-                objectiveId: target.id,
-                expectedPrevUpdatedAt: target.updatedAt,
-                context: finish.context,
-                stamp: { at: receivedAt, commit: stamp?.commit },
-              };
-          }
-        }
-        frozenPlan = {
-          answeredInputIds: w
-            .lastDelivered()
-            .filter(({ input }) => input.from?.role === "lead" || input.from?.role === "panel")
-            .map(({ input }) => input.id),
-          finishedInputIds: w.currentInputIds(),
-          contextWrite,
-          taskTransitions: this.objectives(id)
-            .filter((o) => !o.archived)
-            .flatMap((o) =>
-              o.tasks
-                .filter((t) => t.session === w.id && t.state === "doing")
-                .map((t) => ({ objectiveId: o.id, taskId: t.id, expectedSession: w.id })),
-            ),
-        };
-      }
-      journal.append({
-        reportId: randomUUID(),
-        callId,
-        kind: final ? "final" : "progress",
-        workerWsId: w.id,
-        workerName: w.name,
-        payload: { text, ...finish },
-        frozenPlan,
-        boardState: final ? "pending" : "not_applicable",
-        leadDelivery: { state: "pending" },
-        createdAt: receivedAt,
-      });
-      if (final) {
-        w.markFinished(frozenPlan?.finishedInputIds ?? []);
-        this.host.saveWorkspaceNow(w);
-      }
-      return {
-        ack:
-          online && !waiting
-            ? final
-              ? `Reported to the lead.${unwritten}`
-              : "Sent to the lead."
-            : `${saved}${unwritten}`,
-        online,
-      };
-    });
+      },
+    );
+    if (handedBack) {
+      const prevAwaiting = w.projectedAwaitsUser;
+      this.showAwaiting(w);
+      if (w.projectedAwaitsUser === prevAwaiting) this.host.workspaceChanged(w);
+    } else if (shouldRefreshAwaiting) {
+      this.showAwaiting(w);
+    } else if (finished) {
+      this.host.ownershipChanged?.(w);
+    }
     if (online)
       await this.drainInbox(id).catch((error) =>
         console.error(`[projects] ${id}: report saved; drain failed`, error),
@@ -2241,6 +2344,7 @@ export class ProjectManager {
       for (const inputId of plan.answeredInputIds) worker.markAnswered(inputId);
       if (plan.finishedInputIds?.length) worker.markFinished(plan.finishedInputIds);
       this.host.saveWorkspaceNow(worker);
+      if (plan.finishedInputIds?.length) this.host.ownershipChanged?.(worker);
     }
     const board = this.board(id);
     const ids = new Set(plan.taskTransitions.map((t) => t.objectiveId));
@@ -2569,8 +2673,8 @@ export class ProjectManager {
       this.commitBoard(id, () =>
         new ProjectNotesStore(this.store.notesDir(id)).writeNote(slug, content, expected),
       ),
-    workerReport: (wsId, text, final, finish, callId) =>
-      this.workerReport(wsId, text, final, finish, callId),
+    workerReport: (wsId, text, final, finish, callId, handBack) =>
+      this.workerReport(wsId, text, final, finish, callId, handBack),
     checkReporting: (wsId) => this.checkReporting(this.host.workspace(wsId)),
   };
 }
@@ -2580,26 +2684,44 @@ const INTERRUPTED = "*\\[interrupted\\]*";
 
 // A worker the lead started that stopped on the user: an agent's last turn, on
 // the task or on what the user wrote since, ended without calling finish_task
-// and was not superseded by a later successful finish_task in the workspace.
+// or report_progress and was not superseded by a later report or hand-back.
 // Not what it answered the lead later, nor a turn that failed or was cut off.
 export function awaitsUser(w: Workspace): boolean {
   if (w.hasPendingDialogs) return true;
+  return waitingReply(w) !== undefined;
+}
+
+function waitingReply(w: Workspace): Message | undefined {
   const link = w.projectLink;
-  if (link?.role !== "worker" || link.unreported) return false;
-  if (w.isArchived || !w.messagesLoaded || !w.isQuiet) return false;
+  if (link?.role !== "worker" || link.unreported) return undefined;
+  if (w.isArchived || !w.messagesLoaded || !w.isQuiet) return undefined;
   const messages = w.getMessages();
   const task = taskOf(messages);
-  if (!task) return false;
-  const lastFinish = lastFinishIndex(messages);
-  return w.lastTurns().some(({ input, replies, stopped, finished }) => {
+  if (!task) return undefined;
+  const lastHandoff = Math.max(lastReportIndex(messages), handBackIndex(w, messages));
+  let best: Message | undefined;
+  let bestIdx = -1;
+  for (const { input, replies, stopped, finished, reported } of w.lastTurns()) {
     const from = asked(messages, input);
-    if (from.from && from.id !== task.id) return false;
+    if (from.from && from.id !== task.id) continue;
     const last = replies[replies.length - 1];
-    if (stopped || finished || last?.status !== "done" || last.content.endsWith(INTERRUPTED))
-      return false;
-    if (lastFinish >= 0 && messages.indexOf(last) <= lastFinish) return false;
-    return !replies.some(finishedTask);
-  });
+    if (
+      stopped ||
+      finished ||
+      reported ||
+      last?.status !== "done" ||
+      last.content.endsWith(INTERRUPTED)
+    )
+      continue;
+    const idx = messages.indexOf(last);
+    if (lastHandoff >= 0 && idx <= lastHandoff) continue;
+    if (replies.some(finishedTask) || reportedProgress(last)) continue;
+    if (idx >= bestIdx) {
+      best = last;
+      bestIdx = idx;
+    }
+  }
+  return best;
 }
 
 function lastFinishIndex(messages: Message[]): number {
@@ -2607,6 +2729,22 @@ function lastFinishIndex(messages: Message[]): number {
     if (finishedTask(messages[i])) return i;
   }
   return -1;
+}
+
+function lastReportIndex(messages: Message[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (finishedTask(messages[i]) || reportedProgress(messages[i])) return i;
+  }
+  return -1;
+}
+
+function handBackIndex(w: Workspace, messages: Message[]): number {
+  const id = w.handedBackAfterMessageId;
+  return id ? messages.findIndex((m) => m.id === id) : -1;
+}
+
+function lastReleaseIndex(w: Workspace, messages: Message[]): number {
+  return Math.max(lastFinishIndex(messages), handBackIndex(w, messages));
 }
 
 function lastDirectUserIndex(messages: Message[]): number {
@@ -2619,6 +2757,14 @@ function lastDirectUserIndex(messages: Message[]): number {
   return -1;
 }
 
+function lastLeadInputIndex(messages: Message[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.kind === "user" && m.from?.role === "lead") return i;
+  }
+  return -1;
+}
+
 // A refused finish_task (a context too long, say) reported nothing.
 function finishedTask(m: Message): boolean {
   return (
@@ -2626,6 +2772,19 @@ function finishedTask(m: Message): boolean {
     !!m.events?.some(
       (e) =>
         e.kind === "tool_use" && e.toolName === "mcp__panel__finish_task" && !e.toolResultIsError,
+    )
+  );
+}
+
+// A refused report_progress reported nothing.
+function reportedProgress(m: Message): boolean {
+  return (
+    m.kind === "agent" &&
+    !!m.events?.some(
+      (e) =>
+        e.kind === "tool_use" &&
+        e.toolName === "mcp__panel__report_progress" &&
+        !e.toolResultIsError,
     )
   );
 }
@@ -2764,6 +2923,86 @@ function silentTurnNotice(input: Message, how: string, text?: string): string {
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function awaitingUserNotice(name: string, prompt?: string): string {
+  return prompt
+    ? `Session "${name}" is waiting for the user: ${prompt}`
+    : `Session "${name}" is waiting for the user.`;
+}
+
+const AWAITS_USER_PROMPT_MAX = 180;
+const QUESTION_ENDING = /[?？]["'”’)\]}】》）]*$/;
+
+function clipPrompt(s: string, max = AWAITS_USER_PROMPT_MAX): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > max ? `${t.slice(0, max - 1).trimEnd()}…` : t;
+}
+
+function summarizePendingDialog(dialog?: { title?: string; message?: string }): string | undefined {
+  const title = typeof dialog?.title === "string" ? dialog.title.replace(/\s+/g, " ").trim() : "";
+  const message =
+    typeof dialog?.message === "string" ? dialog.message.replace(/\s+/g, " ").trim() : "";
+  if (title && message) return clipPrompt(title === message ? title : `${title} — ${message}`);
+  const text = title || message;
+  return text ? clipPrompt(text) : undefined;
+}
+
+function cleanMarkdownLine(raw: string): string {
+  let line = raw.trim();
+  if (!line) return "";
+  if (/^([-*_]\s*){3,}$/.test(line)) return "";
+  if (/^\|?(\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?$/.test(line)) return "";
+  line = line
+    .replace(/^(?:>\s*)+/, "")
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^(?:[-*+]|\d+[.)])\s+/, "")
+    .replace(/^\[[ xX]\]\s+/, "")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/~~([^~]+)~~/g, "$1")
+    .replace(/(^|\s)\*([^*\s][^*]*?)\*(?=\s|$|[.,!?;:，。！？；：])/g, "$1$2")
+    .replace(/\s+/g, " ")
+    .trim();
+  return line;
+}
+
+function extractQuestionSentence(line: string): string | undefined {
+  const parts = line
+    .split(/(?<=[.!?]["'”’)\]}】》）]*)\s+|(?<=[。！？]["'”’)\]}】》）]*)\s*/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (QUESTION_ENDING.test(parts[i])) return parts[i];
+  }
+  return QUESTION_ENDING.test(line) ? line : undefined;
+}
+
+function extractWaitingPrompt(content: string): string | undefined {
+  const text = (
+    content.endsWith(INTERRUPTED) ? content.slice(0, -INTERRUPTED.length) : content
+  ).trim();
+  if (!text) return undefined;
+  const meaningful: string[] = [];
+  let inFence = false;
+  for (const rawLine of text.split(/\r?\n/)) {
+    if (/^\s*(?:```|~~~)/.test(rawLine)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const cleaned = cleanMarkdownLine(rawLine);
+    if (cleaned) meaningful.push(cleaned);
+  }
+  if (!meaningful.length) return undefined;
+  for (let i = meaningful.length - 1; i >= 0; i--) {
+    const question = extractQuestionSentence(meaningful[i]);
+    if (question) return clipPrompt(question);
+  }
+  return clipPrompt(meaningful[meaningful.length - 1]);
 }
 
 function failedTurnNotice(input: Message, reply: Message): string {

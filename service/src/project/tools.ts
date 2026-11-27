@@ -185,6 +185,7 @@ export interface PanelApi {
     final: boolean,
     finish?: FinishPatch,
     callId?: string,
+    handBack?: boolean,
   ): Promise<string>;
   currentTask(workspaceId: string, objectiveId?: string): Promise<string>;
   // Throws when the session no longer reports to the lead: its write tools
@@ -936,9 +937,26 @@ function reportTools(api: PanelApi, workspaceId: string, isolated: boolean): Pan
     {
       name: "report_progress",
       description: "Tell the lead, briefly, what changes its plans; not milestones.",
-      shape: { text: z.string() },
+      shape: {
+        text: z.string(),
+        hand_back: z
+          .boolean()
+          .optional()
+          .describe(
+            "Set true when the user explicitly asked you to hand control back to the lead.",
+          ),
+      },
       handler: (a, _signal, callId) =>
-        run(() => api.workerReport(workspaceId, String(a.text), false, undefined, callId)),
+        run(() =>
+          api.workerReport(
+            workspaceId,
+            String(a.text),
+            false,
+            undefined,
+            callId,
+            a.hand_back === true,
+          ),
+        ),
       subagentRefusal: REPORT_REFUSAL,
     },
     {

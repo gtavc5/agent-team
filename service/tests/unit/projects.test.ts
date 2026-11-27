@@ -180,14 +180,17 @@ describe("panel tool arguments", () => {
   it("route a worker's reports to its own workspace", async () => {
     const t = byName(workerToolset(api, "ws-w", project, "/notes"));
     await t.report_progress.handler({ text: "tests pass" });
+    await t.report_progress.handler({ text: "ready for lead", hand_back: true });
     // There is no blocked report: a decision goes to the user in the worker's own session.
     await t.finish_task.handler({ summary: "merged", blocked: true });
     await t.finish_task.handler({ summary: "done", context: "merged", objective_id: "a/x" });
     expect(calls).toEqual([
-      ["workerReport", "ws-w", "tests pass", false, undefined, undefined],
+      ["workerReport", "ws-w", "tests pass", false, undefined, undefined, false],
+      ["workerReport", "ws-w", "ready for lead", false, undefined, undefined, true],
       ["workerReport", "ws-w", "merged", true, {}, undefined],
       ["workerReport", "ws-w", "done", true, { context: "merged", objectiveId: "a/x" }, undefined],
     ]);
+    expect(Object.keys(t.report_progress.shape)).toEqual(["text", "hand_back"]);
     expect(Object.keys(t.finish_task.shape)).toEqual(["summary", "context", "objective_id"]);
   });
 
@@ -2532,19 +2535,21 @@ describe("a worker that goes idle without reporting", () => {
     }
   });
 
-  it("leaves a task that ends in a question to the user, across a restart too", async () => {
+  it("notifies the lead once when a task ends waiting for the user, and not again across a restart", async () => {
     useFakeTimers();
     try {
       const { w, say, told, settle, endTurn, restart, manager } = await started();
       say("Which branch should this go on?");
       endTurn(w);
       await settle();
-      expect(told()).toEqual([]);
+      expect(told()).toEqual([
+        'Session "w" is waiting for the user: Which branch should this go on?',
+      ]);
       expect(w.lastDelivered()[0].answered).toBe(true);
       const back = restart(w);
       manager.recheckWorkers();
       await settle();
-      expect(told()).toEqual([]);
+      expect(told()).toHaveLength(1);
       expect(back.lastDelivered()[0].answered).toBe(true);
     } finally {
       vi.useRealTimers();
@@ -2872,17 +2877,20 @@ describe("a worker that goes idle without reporting", () => {
       expect(back.getMessages().filter((m) => m.from?.role === "panel")).toMatchObject([
         { from: { workspaceId: w.id, name: "w", role: "panel" } },
       ]);
-      // What comes of it stands for the task: a question waits for the user.
+      // What comes of it stands for the task: a question waits for the user and notifies the lead once.
       say("Which branch should this go on?", back);
       endTurn(back);
       await settle();
-      expect(told()).toEqual([]);
+      expect(told()).toEqual([
+        'Session "w" is waiting for the user: Which branch should this go on?',
+      ]);
       expect(awaitsUser(back)).toBe(true);
-      // Nothing is cut off any more: a later restart carries nothing on.
+      // Nothing is cut off any more: a later restart carries nothing on and does not re-notify.
       back = restart(back);
       manager.recheckWorkers();
       await settle();
       expect(session(back).sent).toEqual([]);
+      expect(told()).toHaveLength(1);
       expect(awaitsUser(back)).toBe(true);
 
       // The lead's later question, cut off by a crash mid-turn, goes on too,
@@ -3387,7 +3395,10 @@ describe("a worker that goes idle without reporting", () => {
       say("Which branch should this go on?");
       endTurn(w);
       await settle();
-      expect(told()).toHaveLength(1);
+      expect(told()).toHaveLength(2);
+      expect(told()[1]).toBe(
+        'Session "w" is waiting for the user: Which branch should this go on?',
+      );
       expect(awaitsUser(w)).toBe(true);
     } finally {
       vi.useRealTimers();
@@ -3456,11 +3467,16 @@ describe("a worker that goes idle without reporting", () => {
       endTurn(w);
       expect(awaitsUser(w)).toBe(true);
       expect(shown()).toEqual([true]);
+      const unseenAfterPrimary = w.unseen;
 
       await w.sendMessage("@Allen review this");
       allen.emit("event", { kind: "text_delta", content: "Looks solid." });
       endAllen();
       expect(awaitsUser(w)).toBe(true);
+      expect(manager.awaitsUserPrompt(w)).toBe("Looks solid.");
+      // Allen's reply itself adds 1 unseen; updating awaitsUserPrompt while still
+      // awaiting must not add an extra showAwaiting unseen increment.
+      expect(w.unseen).toBe(unseenAfterPrimary + 1);
 
       await w.sendMessage("LGTM, go ahead");
       session(w).emit("event", {
@@ -3473,7 +3489,7 @@ describe("a worker that goes idle without reporting", () => {
       endTurn(w);
       await settle();
       expect(awaitsUser(w)).toBe(false);
-      expect(shown()).toEqual([true, false]);
+      expect(shown()).toEqual([true, true, false]);
 
       // Pending UI dialog still forces awaitsUser even after finish_task,
       // and showAwaiting broadcasts both the rise and clear.
@@ -3496,7 +3512,7 @@ describe("a worker that goes idle without reporting", () => {
       manager.showAwaiting(w);
       expect(awaitsUser(w)).toBe(false);
       expect(manager.awaitsUser(w)).toBe(false);
-      expect(shown()).toEqual([true, false, true, false]);
+      expect(shown()).toEqual([true, true, false, true, false]);
 
       // A targeted local slash command (@Allen /usage) after finish_task is not
       // mistaken for a new user turn after restart.
@@ -3675,6 +3691,373 @@ describe("a worker that goes idle without reporting", () => {
       lead.archivedAt = null;
       manager.archiveShelved();
       expect(lead.isArchived).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears awaitsUser and skips the waiting notice when a worker calls report_progress", async () => {
+    useFakeTimers();
+    try {
+      const { lead, w, say, told, settle, session, call, endTurn, restart, manager } =
+        await started();
+      say("Tests passed; starting migration.");
+      session(w).emit("event", {
+        kind: "tool_use",
+        toolName: "mcp__panel__report_progress",
+        toolUseId: "rp1",
+        content: "**report_progress**",
+      });
+      await call(w, "report_progress", { text: "Tests passed; starting migration." });
+      endTurn(w);
+      await settle();
+      expect(awaitsUser(w)).toBe(false);
+      expect(manager.awaitsUserPrompt(w)).toBeUndefined();
+      // Only the progress report reached the lead — no waiting-for-user notice.
+      expect(told()).toEqual(["Progress:\n\nTests passed; starting migration."]);
+      const w2 = restart(w);
+      session(w2).setPanelTools(manager.toolsFor(w2));
+      expect(awaitsUser(w2)).toBe(false);
+
+      // A refused report_progress reported nothing and still waits on the user.
+      const refused = await started();
+      refused.say("Should I migrate the old table?");
+      refused.session(refused.w).emit("event", {
+        kind: "tool_use",
+        toolName: "mcp__panel__report_progress",
+        toolUseId: "rp-err",
+        content: "**report_progress**",
+      });
+      refused.session(refused.w).emit("event", {
+        kind: "tool_result",
+        toolUseId: "rp-err",
+        content: "report failed",
+        isError: true,
+      });
+      refused.endTurn(refused.w);
+      expect(awaitsUser(refused.w)).toBe(true);
+      expect(awaitsUser(refused.restart(refused.w))).toBe(true);
+
+      // Plain report_progress after direct user takeover clears awaitsUser but keeps taken_over.
+      await w2.sendMessage("check the schema too");
+      say("Checked the schema and sent a status update.", w2);
+      session(w2).emit("event", {
+        kind: "tool_use",
+        toolName: "mcp__panel__report_progress",
+        toolUseId: "rp2",
+        content: "**report_progress**",
+      });
+      await call(w2, "report_progress", { text: "Checked the schema." });
+      endTurn(w2);
+      expect(awaitsUser(w2)).toBe(false);
+      expect(manager.userTookOver(w2)).toBe(true);
+      await expect(
+        call(lead, "message_session", { session_id: w2.id, message: "continue" }),
+      ).rejects.toThrow(/taken over by the user/i);
+      const afterRestart = restart(w2);
+      expect(awaitsUser(afterRestart)).toBe(false);
+      expect(manager.userTookOver(afterRestart)).toBe(true);
+
+      // A pending UI dialog still marks the worker as awaiting the user even after report_progress.
+      session(afterRestart).emit("ui_dialog_request", {
+        workspaceId: afterRestart.id,
+        agentId: [...afterRestart.agents.keys()][0],
+        processGeneration: 1,
+        requestId: "dlg-rp",
+        method: "confirm",
+        title: "Apply schema change?",
+        message: "Drops column legacy_id",
+        timeoutMs: 60_000,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      });
+      expect(manager.awaitsUser(afterRestart)).toBe(true);
+      expect(manager.awaitsUserPrompt(afterRestart)).toBe(
+        "Apply schema change? — Drops column legacy_id",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands control back to the lead via report_progress(hand_back: true) and preserves future user takeovers", async () => {
+    useFakeTimers();
+    try {
+      const { lead, w, say, settle, session, call, endTurn, restart, manager } = await started();
+      say("Which branch should this go on?");
+      endTurn(w);
+      await w.sendMessage("Use main, then hand back to the lead.");
+      expect(manager.userTookOver(w)).toBe(true);
+      await expect(
+        call(lead, "message_session", { session_id: w.id, message: "next step" }),
+      ).rejects.toThrow(/taken over by the user/i);
+
+      say("Switched to main and handing control back.");
+      session(w).emit("event", {
+        kind: "tool_use",
+        toolName: "mcp__panel__report_progress",
+        toolUseId: "rp-hb",
+        content: "**report_progress**",
+      });
+      await call(w, "report_progress", {
+        text: "Switched to main; user asked to hand back.",
+        hand_back: true,
+      });
+      endTurn(w);
+      await settle();
+
+      expect(manager.userTookOver(w)).toBe(false);
+      expect(awaitsUser(w)).toBe(false);
+      expect(w.handedBackAfterMessageId).toBeTruthy();
+      expect(
+        lead
+          .getMessages()
+          .some((m) => m.from?.role === "worker" && m.content.includes("Switched to main")),
+      ).toBe(true);
+
+      // Survives restart and lets the lead message and stop the worker again.
+      const back = restart(w);
+      expect(manager.userTookOver(back)).toBe(false);
+      expect(awaitsUser(back)).toBe(false);
+      await expect(
+        call(lead, "message_session", { session_id: back.id, message: "run the deploy check" }),
+      ).resolves.toMatch(/Sent to "w"/);
+
+      // A new direct user message after hand-back takes over again.
+      await back.sendMessage("wait, hold on");
+      expect(manager.userTookOver(back)).toBe(true);
+      await expect(
+        call(lead, "message_session", { session_id: back.id, message: "ping" }),
+      ).rejects.toThrow(/taken over by the user/i);
+      const backAgain = restart(back);
+      expect(manager.userTookOver(backAgain)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands control back via handBackToLead for taken_over and user_stopped, including after a restart", async () => {
+    useFakeTimers();
+    try {
+      const { lead, w, say, call, endTurn, restart, manager, project } = await started();
+
+      // 1. User stops the running worker -> userTookOver is true; handBackToLead clears it.
+      w.abortAll("user");
+      expect(manager.userTookOver(w)).toBe(true);
+      await expect(
+        call(lead, "message_session", { session_id: w.id, message: "resume" }),
+      ).rejects.toThrow(/stopped by the user/i);
+
+      // Restart while user_stopped, then hand back after restart.
+      let back = restart(w);
+      expect(manager.userTookOver(back)).toBe(true);
+      manager.handBackToLead(back.id);
+      expect(manager.userTookOver(back)).toBe(false);
+      expect(awaitsUser(back)).toBe(false);
+      await expect(
+        call(lead, "message_session", { session_id: back.id, message: "resume now" }),
+      ).resolves.toMatch(/Sent to "w"/);
+      await vi.advanceTimersByTimeAsync(START_SPACING_MS);
+
+      // 2. User takes over, restart persists `since: true` (entry.input undefined), hand back clears it.
+      say("Working on it", back);
+      endTurn(back);
+      await back.sendMessage("check foo.ts instead");
+      say("Checked foo.ts. Want me to edit it?", back);
+      endTurn(back);
+      expect(manager.userTookOver(back)).toBe(true);
+      expect(awaitsUser(back)).toBe(true);
+
+      back = restart(back);
+      expect(manager.userTookOver(back)).toBe(true);
+      manager.handBackToLead(back.id);
+      expect(manager.userTookOver(back)).toBe(false);
+      expect(awaitsUser(back)).toBe(false);
+      // Persists across another restart.
+      back = restart(back);
+      expect(manager.userTookOver(back)).toBe(false);
+      expect(awaitsUser(back)).toBe(false);
+
+      // Lead can message again, and a subsequent user stop blocks the lead again.
+      await expect(
+        call(lead, "message_session", { session_id: back.id, message: "finish up" }),
+      ).resolves.toMatch(/Sent to "w"/);
+      await vi.advanceTimersByTimeAsync(START_SPACING_MS);
+      back.abortAll("user");
+      expect(manager.userTookOver(back)).toBe(true);
+      await expect(
+        call(lead, "message_session", { session_id: back.id, message: "again" }),
+      ).rejects.toThrow(/stopped by the user/i);
+
+      // Guardrails: non-worker, unreported worker, and sealed project are rejected.
+      expect(() => manager.handBackToLead(lead.id)).toThrow(/worker sessions/i);
+      manager.setReporting(back.id, false);
+      expect(() => manager.handBackToLead(back.id)).toThrow(/does not report to the lead/i);
+      manager.setReporting(back.id, true);
+      await manager.sealProject(project.id, "done");
+      expect(() => manager.handBackToLead(back.id)).toThrow(/sealed/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("extracts concise awaitsUserPrompt previews and skips the lead notice if the user replies before settle", async () => {
+    useFakeTimers();
+    try {
+      const checkPrompt = async (reply: string): Promise<string | undefined> => {
+        const ctx = await started();
+        ctx.say(reply);
+        ctx.endTurn(ctx.w);
+        expect(ctx.manager.awaitsUser(ctx.w)).toBe(true);
+        return ctx.manager.awaitsUserPrompt(ctx.w);
+      };
+
+      // Prefers question line and strips markdown / skips fenced code blocks.
+      expect(
+        await checkPrompt(
+          [
+            "### Status",
+            "```ts",
+            "const fakeQuestion = 'not this?';",
+            "```",
+            "- Updated `config.ts` and ran [tests](https://example.com).",
+            "> **Should we keep `v1.2.3` compatibility?**",
+          ].join("\n"),
+        ),
+      ).toBe("Should we keep v1.2.3 compatibility?");
+
+      // Extracts embedded Chinese question sentence cleanly.
+      expect(
+        await checkPrompt("我已经查完日志并定位到问题。你希望保留旧接口吗？我可以现在改。"),
+      ).toBe("你希望保留旧接口吗？");
+
+      // Falls back to the last meaningful non-question line.
+      expect(
+        await checkPrompt("Finished the draft.\n---\nWaiting for your sign-off on the copy."),
+      ).toBe("Waiting for your sign-off on the copy.");
+
+      // Clips strictly to <= 180 characters with trailing ellipsis.
+      const longQuestion = `Should we migrate ${"segment ".repeat(30)}now?`;
+      const clipped = await checkPrompt(longQuestion);
+      expect(clipped).toBeDefined();
+      expect(clipped!.length).toBeLessThanOrEqual(180);
+      expect(clipped!.endsWith("…")).toBe(true);
+
+      // Empty reply yields undefined prompt even though awaitsUser is true.
+      expect(await checkPrompt("   \n```txt\nonly code\n```")).toBeUndefined();
+
+      // Pending dialog summaries: title only, and minimal dialog without title/message.
+      const dlg = await started();
+      const agentId = [...dlg.w.agents.keys()][0];
+      dlg.session(dlg.w).emit("ui_dialog_request", {
+        workspaceId: dlg.w.id,
+        agentId,
+        processGeneration: 1,
+        requestId: "dlg-title",
+        method: "input",
+        title: "Enter deployment tag",
+        timeoutMs: 60_000,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      });
+      expect(dlg.manager.awaitsUserPrompt(dlg.w)).toBe("Enter deployment tag");
+      dlg.session(dlg.w).emit("ui_dialog_resolved", {
+        workspaceId: dlg.w.id,
+        agentId,
+        processGeneration: 1,
+        requestId: "dlg-title",
+      });
+      dlg.session(dlg.w).emit("ui_dialog_request", {
+        workspaceId: dlg.w.id,
+        agentId,
+        processGeneration: 1,
+        requestId: "dlg-empty",
+      });
+      expect(dlg.manager.awaitsUser(dlg.w)).toBe(true);
+      expect(dlg.manager.awaitsUserPrompt(dlg.w)).toBeUndefined();
+
+      // If the user replies before SETTLE_MS, no waiting notice is sent to the lead.
+      const fast = await started();
+      fast.say("Which branch should this go on?");
+      fast.endTurn(fast.w);
+      await vi.advanceTimersByTimeAsync(SETTLE_MS - 100);
+      await fast.w.sendMessage("main");
+      fast.say("Got it.");
+      fast.endTurn(fast.w);
+      await fast.settle();
+      expect(fast.told()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("handles review regressions: continuation reply after report_progress, atomic hand_back, unloaded fail-closed, and queued tail", async () => {
+    useFakeTimers();
+    try {
+      // Finding #4: a continuation reply on the same TurnInput after report_progress still awaits the user.
+      const cont = await started();
+      cont.say("Waiting on CI.");
+      cont.session(cont.w).emit("event", {
+        kind: "tool_use",
+        toolName: "mcp__panel__report_progress",
+        toolUseId: "rp-c1",
+        content: "**report_progress**",
+      });
+      await cont.call(cont.w, "report_progress", { text: "Waiting on CI." });
+      cont.endTurn(cont.w);
+      expect(awaitsUser(cont.w)).toBe(false);
+      // Wake-up / background continuation on the same input asks a question without reporting.
+      cont.session(cont.w).isRunning = true;
+      cont.say("CI failed — should I revert or patch?");
+      cont.endTurn(cont.w);
+      expect(awaitsUser(cont.w)).toBe(true);
+      expect(cont.manager.awaitsUserPrompt(cont.w)).toBe("CI failed — should I revert or patch?");
+      const contBack = cont.restart(cont.w);
+      expect(awaitsUser(contBack)).toBe(true);
+      expect(cont.manager.awaitsUserPrompt(contBack)).toBe("CI failed — should I revert or patch?");
+
+      // Finding #3: report_progress(hand_back: true) commits hand-back atomically inside commitLock
+      // even if sealProject is queued concurrently behind it.
+      const atomic = await started();
+      atomic.say("Which branch?");
+      atomic.endTurn(atomic.w);
+      await atomic.w.sendMessage("Use main and hand back.");
+      atomic.say("Handing back.");
+      const reportPromise = atomic.call(atomic.w, "report_progress", {
+        text: "Used main, handing back.",
+        hand_back: true,
+      });
+      const sealPromise = atomic.manager.sealProject(atomic.project.id, "done");
+      await expect(reportPromise).resolves.toMatch(/Sent to the lead/);
+      await sealPromise;
+      expect(atomic.w.handedBackAfterMessageId).toBeTruthy();
+
+      // Finding #5: handBackToLead fails closed when loadWorkspace returns false on an unloaded worker.
+      const unloaded = await started();
+      unloaded.w.abortAll("user");
+      unloaded.w.unloadMessages();
+      const loadSpy = vi.spyOn(unloaded.host, "loadWorkspace").mockReturnValue(false);
+      expect(() => unloaded.manager.handBackToLead(unloaded.w.id)).toThrow(/cannot be loaded/i);
+      expect(unloaded.w.persistedOwnershipBlocker()).toBe("user_stopped");
+      loadSpy.mockRestore();
+
+      // Finding #6: markHandedBack ignores trailing queued messages so cancelling them never dangles.
+      const queued = await started();
+      queued.say("Working.");
+      queued.endTurn(queued.w);
+      await queued.w.sendMessage("check this");
+      const userMsgId = queued.w.getMessages().at(-1)!.id;
+      queued.say("Checked.");
+      // Queue another message while running so a queued message sits at the tail.
+      await queued.w.sendMessage("queued tail");
+      const queuedMsg = queued.w.getMessages().find((m) => m.status === "queued")!;
+      queued.manager.handBackToLead(queued.w.id);
+      expect(queued.w.handedBackAfterMessageId).not.toBe(queuedMsg.id);
+      expect(queued.w.cancelQueued(queuedMsg.id)).toBe(true);
+      expect(queued.w.findMessage(queued.w.handedBackAfterMessageId!)).toBeDefined();
+      expect(
+        queued.w.getMessages().findIndex((m) => m.id === queued.w.handedBackAfterMessageId),
+      ).toBeGreaterThanOrEqual(queued.w.getMessages().findIndex((m) => m.id === userMsgId));
     } finally {
       vi.useRealTimers();
     }

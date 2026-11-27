@@ -222,6 +222,10 @@ export interface WorkspaceInfo {
   // A worker stopped on the user (project/manager.ts awaitsUser); the server
   // adds it to the list it sends.
   awaitsUser?: boolean;
+  // Single-line preview (<= 180 chars) of what the worker is waiting on.
+  awaitsUserPrompt?: string;
+  // True when a managed worker currently has a taken_over or user_stopped blocker.
+  userTookOver?: boolean;
   // Actionable results since any client last read the session.
   unread: number;
   lastResult?: "done" | "failed";
@@ -245,6 +249,7 @@ export interface WorkspaceState {
   lastActivityAt?: number;
   archivedAt?: number | null;
   projectLink?: ProjectLink;
+  handedBackAfterMessageId?: string;
   attention?: { unread: number; lastResult?: WorkspaceInfo["lastResult"]; awaitsUser: boolean };
 }
 
@@ -310,6 +315,7 @@ export interface TurnInput {
   stopped?: "user" | "restart" | "lead";
   answered?: boolean;
   finished?: boolean;
+  reported?: boolean;
   // Background work or a wake-up was still to come: a crash cuts it off.
   waiting?: boolean;
 }
@@ -545,6 +551,8 @@ export class Workspace {
   lastActivityAt: number;
   archivedAt: number | null = null;
   projectLink?: ProjectLink;
+  // Message ID boundary of the most recent explicit hand-back to the lead.
+  handedBackAfterMessageId?: string;
   unseen = 0;
   lastResult: WorkspaceInfo["lastResult"];
   // Last projected wait state, persisted so reconnecting does not re-mark it unread.
@@ -681,6 +689,7 @@ export class Workspace {
     replies: Message[];
     stopped?: "user" | "restart" | "lead";
     finished?: boolean;
+    reported?: boolean;
   }> {
     const out = [];
     for (const [agentId, a] of this.agents) {
@@ -689,7 +698,14 @@ export class Workspace {
         const input = this.findMessage(t.transcriptId ?? t.id);
         if (!input) continue;
         const replies = this.messages.filter((m) => t.replies.includes(m.id));
-        out.push({ agentId, input, replies, stopped: t.stopped, finished: t.finished });
+        out.push({
+          agentId,
+          input,
+          replies,
+          stopped: t.stopped,
+          finished: t.finished,
+          reported: t.reported,
+        });
         continue;
       }
       const typed = (idx: number) => {
@@ -766,6 +782,16 @@ export class Workspace {
     return [...ids];
   }
 
+  // A successful report_progress means the worker reported back to the lead on
+  // this turn without clearing user-takeover ownership.
+  markReported(inputIds: readonly string[]): void {
+    for (const a of this.agents.values()) {
+      const turn = a.input ?? a.delivered;
+      if (!turn || !inputIds.includes(turn.id)) continue;
+      turn.reported = true;
+    }
+  }
+
   // A successful finish_task handed the reporting turn back to the lead.
   markFinished(inputIds: readonly string[]): void {
     for (const a of this.agents.values()) {
@@ -778,6 +804,42 @@ export class Workspace {
       if (a.delivered) {
         a.delivered.finished = true;
         if (a.delivered.stopped === "user") delete a.delivered.stopped;
+      }
+    }
+  }
+
+  // User or worker explicitly handed control back to the lead: release prior
+  // takeover/user-stop ownership blockers and persist the message boundary so
+  // earlier direct user turns stay released across restarts.
+  markHandedBack(): void {
+    if (this.messagesLoaded) {
+      const last = [...this.messages]
+        .reverse()
+        .find(
+          (m) =>
+            m.status !== "queued" &&
+            !(
+              m.kind === "agent" &&
+              m.status === "streaming" &&
+              !m.content.trim() &&
+              !m.events?.length
+            ),
+        );
+      this.handedBackAfterMessageId = last?.id;
+    }
+    for (const a of this.agents.values()) {
+      const turn = a.input ?? a.delivered;
+      if (turn) {
+        turn.finished = true;
+        if (turn.stopped === "user") delete turn.stopped;
+      }
+      if (a.delivered) {
+        a.delivered.finished = true;
+        a.delivered.answered = true;
+        if (a.delivered.stopped === "user") delete a.delivered.stopped;
+        // After a restart from taken_over, a.input was omitted (since: true);
+        // realign it with a.delivered so persistedOwnershipBlocker clears since.
+        if (!a.input) a.input = a.delivered;
       }
     }
   }
@@ -971,7 +1033,10 @@ export class Workspace {
       const input = entry.openingPrompt?.input;
       if (input && !input.roomAutomatic) entry.currentMsg.replyTo = input.roomParent ?? input.id;
       if (entry.discussionTurn) entry.currentMsg.discussion = entry.discussionTurn.label;
-      entry.input?.replies.push(entry.currentMsg.id);
+      if (entry.input) {
+        delete entry.input.reported;
+        entry.input.replies.push(entry.currentMsg.id);
+      }
       this.pushMessage(entry.currentMsg);
     }
     return entry.currentMsg;
@@ -3812,6 +3877,9 @@ export class Workspace {
       lastActivityAt: this.lastActivityAt,
       archivedAt: this.archivedAt,
       ...(this.projectLink && { projectLink: this.projectLink }),
+      ...(this.handedBackAfterMessageId && {
+        handedBackAfterMessageId: this.handedBackAfterMessageId,
+      }),
       attention: {
         unread: this.unseen,
         lastResult: this.lastResult,
@@ -3841,6 +3909,7 @@ export class Workspace {
     ws.createdAt = state.createdAt;
     ws.archivedAt = state.archivedAt ?? null;
     ws.projectLink = state.projectLink;
+    ws.handedBackAfterMessageId = state.handedBackAfterMessageId;
     ws.leadOutage = state.leadOutage;
     ws.roomClock = state.roomClock ?? 0;
     // Old unread counts included input, placeholders, and system messages.
