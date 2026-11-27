@@ -3,7 +3,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { afterEach } from "vitest";
+import { afterEach, vi } from "vitest";
 import { ProjectManager, type ProjectHost } from "../../src/project/manager";
 import type { Objective } from "../../src/project/objectives";
 import { Workspace, type Message, type WorkspaceCallbacks } from "../../src/workspace/workspace";
@@ -27,6 +27,11 @@ afterEach(async () => {
 });
 
 export const tick = () => new Promise((r) => setTimeout(r, 0));
+
+export function useRecoveryClock() {
+  // Advancing a recovery window must not replay the board's 250 ms disk polling interval.
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+}
 
 export function setupProjects(onSaveNow?: WorkspaceCallbacks["onSaveNow"]) {
   const base = tmpDir();

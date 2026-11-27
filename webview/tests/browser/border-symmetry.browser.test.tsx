@@ -75,9 +75,9 @@ const actions: AgentsPanelActions = {
   onCancelWake: no,
 };
 
-// Atomic controls contribute their border box even when transparent; text contributes
-// a layout Range, not glyph pixels. This guard is not an audit of painted spacing.
-function boxAndRangeInsets(element: HTMLElement) {
+// Atomic controls and selected flow sections contribute their border box; other
+// text contributes a layout Range. This guard is not an audit of painted spacing.
+function contentInsets(element: HTMLElement, flowSections?: string) {
   const bounds = element.getBoundingClientRect();
   const computed = getComputedStyle(element);
   const topBorder = bounds.top + element.clientTop;
@@ -123,6 +123,7 @@ function boxAndRangeInsets(element: HTMLElement) {
     if (
       node !== element &&
       (atomic.test(node.tagName) ||
+        (flowSections && node.matches(flowSections)) ||
         /^H[1-4]$/.test(node.tagName) ||
         (node.tagName === "SUMMARY" && node.parentElement !== element) ||
         ((inlineBorder || blockBorders) && node.parentElement !== element) ||
@@ -183,6 +184,16 @@ const selectors = {
   "ui-alert": "#audit-ui-alert > .ui-dialog-alert",
 };
 
+// These edge sections use line layout, not the font's ascent/descent rectangle.
+// Measuring the descendants (not the card's content box) still catches shifts
+// caused by margins and alignment, as well as uneven card padding.
+const flowSections: Partial<Record<keyof typeof selectors, string>> = {
+  "banner-notice": ".banner-icon, .banner-text > p",
+  "banner-compact": ".banner-icon, .banner-text",
+  "bp-card": ".bp-id, .bp-card-title, .bp-card-goal, .bp-stage",
+  "bi-row": ".bi-evidence, .bp-id, .bi-row-text",
+};
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -192,7 +203,7 @@ afterEach(() => {
 it.each([
   { layout: "desktop", width: 1280, height: 900 },
   { layout: "mobile", width: 390, height: 844 },
-])("audits control-box and text-range insets on $layout", async ({ width, height }) => {
+])("audits control, flow-section and text-range insets on $layout", async ({ width, height }) => {
   await page.viewport(width, height);
   vi.stubGlobal(
     "fetch",
@@ -262,17 +273,7 @@ it.each([
         <div className="sealed-banner">Sealed project</div>
       </div>
       <div id="audit-status-chip">
-        <MessageStatus
-          msg={{
-            id: "message",
-            kind: "agent",
-            agentId: "agent",
-            content: "",
-            timestamp: NOW,
-            status: "done",
-            effort: "high",
-          }}
-        />
+        <MessageStatus msg={{ effort: "high" }} />
       </div>
       <div id="audit-event-chip">
         <EventItem
@@ -475,23 +476,32 @@ it.each([
 
   fireEvent.click(document.querySelector("#audit-banner-list .banner-toggle")!);
   fireEvent.click(document.querySelector("#audit-banner-schedule .banner-toggle")!);
-  const collapsedQuota = boxAndRangeInsets(
+  const collapsedQuota = contentInsets(
     document.querySelector<HTMLElement>("#audit-quota-panel > .quota-panel")!,
   );
   fireEvent.click(document.querySelector("#audit-quota-panel .quota-row-toggle")!);
 
-  const results = Object.entries(selectors).map(([name, selector]) => {
-    const element = document.querySelector<HTMLElement>(selector);
-    expect(element, selector).not.toBeNull();
-    return { name, ...boxAndRangeInsets(element!) };
-  });
-  for (const { name, top, bottom } of [
-    { name: "quota-collapsed", ...collapsedQuota },
-    ...results,
-  ]) {
+  function expectBalanced(name: string, { top, bottom }: ReturnType<typeof contentInsets>) {
     expect
       .soft(Math.abs(top - bottom), `${name}: top=${top}, bottom=${bottom}`)
       .toBeLessThanOrEqual(1.5);
+  }
+  expectBalanced("quota-collapsed", collapsedQuota);
+  for (const name of Object.keys(selectors) as (keyof typeof selectors)[]) {
+    const selector = selectors[name];
+    const element = document.querySelector<HTMLElement>(selector)!;
+    expect(element, selector).not.toBeNull();
+    const sections = flowSections[name];
+    expectBalanced(name, contentInsets(element, sections));
+    if (!sections) continue;
+
+    // A gap after the last section must be detected even with unchanged padding.
+    // Extend past the adjacent icon, which can be taller than the banner text.
+    const last = [...element.querySelectorAll<HTMLElement>(sections)].at(-1)!;
+    last.style.marginBottom = "8px";
+    const { top, bottom } = contentInsets(element, sections);
+    expect.soft(bottom - top, `${name}: extra space after ${last.className}`).toBeGreaterThan(1.5);
+    last.style.removeProperty("margin-bottom");
   }
 });
 
@@ -651,7 +661,7 @@ it("rejects section and contour regressions hidden by outer-box and resting-labe
   const foot = card.querySelector<HTMLElement>("footer")!;
   const add = foot.querySelector<HTMLElement>(".ap-add")!;
   foot.style.paddingBlock = "4px 10px";
-  const outer = boxAndRangeInsets(card);
+  const outer = contentInsets(card);
   expect(Math.abs(outer.top - outer.bottom)).toBeLessThanOrEqual(1.5);
   expect(footerImbalance(card, add.getBoundingClientRect())).toBeGreaterThan(1.5);
   const rest = await inkBounds(add);

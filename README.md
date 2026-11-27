@@ -53,9 +53,9 @@ new work. The panel provides the orchestration and UI, not a model of its own.
   Writing during the wait sends the pending context alongside your message
   in one turn. Authentication, quota and unknown errors use their usual paths.
 - By default (`init-config` / `config.example.toml`), `[user].language` tells leads
-  and workers to address you in Simplified Chinese while repository artifacts,
-  project-board entries, and agent-to-agent instructions stay English
-  (`service/src/project/tools.ts`).
+  and workers to address you in Simplified Chinese. Repository artifacts,
+  project-board entries, and agent-to-agent instructions and reports default to
+  English unless you explicitly request another language for that content.
 
 ## The panel
 
@@ -144,7 +144,7 @@ cd agent-team
 ./scripts/yaat-service.sh install
 ```
 
-For setup problems, open **# → Service diagnostics** in the sidebar (an indicator dot appears on **#** while collapsed and on **Service diagnostics** when expanded if the panel is offline or unhealthy), or run `AGENT_TEAM_BASE_DIR="$HOME/.yaat" scripts/start-server.sh --doctor --json` after building. The report identifies the failed step and how to fix it. ACP is optional; prepare its runtime explicitly before using ACP models ([instructions](docs/DEPLOY.md#optional-antigravity-acp-runtime)).
+For setup problems, open **# → Service diagnostics** in the sidebar (an indicator dot appears on **#** while collapsed and on **Service diagnostics** when expanded if the panel is offline or unhealthy), or run `scripts/yaat-service.sh doctor --json` after building. The offline check separates startup blockers from optional ACP login issues and leaves remote authorization unverified. ACP is optional; prepare its runtime explicitly before using ACP models ([instructions](docs/DEPLOY.md#optional-antigravity-acp-runtime)).
 
 Or run directly in the foreground:
 
@@ -165,18 +165,17 @@ With pixi, `pixi run serve` builds and starts in one step.
 pixi run dev-webview         # Vite dev server with HMR
 npm run check                # tsc (strict) + ESLint + prettier, zero tolerance
 npm test                     # service + webview unit tests (Vitest, no browser)
-npm run test:fast            # smaller service + webview suites
+npm run test:fast            # core usability, in parallel without Chromium
 npm run fmt                  # prettier
 ```
 
 For layout changes, install Playwright's Chromium (`npx playwright install chromium`,
 or `npx playwright install --with-deps chromium` on Linux if system libraries are missing).
 Run `npm run test:browser` for headless geometry tests or `npm run test:slow` for
-local checks, unit, browser, and end-to-end tests. Pass a file filter to a workspace
-command (for example, `npm test -w service -- tests/unit/issues.test.ts`). Set
-`VERBOSE=1` or pass `-- --reporter=verbose` for Vitest's detailed output. The
-`test:fast` timing note uses a 15-second budget per workspace; set
-`YAAT_FAST_BUDGET_MS` to override it without changing the test exit status.
+local stability checks: exact geometry, reading continuity, bounded state, and recovery
+under stress. Pass a file filter to a workspace command (for example,
+`npm test -w service -- tests/unit/issues.test.ts`). Set `VERBOSE=1` or pass
+`-- --reporter=verbose` for Vitest's detailed output.
 
 To try the UI without touching your own data, seed a demo — a project with a
 lead, workers, history and a board; no session is started — into a separate
@@ -188,8 +187,10 @@ cp config.example.toml .agent-team/dev/config.toml
 AGENT_TEAM_PORT=9801 AGENT_TEAM_BASE_DIR=$PWD/.agent-team/dev node dist/server.js
 ```
 
-Linux and Windows CI run `check`, `test`, `build`, Chromium layout tests and the demo browser E2E.
-Linux also runs the real deterministic Pi RPC scenario with pinned Pi and pi-subagents, no account required.
+Linux and Windows CI run `npm run check` and `npm run test:ci`, which builds the app and
+runs reliability tests including both Chromium pilots and the offline Demo and browser journeys.
+Linux also runs real offline Pi RPC tests with pinned Pi and pi-subagents and verifies that a missing Pi
+fails closed. The CI jobs have a 10-minute limit and do not require a model account.
 The demo opens an archived parser session, follows recorded Markdown link forms and checks the real
 file's highlighted lines. Only the Markdown input is replayed; each target contains a fresh disk-only marker.
 
@@ -249,15 +250,23 @@ offline = true               # set false to allow Pi npm access on startup
 ```
 
 Omitting `[user].language` omits only the user-facing chat language rule (agents
-choose how to reply to you), while keeping the English rule for repository
-artifacts, project-board entries, and agent-to-agent instructions and reports. A
-language change is reflected in Pi's project instructions on the next turn and in
+choose how to reply to you). With or without this setting, agents write repository
+artifacts, project-board entries, and agent-to-agent instructions and reports in
+English unless you explicitly request another language for that content. For
+example, asking for Chinese code comments leaves unrelated reports in English.
+A change to `[user].language` is reflected in Pi's project instructions on the next turn and in
 Codex on thread start or resume in a new app-server process.
 
 If upgrading from a config with `[providers.*]`, migrate custom Pi providers to
 `~/.pi/agent/models.json` and remove those tables from `config.toml`. The managed
 Pi home links `models.json`; start a new Pi process to pick up changes. Its
 `models-store.json` cache is separate and seeded from the user cache only once.
+YAAT owns its Pi `settings.json` and the ACP provider's `config.json` and
+`sessions.json`. New runtime Pi sessions share only the provider's explicit
+`antigravity-acp-provider/gemini` login directory with host Pi. After
+`/login antigravity-acp` in host Pi, start a new YAAT Pi session without
+redeploying. See [ACP login conflicts](docs/DEPLOY.md#optional-antigravity-acp-runtime)
+if both directories already contain local state.
 If a package is unsuitable for headless Pi on your machine, list it in
 `[pi].exclude_packages`.
 

@@ -60,6 +60,31 @@ describe("diagram SVG sanitization", () => {
     expect(parsed(clean).querySelector("path")?.getAttribute("class")).toBe("edge");
   });
 
+  it.each(["", "'", '"'])("keeps a fragment-only CSS URL with %s quotes", (quote) => {
+    const css = `.edge { stroke: url(${quote}#diagram-preview-1-gradient${quote}); }`;
+    expect(
+      parsed(sanitizeDiagramSvg(`<svg><style>${css}</style></svg>`)).querySelector("style")
+        ?.textContent,
+    ).toBe(css);
+  });
+
+  it.each([
+    "url(https://example.test)",
+    "url(//example.test)",
+    "url(data:image/png,abc)",
+    "url(#ok) url(https://example.test)",
+    'url("#id" https://example.test)',
+    String.raw`\75 rl(relative)`,
+    '@import "relative"',
+    'image-set("relative" 1x)',
+    "url(\u00a0#id)",
+    'url("/*comment*/#id")',
+    'src("relative")',
+  ])("strips unsafe CSS: %s", (value) => {
+    const clean = sanitizeDiagramSvg(`<svg><style>.edge { stroke: ${value}; }</style></svg>`);
+    expect(parsed(clean).querySelector("style")).toBeNull();
+  });
+
   it("fails closed instead of inserting a non-SVG or an external reference", () => {
     expect(() => sanitizeDiagramSvg("<div>not a diagram</div>")).toThrow(/valid SVG/);
     expect(() =>

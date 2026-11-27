@@ -1620,20 +1620,18 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.message-starting .message-header {
+.message-agent .message-header {
   flex-wrap: nowrap;
 }
-.message-starting .message-author {
+.message-agent .message-author {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.message-starting .delivery-inline {
-  flex-shrink: 0;
-  color: var(--text-muted);
-  font-size: 10.5px;
-  white-space: nowrap;
+/* Starting… gives way to the reply time without moving the model or live dot. */
+.message-live-time {
+  min-width: 5em;
 }
 .delivery-inline .streaming-dot {
   display: inline-block;
@@ -6612,9 +6610,13 @@ button.from-author {
   border-radius: var(--radius-sm);
   cursor: pointer;
 }
-.fp-btn:hover {
+.fp-btn:hover:not(:disabled) {
   color: var(--text-primary);
   border-color: var(--border);
+}
+.fp-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .fp-up {
   padding: 0 5px;
@@ -7528,11 +7530,16 @@ button.from-author {
       justify-self: stretch;
     }
   }
-  .fp-bar {
+  .fp-bar,
+  .bn-image-bar {
     flex-wrap: wrap;
   }
   .fp-path {
     flex-basis: 0;
+  }
+  .fp-image-bar .fp-path,
+  .bn-image-bar .bn-path {
+    min-width: 10ch;
   }
   .fp-roots {
     order: -1;

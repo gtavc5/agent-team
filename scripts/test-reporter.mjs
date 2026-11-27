@@ -9,10 +9,10 @@ export function useNativeReporter(options, env) {
   return Boolean(isCI(env) || env.VERBOSE === "1" || options.reporter);
 }
 
-export function entryHint(tier, filter, options, env, fromSlow) {
+export function entryHint(tier, filter, options, env, fromSuite) {
   if (
     !["browser", "e2e"].includes(tier) ||
-    fromSlow ||
+    fromSuite ||
     isCI(env) ||
     filter.length ||
     options.testNamePattern != null ||
@@ -126,20 +126,6 @@ export function formatSummary(workspace, tier, files, tests, duration) {
   return `[${workspace}/${tier}] ${files.length} files (${counts(files)}), ${tests.length} tests (${counts(tests)}) in ${seconds(duration)}`;
 }
 
-export function fastBudgetNote(workspace, tier, files, duration, env) {
-  const input = Number(env.YAAT_FAST_BUDGET_MS?.trim() || 15_000);
-  const budget = Number.isFinite(input) && input >= 0 ? input : 15_000;
-  if (tier !== "fast" || duration <= budget || !files.length) return undefined;
-  const slowest = [...files]
-    .sort((a, b) => b.ms - a.ms)
-    .slice(0, 3)
-    .map(({ file, ms }) => `${file} (${seconds(ms)})`)
-    .join(", ");
-  return clean(
-    `[${workspace}/fast] Soft budget ${seconds(budget)} exceeded; slowest files: ${slowest}`,
-  );
-}
-
 export default class CompactReporter {
   constructor() {
     this.context = JSON.parse(process.env.YAAT_TEST_REPORTER_CONTEXT);
@@ -158,11 +144,9 @@ export default class CompactReporter {
     const { workspace, tier, cwd } = this.context;
     const files = [];
     const tests = [];
-    const timings = [];
     for (const module of modules) {
       const file = slash(relative(cwd, module.moduleId));
       files.push(module.state());
-      timings.push({ file, ms: module.diagnostic().duration });
       let failedTests = 0;
       for (const test of module.children.allTests()) {
         const result = test.result();
@@ -211,8 +195,6 @@ export default class CompactReporter {
     }
     const duration = performance.now() - (this.start ?? performance.now());
     console.log(formatSummary(workspace, tier, files, tests, duration));
-    const note = fastBudgetNote(workspace, tier, timings, duration, process.env);
-    if (note) console.log(note);
     if (process.connected) process.send("yaat:test-run-reported");
   }
 }

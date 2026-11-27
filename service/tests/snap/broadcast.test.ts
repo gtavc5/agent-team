@@ -120,6 +120,11 @@ function clientFold(frames: Frame[], mode: "each" | "hidden") {
           ...withoutLiveTiming(m),
           status: f.status as ClientMessage["status"],
           content: f.content as string,
+          ...("queuedFor" in f ? { queuedFor: (f.queuedFor as string | null) ?? undefined } : {}),
+          ...("steering" in f ? { steering: f.steering === true || undefined } : {}),
+          ...(m.kind === "user" && {
+            pendingDelivery: f.pendingDelivery as ClientMessage["pendingDelivery"],
+          }),
           ...(events ? { events } : {}),
           ...("context" in f ? { context: f.context as ClientMessage["context"] } : {}),
           ...(f.effort ? { effort: f.effort as string } : {}),
@@ -150,6 +155,30 @@ describe("broadcast parity", () => {
   });
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it.each([
+    ["pi", "basic-turn"],
+    ["codex", "commands"],
+  ] as const)("%s/%s announces the reply before clearing dispatch", async (backend, name) => {
+    const { frames, messages } = await replayBroadcast(backend, name);
+    const input = messages.find((msg) => msg.kind === "user")!;
+    const dispatching = frames.findIndex(
+      (f) => f.type === "message_done" && f.messageId === input.id && f.status === "dispatching",
+    );
+    const opened = frames.findIndex(
+      (f) =>
+        f.type === "new_message" &&
+        (f.message as ClientMessage).replyTo === input.id &&
+        (f.message as ClientMessage).status === "streaming",
+    );
+    const cleared = frames.findIndex(
+      (f) => f.type === "message_done" && f.messageId === input.id && f.status === "done",
+    );
+    expect(dispatching).toBeGreaterThanOrEqual(0);
+    expect(opened).toBeGreaterThan(dispatching);
+    expect(cleared).toBeGreaterThan(opened);
+    expect(frames[cleared]).toMatchObject({ queuedFor: null, steering: false });
   });
 
   it.each([
@@ -198,6 +227,10 @@ describe("broadcast parity", () => {
           const cm = msgs[i];
           expect(cm.status, `status ${i}`).toBe(sm.status);
           expect(cm.content, `content ${i}`).toBe(sm.content);
+          expect(cm.queuedFor, `queuedFor ${i}`).toBe(sm.queuedFor);
+          expect(cm.steering, `steering ${i}`).toBe(sm.steering);
+          expect(cm.pendingDelivery, `pendingDelivery ${i}`).toBe(sm.pendingDelivery);
+          expect(cm.replyTo, `replyTo ${i}`).toBe(sm.replyTo);
           expect(cm.thinking, `thinking ${i}`).toEqual(sm.thinking);
           expect(cm.context, `context ${i}`).toEqual(sm.context);
           expect(cm.effort, `effort ${i}`).toEqual(sm.effort);

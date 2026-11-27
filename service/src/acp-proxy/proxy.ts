@@ -4,6 +4,12 @@ import { once } from "node:events";
 import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
+import {
+  ccpaObservation,
+  observationCap,
+  type CcpaOperation,
+  type ObserveRequest,
+} from "./limit-evidence";
 import { UpstreamPool } from "./pool";
 import { ProxyMetrics, type MetricRow, type ProxyHealth } from "./metrics";
 
@@ -20,6 +26,7 @@ export interface CcpaProxyOptions {
 }
 export interface CcpaProxy {
   url: string;
+  registerSession(observe: ObserveRequest): { url: string; dispose(): void };
   close(): Promise<void>;
   health(): ProxyHealth;
 }
@@ -91,11 +98,22 @@ export async function startCcpaProxy(opts: CcpaProxyOptions): Promise<CcpaProxy>
   const metrics = new ProxyMetrics(opts.baseDir);
   const health = () => metrics.health(pool.activeH2Sessions, pool.lastPingRttMs);
   const budget = new FailureBudget();
+  const routes = new Map<string, ObserveRequest>();
+  let observationSlots = 4;
   let reserved = 0;
   const tasks = new Set<Promise<void>>();
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse) => {
     req.socket.setNoDelay(true);
-    const path = req.url ?? "/";
+    let path = req.url ?? "/";
+    const prefix = /^\/_yaat\/([a-f0-9-]+)(?=\/)/.exec(path);
+    const observer = prefix && routes.get(prefix[1]);
+    if (prefix) {
+      if (!observer) {
+        json(res, 410, { error: "session_retired" });
+        return;
+      }
+      path = path.slice(prefix[0].length);
+    }
     if (req.method === "GET" && path === "/__health") {
       json(res, 200, health());
       return;
@@ -108,6 +126,17 @@ export async function startCcpaProxy(opts: CcpaProxyOptions): Promise<CcpaProxy>
     const start = performance.now();
     // Never persist arbitrary paths or query values; only the CCPA operation is diagnostic.
     const route = /^\/v1internal:[A-Za-z]{1,80}(?=\?|$)/.exec(path)?.[0] ?? "/other";
+    const operation = route.slice("/v1internal:".length) as CcpaOperation;
+    // Capture the owner at admission, never on response (which could arrive
+    // after another turn started, or after the process was replaced).
+    const observe =
+      observer &&
+      method === "POST" &&
+      ["streamGenerateContent", "fetchAvailableModels", "retrieveUserQuotaSummary"].includes(
+        operation,
+      )
+        ? observer(operation)
+        : undefined;
     const row: MetricRow = {
       ts: new Date().toISOString(),
       reqId: randomUUID(),
@@ -133,6 +162,7 @@ export async function startCcpaProxy(opts: CcpaProxyOptions): Promise<CcpaProxy>
     const abort = () => control.abort();
     res.once("close", abort);
     req.once("aborted", abort);
+    let observingBody = false;
     let reservation = 0;
     let upload: Readable | undefined;
     try {
@@ -269,10 +299,32 @@ export async function startCcpaProxy(opts: CcpaProxyOptions): Promise<CcpaProxy>
         row.errorClass = null;
         res.writeHead(reply.status, reply.headers);
         res.flushHeaders();
+        let sample: Buffer[] | undefined;
+        if (
+          observe &&
+          observationSlots > 0 &&
+          (row.isStream ? reply.status === 429 : reply.status === 200)
+        ) {
+          observationSlots--;
+          observingBody = true;
+          sample = [];
+        }
         for await (const chunk of reply.stream as AsyncIterable<Buffer>) {
           row.bytesOut += chunk.length;
+          if (sample && row.bytesOut <= observationCap) sample.push(chunk);
+          else sample = undefined;
           if (!res.write(chunk)) await once(res, "drain", { signal: control.signal });
         }
+        if (observe)
+          observe(
+            ccpaObservation(
+              operation,
+              row.model,
+              reply.status,
+              reply.headers,
+              sample && Buffer.concat(sample),
+            ),
+          );
         res.end();
         row.proxyRetryRecovered = row.attempts > 1 && reply.status >= 200 && reply.status < 300;
         return;
@@ -294,6 +346,7 @@ export async function startCcpaProxy(opts: CcpaProxyOptions): Promise<CcpaProxy>
       req.resume();
       res.off("close", abort);
       req.off("aborted", abort);
+      if (observingBody) observationSlots++;
       reserved -= reservation;
       row.totalMs = Math.round(performance.now() - start);
       row.pingRttMs = pool.lastPingRttMs;
@@ -318,8 +371,19 @@ export async function startCcpaProxy(opts: CcpaProxyOptions): Promise<CcpaProxy>
   await once(server, "listening");
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Expected a loopback TCP listener");
+  const url = `http://127.0.0.1:${address.port}`;
   return {
-    url: `http://127.0.0.1:${address.port}`,
+    url,
+    registerSession(observe) {
+      const key = randomUUID();
+      routes.set(key, observe);
+      return {
+        url: `${url}/_yaat/${key}`,
+        dispose: () => {
+          routes.delete(key);
+        },
+      };
+    },
     health,
     async close() {
       const closed = new Promise<void>((resolve) => server.close(() => resolve()));

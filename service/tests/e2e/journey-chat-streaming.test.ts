@@ -42,7 +42,7 @@ beforeAll(async () => {
   writeFileSync(
     join(mobile.cwd, imageName),
     Buffer.from(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ZkAAAAASUVORK5CYII=",
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==",
       "base64",
     ),
   );
@@ -152,8 +152,11 @@ it("reads persisted markdown, expands tool results, copies code and opens an ima
   await result.click();
   const output = bash.locator(".event-result", { hasText: "31 passed (31)" });
   await output.getByRole("button", { name: "Copy", exact: true }).click();
+  // The Windows clipboard represents line breaks as CRLF.
   await expect
-    .poll(() => page.evaluate("navigator.clipboard.readText()"))
+    .poll(async () =>
+      (await page.evaluate<string>("navigator.clipboard.readText()")).replaceAll("\r\n", "\n"),
+    )
     .toBe(" Test Files  2 passed (2)\n      Tests  31 passed (31)");
   await bash.getByRole("button", { name: /^Hide result ·/ }).click();
   await bash.locator(".event-result").waitFor({ state: "hidden" });
@@ -173,6 +176,36 @@ it("reads persisted markdown, expands tool results, copies code and opens an ima
   await page.waitForFunction(
     "document.querySelector('.files-panel .file-image img')?.naturalWidth === 1",
   );
+  expect(await preview.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
+  const bar = page.locator(".files-panel .fp-bar");
+  const copy = bar.getByTitle("Copy image");
+  expect(await bar.getByTitle("Copy path").textContent()).toBe("Copy path");
+  await copy.click();
+  await expect.poll(() => copy.textContent()).toBe("Copied");
+  expect(
+    await page.evaluate<string[]>(
+      "navigator.clipboard.read().then(items => items.flatMap(item => item.types))",
+    ),
+  ).toEqual(["image/png"]);
+  await page.setViewportSize({ width: 320, height: 740 });
+  // Measure the actual control boxes against their host bar at phone width.
+  await expect
+    .poll(() =>
+      bar.evaluate((bar) => {
+        const host = bar.getBoundingClientRect();
+        return Array.from(bar.querySelectorAll(".fp-btn")).every((button) => {
+          const rect = button.getBoundingClientRect();
+          return (
+            rect.width > 0 &&
+            rect.height >= 40 &&
+            rect.left >= host.left &&
+            rect.right <= host.right
+          );
+        });
+      }),
+    )
+    .toBe(true);
+  expect(await overflow(page)).toBe(0);
 }, 40_000);
 
 it("keeps per-workspace drafts through desktop and phone navigation and selects suggestions by key", async () => {

@@ -134,10 +134,25 @@ it.each([
             : new Response(null, { status: 404 }),
       ),
     );
-    vi.stubGlobal("fetch", (url: string) =>
-      url.startsWith("api/workspaces/") ? fetchStats(url) : new Response(null, { status: 404 }),
-    );
-    const beacon = vi.spyOn(navigator, "sendBeacon").mockReturnValue(true);
+    const batches: Promise<TelemetryBatch>[] = [];
+    const capture = (body: Blob | string) => {
+      const text = typeof body === "string" ? Promise.resolve(body) : body.text();
+      batches.push(text.then((value) => JSON.parse(value) as TelemetryBatch));
+    };
+    vi.stubGlobal("fetch", (url: string, options?: RequestInit) => {
+      if (url.startsWith("api/workspaces/")) return fetchStats(url);
+      if (url === "api/telemetry") capture(options?.body as string);
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    // Exercise mixed transports deterministically: reject the first final flush,
+    // so the browser's keepalive POST carries that batch instead.
+    vi.spyOn(navigator, "sendBeacon")
+      .mockImplementation((url, blob) => {
+        expect(url).toBe("api/telemetry");
+        capture(blob as Blob);
+        return true;
+      })
+      .mockReturnValueOnce(false);
     if (layout === "narrow") {
       const linked: Workspace = {
         ...ws,
@@ -174,6 +189,8 @@ it.each([
     await expect.element(opener).toHaveAttribute("aria-pressed", "true");
     const panel = page.getByRole("complementary", { name: "Session stats" });
     await expect.element(panel.getByText("20 of 21 turns · Newest first")).toBeVisible();
+    window.dispatchEvent(new Event("pagehide"));
+    expect(batches).toHaveLength(1);
     const bounds = panel.element().getBoundingClientRect();
     expect(bounds.right).toBeLessThanOrEqual(width);
     if (layout === "narrow") expect(bounds.width).toBe(width);
@@ -267,10 +284,8 @@ it.each([
     await panel.getByRole("button", { name: "Close Session stats" }).click();
     await expect.element(panel).not.toBeInTheDocument();
     window.dispatchEvent(new Event("pagehide"));
-    expect(beacon).toHaveBeenCalledOnce();
-    const [url, blob] = beacon.mock.calls[0];
-    expect(url).toBe("api/telemetry");
-    const { events } = JSON.parse(await (blob as Blob).text()) as TelemetryBatch;
+    // A timed flush can POST an earlier batch, leaving only the tail for pagehide.
+    const events = (await Promise.all(batches)).flatMap((batch) => batch.events);
     expect(
       events.map(({ ts, ...event }) => {
         expect(typeof ts).toBe("number");

@@ -333,7 +333,9 @@ describe.skipIf(process.platform === "win32")("yaat-service.sh and start-server.
     expect(config).toContain('[user]\nlanguage = "简体中文"\n');
     expect(output).toContain(`[note] [user].language is set to "简体中文" in ${configPath}`);
     expect(output).toContain("user-facing chat language only");
-    expect(output).toContain("stay English");
+    expect(output).toContain(
+      "default to English unless you explicitly request another language for that content",
+    );
   });
 
   it.each([
@@ -399,7 +401,9 @@ describe.skipIf(process.platform === "win32")("yaat-service.sh and start-server.
       if (expectReminder) {
         expect(bashFallbackOutput).toContain(`[note] [user].language is not set in ${configPath}`);
         expect(bashFallbackOutput).toContain("defaults to model choice");
-        expect(bashFallbackOutput).toContain("stay English");
+        expect(bashFallbackOutput).toContain(
+          "default to English unless you explicitly request another language for that content",
+        );
       } else {
         expect(bashFallbackOutput).not.toContain("[user].language");
       }
@@ -446,6 +450,9 @@ describe.skipIf(process.platform === "win32")("yaat-service.sh and start-server.
     stubBundle();
     const diagnostic: unknown = JSON.parse(ok("start-server", ["--doctor", "--json"]));
     expect(diagnostic).toEqual({ args: ["--doctor", "--json"], cwd: root, node: nvm.node });
+    expect(JSON.parse(ok("yaat-service", ["doctor", "--json", "--base-dir", base]))).toEqual(
+      diagnostic,
+    );
     const regular = run("start-server", []);
     expect(regular.status).toBe(1);
     expect(regular.stderr).toContain("config.toml not found");

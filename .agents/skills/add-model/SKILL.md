@@ -7,7 +7,7 @@ description: Add, rename or retire a native Codex model, or diagnose a missing m
 
 ## Pi RPC
 
-Pi models come from the running model catalog, not `MODEL_OPTIONS`. Use the full `provider/model` ID in `[pi].default_model` or a preset. Configure custom providers in `~/.pi/agent/models.json`, or use a Pi package, as the service user. Check the catalog with `scripts/start-server.sh --doctor --json` (point `AGENT_TEAM_BASE_DIR` at the intended instance; no model turn). A new Pi process is needed to reliably pick up catalog changes. For Antigravity ACP, prepare its runtime separately as described in `docs/DEPLOY.md`; a catalog entry does not prove the runtime is ready.
+Pi models come from the running model catalog, not `MODEL_OPTIONS`. Use the full `provider/model` ID in `[pi].default_model` or a preset. Configure custom providers in `~/.pi/agent/models.json`, or use a Pi package, as the service user. Check the running instance's model picker and **# → Service diagnostics**. `scripts/yaat-service.sh doctor --json` checks local startup inputs and leaves the live catalog unverified. A new Pi process is needed to reliably pick up catalog changes. For Antigravity ACP, prepare its runtime separately as described in `docs/DEPLOY.md`; a catalog entry does not prove the runtime is ready.
 
 ## Native Codex
 

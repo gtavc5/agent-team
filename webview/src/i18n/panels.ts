@@ -420,6 +420,26 @@ export const panelMessages = {
     en: "Copy path",
     "zh-CN": "复制路径",
   },
+  copyImage: {
+    en: "Copy image",
+    "zh-CN": "复制图片",
+  },
+  copyImageFailed: {
+    en: "Copy failed",
+    "zh-CN": "复制失败",
+  },
+  imageLoadFailed: {
+    en: "Could not load image: {error}",
+    "zh-CN": "无法加载图片：{error}",
+  },
+  imageResponseInvalid: {
+    en: "Error: The response is not an image.",
+    "zh-CN": "错误：响应内容不是图片。",
+  },
+  imageReadFailed: {
+    en: "Error: Image read failed",
+    "zh-CN": "错误：读取图片失败",
+  },
   copied: {
     en: "Copied",
     "zh-CN": "已复制",

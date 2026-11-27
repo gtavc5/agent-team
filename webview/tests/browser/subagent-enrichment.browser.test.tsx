@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-libra
 import { afterEach, expect, it, vi } from "vitest";
 import { SubAgentItem } from "../../src/chat/messages";
 import { App } from "../../src/App";
-import { page } from "vitest/browser";
+import { cdp, page } from "vitest/browser";
 import { readTracePage, TRACE_MAX_BYTES, TRACE_MAX_EVENTS } from "../../../shared/subagent-trace";
 import type { Message } from "../../src/state/useServer";
 import * as telemetry from "../../src/telemetry";
@@ -31,7 +31,7 @@ const statuses: SubagentStatus[] = [
   "stopped",
   "rejected",
 ];
-it.each(statuses)("renders %s with the correct animation and cancel affordance", (status) => {
+it.each(statuses)("renders %s with the correct animation and cancel affordance", async (status) => {
   const { container } = render(
     <SubAgentItem
       ev={{
@@ -44,11 +44,32 @@ it.each(statuses)("renders %s with the correct animation and cancel affordance",
   );
   const icon = container.querySelector(".subagent-status-icon")!;
   expect(icon.getAttribute("title")).toBe(status);
-  expect(getComputedStyle(icon).animationName).toBe(status === "running" ? "spin" : "none");
-  expect(!!container.querySelector(".streaming-dot")).toBe(status === "running");
+  const dot = container.querySelector(".streaming-dot");
+  expect(!!dot).toBe(status === "running");
   expect(!!container.querySelector(".btn-cancel-subagent")).toBe(
     status === "queued" || status === "running",
   );
+  if (status !== "running") {
+    expect(getComputedStyle(icon).animationName).toBe("none");
+    return;
+  }
+
+  const media = cdp();
+  const setMotion = (value: string) =>
+    media.send("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value }],
+    });
+  try {
+    await setMotion("no-preference");
+    expect(getComputedStyle(icon).animationName).toBe("spin");
+    await setMotion("reduce");
+    expect(getComputedStyle(icon).animationName).toBe("none");
+    expect(getComputedStyle(dot!).animationName).toBe("none");
+    await expect.element(page.elementLocator(icon)).toBeVisible();
+    await expect.element(page.elementLocator(dot!)).toBeVisible();
+  } finally {
+    await media.send("Emulation.setEmulatedMedia", { features: [] });
+  }
 });
 
 const agent = {
@@ -234,10 +255,18 @@ it("preserves a historical reading anchor on open, close, session switch and rec
     scroller().getBoundingClientRect().top;
   const anchor = () => [scroller().scrollTop, offset()];
   await paint();
+  // Exercise Chromium's half-pixel scroll rounding regardless of host font metrics.
+  const padding = parseFloat(getComputedStyle(scroller()).paddingTop);
+  const initialOffset = offset();
+  const fixtureStyle = document.createElement("style");
+  // Scope the adjustment to this fixture and retain it when the scroller remounts.
+  fixtureStyle.textContent = `@scope { .messages { padding-top: ${padding + Math.floor(initialOffset) + 0.5 - initialOffset}px } }`;
+  view.container.append(fixtureStyle);
+  expect(Math.abs(offset() % 1)).toBe(0.5);
   scroller().scrollTop += offset() + 17;
   fireEvent.scroll(scroller());
   await paint();
-  expect(offset()).toBeCloseTo(-17, 0);
+  expect(Math.abs(offset() + 17)).toBeLessThanOrEqual(0.5);
   const original = anchor();
   const initialWidths = widths();
   const sameGeometry = () => {

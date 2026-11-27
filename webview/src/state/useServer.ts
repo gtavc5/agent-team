@@ -277,6 +277,9 @@ export interface Message {
   images?: MessageImage[];
   forwardRef?: ForwardRef;
   queuedFor?: string;
+  // The delivery status already revealed by the workspace.
+  pendingDelivery?: "starting" | "sending";
+  replyTo?: string;
   // Handed to the agent's running turn (Codex steer): no taking it back.
   steering?: boolean;
   // Sent by another session, not the user: the project's lead, one of its
@@ -308,13 +311,15 @@ export interface AgentInfo {
   canSwitchBackend?: boolean;
   busy?: boolean;
   networkWaiting?: boolean;
+  retryPending?: boolean;
   state?: RunState;
   lastStreamAt?: number;
   retryLabel?: string;
   // Transient label of what the agent is doing (compacting, a long tool...).
   activity?: string | null;
-  // Current reasoning effort level, when the model supports one.
+  // Configured override and the backend's reasoning effort when known.
   effort?: string | null;
+  effectiveEffort?: string;
   // The levels /effort takes for its model.
   effortLevels?: string[];
   fast?: boolean;
@@ -1056,6 +1061,12 @@ export function useServer() {
                       ? { queuedFor: (msg.queuedFor as string | null) ?? undefined }
                       : {}),
                     ...("steering" in msg ? { steering: msg.steering === true || undefined } : {}),
+                    ...(m.kind === "user" && {
+                      pendingDelivery:
+                        status === "starting" || status === "dispatching"
+                          ? (msg.pendingDelivery as Message["pendingDelivery"])
+                          : undefined,
+                    }),
                     ...(events ? { events } : {}),
                     ...(context !== undefined ? { context } : {}),
                     ...(effort ? { effort } : {}),

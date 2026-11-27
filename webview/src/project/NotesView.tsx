@@ -1,8 +1,9 @@
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { MdBlock, ProsePathContext } from "../chat/markdown";
+import { ImagePathContext, MdBlock, ProsePathContext } from "../chat/markdown";
 import { FileOpenContext, splitFileRef, WIN_DRIVE, type FileRef } from "../chat/fileRef";
 import { CodeView, languageFor, type FileView } from "../panels/FilesPanel";
 import { FileIcon, Icon } from "../panels/Icon";
+import { CopyImageButton, ImagePreview, useImagePreview } from "../panels/ImagePreview";
 import { formatSize, utf8Length } from "../format";
 import { tProject, useProjectT } from "../i18n/project";
 import { inVSCode } from "../vscode";
@@ -251,7 +252,11 @@ export function FilePreview({
   const tr = useProjectT();
   const result = useJson<FileView & { ref?: string }>(fileUrl(project, file.path));
   const view = result && "value" in result ? result.value : null;
+  const raw = fileUrl(project, file.path, true);
+  const image = useImagePreview(raw, view?.kind === "image" ? view.size : null);
   const found = view?.ref;
+  const resolveImage = (ref: string) =>
+    fileUrl(project, refFrom(found ?? file.path.replace(/\\/g, "/"), ref), true);
   useEffect(() => {
     const bare = (p: string) => p.replace(/\/+$/, "");
     if (found && bare(found) !== bare(file.path)) onResolve(found);
@@ -276,7 +281,7 @@ export function FilePreview({
   const notice = failed ?? file.notice;
   return (
     <section className="bn-preview" aria-label={name}>
-      <div className="bn-bar">
+      <div className={view?.kind === "image" ? "bn-bar bn-image-bar" : "bn-bar"}>
         <button className="bp-back bn-back" aria-label={tr("backLabel")} onClick={onClose}>
           ‹
         </button>
@@ -298,6 +303,7 @@ export function FilePreview({
             VS Code
           </button>
         )}
+        {view?.kind === "image" && <CopyImageButton key={raw} raw={raw} preview={image} />}
         <button
           className="side-panel-btn bn-close"
           aria-label={tr("closeFileLabel")}
@@ -343,7 +349,9 @@ export function FilePreview({
             <FileOpenContext.Provider value={openRef}>
               <ProsePathContext.Provider value={acceptHere}>
                 <div className="file-markdown message-content bn-md">
-                  <MdBlock>{view.content}</MdBlock>
+                  <ImagePathContext.Provider value={resolveImage}>
+                    <MdBlock>{view.content}</MdBlock>
+                  </ImagePathContext.Provider>
                 </div>
               </ProsePathContext.Provider>
             </FileOpenContext.Provider>
@@ -351,9 +359,7 @@ export function FilePreview({
             <CodeView content={view.content} lang={languageFor(file.path)} target={file} />
           )
         ) : view?.kind === "image" ? (
-          <div className="file-image">
-            <img src={fileUrl(project, file.path, true)} alt={name} />
-          </div>
+          <ImagePreview preview={image} alt={name} />
         ) : (
           <div className="file-note">{tr("binaryFileNote")}</div>
         )}

@@ -298,7 +298,7 @@ describe("file preview", () => {
 
   it("reports a missing file, and needs a login", async () => {
     expect((await get("ws=ws-h&path=notes/nope.txt")).status).toBe(404);
-    expect((await request("/api/file?ws=ws-h&path=notes/a.ts")).status).toBe(302);
+    expect((await request("/api/file?ws=ws-h&path=notes/a.ts")).status).toBe(401);
   });
 });
 

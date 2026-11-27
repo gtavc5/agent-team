@@ -19,6 +19,7 @@ const baselineArtifacts = [
 const artifacts = [
   ...baselineArtifacts,
   "pi-panel-bridge.ts",
+  "pi-rate-limit.ts",
   "pi-quota.ts",
   "quota-schema.ts",
   "acp-readiness.ts",
@@ -341,6 +342,54 @@ function build(repo, dir, npm, abort) {
   );
 }
 
+async function candidatePreflight(directory, baseDir, signal) {
+  let stdout;
+  let exit = 0;
+  try {
+    ({ stdout } = await exec(
+      process.execPath,
+      [
+        "--permission",
+        "--allow-fs-read=*",
+        path.join(directory, "server.js"),
+        "--doctor",
+        "--json",
+      ],
+      {
+        env: {
+          ...process.env,
+          AGENT_TEAM_BASE_DIR: baseDir,
+          NODE_OPTIONS: "",
+          NODE_V8_COVERAGE: "",
+          NODE_DISABLE_COMPILE_CACHE: "1",
+        },
+        timeout: 15_000,
+        maxBuffer: 256 * 1024,
+        signal,
+      },
+    ));
+  } catch (error) {
+    // Exit 1 may carry a structured startup blocker. Other exits, invalid JSON
+    // or a missing completion marker fail closed without logging raw CLI output.
+    if (error.code !== 1) throw new Error("Candidate offline preflight could not run");
+    ({ stdout } = error);
+    exit = 1;
+  }
+  try {
+    const report = JSON.parse(stdout);
+    const { startup, acpLocalAuth, acpRemoteAuth } = report.facts;
+    if (
+      startup?.value !== (exit ? "blocked" : "offline checks passed") ||
+      acpRemoteAuth?.value !== "unverified offline" ||
+      !Array.isArray(report.issues)
+    )
+      throw new Error();
+    return { ok: exit === 0, startup, acpLocalAuth, acpRemoteAuth, issues: report.issues };
+  } catch {
+    throw new Error("Candidate offline preflight did not return a valid report");
+  }
+}
+
 // No operation before the decision file changes either live release pointer or
 // the service. Cancellation competes for that file with the cutover, not with
 // a poll in another process. The external controller owns post-commit recovery.
@@ -352,6 +401,7 @@ export async function deploy({
   timeoutMs,
   manager,
   stage,
+  preflight = candidatePreflight,
   request = controlRequest,
   probe = health,
   now = () => performance.now(),
@@ -360,8 +410,9 @@ export async function deploy({
   const deadline = now() + timeoutMs;
   const journal = path.join(root, "transaction.json");
   const decision = path.join(job, "decision");
+  let preflightReport;
   const write = (phase, fields = {}) =>
-    atomicJson(path.join(job, "status.json"), { id, phase, ...fields });
+    atomicJson(path.join(job, "status.json"), { id, phase, preflight: preflightReport, ...fields });
   const stopping = () => {
     try {
       if (fs.readFileSync(decision, "utf8") === "cancel\n") return "cancelled";
@@ -410,6 +461,11 @@ export async function deploy({
       fs.mkdirSync(directory, { mode: 0o700 });
       await stage(directory, abort.signal);
       validateArtifacts(directory);
+      if (stopping()) return write(stopping(), { candidate });
+      write("preflight", { candidate });
+      preflightReport = await preflight(directory, target.baseDir, abort.signal);
+      if (!preflightReport.ok)
+        throw new Error("Candidate offline preflight found a startup blocker");
       if (before === "legacy" && !stopping()) {
         const source = path.join(target.installedRepoDir, "dist");
         validateArtifacts(source, baselineArtifacts);
@@ -479,7 +535,7 @@ export async function deploy({
       }
       if (!stopping()) await pause(Math.min(500, Math.max(1, deadline - now())));
     }
-    if (!committed) return write(stopping() ?? "cancelled");
+    if (!committed) return write(stopping() ?? "cancelled", { candidate });
 
     write("restarting", { candidate, prior });
     pointer(root, "previous", prior);
@@ -580,7 +636,7 @@ async function main() {
     return console.log(fs.readFileSync(path.join(job, "status.json"), "utf8").trim());
   if (cmd === "cancel") {
     const state = JSON.parse(fs.readFileSync(path.join(job, "status.json")));
-    if (!["queued", "building", "waiting"].includes(state.phase))
+    if (!["queued", "building", "preflight", "waiting"].includes(state.phase))
       throw new Error(`Cannot cancel a ${state.phase} job`);
     fs.writeFileSync(path.join(job, "decision"), "cancel\n", { flag: "wx", mode: 0o600 });
     return console.log(`Cancellation requested: ${id}`);

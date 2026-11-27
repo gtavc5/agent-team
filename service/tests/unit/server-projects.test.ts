@@ -1851,6 +1851,82 @@ describe("rate limits on the server", () => {
       .map((f) => (f.message as Message).content)
       .filter((c) => c.includes("hit the 5-hour limit") || c.includes("hit the weekly limit"));
 
+  it.each(["carry on", "queued", "retry original", "stop", "archive"])(
+    "restores the turn-final recovery mode at reset: %s",
+    async (mode) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      const { base, web } = seed();
+      let s = await start(base, web);
+      try {
+        s.send({ type: "send_message", workspaceId: "ws-live", content: "original" });
+        await until(() => launches[0]?.prompts.length === 1, "original prompt");
+        const session = sessionsByAgent.get("a-live")!;
+        const resetsAt = (Date.now() + 120_000) / 1000;
+        if (mode !== "retry original") {
+          session.emit("event", {
+            kind: "tool_use",
+            toolName: "write",
+            toolUseId: "t",
+            content: "write",
+          });
+          session.emit("event", { kind: "tool_result", toolUseId: "t", content: "saved once" });
+        }
+        session.emit("event", { kind: "text_delta", content: "refused" });
+        session.isRunning = false;
+        session.emit("event", { kind: "error", content: "real provider error" }, undefined, {
+          resetsAt,
+          refusalText: "refused",
+        });
+        const ws = s.server["workspaces"].get("ws-live")!;
+        if (mode === "queued")
+          expect(
+            ws.deliver(
+              "new task",
+              { role: "panel", workspaceId: "ws-lead", name: "Panel" },
+              "new task",
+            ),
+          ).toBe("queued");
+        if (mode === "stop") ws.abortAll();
+        if (mode === "archive") {
+          s.send({ type: "archive_workspace", workspaceId: "ws-live" });
+          await until(() => ws.isArchived, "archive");
+        }
+        await s.stop();
+        const state = readState(base, "ws-live");
+        const reply = state.messages!.find((m) => m.content === "refused")!;
+        expect(reply.events).toContainEqual(
+          expect.objectContaining({ kind: "error", content: "real provider error" }),
+        );
+        if (mode !== "retry original")
+          expect(reply.events).toContainEqual(
+            expect.objectContaining({ toolResult: "saved once" }),
+          );
+        expect(state.agents[0].pausedUntil).toBe(
+          ["stop", "archive"].includes(mode) ? undefined : resetsAt * 1000,
+        );
+        expect(state.agents[0].lastEnvelope?.text).toBe(
+          mode === "retry original" ? "original" : undefined,
+        );
+        s = await start(base, web);
+        await vi.advanceTimersByTimeAsync(119_999);
+        expect(launches.flatMap((l) => l.prompts)).toEqual(["original"]);
+        await vi.advanceTimersByTimeAsync(200_000);
+        expect(launches.flatMap((l) => l.prompts).slice(1)).toEqual(
+          mode === "queued"
+            ? ["new task"]
+            : mode === "retry original"
+              ? ["original"]
+              : mode === "carry on"
+                ? ["[From the panel] A usage limit cut your turn off. Carry on where you left off."]
+                : [],
+        );
+      } finally {
+        await s.stop();
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("lets the retry the user's message started run after a weekly limit without account failover", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const { base, web } = seed();

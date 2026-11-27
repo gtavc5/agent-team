@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { listNotes, readNote, writeNote } from "../../src/project/notes";
 import { PanelHttpServer } from "../../src/session/panel-http";
 import { PiSession } from "../../src/session/pi";
-import type { Host, HostSessionHandle } from "../../src/session/host";
+import type { BoundarySteer, Host, HostSessionHandle } from "../../src/session/host";
 import { HostRegistry } from "../../src/session/host";
 import type {
   PromptEnvelope,
@@ -48,6 +48,7 @@ class StubSession extends EventEmitter implements HostSessionHandle {
     duration_ms: 0,
   };
   isRunning = false;
+  effectiveEffort?: string;
   resetCalled = 0;
   abortCalled = 0;
   sendImpl: (input: string | PromptEnvelope, hooks?: SendHooks) => Promise<SendReceipt> = (
@@ -64,6 +65,11 @@ class StubSession extends EventEmitter implements HostSessionHandle {
     return Promise.resolve({ disposition: "started" });
   };
   interruptImpl: () => Promise<boolean> = () => Promise.resolve(true);
+  boundarySteer?: () => BoundarySteer | undefined;
+
+  setBoundarySteerSource(source: () => BoundarySteer | undefined): void {
+    this.boundarySteer = source;
+  }
 
   constructor(private readonly config: SessionConfig) {
     super();
@@ -175,16 +181,85 @@ describe("Pi workspace lifecycle regressions", () => {
     return { promise, resolve, reject, write: () => beforeWrite!() };
   }
 
+  it.each([349, 350])("projects the startup row across the write after %ims", async (delay) => {
+    vi.useFakeTimers();
+    try {
+      const onMessageDone = vi.fn<WorkspaceCallbacks["onMessageDone"]>();
+      const { ws, session } = makeWorkspace({ onMessageDone });
+      const turn = deferSend(session);
+      const sending = ws.sendMessage("start the agent");
+      const input = ws.messages.find((m) => m.kind === "user")!;
+      vi.advanceTimersByTime(delay);
+      expect(onMessageDone.mock.calls.map((args) => args[2])).toEqual(
+        delay === 350 ? ["starting"] : [],
+      );
+      turn.write();
+      expect(onMessageDone.mock.lastCall?.[5]?.pendingDelivery).toBe(
+        delay === 350 ? "starting" : undefined,
+      );
+      // Pi can acknowledge the RPC while Workspace still waits for acceptance.
+      session.isRunning = true;
+      turn.resolve({ disposition: "started" });
+      await sending;
+      vi.advanceTimersByTime(1);
+      const pendingDelivery = delay === 350 ? "starting" : "sending";
+      expect(toWireMessage(ws.getInfo().messages.find((m) => m.id === input.id)!)).toMatchObject({
+        status: "dispatching",
+        pendingDelivery,
+      });
+      expect(onMessageDone.mock.lastCall?.[2]).toBe("dispatching");
+      expect(onMessageDone.mock.lastCall?.[5]?.pendingDelivery).toBe(pendingDelivery);
+      session.emit("user_message_accepted", { inputId: input.id });
+      expect(input.status).toBe("done");
+      expect(input.pendingDelivery).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows a stalled boundary steer inline and clears the status when it is requeued", async () => {
+    vi.useFakeTimers();
+    try {
+      const { ws, session } = makeWorkspace();
+      session.isRunning = true;
+      await ws.sendMessage("queue behind this turn");
+      const input = ws.messages.find((m) => m.kind === "user")!;
+      expect(input.status).toBe("queued");
+      const steer = session.boundarySteer?.();
+      expect(steer?.claim()).toBe(true);
+      vi.advanceTimersByTime(349);
+      expect(input.pendingDelivery).toBeUndefined();
+      vi.advanceTimersByTime(1);
+      expect(input).toMatchObject({ status: "dispatching", pendingDelivery: "sending" });
+      steer!.finish("rejected");
+      expect(input.status).toBe("queued");
+      expect(input.pendingDelivery).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["acceptance", "first stream event"])(
     "opens one cold-start reply at %s",
     async (opensAt) => {
-      const { ws, agent, session, agentMsgs, registry } = makeWorkspace();
+      const order: string[] = [];
+      const { ws, agent, session, registry } = makeWorkspace({
+        onSaveNow: () => order.push("save"),
+        onNewMessage: (_id, msg) => {
+          if (msg.kind === "agent") order.push("reply");
+        },
+        onMessageDone: (_ws, _id, status) => order.push(status),
+      });
+      const agentMsgs = () => ws.messages.filter((msg) => msg.kind === "agent");
       const turn = deferSend(session);
       const unseen = ws.unseen;
       const sending = ws.sendMessage("cold start");
       const input = ws.messages.find((m) => m.kind === "user")!;
       expect(input.status).toBe("starting");
       expect(input.dispatchAttempt).toBeUndefined();
+      // Pi learns its default effort while the process starts; this is not an override.
+      session.effectiveEffort = "medium";
+      expect(ws.getInfo().agents[0]).toMatchObject({ effort: null, effectiveEffort: "medium" });
       expect(ws.cancelQueued(input.id)).toBe(false);
       expect(ws.unseen).toBe(unseen);
       expect(agentMsgs()).toHaveLength(0);
@@ -201,6 +276,7 @@ describe("Pi workspace lifecycle regressions", () => {
       expect(input.dispatchAttempt?.inputId).toBe(input.id);
       expect(agentMsgs()).toHaveLength(0);
       expect(restoredStatus()).toBe("outcome_unknown");
+      order.length = 0;
 
       session.isRunning = true;
       const text = () => session.emit("event", { kind: "text_delta", content: "answer" });
@@ -214,9 +290,12 @@ describe("Pi workspace lifecycle regressions", () => {
       await sending;
       expect(input.status).toBe("done");
       expect(agentMsgs()).toHaveLength(1);
+      expect(order).toEqual(
+        opensAt === "acceptance" ? ["save", "reply", "done"] : ["reply", "save", "done"],
+      );
       expect(ws.unseen).toBe(unseen);
       expect(ws.agents.get(agent.id)?.input?.replies).toEqual([agentMsgs()[0].id]);
-      expect(agentMsgs()[0].content).toBe("answer");
+      expect(agentMsgs()[0]).toMatchObject({ content: "answer", effort: "medium" });
     },
   );
 

@@ -5,10 +5,10 @@ import {
   saveIndex,
   saveWorkspace,
 } from "../../src/workspace/state";
-import { setupProjects } from "./projectHarness";
+import { setupProjects, useRecoveryClock } from "./projectHarness";
 
 async function waitingLead(backend: "pi" | "codex" = "codex") {
-  vi.useFakeTimers();
+  useRecoveryClock();
   vi.setSystemTime(new Date("2026-02-01T02:00:00Z"));
   const save = () => saveWorkspace(h.base, lead.getState());
   const h = setupProjects(() => {

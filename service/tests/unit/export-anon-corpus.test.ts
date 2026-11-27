@@ -4,8 +4,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { expect, it } from "vitest";
 import {
+  type AnonCorpus,
+  assertJourneyCorpus,
   assertRedactedCorpus,
   exportCorpus,
+  projectJourney,
   redactCorpus,
 } from "../../../scripts/export-anon-corpus";
 
@@ -103,6 +106,9 @@ it("reads cache and SQLite rows without rewriting them and validates the committ
         { ts: 20, action: "chat.send" },
       ],
     });
+    const journey = projectJourney(JSON.parse(output) as AnonCorpus);
+    expect(journey).toEqual({ actions: ["workspace.switch", "chat.send"], history: [["agent"]] });
+    assertJourneyCorpus(JSON.parse(JSON.stringify(journey)));
     expect(readFileSync(metadataFile, "utf8")).toBe(metadata);
     expect(() => exportCorpus(base, [0], [[0, 9]])).toThrow("Selected message missing");
   } finally {
@@ -112,4 +118,24 @@ it("reads cache and SQLite rows without rewriting them and validates the committ
     readFileSync(new URL("../corpus/anon-pilot.jsonl", import.meta.url), "utf8"),
   );
   expect(() => assertRedactedCorpus(fixture)).not.toThrow();
+});
+
+it("allows only ordered action and row enums in the published journey", () => {
+  const jsonl = readFileSync(new URL("../corpus/anon-journey.jsonl", import.meta.url), "utf8");
+  const fixture: unknown = JSON.parse(jsonl);
+  assertJourneyCorpus(fixture);
+  // Reject extra serialized material, including duplicate keys ignored by JSON.parse.
+  expect(jsonl).toBe(JSON.stringify(fixture) + "\n");
+  expect(fixture.actions).toHaveLength(31);
+  expect(fixture.history.map((rows) => rows.length)).toEqual([5, 3, 3]);
+  for (const leak of [
+    { ...fixture, timestamp: 1790000000000 },
+    { ...fixture, tab_run_id: "\uE100\uE100" },
+    { ...fixture, history: [[{ user: "operator@example.test /private secret" }]] },
+    { ...fixture, history: [["private reply"]] },
+    { ...fixture, actions: ["chat.send", "private prompt"] },
+    { ...fixture, actions: [{ "chat.send": 42 }] },
+  ]) {
+    expect(() => assertJourneyCorpus(leak)).toThrow("Invalid journey corpus");
+  }
 });

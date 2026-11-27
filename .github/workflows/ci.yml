@@ -20,6 +20,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
       - if: runner.os == 'Windows'
         run: |
@@ -39,25 +40,31 @@ jobs:
           npm install -g @earendil-works/pi-coding-agent@1.6.0
           npm install --prefix "$HOME/.pi/agent/npm" pi-subagents@0.90.0
           printf '%s\n' '{"packages":["npm:pi-subagents"]}' > "$HOME/.pi/agent/settings.json"
-      - run: npm run check
-      - run: npm run build
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:browser
-      - name: Replay the same queue and subagent browser chains
-        run: npm run test:e2e -w service -- journey-pilot-
-      - name: Check deliberate Stop, single crash recovery and file-lock release
-        run: npm test -w service -- tests/snap/snap.test.ts deterministic-process-exit.test.ts
+      - if: runner.os == 'Windows'
+        name: Check source and provision Chromium
+        run: |
+          # Playwright installs Media Foundation on Windows Server. It can do
+          # that while the source checks run, before either browser suite starts.
+          $install = Start-Job -WorkingDirectory $PWD -ScriptBlock {
+            $ErrorActionPreference = 'Stop'
+            $PSNativeCommandUseErrorActionPreference = $true
+            npx playwright install --with-deps chromium
+          }
+          try {
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Receive-Job $install -Wait -ErrorAction Stop
+            if ($install.State -ne 'Completed') { throw 'Chromium installation did not complete' }
+          } finally {
+            Remove-Job $install -Force
+          }
+      - if: runner.os == 'Linux'
+        run: npm run check
+      - if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
       - if: runner.os == 'Linux'
         name: Prove missing Pi fails closed
         run: |
           if PI_BINARY=yaat-no-such-pi npm run test:e2e -w service -- pi-deterministic > "$RUNNER_TEMP/pi-negative.log" 2>&1; then exit 1; fi
           grep -F 'Pi E2E requires the pi binary' "$RUNNER_TEMP/pi-negative.log"
-      - if: runner.os == 'Linux'
-        name: Run remaining E2E, including real offline Pi
-        run: npm run test:e2e -w service -- --exclude '**/journey-pilot-*.test.ts' --reporter=verbose
-      - if: runner.os == 'Windows'
-        name: Run remaining offline browser journeys
-        run: npm run test:e2e -w service -- demo-browser journey- --exclude '**/journey-pilot-*.test.ts'
-      - name: Run remaining service tests without orphan-shutdown stress
-        run: npm test -w service -- --tagsFilter='!shutdown-stress' --exclude '**/snap.test.ts' --exclude '**/deterministic-process-exit.test.ts'
-      - run: npm test -w webview
+      - run: npm run test:ci

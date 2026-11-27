@@ -50,6 +50,8 @@ async function render(source: string, theme: DiagramTheme): Promise<string> {
     darkMode: dark,
     fontFamily: token("--font-mono"),
     themeVariables: {
+      useGradient: false,
+      dropShadow: "none",
       background: token("--bg-tertiary"),
       primaryColor: token("--bg-elevated"),
       primaryTextColor: token("--text-primary"),

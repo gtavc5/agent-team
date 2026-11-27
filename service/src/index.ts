@@ -13,12 +13,11 @@ if (
   process.argv[2] === "--doctor" &&
   (process.argv.length === 3 || (process.argv.length === 4 && process.argv[3] === "--json"))
 ) {
-  void doctor(baseDir).then(({ report, ok }) => {
-    console.log(
-      process.argv[3] === "--json" ? JSON.stringify(report, null, 2) : formatReport(report),
-    );
-    process.exitCode = ok ? 0 : 1;
-  });
+  const { report, ok } = doctor(baseDir);
+  console.log(
+    process.argv[3] === "--json" ? JSON.stringify(report, null, 2) : formatReport(report),
+  );
+  process.exitCode = ok ? 0 : 1;
 } else if (process.argv.length > 2) {
   console.error("Usage: node dist/server.js [--doctor [--json]]");
   process.exitCode = 2;

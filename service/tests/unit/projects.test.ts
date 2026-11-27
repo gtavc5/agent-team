@@ -281,11 +281,11 @@ describe("panel tool arguments", () => {
     );
   });
 
-  it.each([undefined, "", "   ", "Icelandic", "简体中文"])(
-    "keeps the internal English rule unconditional and scopes optional user-facing language (%s)",
+  it.each([undefined, "", "   ", "  Icelandic  ", "简体中文"])(
+    "keeps English as the internal default with a scoped explicit exemption, independent of chat language (%s)",
     (language) => {
       const englishRule =
-        "Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English. Preserve quoted user text, identifiers, paths, and error messages verbatim.";
+        "Write repository artifacts, project-board entries, and agent-to-agent instructions and reports in English unless the user explicitly asks for another language for that content. Preserve quoted user text, identifiers, paths, and error messages verbatim.";
       const trimmed = language?.trim();
       const expectedDirect = trimmed
         ? [
@@ -300,13 +300,10 @@ describe("panel tool arguments", () => {
         workerToolset(api, "ws-w", project, "/notes", false, false, language).instructions,
         workerToolset(api, "ws-w", project, "/notes", true, false, language).instructions,
         workerToolset(api, "ws-w", project, "/notes", false, true, language).instructions,
+        workerToolset(api, "ws-w", project, "/notes", true, true, language).instructions,
       ]) {
-        expect(text).toContain(englishRule);
-        if (trimmed) {
-          expect(text).toContain(
-            `Write chat messages addressed to the user, including questions and summaries, in ${trimmed}. ${englishRule}`,
-          );
-        } else {
+        expect(text.split("\n\n")[1]).toBe(expectedDirect[0]);
+        if (!trimmed) {
           expect(text).not.toContain("Write chat messages addressed to the user");
         }
       }
@@ -329,8 +326,25 @@ describe("panel tool arguments", () => {
       /act or dispatch only when the user explicitly requests execution or rework/i,
     );
     expect(instructions).toMatch(
-      /quick edit grows[^\n]*hand it off to a worker[^\n]*unless the user/i,
+      /quick edit grows[^\n]*stop and hand it off to a worker unless the user explicitly asked to keep it inline/i,
     );
+  });
+
+  it("treats colloquial 'you' as project direction, not an inline override", () => {
+    const { instructions } = leadToolset(api, project, "/notes", ["m"]);
+    expect(instructions).toMatch(
+      /"you" in requests to open a branch or make changes addresses the project you lead, not this session/i,
+    );
+    expect(instructions).toMatch(
+      /keep substantial work inline only when the user explicitly asks[^\n]*this session or work without a worker/i,
+    );
+  });
+
+  it("keeps dispatch criteria qualitative", () => {
+    const { instructions } = leadToolset(api, project, "/notes", ["m"]);
+    const dispatch = instructions.split("\n\n").find((p) => p.startsWith("Discussion alone"));
+    expect(dispatch).toBeDefined();
+    expect(dispatch).not.toMatch(/\d|\b(?:seconds?|minutes?|hours?|loc|lines?|files)\b/i);
   });
 
   it("routes direct work and delegated work to the right owner", () => {
@@ -340,8 +354,7 @@ describe("panel tool arguments", () => {
     for (const scope of [
       "read-only checks",
       "board or notes updates",
-      "few-line edits",
-      "do yourself",
+      "trivial, immediately verifiable edits",
     ]) {
       expect(direct).toContain(scope);
     }
@@ -355,6 +368,10 @@ describe("panel tool arguments", () => {
     ]) {
       expect(delegated).toContain(scope);
     }
+    expect(delegated).toMatch(
+      /^delegate branch or merge request work to workers in isolated worktrees to keep your main checkout clean/i,
+    );
+    expect(delegated).toContain("a worker owns the task through verification");
     expect(instructions).toMatch(
       /prefer message_session[^\n]*idle, lead-dispatchable[^\n]*otherwise use start_session/i,
     );
@@ -472,7 +489,8 @@ describe("panel tool arguments", () => {
       /\[From session …\][^\n]*tasks to review[^\n]*tasks done[^\n]*dropped[^\n]*delete the objective/,
     );
     expect(lead.length).toBeLessThan(5200);
-    expect(worker.length).toBeLessThan(3800);
+    // Allow the 70 characters of the explicit language exemption.
+    expect(worker.length).toBeLessThan(3870);
     // Nothing the CLI would cut.
     const tools = [
       ...leadToolset(api, project, "/notes", ["m"]).tools,

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setupProjects } from "./projectHarness";
+import { setupProjects, useRecoveryClock } from "./projectHarness";
 import { ProjectStore } from "../../src/project/store";
 import { ReportJournalStore } from "../../src/project/report-journal";
 import type { PromptEnvelope, SendHooks, SendReceipt } from "../../src/session/types";
@@ -8,7 +8,7 @@ import type { Workspace } from "../../src/workspace/workspace";
 afterEach(() => vi.useRealTimers());
 
 async function fixture() {
-  vi.useFakeTimers();
+  useRecoveryClock();
   const h = setupProjects();
   const { project, lead } = h.create("recovery batch");
   const session = h.session(lead);

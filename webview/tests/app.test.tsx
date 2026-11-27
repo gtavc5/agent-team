@@ -135,6 +135,8 @@ function setVisibility(state: "visible" | "hidden") {
 let scrollIntoView: MockInstance<(arg?: boolean | ScrollIntoViewOptions) => void>;
 beforeEach(() => {
   vi.useFakeTimers();
+  localStorage.clear();
+  sessionStorage.clear();
   Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
   FakeSocket.instances = [];
   vi.stubGlobal("WebSocket", ReactSocket);
@@ -147,7 +149,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("render cost of a live transcript", () => {
+describe("render cost of a live transcript", { tags: ["app-detail"] }, () => {
   // MessageItem formats its timestamp once per render.
   const renders = () => {
     const spy = vi.spyOn(format, "formatMessageTime");
@@ -213,7 +215,7 @@ describe("render cost of a live transcript", () => {
   });
 });
 
-describe("UI telemetry middleware", () => {
+describe("UI telemetry middleware", { tags: ["app-detail"] }, () => {
   it("delegates only the closest allowed click or focus action", () => {
     const record = vi.spyOn(telemetry, "recordTelemetry");
     boot([]);
@@ -278,41 +280,48 @@ describe("UI telemetry middleware", () => {
 });
 
 describe("composer", () => {
-  it.each(["agent_updated", "init"])(
-    "keeps Stop and Send available for a network-waiting Lead from %s",
-    async (projection) => {
-      const agent: AgentInfo = { ...AGENT, busy: false, state: "idle", networkWaiting: false };
-      const waiting = { ...agent, networkWaiting: true };
-      const sock = boot([], {
-        agents: [projection === "init" ? waiting : agent],
-        projectLink: { projectId: "p1", role: "lead" },
-      });
-      const update = (agent: AgentInfo) =>
-        sock.receive({ type: "agent_updated", workspaceId: "w1", agent });
-      const composerStop = () => screen.queryByRole("button", { name: "Stop Alice" });
-      if (projection === "agent_updated") {
-        expect(composerStop()).toBeNull();
-        update(waiting);
-      }
-      fireEvent.click(composerStop()!);
-      openAgents();
-      const panelStop = () => screen.queryByRole("button", { name: "Stop" });
-      fireEvent.click(panelStop()!);
-      expect(sock.frames().filter(({ type }) => type === "interrupt")).toEqual([
-        { type: "interrupt", workspaceId: "w1", agentId: agent.id },
-        { type: "interrupt", workspaceId: "w1" },
-      ]);
-      fireEvent.change(composer(), { target: { value: "Manual message" } });
-      fireEvent.click(screen.getByRole("button", { name: "Send" }));
-      await act(async () => {});
-      expect(sock.frames().filter(({ type }) => type === "send_message")).toMatchObject([
-        { workspaceId: "w1", content: "Manual message" },
-      ]);
-      update(agent);
+  it.each(
+    ["agent_updated", "init"].flatMap((projection) =>
+      ["networkWaiting", "retryPending"].map((reason) => [projection, reason]),
+    ),
+  )("keeps Stop and Send available from %s while %s", async (projection, reason) => {
+    const agent: AgentInfo = {
+      ...AGENT,
+      busy: false,
+      state: "idle",
+      networkWaiting: false,
+      retryPending: false,
+    };
+    const waiting = { ...agent, [reason]: true };
+    const sock = boot([], {
+      agents: [projection === "init" ? waiting : agent],
+      projectLink: { projectId: "p1", role: "lead" },
+    });
+    const update = (agent: AgentInfo) =>
+      sock.receive({ type: "agent_updated", workspaceId: "w1", agent });
+    const composerStop = () => screen.queryByRole("button", { name: "Stop Alice" });
+    if (projection === "agent_updated") {
       expect(composerStop()).toBeNull();
-      expect(panelStop()).toBeNull();
-    },
-  );
+      update(waiting);
+    }
+    fireEvent.click(composerStop()!);
+    openAgents();
+    const panelStop = () => screen.queryByRole("button", { name: "Stop" });
+    fireEvent.click(panelStop()!);
+    expect(sock.frames().filter(({ type }) => type === "interrupt")).toEqual([
+      { type: "interrupt", workspaceId: "w1", agentId: agent.id },
+      { type: "interrupt", workspaceId: "w1" },
+    ]);
+    fireEvent.change(composer(), { target: { value: "Manual message" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await act(async () => {});
+    expect(sock.frames().filter(({ type }) => type === "send_message")).toMatchObject([
+      { workspaceId: "w1", content: "Manual message" },
+    ]);
+    update(agent);
+    expect(composerStop()).toBeNull();
+    expect(panelStop()).toBeNull();
+  });
 
   it("records only validated composer submissions from Enter and the button", async () => {
     const record = vi.spyOn(telemetry, "recordTelemetry");
@@ -651,18 +660,22 @@ describe("search jumps against the server's paging", () => {
   const renderedIds = () =>
     [...document.querySelectorAll("[id^=msg-]")].map((e) => e.id.slice("msg-".length));
 
-  it("reaches an old hit through tie groups split across pages, with no gap or duplicate", () => {
-    // Three messages per millisecond: page edges fall inside groups.
-    const all = Array.from({ length: 1000 }, (_, i) => message(i, 1000 + Math.floor(i / 3)));
-    render(<App />);
-    const sock = FakeSocket.instances.at(-1)!;
-    openSocket(sock, [AGENT]);
-    answerAll(sock, () => all);
-    searchAndOpen(sock, all[5]);
-    answerAll(sock, () => all);
-    expect(renderedIds()).toEqual(all.map((m) => m.id));
-    expect(document.querySelector("#msg-m5")!.classList).toContain("message-highlight");
-  }, 30_000);
+  it(
+    "reaches an old hit through tie groups split across pages, with no gap or duplicate",
+    { tags: ["history-stress"], timeout: 30_000 },
+    () => {
+      // Three messages per millisecond: page edges fall inside groups.
+      const all = Array.from({ length: 1000 }, (_, i) => message(i, 1000 + Math.floor(i / 3)));
+      render(<App />);
+      const sock = FakeSocket.instances.at(-1)!;
+      openSocket(sock, [AGENT]);
+      answerAll(sock, () => all);
+      searchAndOpen(sock, all[5]);
+      answerAll(sock, () => all);
+      expect(renderedIds()).toEqual(all.map((m) => m.id));
+      expect(document.querySelector("#msg-m5")!.classList).toContain("message-highlight");
+    },
+  );
 
   it("keeps the history in order when an older page is answered after a resync", () => {
     // Loaded m100..m149; the jump's older-page request goes out, then the
@@ -696,7 +709,7 @@ describe("search jumps against the server's paging", () => {
   });
 });
 
-describe("files panel", () => {
+describe("files panel", { tags: ["app-detail"] }, () => {
   const fetchMock = vi.fn((url: string) => {
     const path = new URLSearchParams(url.split("?")[1]).get("path")!;
     const view =
@@ -808,7 +821,7 @@ describe("files panel", () => {
   });
 });
 
-describe("changes panel", () => {
+describe("changes panel", { tags: ["app-detail"] }, () => {
   const urls: string[] = [];
   const fetchMock = vi.fn((url: string) => {
     if (url === "api/diagnostics") {
@@ -1012,7 +1025,7 @@ describe("read state shared by every device", () => {
   });
 });
 
-describe("debug strip", () => {
+describe("debug strip", { tags: ["app-detail"] }, () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("captures with Alt+Shift+S without opening the strip or moving focus", async () => {

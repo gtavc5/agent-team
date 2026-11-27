@@ -19,6 +19,7 @@ import {
   FILE_EXT,
   FILE_NAME,
   FileOpenContext,
+  WIN_DRIVE,
   linkFileRef,
   parseFileRef,
   splitFileRef,
@@ -340,10 +341,40 @@ function InlineCode({ children, node: _node, ...rest }: ComponentProps<"code"> &
   return <code {...rest}>{children}</code>;
 }
 
-// react-markdown blanks hrefs with a scheme it does not know, and "a.ts:12"
-// reads as one; Link decides what a local target is.
-function urlTransform(url: string): string {
-  return /^file:\/\//i.test(url) || linkFileRef(url) ? url : defaultUrlTransform(url);
+// File previews resolve image paths via their own scoped raw-file endpoints.
+// Do it before react-markdown can discard file URLs and drive-letter paths.
+export const ImagePathContext = createContext<((path: string) => string) | null>(null);
+const IMAGE_URL = /^(?:https?:|data:|blob:|\/\/)/i;
+const ROUTED_IMAGE = /^\/?(?:uploads\/|avatars\/|api\/file\/raw\?)/;
+const LOCAL_FILE_URL = /^file:\/\/(?:localhost)?(?=\/)/i;
+
+function imageUrl(url: string, resolve: ((path: string) => string) | null): string {
+  if (IMAGE_URL.test(url) || ROUTED_IMAGE.test(url)) return url;
+  if (!resolve) return defaultUrlTransform(url);
+
+  let path = url.split(/[?#]/, 1)[0];
+  const fileUrl = LOCAL_FILE_URL.test(path);
+  if (fileUrl) {
+    path = path.replace(LOCAL_FILE_URL, "");
+  } else if (!WIN_DRIVE.test(path) && /^[^/\\]*:/.test(path)) {
+    return "";
+  }
+  // Decode one UTF-8 character at a time so a malformed escape does not
+  // prevent its neighbors from resolving to their original filename bytes.
+  const encodedChar =
+    /%[0-7][\da-f]|%[cd][\da-f]%[89ab][\da-f]|%e[\da-f](?:%[89ab][\da-f]){2}|%f[0-4](?:%[89ab][\da-f]){3}/gi;
+  path = path.replace(encodedChar, (encoded) => {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return encoded;
+    }
+  });
+  // Never turn remote file URLs or UNC paths into filesystem reads.
+  if (!path || /^[\\/]{2}/.test(path) || path.includes("\0")) return "";
+  return resolve(
+    fileUrl && path.startsWith("/") && WIN_DRIVE.test(path.slice(1)) ? path.slice(1) : path,
+  );
 }
 
 // GFM keeps HTML as it is, which shows escaped; agents break lines in a
@@ -495,6 +526,15 @@ export const MdBlock = memo(function MdBlock({ children, thinking }: MdBlockProp
   useLocale();
   const { text, hasMath } = useMemo(() => prepareSource(children, thinking), [children, thinking]);
   const math = useMathPlugins(hasMath);
+  const resolveImage = useContext(ImagePathContext);
+  const urlTransform = useMemo<NonNullable<Options["urlTransform"]>>(
+    () => (url, key, node) => {
+      if (key === "src" && node.tagName === "img") return imageUrl(url, resolveImage);
+      // Link handles local hrefs, including file URLs and references like a.ts:12.
+      return /^file:\/\//i.test(url) || linkFileRef(url) ? url : defaultUrlTransform(url);
+    },
+    [resolveImage],
+  );
   const refs = useContext(IssueRefContext);
   const paths = useProsePaths();
   const remark = math?.remark ?? mdRemarkPlugins;

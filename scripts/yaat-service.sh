@@ -49,6 +49,7 @@ Commands:
   stop                      Stop the service
   restart                   Restart the service
   status                    Show service status
+  doctor [--json]           Inspect startup and local auth without writing or connecting
   logs                      View service logs (-n <lines>, --no-follow)
   health                    Check http://127.0.0.1:<port>/manifest.webmanifest
   deploy                    Build, restart, and wait for health (--verify)
@@ -187,6 +188,7 @@ SUBCOMMAND=""
 EXTRA_ARGS=""
 WHEN_IDLE=0
 DEPLOY_TIMEOUT=""
+DOCTOR_JSON=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -258,6 +260,10 @@ while [ "$#" -gt 0 ]; do
       VERIFY=1
       shift
       ;;
+    --json)
+      DOCTOR_JSON=1
+      shift
+      ;;
     --force)
       FORCE=1
       shift
@@ -312,6 +318,10 @@ done
 if [ -z "$SUBCOMMAND" ]; then
   usage
   exit 1
+fi
+
+if [ "$DOCTOR_JSON" -eq 1 ] && [ "$SUBCOMMAND" != doctor ]; then
+  die '--json is only supported with doctor'
 fi
 
 if [ "$WHEN_IDLE" -ne 0 ] || [ -n "$DEPLOY_TIMEOUT" ]; then
@@ -508,7 +518,7 @@ language = \"简体中文\"
     printf '  username: %s\n' "$USERNAME"
     printf '  password: %s\n' "$pw"
   fi
-  printf '[note] [user].language is set to "简体中文" in %s (controls user-facing chat language only; repository artifacts, project-board entries, and agent-to-agent instructions/reports always stay English). Edit or remove [user].language in %s to change or unset it.\n' "$cfg" "$cfg"
+  printf '[note] [user].language is set to "简体中文" in %s (controls user-facing chat language only; repository artifacts, project-board entries, and agent-to-agent instructions/reports default to English unless you explicitly request another language for that content). Edit or remove [user].language in %s to change or unset it.\n' "$cfg" "$cfg"
 }
 
 write_darwin_plist() {
@@ -904,7 +914,7 @@ JS
   fi
 
   if [ "$has_user_language" = "no" ]; then
-    printf '[note] [user].language is not set in %s; user-facing chat language defaults to model choice (repository artifacts, project-board entries, and agent-to-agent instructions/reports always stay English). Set language = "简体中文" (or your preferred language) under [user] in %s.\n' "$cfg" "$cfg"
+    printf '[note] [user].language is not set in %s; user-facing chat language defaults to model choice (repository artifacts, project-board entries, and agent-to-agent instructions/reports default to English unless you explicitly request another language for that content). Set language = "简体中文" (or your preferred language) under [user] in %s.\n' "$cfg" "$cfg"
   fi
 }
 
@@ -1330,6 +1340,12 @@ case "$SUBCOMMAND" in
     ;;
   status)
     cmd_status
+    ;;
+  doctor)
+    [ -z "$EXTRA_ARGS" ] || die 'doctor takes no positional argument'
+    args=(--doctor)
+    if [ "$DOCTOR_JSON" -eq 1 ]; then args+=(--json); fi
+    AGENT_TEAM_BASE_DIR="$BASE_DIR" run_cmd "$REPO_DIR/scripts/start-server.sh" "${args[@]}"
     ;;
   logs)
     cmd_logs

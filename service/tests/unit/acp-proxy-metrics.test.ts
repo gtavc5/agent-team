@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -36,7 +36,7 @@ afterEach(async () => {
   await rm(baseDir, { recursive: true, force: true });
 });
 
-it("flushes JSONL in record order with owner-only permissions on POSIX", async () => {
+it("flushes JSONL in record order with owner-only permissions", async () => {
   const metrics = new ProxyMetrics(baseDir);
   const second = { ...row, reqId: "second" };
   metrics.record(row);
@@ -47,22 +47,27 @@ it("flushes JSONL in record order with owner-only permissions on POSIX", async (
   expect(await readFile(logPath, "utf8")).toBe(
     `${JSON.stringify(row)}\n${JSON.stringify(second)}\n`,
   );
+  // Windows uses directory ACLs, not POSIX group/other mode bits.
   if (process.platform !== "win32") expect((await stat(logPath)).mode & 0o777).toBe(0o600);
 });
 
-it("rotates before exceeding the size cap and keeps exactly one private backup", async () => {
+it("rotates before exceeding the size cap and keeps exactly one backup", async () => {
   const first = new ProxyMetrics(baseDir);
   first.record(row);
   await first.close();
   const limit = 8 * 1024 * 1024;
   await truncate(logPath, limit);
-  await chmod(logPath, 0o644);
+  if (process.platform !== "win32") await chmod(logPath, 0o644);
   await writeFile(`${logPath}.1`, "old backup");
 
   const metrics = new ProxyMetrics(baseDir);
   metrics.record(row);
   await metrics.close();
   expect(await readFile(logPath, "utf8")).toBe(`${JSON.stringify(row)}\n`);
+  expect((await readdir(join(baseDir, ".agent-team"))).sort()).toEqual([
+    "ccpa-proxy-metrics.jsonl",
+    "ccpa-proxy-metrics.jsonl.1",
+  ]);
   const backup = await stat(`${logPath}.1`);
   expect(backup.size).toBe(limit);
   if (process.platform !== "win32") {

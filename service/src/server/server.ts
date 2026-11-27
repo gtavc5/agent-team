@@ -362,7 +362,7 @@ export class Server {
             recordUsage: (observation) => recordUsage(this.baseDir, observation),
             recordJourney: (event) => recordJourney(this.baseDir, event),
           },
-          () => this.ccpaProxy?.url,
+          () => this.ccpaProxy,
         ),
       );
     }
@@ -1698,13 +1698,8 @@ export class Server {
   }
 
   // Rate-limit recovery policy:
-  //  - five_hour: hold the agent's queue and auto-retry the failed prompt
-  //    shortly after the window resets ("wait it out"); a turn the CLI
-  //    started is no prompt of ours, the agent is told to carry on instead
-  //  - weekly-type limits (seven_day / fable pools): fail over the DEFAULT
-  //    account to another credential and retry immediately — agents pinned to
-  //    an explicit account are left alone (switching under them would be
-  //    surprising), they just get the error message.
+  // Keep the original envelope only for an unanswered prompt. After progress,
+  // a queued input takes over; otherwise retryLast sends one continuation.
   // Agents limited in the same window share its reset: their retries take
   // start slots like any start. The pause is saved with the agent, so a
   // restart schedules the retry again.
@@ -1717,7 +1712,12 @@ export class Server {
         () => {
           this.retryTimers.delete(key);
           const w = this.workspaces.get(wsId);
-          if (!w || !w.agents.has(agentId) || w.isArchived) return;
+          if (!w || !w.agents.get(agentId)?.retryPending || w.isArchived) return;
+          const remaining = (w.agents.get(agentId)?.pausedUntil ?? 0) - Date.now();
+          if (remaining > 0) {
+            this.scheduleRetry(wsId, agentId, remaining);
+            return;
+          }
           // A turn whose output could not be saved does not run; try later.
           if (!this.ensureLoaded(w)) {
             this.scheduleRetry(wsId, agentId, 60_000);
@@ -1727,7 +1727,7 @@ export class Server {
           this.persistWorkspace(wsId);
           this.projects.workerIdle(w);
         },
-        this.projects.takeStartSlot(Math.max(delay, 1000)),
+        Math.min(this.projects.takeStartSlot(Math.max(delay, 1000)), 2_147_483_647),
       ),
     );
   }
@@ -1735,7 +1735,7 @@ export class Server {
   private handleRateLimit(
     wsId: string,
     agentId: string,
-    info: { rateLimitType?: string; resetsAt?: number },
+    info: { rateLimitType?: string; resetsAt?: number; turnFinal?: true },
   ): void {
     const ws = this.workspaces.get(wsId);
     const entry = ws?.agents.get(agentId);
@@ -1747,12 +1747,22 @@ export class Server {
     const now = Date.now();
     if (entry.retryPending && (entry.pausedUntil ?? 0) > now) return;
     const reset = info.resetsAt ? info.resetsAt * 1000 + 60_000 : 0;
+    const strictReset = (info.resetsAt ?? 0) * 1000;
+    if (info.turnFinal && (!Number.isFinite(strictReset) || strictReset <= now)) return;
+    // Preserve the existing native Codex backoff when its reset is stale or absent.
     const retryAt = reset > now ? reset : now + 31 * 60_000;
     const cap = info.rateLimitType === "seven_day" ? 8 * 86400_000 : 6 * 3600_000;
-    const delay = Math.min(Math.max(retryAt - now, 60_000), cap);
+    const delay = info.turnFinal
+      ? strictReset - now
+      : Math.min(Math.max(retryAt - now, 60_000), cap);
     ws.pauseAgent(agentId, now + delay, true);
     const at = new Date(now + delay).toLocaleTimeString();
-    const limit = info.rateLimitType === "seven_day" ? "weekly" : "5-hour";
+    const limit =
+      info.rateLimitType === "seven_day"
+        ? "weekly"
+        : info.rateLimitType === "five_hour"
+          ? "5-hour"
+          : "usage";
     ws.postSystemMessage(
       entry.lastEnvelope
         ? `⏳ **${agentName}** hit the ${limit} limit — auto-retrying at ${at}.`

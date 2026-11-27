@@ -12,6 +12,7 @@ const extensionFiles = [
   "pi-panel-bridge.ts",
   "pi-quota.ts",
   "pi-recovery-context.ts",
+  "pi-rate-limit.ts",
   "quota-schema.ts",
 ];
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setupProjects } from "./projectHarness";
+import { setupProjects, useRecoveryClock } from "./projectHarness";
 import { ProjectStore } from "../../src/project/store";
 import { ReportJournalStore } from "../../src/project/report-journal";
 import type { Workspace } from "../../src/workspace/workspace";
@@ -7,7 +7,7 @@ import type { Workspace } from "../../src/workspace/workspace";
 const minute = 60_000;
 afterEach(() => vi.useRealTimers());
 async function outage() {
-  vi.useFakeTimers();
+  useRecoveryClock();
   vi.setSystemTime(new Date("2026-02-01T02:00:00Z"));
   const h = setupProjects();
   const p = h.create("night shift");
@@ -119,11 +119,18 @@ describe("bounded project Lead recovery", () => {
       const h = await outage();
       if (mode === "Stop") await h.lead.interruptAgent(h.entry().info.id);
       else {
-        while (h.lead.leadOutage?.phase === "waiting") {
+        const { started, deadline } = h.lead.leadOutage!;
+        for (const elapsed of [30, 90, 210, 510, 1110, 1710]) {
           await h.next();
-          if (h.lead.leadOutage?.batch) h.fail();
+          expect(Date.now() - started).toBe(elapsed * 1000);
+          expect(h.lead.leadOutage?.batch?.admitted).toBe(true);
+          h.fail();
         }
+        await vi.advanceTimersByTimeAsync(deadline - Date.now() - 1);
+        expect(h.lead.leadOutage?.phase).toBe("waiting");
+        await vi.advanceTimersByTimeAsync(1);
         expect(new Date().toISOString()).toContain("02:30:00");
+        expect(h.session(h.lead).sent).toHaveLength(7);
       }
       expect(h.lead.leadOutage?.phase).toBe("held");
       h.restore();
@@ -139,6 +146,7 @@ describe("bounded project Lead recovery", () => {
     await h.next();
     const s = h.session(h.lead);
     if (kind === "ambiguous RPC") {
+      expect(h.lead.leadOutage?.batch?.admitted).toBe(true);
       s.isRunning = false;
       s.emit("event", { kind: "error", content: "RPC connection reset" });
     } else {

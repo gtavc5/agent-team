@@ -898,7 +898,6 @@ async function runDeterministicPiScenario() {
     const closedIn = Date.now() - started;
     try {
       expect(await tracker.release(started + 10_000)).toEqual([]);
-      if (closedIn > 5000) console.warn(`Pi E2E shutdown: ${closedIn}ms (reference 5000ms)`);
       expect(tracker.observed().length).toBeGreaterThan(0);
       expect(ports.size).toBe(2);
       await Promise.all([...ports].map(verifyPortClosed));

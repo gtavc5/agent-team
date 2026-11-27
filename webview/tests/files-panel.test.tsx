@@ -7,10 +7,13 @@ import {
   type FileRoot,
   type FileView,
 } from "../src/panels/FilesPanel";
+import { INLINE_IMAGE_LIMIT } from "../src/panels/ImagePreview";
+import { FilePreview } from "../src/project/NotesView";
 import { fileRoots } from "../src/panels/scope";
 import { autoPanelWidth } from "../src/panels/SidePanel";
 import { FileOpenContext, linkFileRef, parseFileRef, splitFileRef } from "../src/chat/fileRef";
 import { MdBlock } from "../src/chat/markdown";
+import { resetLocaleForTests, setLocaleOverride } from "../src/i18n";
 import type { Workspace } from "../src/state/useServer";
 
 describe("parseFileRef", () => {
@@ -221,6 +224,202 @@ describe("FilesPanel", () => {
       { path: "/p/notes/plan.md", lang: "markdown", from: 1, to: 2, text: "a\nb" },
     ]);
     document.getSelection()!.removeAllRanges();
+  });
+
+  describe("image previews", () => {
+    const blob = new Blob(["image bytes"], { type: "image/png" });
+    const raw = "api/file/raw?ws=w1&path=%2Fw%2Fa.png";
+    beforeEach(() => {
+      views = { "/w/a.png": { kind: "image", path: "/w/a.png", size: blob.size } };
+    });
+
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    }
+
+    const pngResponse = () => ({ ok: true, blob: () => Promise.resolve(blob) });
+
+    function rawResponse(respond: (signal: AbortSignal) => unknown) {
+      const fetchMock = vi.mocked(fetch);
+      const metadata = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation((url, init) =>
+        typeof url === "string" && url.startsWith("api/file/raw?")
+          ? (Promise.resolve(respond(init!.signal!)) as Promise<Response>)
+          : metadata(url, init),
+      );
+      return fetchMock;
+    }
+
+    afterEach(resetLocaleForTests);
+
+    it.each([
+      { locale: "en", imageLabel: "Copy image", pathLabel: "Copy path", copied: "Copied" },
+      { locale: "zh-CN", imageLabel: "复制图片", pathLabel: "复制路径", copied: "已复制" },
+    ] as const)(
+      "copies only PNG with localized controls in $locale",
+      async ({ locale, imageLabel, pathLabel, copied }) => {
+        setLocaleOverride(locale);
+        const response = deferred<{ ok: boolean; blob: () => Promise<Blob> }>();
+        const fetchMock = rawResponse(() => response.promise);
+        class Item {
+          constructor(readonly data: Record<string, Promise<Blob>>) {}
+        }
+        const written = deferred<void>();
+        const write = vi.fn((_items: Item[]) => written.promise);
+        vi.stubGlobal("ClipboardItem", Item);
+        vi.stubGlobal("navigator", { ...navigator, clipboard: { write } });
+        const { findByTitle, getByTitle, queryByRole, findByRole } = open("/w/a.png");
+        const copy = (await findByTitle(imageLabel)) as HTMLButtonElement;
+        expect(copy.disabled).toBe(true);
+        expect(queryByRole("img")).toBeNull();
+        expect(getByTitle(pathLabel).textContent).toBe(pathLabel);
+        response.resolve(pngResponse());
+        const preview = await findByRole("img");
+        expect(preview.getAttribute("src")).toBe("data:image/png;base64,aW1hZ2UgYnl0ZXM=");
+        fireEvent.click(copy);
+        expect(write).toHaveBeenCalledTimes(1);
+        const [item] = write.mock.calls[0][0];
+        expect(Object.keys(item.data)).toEqual(["image/png"]);
+        expect(await item.data["image/png"]).toBe(blob);
+        expect(copy.textContent).toBe(imageLabel);
+        await act(() => {
+          written.resolve();
+          return written.promise;
+        });
+        expect(copy.textContent).toBe(copied);
+        expect(fetchMock.mock.calls.filter(([url]) => url === raw)).toHaveLength(1);
+      },
+    );
+
+    it("renders oversized images from the raw URL without a prefetch or unsupported copy control", async () => {
+      views["/w/a.png"] = { kind: "image", path: "/w/a.png", size: INLINE_IMAGE_LIMIT + 1 };
+      vi.stubGlobal("ClipboardItem", class {});
+      vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
+      const { findByRole, queryByTitle } = open("/w/a.png");
+      expect((await findByRole("img")).getAttribute("src")).toBe(raw);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(queryByTitle("Copy image")).toBeNull();
+    });
+
+    it("fetches an oversized image only when the copy action needs its bytes", async () => {
+      views["/w/a.png"] = { kind: "image", path: "/w/a.png", size: INLINE_IMAGE_LIMIT + 1 };
+      const fetchMock = rawResponse(pngResponse);
+      class Item {
+        constructor(readonly data: Record<string, Promise<Blob>>) {}
+      }
+      const write = vi.fn(async ([item]: Item[]) =>
+        expect(await item.data["image/png"]).toBe(blob),
+      );
+      vi.stubGlobal("ClipboardItem", Item);
+      vi.stubGlobal("navigator", { ...navigator, clipboard: { write } });
+      const { findByTitle, findByText } = open("/w/a.png");
+      const button = await findByTitle("Copy image");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      fireEvent.click(button);
+      await findByText("Copied");
+      expect(fetchMock.mock.calls.filter(([url]) => url === raw)).toHaveLength(1);
+      expect(write).toHaveBeenCalledOnce();
+    });
+
+    it("aborts the FileReader when unmounted during data URL conversion", async () => {
+      const started = vi.fn();
+      const abort = vi.fn();
+      class PendingReader {
+        onabort?: () => void;
+        onloadend?: () => void;
+        readAsDataURL() {
+          started();
+        }
+        abort() {
+          abort();
+          this.onabort?.();
+          this.onloadend?.();
+        }
+      }
+      vi.stubGlobal("FileReader", PendingReader);
+      rawResponse(pngResponse);
+      const { unmount } = open("/w/a.png");
+      await waitFor(() => expect(started).toHaveBeenCalledOnce());
+      unmount();
+      expect(abort).toHaveBeenCalledOnce();
+    });
+
+    it("uses the raw URL with a JSON-only test response", async () => {
+      const { findByRole } = open("/w/a.png");
+      expect((await findByRole("img")).getAttribute("src")).toBe(raw);
+    });
+
+    it.each([
+      ["HTTP 401", () => ({ ok: false, status: 401 })],
+      [
+        "not an image",
+        () => ({ ok: true, blob: () => Promise.resolve(new Blob([], { type: "text/html" })) }),
+      ],
+      ["offline", () => Promise.reject(new Error("offline"))],
+    ])("shows a readable error for %s without rendering the raw URL", async (error, respond) => {
+      rawResponse(respond);
+      const { findByText, queryByRole } = open("/w/a.png");
+      await findByText(new RegExp(error));
+      expect(queryByRole("img")).toBeNull();
+    });
+
+    it("aborts pending image fetches on navigation and unmount", async () => {
+      views["/w"] = {
+        kind: "dir",
+        path: "/w",
+        entries: [{ name: "a.png", dir: false, size: 11 }],
+        truncated: false,
+      };
+      const signals: AbortSignal[] = [];
+      const first = deferred<unknown>();
+      rawResponse((signal) => {
+        signals.push(signal);
+        return signals.length === 1 ? first.promise : new Promise(() => {});
+      });
+      const { getByTitle, findByRole, queryByRole, unmount } = open("/w/a.png");
+      await waitFor(() => expect(signals).toHaveLength(1));
+      fireEvent.click(getByTitle("Parent folder"));
+      const entry = await findByRole("button", { name: /a\.png/ });
+      expect(signals[0].aborted).toBe(true);
+      await act(() => {
+        first.resolve(pngResponse());
+        return first.promise;
+      });
+      expect(queryByRole("img")).toBeNull();
+      fireEvent.click(entry);
+      await waitFor(() => expect(signals).toHaveLength(2));
+      expect(queryByRole("img")).toBeNull();
+      unmount();
+      expect(signals[1].aborted).toBe(true);
+    });
+
+    it("inlines images in the Notes preview too", async () => {
+      const signals: AbortSignal[] = [];
+      rawResponse((signal) => {
+        signals.push(signal);
+        return pngResponse();
+      });
+      const { findByRole } = render(
+        <FilePreview
+          project="p"
+          file={{ path: "/w/a.png" }}
+          onRef={vi.fn()}
+          onResolve={vi.fn()}
+          onClose={vi.fn()}
+          editor={false}
+        />,
+      );
+      expect((await findByRole("img", { name: "a.png" })).getAttribute("src")).toMatch(
+        /^data:image\/png;/,
+      );
+      expect(fetch).toHaveBeenCalledWith("api/file/raw?project=p&path=%2Fw%2Fa.png", {
+        signal: signals[0],
+      });
+    });
   });
 
   it("describes binary files without trying to render them as text or images", async () => {

@@ -3,7 +3,9 @@ import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { buildSync } from "esbuild";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RuntimeReport } from "../../src/config/diagnostics";
 
 interface Target {
   port: number;
@@ -19,6 +21,7 @@ interface Options {
   timeoutMs: number;
   manager: { restart(): Promise<void>; verify(pid: number): Promise<void> };
   stage(dir: string, signal: AbortSignal): Promise<void>;
+  preflight?(dir: string, baseDir: string, signal: AbortSignal): Promise<{ ok: boolean }>;
   request(base: string, message: Record<string, unknown>): Promise<unknown>;
   probe(status: unknown, dir: string): Promise<void>;
   now(): number;
@@ -51,6 +54,7 @@ const files = [
   "server.js",
   "history-worker.js",
   "pi-panel-bridge.ts",
+  "pi-rate-limit.ts",
   "pi-quota.ts",
   "quota-schema.ts",
   "acp-readiness.ts",
@@ -68,7 +72,10 @@ let dir: string;
 beforeEach(() => {
   dir = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), "yaat-job-")));
 });
-afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+afterEach(() => {
+  fs.rmSync(dir, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+});
 
 describe.skipIf(process.platform === "win32")("release garbage collection", () => {
   it("keeps current, rollback, live processes and unfinished jobs", async () => {
@@ -246,6 +253,7 @@ function fixture() {
     target,
     manager,
     stage,
+    preflight: () => Promise.resolve({ ok: true }),
     request: rpc,
     probe: () => Promise.resolve(),
     now: () => time,
@@ -264,12 +272,132 @@ function fixture() {
     rpc,
     options,
     current: () => fs.readlinkSync(path.join(root, "current")),
-    status: (): { phase: string } =>
-      JSON.parse(fs.readFileSync(path.join(job, "status.json"), "utf8")) as { phase: string },
+    status: () =>
+      JSON.parse(fs.readFileSync(path.join(job, "status.json"), "utf8")) as {
+        phase: string;
+        preflight?: { issues: RuntimeReport["issues"] };
+      },
   };
 }
 
+function contents(dir: string): unknown {
+  return Object.fromEntries(
+    fs.readdirSync(dir, { withFileTypes: true }).map((entry) => {
+      const file = path.join(dir, entry.name);
+      const data = entry.isDirectory()
+        ? contents(file)
+        : entry.isSymbolicLink()
+          ? fs.readlinkSync(file)
+          : fs.readFileSync(file).toString("base64");
+      const { mode, mtimeMs } = fs.lstatSync(file);
+      return [entry.name, { data, mode, mtimeMs }];
+    }),
+  );
+}
+
 describe("deferred cutover", () => {
+  it.each(["conflicting ACP credentials", "incompatible startup config"])(
+    "records %s from the real candidate before cutover without writing to live or host data",
+    async (scenario) => {
+      const f = fixture();
+      const baseDir = path.join(dir, "live");
+      f.options.target.baseDir = f.state.baseDir = baseDir;
+      const home = path.join(dir, "host");
+      vi.stubEnv("HOME", home);
+      vi.stubEnv("USERPROFILE", home);
+      const sourceAgentDir = path.join(home, ".pi", "agent");
+      const extension = path.join(
+        sourceAgentDir,
+        "npm/node_modules/pi-antigravity-acp-provider/extensions/index.ts",
+      );
+      fs.mkdirSync(path.dirname(extension), { recursive: true });
+      fs.writeFileSync(extension, 'throw new Error("Must not load an extension in preflight");');
+      fs.writeFileSync(
+        path.join(sourceAgentDir, "settings.json"),
+        '{"packages":["npm:pi-antigravity-acp-provider"]}',
+      );
+      fs.writeFileSync(
+        path.join(sourceAgentDir, "auth.json"),
+        '{"other":{"type":"api_key","key":"synthetic-other-provider"}}',
+      );
+      const store = "antigravity-acp-provider/gemini/antigravity-acp";
+      for (const [agentDir, token] of [
+        [sourceAgentDir, "synthetic-host-secret"],
+        [path.join(baseDir, "pi-agent-home"), "synthetic-managed-secret"],
+      ]) {
+        const folder = path.join(agentDir, store);
+        fs.mkdirSync(folder, { recursive: true });
+        fs.writeFileSync(
+          path.join(folder, "acp_token.json"),
+          JSON.stringify({ refresh_token: token }),
+        );
+      }
+      const blocked = scenario === "incompatible startup config";
+      fs.writeFileSync(
+        path.join(baseDir, "config.toml"),
+        blocked ? "[pi.acp]\npermissions = 42" : "[pi]\n",
+      );
+      const liveBefore = contents(baseDir);
+      const hostBefore = contents(home);
+      delete f.options.preflight;
+      f.options.stage = async (candidate) => {
+        await f.stage(candidate);
+        buildSync({
+          entryPoints: [path.resolve(__dirname, "../../src/index.ts")],
+          platform: "node",
+          bundle: true,
+          outfile: path.join(candidate, "server.js"),
+        });
+      };
+      f.state.blockers.workspaces = 1;
+      const pause = f.options.pause;
+      f.options.pause = (ms) => {
+        expect(f.status().phase).toBe("waiting");
+        fs.writeFileSync(path.join(f.job, "decision"), "cancel\n", { flag: "wx" });
+        return pause(ms);
+      };
+      if (blocked) await expect(deploy(f.options)).rejects.toThrow("startup blocker");
+      else await deploy(f.options);
+      const status = f.status();
+      expect(status).toMatchObject({
+        phase: blocked ? "failed" : "cancelled",
+        preflight: {
+          ok: !blocked,
+          startup: { value: blocked ? "blocked" : "offline checks passed" },
+          acpRemoteAuth: { value: "unverified offline" },
+        },
+      });
+      const issue = status.preflight?.issues.find(
+        ({ code }) => code === (blocked ? "CONFIG_INVALID" : "acp_auth_conflict"),
+      );
+      expect(issue?.value).toContain(blocked ? "pi.acp.permissions" : "directories are separate");
+      if (!blocked) expect(issue?.nextStep).toContain("move the managed gemini directory");
+      expect(JSON.stringify(status)).not.toContain("synthetic-");
+      expect(contents(baseDir)).toEqual(liveBefore);
+      expect(contents(home)).toEqual(hostBefore);
+      expect(f.current()).toBe("gen-old");
+      expect(f.manager.restart).not.toHaveBeenCalled();
+      expect(f.rpc.mock.calls.every(([, request]) => request.cmd === "status")).toBe(true);
+    },
+  );
+  it("denies writes by the candidate process and fails closed without a preflight report", async () => {
+    const f = fixture();
+    const sentinel = path.join(dir, "live-state.json");
+    fs.writeFileSync(sentinel, "original");
+    delete f.options.preflight;
+    f.options.stage = async (candidate) => {
+      await f.stage(candidate);
+      fs.writeFileSync(
+        path.join(candidate, "server.js"),
+        `require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'changed')`,
+      );
+    };
+    await expect(deploy(f.options)).rejects.toThrow("did not return a valid report");
+    expect(fs.readFileSync(sentinel, "utf8")).toBe("original");
+    expect(f.current()).toBe("gen-old");
+    expect(f.manager.restart).not.toHaveBeenCalled();
+  });
+
   it("rejects a staged build missing a nested quota artifact before sealing", async () => {
     const f = fixture();
     f.options.stage = async (candidate) => {

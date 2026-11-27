@@ -1243,7 +1243,7 @@ export function App() {
     syncLatestVisible();
   }, [activeWs, connected, followTail, loadMessages, measureAnchorOffset, syncLatestVisible]);
 
-  // A delayed starting row can grow the transcript without a server update.
+  // A starting row can grow the tail without adding a message.
   const onStartingRow = useCallback(
     (row: HTMLDivElement | null) => {
       const el = messagesContainerRef.current;
@@ -1357,7 +1357,11 @@ export function App() {
   const targetBusy = !!targetAgent && agentQueues(targetAgent);
   const stoppableAgents = connected
     ? (activeWs?.agents.filter(
-        (a) => a.networkWaiting || agentQueues(a) || (a.busy && a.lastStreamAt != null),
+        (a) =>
+          a.networkWaiting ||
+          a.retryPending ||
+          agentQueues(a) ||
+          (a.busy && a.lastStreamAt != null),
       ) ?? [])
     : [];
 
@@ -1935,11 +1939,7 @@ export function App() {
                               </div>
                             );
                           }
-                          const streamingAgentIds = new Set(
-                            msgs
-                              .filter((msg) => msg.kind === "agent" && msg.status === "streaming")
-                              .map((msg) => msg.agentId),
-                          );
+                          const repliedInputIds = new Set(msgs.map((msg) => msg.replyTo));
                           return (
                             <>
                               <HistoryHint
@@ -1969,15 +1969,14 @@ export function App() {
                                     user={user}
                                     msg={msg}
                                     agents={
-                                      msg.status === "streaming" ? activeWs.agents : settledAgents
+                                      msg.status === "streaming" ||
+                                      msg.pendingDelivery === "starting"
+                                        ? activeWs.agents
+                                        : settledAgents
                                     }
                                     compact={compact}
                                     highlight={msg.id === highlightMsgId}
-                                    hasStreamingReply={
-                                      msg.status === "starting" &&
-                                      !!msg.queuedFor &&
-                                      streamingAgentIds.has(msg.queuedFor)
-                                    }
+                                    hasReply={repliedInputIds.has(msg.id)}
                                     onStartingRow={onStartingRow}
                                     onQuote={handleQuote}
                                     onJumpToMessage={jumpToMessageInActiveWs}
