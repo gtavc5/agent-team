@@ -585,6 +585,11 @@ export const Sidebar = memo(function Sidebar(p: SidebarProps) {
               {cue ? (
                 <span
                   className={`session-attention attention-${cue}${cue === "yourTurn" ? " awaits-tag" : ""}`}
+                  title={
+                    cue === "yourTurn" && ws.awaitsUserPrompt?.trim()
+                      ? tr("yourTurnWithPrompt", { prompt: ws.awaitsUserPrompt.trim() })
+                      : undefined
+                  }
                 >
                   {tr(
                     cue === "yourTurn"

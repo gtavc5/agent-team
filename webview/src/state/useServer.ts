@@ -375,6 +375,9 @@ export interface Workspace {
   projectLink?: ProjectLink;
   // A worker stopped on the user's reply (its task asked them something).
   awaitsUser?: boolean;
+  awaitsUserPrompt?: string;
+  // Set when the user took over or stopped a managed worker so control can be handed back.
+  userTookOver?: boolean;
   // Actionable results since any client last read the session (server-owned).
   unread?: number;
   lastResult?: "done" | "failed";
@@ -1703,6 +1706,10 @@ export function useServer() {
     setReporting: useCallback(
       (wsId: string, reports: boolean) =>
         send({ type: "set_reporting", workspaceId: wsId, reports }),
+      [send],
+    ),
+    handBackToLead: useCallback(
+      (wsId: string) => send({ type: "hand_back_to_lead", workspaceId: wsId }),
       [send],
     ),
     // One project's archived sessions, or (null) those in no project.

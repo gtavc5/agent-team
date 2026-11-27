@@ -124,9 +124,21 @@ export const panelMessages = {
     en: "Waiting for your reply",
     "zh-CN": "等待你的回复",
   },
+  yourTurnWithPrompt: {
+    en: "Your turn: {prompt}",
+    "zh-CN": "轮到你：{prompt}",
+  },
   yourTurnTag: {
     en: "your turn",
     "zh-CN": "待回复",
+  },
+  handBackToLead: {
+    en: "Hand back to lead",
+    "zh-CN": "交回 Lead",
+  },
+  handBackToLeadTitle: {
+    en: "Return control of this worker session to the project lead",
+    "zh-CN": "将此工作会话的控制权交回项目 Lead",
   },
   gitDirtyCount: {
     en: "{count} changed",

@@ -163,6 +163,7 @@ export const workspaceMessages = {
     "zh-CN": "此会话及其消息历史将被删除。",
   },
   yourTurnStatus: { en: "Your turn", "zh-CN": "轮到你" },
+  yourTurnWithPrompt: { en: "Your turn: {prompt}", "zh-CN": "轮到你：{prompt}" },
   failedSession: { en: "Failed", "zh-CN": "失败" },
   unreadResult: { en: "Unread result", "zh-CN": "未读结果" },
   needYouCount: { en: "{count} need you", "zh-CN": "{count} 个等待你回复" },

@@ -40,6 +40,7 @@ export interface AgentsPanelActions extends TaskActions {
   onArchive: (workspaceId: string) => void;
   onRestore: (workspaceId: string) => void;
   onSetReporting: (workspaceId: string, reports: boolean) => void;
+  onHandBackToLead?: (workspaceId: string) => void;
   onAddAgent: (workspaceId: string) => void;
   onClearContext: (workspaceId: string, agentId: string) => void;
   onRemoveAgent: (workspaceId: string, agentId: string) => void;
@@ -167,6 +168,15 @@ function SessionCard({
   const canStop =
     state === "working" ||
     (connected && state !== "archived" && w.agents.some((a) => a.networkWaiting || a.retryPending));
+  const awaitsUser = Boolean(w.awaitsUser && state === "idle");
+  const awaitsPrompt = awaitsUser ? w.awaitsUserPrompt?.trim() || undefined : undefined;
+  const canHandBack =
+    !readOnly &&
+    w.projectLink?.role === "worker" &&
+    !w.projectLink.unreported &&
+    Boolean(w.userTookOver) &&
+    !w.archivedAt &&
+    state === "idle";
   const name = sessionName(w, project);
   const tasks = workCount([w]);
   // Where it works, when that is not the project's own checkout.
@@ -178,6 +188,19 @@ function SessionCard({
       {t("stop")}
     </button>
   );
+  const handBackButton = canHandBack ? (
+    <button
+      type="button"
+      className="panel-btn ap-hand-back"
+      title={t("handBackToLeadTitle")}
+      onClick={(e) => {
+        e.stopPropagation();
+        actions.onHandBackToLead?.(w.id);
+      }}
+    >
+      {t("handBackToLead")}
+    </button>
+  ) : null;
   return (
     <section
       className={`ap-session ss-${state}${active ? " active" : ""}${open ? " open" : ""}`}
@@ -202,8 +225,15 @@ function SessionCard({
           <span className="clip" title={w.name}>
             {name}
           </span>
-          {w.awaitsUser && state === "idle" && (
-            <span className="awaits-tag" title={t("waitingForReplyTitle")}>
+          {awaitsUser && (
+            <span
+              className="awaits-tag"
+              title={
+                awaitsPrompt
+                  ? t("yourTurnWithPrompt", { prompt: awaitsPrompt })
+                  : t("waitingForReplyTitle")
+              }
+            >
               {t("yourTurnTag")}
             </span>
           )}
@@ -222,8 +252,23 @@ function SessionCard({
             </span>
           ))}
           {tasks > 0 && <span className="ap-brief-tasks">{tasksTag(w, t)}</span>}
-          {canStop && <span className="ap-actions">{stop}</span>}
+          {(canStop || canHandBack) && (
+            <span className="ap-actions">
+              {handBackButton}
+              {canStop && stop}
+            </span>
+          )}
         </div>
+      )}
+      {awaitsPrompt && (
+        <button
+          type="button"
+          className="ap-awaits-prompt"
+          title={awaitsPrompt}
+          onClick={() => actions.onOpen(w.id)}
+        >
+          {awaitsPrompt}
+        </button>
       )}
       {open && (
         <>
@@ -285,6 +330,7 @@ function SessionCard({
                     {t("addAgent")}
                   </button>
                 )}
+                {handBackButton && <span className="ap-actions-handoff">{handBackButton}</span>}
                 <span className="ap-actions">
                   {tasks > 0 && (
                     <button

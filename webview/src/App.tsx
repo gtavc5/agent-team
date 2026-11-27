@@ -221,6 +221,7 @@ export function App() {
     archiveWorkspace,
     unarchiveWorkspace,
     setReporting,
+    handBackToLead,
     purgeArchived,
     archiveProject,
     archiveAfterDays,
@@ -822,6 +823,7 @@ export function App() {
       onArchive: (id) => archiveWorkspace(id),
       onRestore: (id) => unarchiveWorkspace(id),
       onSetReporting: (id, reports) => setReporting(id, reports),
+      onHandBackToLead: (id) => handBackToLead(id),
       onAddAgent: (id) => {
         recordTelemetry("dialog.add_agent", "open");
         setAddAgentFor(id);
@@ -841,6 +843,7 @@ export function App() {
       archiveWorkspace,
       unarchiveWorkspace,
       setReporting,
+      handBackToLead,
       clearContext,
       removeAgent,
       sendMessage,
