@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
-import { render, act, fireEvent, cleanup } from "@testing-library/react";
+import { render, act, fireEvent, cleanup, screen } from "@testing-library/react";
+import { resolveTargetState } from "../src/composer/targetRouting";
 import { App } from "../src/App";
 import type { AgentInfo, Message, Project } from "../src/state/useServer";
 import { FakeSocket } from "./fakeSocket";
@@ -49,7 +50,7 @@ interface BootWorkspace {
   messages?: Message[];
 }
 
-function boot(workspaces: BootWorkspace[], projects: Project[] = []) {
+function boot(workspaces: BootWorkspace[], projects: Project[] = [], language = "en") {
   render(<App />);
   const sock = FakeSocket.instances.at(-1)!;
   act(() => sock.open());
@@ -68,7 +69,13 @@ function boot(workspaces: BootWorkspace[], projects: Project[] = []) {
       messages: [],
       createdAt: 100 - idx,
     })),
-    config: { presets: [], models: [], commands: [], hosts: {} },
+    config: {
+      presets: [],
+      models: [],
+      commands: [],
+      hosts: {},
+      user: { name: "User", avatar: "U", language },
+    },
     hosts: [],
   });
   for (const w of workspaces) {
@@ -127,6 +134,111 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+});
+
+describe("Same-room peer discussion controls", () => {
+  it("deduplicates valid multi-target mentions in order and expands both all aliases", () => {
+    const agents = [ALICE, BOB];
+    for (const text of ["@Bob @Alice @Bob hello", "@Bob @all hello", "@Bob @全体 hello"]) {
+      const state = resolveTargetState(agents, ALICE.id, text);
+      expect(state.targetAgents).toEqual([BOB, ALICE]);
+      expect(state.sendTarget).toBeUndefined();
+    }
+    expect(resolveTargetState(agents, BOB.id, "@Alice hi").targetAgents).toEqual([ALICE]);
+    expect(
+      resolveTargetState(agents, BOB.id, "@Alice ` @all `\n```\n@全体\n```").targetAgents,
+    ).toEqual([ALICE]);
+    expect(resolveTargetState(agents, BOB.id, "@all /usage").targetAgents).toEqual([ALICE]);
+  });
+
+  it("shows discussion controls only for a multi-target draft and sends the selected round count", async () => {
+    const socket = boot([{ id: "w1", name: "Room", agents: [ALICE, BOB] }]);
+    expect(screen.queryByText(/No cross-review|不互评/)).toBeNull();
+    const text = "@all proposal";
+    fireEvent.change(composer(), { target: { value: text, selectionStart: text.length } });
+    expect(screen.getByText(/Send to Alice, Bob|发送给 Alice、Bob/)).toBeTruthy();
+    const toggle = screen.getByRole("button", { name: /No cross-review|不互评/ });
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: /1 round|互评 1 轮/ }));
+    expect(screen.getByRole("button", { name: /2 rounds|互评 2 轮/ })).toBeTruthy();
+    fireEvent.keyDown(composer(), { key: "Enter" });
+    await act(async () => {});
+    expect(sendFrames(socket).at(-1)).toMatchObject({ content: text, discussionRounds: 2 });
+    expect(screen.queryByText(/2 rounds|互评 2 轮/)).toBeNull();
+    fireEvent.change(composer(), { target: { value: text, selectionStart: text.length } });
+    expect(screen.getByRole("button", { name: /No cross-review|不互评/ })).toBeTruthy();
+  });
+
+  it("lets the target picker replace group routing", async () => {
+    const socket = boot([{ id: "w1", name: "Room", agents: [ALICE, BOB] }]);
+    const text = "@all proposal";
+    fireEvent.change(composer(), { target: { value: text, selectionStart: text.length } });
+    fireEvent.click(targetBtn()!);
+    fireEvent.click(screen.getByText("Bob", { exact: true }));
+    expect(composer().value).toBe("proposal");
+    fireEvent.keyDown(composer(), { key: "Enter" });
+    await act(async () => {});
+    expect(sendFrames(socket).at(-1)).toMatchObject({ content: "proposal", target: BOB.id });
+  });
+
+  it.each([
+    [
+      "en",
+      "Send to Alice, Bob",
+      "No cross-review",
+      "Cross-review 1/2",
+      "Final synthesis",
+      "Relay from Alice (2/2)",
+      "2-hop limit reached",
+    ],
+    [
+      "zh-CN",
+      "发送给 Alice、Bob",
+      "不互评",
+      "交叉确认 1/2",
+      "最终结论",
+      "由 Alice 转交 (2/2)",
+      "已达 2 跳上限",
+    ],
+  ])(
+    "renders the %s composer and reply labels, including the live relay limit",
+    (language, hint, toggle, review, synthesis, relay, limit) => {
+      const socket = boot(
+        [
+          {
+            id: "w1",
+            name: "Room",
+            agents: [ALICE, BOB],
+            messages: [
+              agentMsg("review", ALICE.id, { discussion: { kind: "review", round: 1, rounds: 2 } }),
+              agentMsg("synthesis", ALICE.id, { discussion: { kind: "synthesis" } }),
+              agentMsg("relay", BOB.id, {
+                status: "streaming",
+                discussion: { kind: "relay", from: "Alice", hop: 2 },
+              }),
+            ],
+          },
+        ],
+        [],
+        language,
+      );
+      fireEvent.change(composer(), { target: { value: "@all ", selectionStart: 5 } });
+      expect(screen.getByText(hint)).toBeTruthy();
+      expect(screen.getByRole("button", { name: toggle })).toBeTruthy();
+      expect(screen.getByText(review)).toBeTruthy();
+      expect(screen.getByText(synthesis)).toBeTruthy();
+      expect(screen.getByText(relay)).toBeTruthy();
+      socket.receive({
+        type: "message_done",
+        workspaceId: "w1",
+        messageId: "relay",
+        status: "done",
+        content: "Done",
+        discussion: { kind: "relay", from: "Alice", hop: 2, limitReached: true },
+      });
+      expect(screen.getByText(limit)).toBeTruthy();
+    },
+  );
 });
 
 describe("App target agent routing and quick @ mention", () => {

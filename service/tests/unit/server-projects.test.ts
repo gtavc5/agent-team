@@ -595,6 +595,72 @@ describe("server restart with projects", () => {
     }
   });
 
+  it("admits one room bubble over WS, persists each target's queue, and reconnects to the same row", async () => {
+    const { base, root, web } = seed();
+    const room = "ws-lead";
+    const state = [...readWorkspaceMetadata(base)].find((w) => w.id === room)!;
+    saveWorkspace(base, {
+      ...state,
+      agents: [...state.agents, { ...agent("a-peer", "Peer", root), isDefault: false }],
+    });
+    const { frames, send, stop } = await start(base, web, true);
+    const sendPrompt = (content: string, requestId: string, discussionRounds?: unknown) =>
+      send({ type: "send_message", workspaceId: room, content, requestId, discussionRounds });
+    const users = () =>
+      frames
+        .filter((f) => f.type === "new_message")
+        .map((f) => f.message as Message)
+        .filter((m) => m.kind === "user");
+    try {
+      sendPrompt("@Peer busy", "busy");
+      await until(() => launches.length === 1, "busy peer");
+      sendPrompt("@all proposal", "room", 8);
+      await until(
+        () =>
+          frames.some((f) => f.type === "send_receipt" && f.requestId === "room") &&
+          launches.length === 2,
+        "room receipt and idle draft",
+      );
+      const row = users().at(-1)!;
+      expect(users().map((m) => m.content)).toEqual(["@Peer busy", "@all proposal"]);
+      expect(row).toMatchObject({ status: "queued", queuedFor: "a-peer" });
+      expect(row).not.toHaveProperty("roomInputs");
+      expect(
+        frames.filter((f) => f.type === "send_receipt" && f.requestId === "room"),
+      ).toHaveLength(1);
+      expect(
+        historyOf(base)
+          .load(room)
+          .find((m) => m.id === row.id)?.roomInputs,
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ status: "queued", queuedFor: "a-peer" }),
+        ]),
+      );
+      expect(
+        [...readWorkspaceMetadata(base)].find((w) => w.id === room)?.roomClock,
+      ).toBeGreaterThan(0);
+      send({ type: "load_messages", workspaceId: room });
+      await until(() => frames.some((f) => f.type === "workspace_messages"), "fresh history");
+      const page = frames.find((f) => f.type === "workspace_messages")!.messages as Message[];
+      expect(page.find((m) => m.id === row.id)).toEqual(row);
+      expect(page.filter((m) => m.kind === "user")).toHaveLength(2);
+      launches[1].emit({ kind: "text_delta", content: "independent lead draft" });
+      launches[1].emit({ kind: "result", content: "" });
+      launches[0].emit({ kind: "text_delta", content: "initial peer result" });
+      launches[0].emit({ kind: "result", content: "" });
+      await until(() => launches[0].prompts.length === 2, "queued draft");
+      expect(launches[0].prompts[1]).toBe("proposal");
+      launches[0].emit({ kind: "text_delta", content: "independent peer draft" });
+      launches[0].emit({ kind: "result", content: "" });
+      await until(() => launches[0].prompts.length === 3, "clamped cross-review");
+      expect(launches[0].prompts[2]).toContain("Cross-review 1/2");
+      expect(launches[0].prompts[2]).toContain("independent lead draft");
+    } finally {
+      await stop();
+    }
+  });
+
   it("preserves sendOrder admission receipts across a slow image download while dispatch stays pending", async () => {
     const { base, web } = seed();
     const { server, frames, send, stop } = await start(base, web, true);

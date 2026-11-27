@@ -143,17 +143,29 @@ export function summarizeEvent(e: StreamEvent): StreamEvent {
 /** Strip persistence-only dispatch fields before broadcasting a message over WS. */
 export function toWireMessage(m: Message): Message {
   const hasSubagent = m.events?.some((e) => e.subagent) ?? false;
-  if (!hasSubagent && m.queuedEnvelope === undefined && m.dispatchAttempt === undefined) return m;
-  const copy = { ...m, ...(hasSubagent && { events: m.events?.map(toWireEvent) }) };
-  delete copy.queuedEnvelope;
-  delete copy.dispatchAttempt;
-  return copy;
+  if (
+    !hasSubagent &&
+    m.queuedEnvelope === undefined &&
+    m.dispatchAttempt === undefined &&
+    !m.roomInputs &&
+    !m.roomSequence
+  )
+    return m;
+  const {
+    queuedEnvelope: _queued,
+    dispatchAttempt: _attempt,
+    roomInputs: _inputs,
+    roomSequence: _sequence,
+    roomAuthor: _author,
+    roomRecipients: _recipients,
+    ...wire
+  } = m;
+  return hasSubagent ? { ...wire, events: m.events?.map(toWireEvent) } : wire;
 }
 
 export function summarizeMessage(m: Message): Message {
   if (!m.events?.length) return toWireMessage(m);
-  const { queuedEnvelope: _queued, dispatchAttempt: _attempt, ...wire } = m;
-  return { ...wire, events: m.events.map(summarizeEvent), detail: "summary" };
+  return { ...toWireMessage(m), events: m.events.map(summarizeEvent), detail: "summary" };
 }
 
 export function summarizeMessages(messages: Message[]): Message[] {

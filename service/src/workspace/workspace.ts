@@ -2,6 +2,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { isOutstandingSubagentStatus } from "../../../shared/subagent-status";
 import { applyExtensionUi } from "../../../shared/extension-ui";
+import {
+  isAllMention,
+  parseRoomTargets,
+  type DiscussionLabel,
+  type DiscussionRounds,
+} from "../../../shared/room-targets";
+import { RoomDiscussion, conclusionOf, roomUpdates, type DiscussionTurn } from "./room-discussion";
 import { isChineseLanguage } from "../i18n";
 import { classifyProbeDelivery } from "../project/network-failure";
 import { hasPersistedPiReport, validatePiAttachments } from "../session/pi";
@@ -91,6 +98,15 @@ export interface Message {
   detail?: "summary";
   liveThinkingSince?: number;
   waitingSince?: number;
+  discussion?: DiscussionLabel;
+  // Internal room delivery state. Only the parent (the user's message) is projected.
+  roomInputs?: Message[];
+  roomParent?: string;
+  roomAutomatic?: true;
+  roomThrough?: number;
+  roomSequence?: number;
+  roomRecipients?: string[];
+  roomAuthor?: string;
 }
 
 export interface AgentInfo {
@@ -137,6 +153,7 @@ export interface AgentState extends AgentInfo {
   // A rate-limit pause still to be retried, with the prompt the retry sends.
   pausedUntil?: number;
   lastEnvelope?: PromptEnvelope;
+  roomCursor?: number;
 }
 
 // A workspace in a project: its lead agent's, or a worker session the lead
@@ -213,6 +230,7 @@ export interface WorkspaceInfo {
 
 export interface WorkspaceState {
   leadOutage?: import("../project/lead-recovery").LeadOutage;
+  roomClock?: number;
   id: string;
   name: string;
   project: string;
@@ -243,7 +261,11 @@ export interface AgentEntry {
     input?: Message;
     writeClaimed: boolean;
     replied: boolean;
+    roomThrough?: number;
   };
+  roomCursor?: number;
+  discussionTurn?: DiscussionTurn;
+  steeringContext?: Map<string, number>;
   recoveringDispatching?: boolean;
   networkWaiting?: boolean;
   activeReportId?: string;
@@ -282,6 +304,8 @@ interface PendingTurnFailure {
 export interface TurnInput {
   recovery?: true;
   id: string;
+  // Room deliveries have unique backend IDs but share one transcript input.
+  transcriptId?: string;
   replies: string[];
   stopped?: "user" | "restart" | "lead";
   answered?: boolean;
@@ -317,7 +341,7 @@ export interface WorkspaceCallbacks {
     status: MessageStatus,
     content: string,
     events?: StreamEvent[],
-    patch?: Partial<Pick<Message, "context" | "effort" | "thinking">> & {
+    patch?: Partial<Pick<Message, "context" | "effort" | "thinking" | "discussion">> & {
       queuedFor?: string | null;
       steering?: boolean;
       pendingDelivery?: Message["pendingDelivery"];
@@ -569,6 +593,7 @@ export class Workspace {
   }
 
   get isIdle(): boolean {
+    if (this.automaticInputs.size) return false;
     for (const a of this.agents.values()) {
       if (this.dispatchHeld(a)) return false;
       if (this.agentState(a) === "waiting") return false;
@@ -661,7 +686,7 @@ export class Workspace {
     for (const [agentId, a] of this.agents) {
       const t = a.input;
       if (t) {
-        const input = this.messages.find((m) => m.id === t.id);
+        const input = this.findMessage(t.transcriptId ?? t.id);
         if (!input) continue;
         const replies = this.messages.filter((m) => t.replies.includes(m.id));
         out.push({ agentId, input, replies, stopped: t.stopped, finished: t.finished });
@@ -825,12 +850,21 @@ export class Workspace {
     this.cb?.onAttention?.(this.id, this.unseen, result);
   }
 
+  private roomClock = 0;
+  private readonly automaticInputs = new Map<string, { input: Message; turn: DiscussionTurn }>();
+  private readonly discussion = new RoomDiscussion(
+    () => [...this.agents.values()].map(({ info }) => info),
+    () => this.roomClock,
+    () => genId("discussion"),
+    (turn) => this.enqueueDiscussion(turn),
+  );
+
   private finished(
     id: string,
     status: MessageStatus,
     content: string,
     events?: StreamEvent[],
-    patch?: Partial<Pick<Message, "context" | "effort" | "thinking">>,
+    patch?: Partial<Pick<Message, "context" | "effort" | "thinking" | "discussion">>,
   ): void {
     this.changed.add(id);
     const msg = this.findMessage(id);
@@ -934,7 +968,9 @@ export class Workspace {
       if (entry.openingPrompt) entry.openingPrompt.replied = true;
       else if (!entry.retryPending) entry.lastEnvelope = undefined;
       entry.currentMsg = this.makeAgentMsg(entry.info.id);
-      if (entry.openingPrompt?.input) entry.currentMsg.replyTo = entry.openingPrompt.input.id;
+      const input = entry.openingPrompt?.input;
+      if (input && !input.roomAutomatic) entry.currentMsg.replyTo = input.roomParent ?? input.id;
+      if (entry.discussionTurn) entry.currentMsg.discussion = entry.discussionTurn.label;
       entry.input?.replies.push(entry.currentMsg.id);
       this.pushMessage(entry.currentMsg);
     }
@@ -1320,8 +1356,10 @@ export class Workspace {
           this.recordTerminalContext(entry, entry.currentMsg, event.context, contextPending);
           if (event.effort) entry.currentMsg.effort = event.effort;
           if (event.thinking) entry.currentMsg.thinking = event.thinking;
+          this.finishRoomTurn(entry, entry.currentMsg, !!event.interrupted);
           const contextPatch = entry.currentMsg.context;
           const patch = {
+            ...(entry.currentMsg.discussion && { discussion: entry.currentMsg.discussion }),
             ...(contextPatch !== undefined && { context: contextPatch }),
             ...(event.effort && { effort: event.effort }),
             ...(event.thinking && { thinking: event.thinking }),
@@ -1333,7 +1371,8 @@ export class Workspace {
             entry.currentMsg.events,
             Object.keys(patch).length ? patch : undefined,
           );
-          this.cb?.onLeadTerminal?.(this, entry.info.id, entry.currentMsg, !!event.interrupted);
+          if (!entry.currentMsg.discussion)
+            this.cb?.onLeadTerminal?.(this, entry.info.id, entry.currentMsg, !!event.interrupted);
           // A turn the model answered while a retry waits (a wake-up, a
           // task's report): the limit is over. That turn saw the cut prompt,
           // so the retry carries on rather than sending it again, and now.
@@ -1342,6 +1381,7 @@ export class Workspace {
             entry.pausedUntil = Date.now();
           }
         }
+        if (!entry.currentMsg) this.finishRoomTurn(entry);
         this.finishReply(entry);
         if (event.interrupted && this.projectLink?.role === "worker") this.cb?.onSaveNow?.();
       } else if (event.kind === "error") {
@@ -1359,7 +1399,11 @@ export class Workspace {
         // The refusal remains in the transcript; only its exact final span is
         // omitted from the progress check. Tools/thinking and earlier text count.
         const confirmed =
-          limit && limit.resetsAt * 1000 > Date.now() && this.isWritable() && !input?.stopped;
+          limit &&
+          limit.resetsAt * 1000 > Date.now() &&
+          this.isWritable() &&
+          !input?.stopped &&
+          !entry.discussionTurn;
         if (confirmed) {
           const before =
             limit.refusalText && msg.content.endsWith(limit.refusalText)
@@ -1399,7 +1443,8 @@ export class Workspace {
           msg.events,
           msg.context !== undefined ? { context: msg.context } : undefined,
         );
-        this.cb?.onLeadTerminal?.(this, entry.info.id, msg, false);
+        if (!msg.discussion) this.cb?.onLeadTerminal?.(this, entry.info.id, msg, false);
+        this.finishRoomTurn(entry);
         this.finishReply(entry);
         if (failedWorkerTurn) this.cb?.onSaveNow?.();
       } else if (event.kind === "subagent_progress" || event.kind === "subagent_done") {
@@ -1576,7 +1621,7 @@ export class Workspace {
       });
     });
     session.on("rateLimit", (info: { rateLimitType?: string; resetsAt?: number }) => {
-      this.cb?.onRateLimit?.(this.id, agentId, info);
+      if (!this.agents.get(agentId)?.discussionTurn) this.cb?.onRateLimit?.(this.id, agentId, info);
     });
     session.setBoundarySteerSource?.(() => this.nextBoundarySteer(agentId, session));
     session.on("steered", (inputId: string) => this.steered(agentId, inputId));
@@ -1649,6 +1694,12 @@ export class Workspace {
     }
     this.finalizeAbort(entry, false);
     this.agents.delete(agentId);
+    if (this.agents.size < 2) this.cancelDiscussion(false);
+    else this.discussion.remove(agentId);
+    for (const input of this.inputs()) {
+      if (input.queuedFor !== agentId || input.status !== "queued") continue;
+      if (input.roomParent || input.roomAutomatic) this.completeDispatch(input, "error");
+    }
     this.cb?.onCommandsUpdate?.(agentId, []);
 
     if (entry.info.isDefault && this.agents.size > 0) {
@@ -1693,6 +1744,8 @@ export class Workspace {
   // forget it, without starting anything still queued.
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.discussion.cancel();
+    this.automaticInputs.clear();
     await Promise.all(
       [...this.agents].map(([agentId, entry]) => this.releaseSession(agentId, entry)),
     );
@@ -1815,6 +1868,7 @@ export class Workspace {
       !this.messages.some(
         (m, index) =>
           m.queuedFor === agent.info.id ||
+          m.roomInputs?.some((input) => input.queuedFor === agent.info.id) ||
           (m.kind === "agent" &&
             m.agentId === agent.info.id &&
             !m.localCommand &&
@@ -2038,15 +2092,34 @@ export class Workspace {
     images?: Array<{ name: string; url: string; path: string }>,
     quote?: { messageId: string; agentId: string | null; content: string },
     onAccepted?: () => void,
+    rounds: DiscussionRounds = 0,
   ): Promise<void> {
     this.assertWritable();
-    let resolvedTarget = target;
-    let cleanContent = content;
-    const mentionMatch = content.match(/(?:^|\s)@(\S+)/);
-    if (mentionMatch) {
-      if (!resolvedTarget) resolvedTarget = mentionMatch[1];
-      cleanContent = content.replace(/(?:^|\s)@\S+\s*/, " ").trim();
+    this.cancelDiscussion();
+    const room = parseRoomTargets(
+      content,
+      [...this.agents.values()].map(({ info }) => info),
+    );
+    const group = room.targets.length > 1;
+    if (group && !room.slash) {
+      await this.sendRoomMessage(
+        content,
+        room.clean,
+        room.targets,
+        room.firstExplicit?.id ?? this.resolveAgent()?.info.id,
+        images,
+        quote,
+        onAccepted,
+        rounds,
+      );
+      return;
     }
+    const resolvedTarget =
+      target ||
+      (group
+        ? (room.firstExplicit?.id ?? this.resolveAgent()?.info.id)
+        : room.first && (isAllMention(room.first) ? this.resolveAgent()?.info.id : room.first));
+    let cleanContent = group ? room.clean : room.singleClean;
 
     const agent = this.resolveAgent(resolvedTarget);
     if (!agent)
@@ -2083,38 +2156,14 @@ export class Workspace {
       return;
     }
 
-    const msgImages = images?.map(({ name, url }) => ({ name, url }));
-
-    let forwardRef: ForwardRef | undefined;
-    if (quote) {
-      const author = this.authorOf(
-        this.messages.find((m) => m.id === quote.messageId) ?? { agentId: quote.agentId },
-      );
-      const preview = quote.content.slice(0, 120) + (quote.content.length > 120 ? "..." : "");
-      forwardRef = {
-        messageId: quote.messageId,
-        fromAgent: author.name,
-        fromAvatar: author.avatar,
-        preview,
-      };
-    }
-
-    let prompt = cleanContent;
-    if (quote) {
-      const quotedFrom = forwardRef?.fromAgent ?? "Unknown";
-      prompt = `[Quoted from ${quotedFrom}]:\n${quote.content}\n\n${prompt}`;
-    }
-    const pi = agent.session.getState().config.backend === "pi";
-    const attachmentIds = pi ? images?.map((img) => path.basename(img.url)) : undefined;
-    if (attachmentIds?.length)
-      validatePiAttachments(
-        this.storage?.uploadsDir ?? agent.session.getState().config.uploadsDir,
-        attachmentIds,
-      );
-    if (!pi && images?.length) {
-      const refs = images.map((img) => img.path).join("\n");
-      prompt = `[User attached image(s). Use the Read tool to view:\n${refs}]\n\n${prompt || "Please look at the attached image(s)."}`;
-    }
+    const forwardRef = this.quoteReference(quote);
+    const { text, attachmentIds } = this.manualPrompt(
+      agent,
+      cleanContent,
+      images,
+      quote,
+      forwardRef,
+    );
 
     // A busy agent queues the message instead of rejecting it; the queue
     // drains in order whenever the agent becomes idle. A pending rate-limit
@@ -2140,16 +2189,21 @@ export class Workspace {
       content,
       timestamp: Date.now(),
       status: busy ? "queued" : "starting",
-      images: msgImages?.length ? msgImages : undefined,
+      images: images?.length ? images.map(({ name, url }) => ({ name, url })) : undefined,
       forwardRef,
       queuedFor: agent.info.id,
       ...(steering && { steering: true }),
     };
-    this.enqueueManualInput(
-      userMsg,
-      { inputId: userMsg.id, text: prompt, attachmentIds },
-      admission,
-    );
+    const modelPrompt = !cleanContent.trimStart().startsWith("/") && !paired;
+    if (this.agents.size > 1 && modelPrompt) this.noteRoomInput(userMsg, [agent.info.id]);
+    this.enqueueManualInput(userMsg, { inputId: userMsg.id, text, attachmentIds }, admission);
+    if (userMsg.roomSequence)
+      this.discussion.begin(
+        userMsg.id,
+        [{ agentId: agent.info.id, id: userMsg.id }],
+        0,
+        cleanContent,
+      );
     if (steering) {
       const steeringPrompt = this.steer(agent, userMsg);
       onAccepted?.();
@@ -2166,6 +2220,285 @@ export class Workspace {
     await dispatching;
   }
 
+  private quoteReference(quote?: {
+    messageId: string;
+    agentId: string | null;
+    content: string;
+  }): ForwardRef | undefined {
+    if (!quote) return;
+    const author = this.authorOf(this.findMessage(quote.messageId) ?? quote);
+    return {
+      messageId: quote.messageId,
+      fromAgent: author.name,
+      fromAvatar: author.avatar,
+      preview: quote.content.slice(0, 120) + (quote.content.length > 120 ? "..." : ""),
+    };
+  }
+
+  private manualPrompt(
+    agent: AgentEntry,
+    content: string,
+    images?: Array<{ name: string; url: string; path: string }>,
+    quote?: { content: string },
+    forwardRef?: ForwardRef,
+  ): Pick<PromptEnvelope, "text" | "attachmentIds"> {
+    let text = quote
+      ? `[Quoted from ${forwardRef?.fromAgent ?? "Unknown"}]:\n${quote.content}\n\n${content}`
+      : content;
+    const config = agent.session.getState().config;
+    const attachmentIds =
+      config.backend === "pi" ? images?.map((img) => path.basename(img.url)) : undefined;
+    if (attachmentIds?.length)
+      validatePiAttachments(this.storage?.uploadsDir ?? config.uploadsDir, attachmentIds);
+    if (config.backend !== "pi" && images?.length) {
+      const refs = images.map((img) => img.path).join("\n");
+      text = `[User attached image(s). Use the Read tool to view:\n${refs}]\n\n${text || "Please look at the attached image(s)."}`;
+    }
+    return { text, attachmentIds };
+  }
+
+  private async sendRoomMessage(
+    content: string,
+    clean: string,
+    targets: AgentInfo[],
+    synthesizer: string | undefined,
+    images?: Array<{ name: string; url: string; path: string }>,
+    quote?: { messageId: string; agentId: string | null; content: string },
+    accepted?: () => void,
+    rounds: DiscussionRounds = 0,
+  ): Promise<void> {
+    const parent: Message = {
+      id: genId("msg"),
+      kind: "user",
+      agentId: null,
+      content,
+      timestamp: Date.now(),
+      status: "queued",
+      images: images?.length ? images.map(({ name, url }) => ({ name, url })) : undefined,
+      forwardRef: this.quoteReference(quote),
+    };
+    // All structured drafts read the same pre-draft boundary, even when a
+    // busy target does not start until another target has already replied.
+    const through = rounds ? this.roomClock : undefined;
+    const deliveries = targets.map(({ id }) => {
+      const agent = this.agents.get(id)!;
+      const inputId = genId("input");
+      const prompt = this.manualPrompt(agent, clean, images, quote, parent.forwardRef);
+      const input: Message = {
+        id: inputId,
+        kind: "user",
+        agentId: null,
+        content: "",
+        timestamp: parent.timestamp,
+        status: "queued",
+        queuedFor: id,
+        roomParent: parent.id,
+        roomThrough: through,
+        queuedEnvelope: { inputId, ...prompt },
+      };
+      return { agent, input };
+    });
+    this.noteRoomInput(
+      parent,
+      targets.map(({ id }) => id),
+    );
+    // A manual room prompt supersedes waiting lead recovery without sharing
+    // that project's private recovery receipts with other room participants.
+    const admission = this.cb?.prepareManualInput?.(this, targets[0].id, false);
+    for (const { agent, input } of deliveries) {
+      if (!agent.lastEnvelope) this.dropRetry(agent);
+      const retried =
+        agent.retryPending && !agent.session.isRunning && this.retryLast(agent.info.id);
+      if (
+        !retried &&
+        !this.leadOutage &&
+        !this.dispatchHeld(agent) &&
+        !this.held(agent) &&
+        !this.hasQueued(agent)
+      ) {
+        input.status = "starting";
+      }
+    }
+    parent.roomInputs = deliveries.map(({ input }) => input);
+    this.refreshRoomDelivery(parent);
+    this.enqueue(parent, undefined, admission);
+    this.discussion.begin(
+      parent.id,
+      deliveries.map(({ agent, input }) => ({ agentId: agent.info.id, id: input.id })),
+      rounds,
+      clean,
+      synthesizer,
+    );
+    accepted?.();
+    await Promise.all(
+      deliveries.map(async ({ agent, input }) => {
+        if (input.status === "starting")
+          return this.dispatchPrompt(agent, input.queuedEnvelope!, input);
+        this.dequeueNext(agent.info.id);
+      }),
+    );
+  }
+
+  private noteRoomInput(input: Message, recipients: string[]): void {
+    input.roomRecipients = recipients;
+    input.roomSequence = ++this.roomClock;
+  }
+
+  private finishRoomTurn(entry: AgentEntry, message?: Message, interrupted = false): void {
+    if (this.agents.size < 2 && !entry.discussionTurn) return;
+    const text =
+      message?.status === "done" &&
+      !message.localCommand &&
+      !interrupted &&
+      !entry.input?.stopped &&
+      !message.content.startsWith("*(no output —")
+        ? conclusionOf(message)
+        : "";
+    if (message && text) {
+      message.roomSequence = ++this.roomClock;
+      message.roomAuthor = entry.info.name;
+    }
+    const inputId = entry.input?.id;
+    if (inputId) {
+      const limit = this.discussion.settled(
+        entry.info.id,
+        inputId,
+        message && text
+          ? {
+              messageId: message.id,
+              agentId: entry.info.id,
+              text,
+            }
+          : undefined,
+      );
+      if (limit && message?.discussion?.kind === "relay")
+        message.discussion = { ...message.discussion, limitReached: true };
+    }
+    entry.discussionTurn = undefined;
+  }
+
+  private enqueueDiscussion(turn: DiscussionTurn): void {
+    if (!this.isWritable()) return;
+    const input: Message = {
+      id: turn.id,
+      kind: "user",
+      agentId: null,
+      content: "",
+      timestamp: Date.now(),
+      status: "queued",
+      queuedFor: turn.agentId,
+      queuedEnvelope: { inputId: turn.id, text: turn.text, roomDiscussion: true },
+      roomAutomatic: true,
+    };
+    this.automaticInputs.set(turn.id, { input, turn });
+    // Terminal events can precede the send receipt. Let the current event
+    // unwind first; a still-opening target resumes through its normal queue.
+    queueMicrotask(() => {
+      if (this.automaticInputs.has(turn.id)) this.dequeueNext(turn.agentId);
+    });
+  }
+
+  private cancelDiscussion(cancelDrafts = true): void {
+    const drafts =
+      cancelDrafts && this.discussion.inDraftRound
+        ? this.inputs().filter(
+            (input) =>
+              input.status === "queued" &&
+              input.roomParent &&
+              this.discussion.isPendingTurn(input.queuedFor!, input.id),
+          )
+        : [];
+    this.discussion.cancel();
+    this.automaticInputs.clear();
+    for (const draft of drafts) this.completeDispatch(draft, "error");
+    for (const entry of this.agents.values()) {
+      if (!entry.discussionTurn) continue;
+      entry.discussionTurn = undefined;
+      this.cancelOpeningPrompt(entry, "Peer discussion cancelled");
+      entry.session.abort();
+      this.finalizeAbort(entry, true);
+    }
+  }
+
+  private advanceRoomCursor(entry: AgentEntry, through?: number): void {
+    if (through !== undefined && through > (entry.roomCursor ?? 0)) entry.roomCursor = through;
+  }
+
+  private promptWithRoomContext(entry: AgentEntry, envelope: PromptEnvelope, input?: Message) {
+    const turn = input?.roomAutomatic ? this.automaticInputs.get(input.id)?.turn : undefined;
+    if (
+      this.agents.size < 2 ||
+      !input ||
+      (!turn && !input.roomSequence && !input.roomParent) ||
+      envelope.reportId ||
+      envelope.text.trimStart().startsWith("/")
+    )
+      return { envelope };
+    const through = turn?.through ?? input.roomThrough ?? this.roomClock;
+    const block = roomUpdates(
+      this.messages,
+      this.agents,
+      entry.info.id,
+      entry.roomCursor ?? 0,
+      through,
+      turn?.covered,
+    );
+    return {
+      envelope: block ? { ...envelope, text: `${block}\n\n${envelope.text}` } : envelope,
+      through,
+    };
+  }
+
+  private inputs(): Message[] {
+    // Flatten nested dispatch slots in transcript order. Automatic turns
+    // have no transcript row and always wait behind manual input.
+    if (!this.roomClock && !this.automaticInputs.size) return this.messages;
+    const inputs: Message[] = [];
+    for (const message of this.messages) {
+      if (message.roomInputs) inputs.push(...message.roomInputs);
+      else if (message.kind === "user") inputs.push(message);
+    }
+    for (const { input } of this.automaticInputs.values()) inputs.push(input);
+    return inputs;
+  }
+
+  private refreshRoomDelivery(parent: Message): void {
+    const slots = parent.roomInputs!;
+    const pending =
+      slots.find((m) => m.status === "queued") ??
+      slots.find((m) => m.status === "dispatching") ??
+      slots.find((m) => m.status === "starting");
+    parent.status =
+      pending?.status ??
+      (slots.some((m) => m.status === "outcome_unknown")
+        ? "outcome_unknown"
+        : slots.some((m) => m.status === "done")
+          ? "done"
+          : "error");
+    parent.queuedFor = pending?.queuedFor;
+    parent.pendingDelivery = pending?.pendingDelivery;
+    if (!pending) delete parent.roomInputs;
+  }
+
+  private touchInput(input: Message): Message | undefined {
+    if (input.roomAutomatic) return;
+    const visible = input.roomParent ? this.findMessage(input.roomParent) : input;
+    if (visible) {
+      if (visible.roomInputs) this.refreshRoomDelivery(visible);
+      this.changed.add(visible.id);
+    }
+    return visible;
+  }
+
+  private publishInput(input: Message): void {
+    const visible = this.touchInput(input);
+    if (visible) this.finished(visible.id, visible.status, visible.content);
+  }
+
+  private holdsRoomTurn(entry: AgentEntry): boolean {
+    return !!entry.discussionTurn || this.discussion.isPendingTurn(entry.info.id, entry.input?.id);
+  }
+
   // Whether a message for the agent now goes into its running turn: the
   // backend takes one mid-turn (Codex), and neither messages waiting ahead
   // nor a rate limit hold the queue. Decided before the message is shown,
@@ -2175,8 +2508,9 @@ export class Workspace {
       !!agent.session.steer &&
       agent.session.isRunning &&
       agent.session.canSteer !== false &&
+      !this.holdsRoomTurn(agent) &&
       !this.held(agent) &&
-      !this.messages.some(
+      !this.inputs().some(
         (m) => m.status === "queued" && m.queuedFor === agent.info.id && !m.steering,
       )
     );
@@ -2193,25 +2527,29 @@ export class Workspace {
       this.isWritable() &&
       this.cb?.canDequeue?.() !== false &&
       !this.leadOutage &&
+      !this.holdsRoomTurn(entry) &&
       !this.held(entry) &&
       !entry.openingPrompt &&
       !entry.recoveringDispatching;
-    if (!available()) return;
-    const msg = this.messages.find(
+    if (!entry || !available()) return;
+    const msg = this.inputs().find(
       (item) => item.queuedFor === agentId && item.status === "queued",
     );
     const envelope = msg?.queuedEnvelope;
     if (
       !msg ||
       !envelope ||
+      msg.roomParent ||
+      msg.roomAutomatic ||
       envelope.reportId ||
       envelope.panelContext !== undefined ||
       envelope.text.trimStart().startsWith("/")
     )
       return;
+    const context = this.promptWithRoomContext(entry, envelope, msg);
     let deliveryTimer: ReturnType<typeof setTimeout> | undefined;
     return {
-      envelope: { ...envelope, trigger: inputTrigger(msg) },
+      envelope: { ...context.envelope, trigger: inputTrigger(msg) },
       claim: () => {
         if (
           !available() ||
@@ -2222,11 +2560,14 @@ export class Workspace {
           return false;
         // Commit before the RPC write. Restart recovery already treats dispatching as non-replayable.
         msg.status = "dispatching";
+        if (context.through !== undefined)
+          (entry.steeringContext ??= new Map()).set(msg.id, context.through);
         this.touch([msg.id]);
         try {
           this.cb?.onSaveNow?.();
         } catch (error) {
           msg.status = "queued";
+          entry.steeringContext?.delete(msg.id);
           throw error;
         }
         this.finished(msg.id, msg.status, msg.content);
@@ -2242,6 +2583,7 @@ export class Workspace {
           this.finished(msg.id, msg.status, msg.content);
         } else if (outcome === "read") this.steered(agentId, msg.id);
         else this.completeDispatch(msg, outcome === "handled" ? "done" : outcome);
+        entry.steeringContext?.delete(msg.id);
       },
     };
   }
@@ -2249,13 +2591,18 @@ export class Workspace {
   // A message handed to the running turn stays queued until the model reads
   // it (steered); not taken, it waits like any other.
   private async steer(agent: AgentEntry, msg: Message): Promise<void> {
+    const context = this.promptWithRoomContext(agent, msg.queuedEnvelope!, msg);
+    if (context.through !== undefined)
+      (agent.steeringContext ??= new Map()).set(msg.id, context.through);
     const taken = await agent.session.steer!(
-      msg.queuedEnvelope?.text ?? msg.content,
+      context.envelope.text,
       msg.id,
       inputTrigger(msg),
     ).catch(() => false);
     // Given back meanwhile (unread) when the turn ended under the request.
-    if (taken || !msg.steering) return;
+    if (taken) return;
+    agent.steeringContext?.delete(msg.id);
+    if (!msg.steering) return;
     delete msg.steering;
     this.finished(msg.id, msg.status, msg.content);
     this.dequeueNext(agent.info.id);
@@ -2267,6 +2614,8 @@ export class Workspace {
     const entry = this.agents.get(agentId);
     const msg = this.messages.find((m) => m.id === inputId);
     if (!entry || !msg) return;
+    this.advanceRoomCursor(entry, entry.steeringContext?.get(inputId));
+    entry.steeringContext?.delete(inputId);
     delete msg.steering;
     delete msg.queuedFor;
     delete msg.queuedEnvelope;
@@ -2301,6 +2650,7 @@ export class Workspace {
     for (const m of back) {
       delete m.steering;
       const entry = m.queuedFor ? this.agents.get(m.queuedFor) : undefined;
+      entry?.steeringContext?.delete(m.id);
       if (
         (m.from?.role === "lead" || m.from?.role === "panel") &&
         (this.projectLink?.unreported || (entry && this.leadBlockedOnAgent(entry)))
@@ -2330,7 +2680,7 @@ export class Workspace {
     const agent = this.resolveAgent();
     if (!agent) throw new Error(`"${this.name}" has no agent to take the message`);
     const paused = this.held(agent);
-    const waiting = this.messages.some(
+    const waiting = this.inputs().some(
       (m) => m.status === "queued" && m.queuedFor === agent.info.id && !m.steering,
     );
     const queued = !!this.leadOutage || this.dispatchHeld(agent) || paused || waiting;
@@ -2361,7 +2711,7 @@ export class Workspace {
     return setTimeout(() => {
       if (!isCurrent() || (input.status !== "starting" && input.status !== "dispatching")) return;
       input.pendingDelivery = input.status === "starting" ? "starting" : "sending";
-      this.finished(input.id, input.status, input.content);
+      this.publishInput(input);
     }, 350);
   }
 
@@ -2373,16 +2723,25 @@ export class Workspace {
     banner?: StreamEvent,
     trigger: InputTrigger = inputTrigger(input),
   ): Promise<void> {
-    const envelope =
-      typeof prompt === "string" ? { inputId: genId("input"), text: prompt } : prompt;
+    const base = typeof prompt === "string" ? { inputId: genId("input"), text: prompt } : prompt;
+    const { envelope, through } = this.promptWithRoomContext(agent, base, input);
     const outage = envelope.recovery ? this.leadOutage : undefined;
-    const opening = { envelope, input, writeClaimed: false, replied: false };
+    const opening = { envelope, input, writeClaimed: false, replied: false, roomThrough: through };
     agent.openingPrompt = opening;
-    agent.lastEnvelope = envelope.reportId ? undefined : envelope;
+    agent.discussionTurn = input?.roomAutomatic
+      ? this.automaticInputs.get(input.id)?.turn
+      : undefined;
+    agent.lastEnvelope = envelope.reportId || input?.roomAutomatic ? undefined : envelope;
     if (input) {
       input.queuedEnvelope ??= envelope;
       if (!input.from) agent.pendingTurnFailures = undefined;
-      agent.input = { id: input.id, replies: [], ...(envelope.recovery && { recovery: true }) };
+      const transcriptId = input.roomParent ?? agent.discussionTurn?.parentId;
+      agent.input = {
+        id: input.id,
+        replies: [],
+        ...(transcriptId && { transcriptId }),
+        ...(envelope.recovery && { recovery: true }),
+      };
       if (input.from) agent.delivered = agent.input;
     }
     if (agent.currentMsg) this.settle(agent.currentMsg);
@@ -2402,9 +2761,9 @@ export class Workspace {
     try {
       if (input?.status === "queued") {
         input.status = "starting";
-        this.finished(input.id, input.status, input.content);
+        this.publishInput(input);
       }
-      if (input?.status === "starting")
+      if (input?.status === "starting" && !input.roomAutomatic)
         deliveryTimer = this.revealPendingDelivery(input, isOpeningReply);
       if (banner) {
         this.ensureAgentMsg(agent);
@@ -2430,14 +2789,16 @@ export class Workspace {
               opening.writeClaimed = true;
               return;
             }
-            this.touch([input.id]);
             input.dispatchAttempt = attempt;
             input.status = "dispatching";
-            this.cb?.onSaveNow?.();
+            if (!input.roomAutomatic) {
+              this.touchInput(input);
+              this.cb?.onSaveNow?.();
+            }
             opening.writeClaimed = true;
             if (envelope.reportId)
               this.cb?.onReportDeliveryState?.(envelope.reportId, "dispatching");
-            this.finished(input.id, input.status, input.content);
+            this.publishInput(input);
           },
         },
       );
@@ -2459,6 +2820,7 @@ export class Workspace {
         if (
           receipt.retryable &&
           input &&
+          !input.roomAutomatic &&
           !(envelope.reportId && envelope.reportId === this.leadOutage?.batch?.id)
         ) {
           this.requeueReport(input);
@@ -2471,7 +2833,10 @@ export class Workspace {
       } else if (receipt?.disposition !== "started") {
         const handled = receipt?.disposition === "handled";
         this.acceptDispatch(agent, envelope.inputId, !handled);
-        if (handled) agent.activeReportId = undefined;
+        if (handled) {
+          agent.activeReportId = undefined;
+          this.finishRoomTurn(agent);
+        }
         if (backend === "codex" && !agent.session.isRunning) this.settleActiveReport(agent);
         this.settleIdleReply(agent);
       }
@@ -2491,14 +2856,14 @@ export class Workspace {
 
   // Flush the proof of an unsent attempt before mirroring the journal.
   private requeueReport(msg: Message): void {
-    this.touch([msg.id]);
     msg.status = "queued";
     delete msg.pendingDelivery;
     delete msg.dispatchAttempt;
+    this.touchInput(msg);
     this.cb?.onSaveNow?.();
     if (msg.queuedEnvelope?.reportId)
       this.cb?.onReportDeliveryState?.(msg.queuedEnvelope.reportId, "enqueued");
-    this.finished(msg.id, msg.status, msg.content);
+    this.publishInput(msg);
   }
 
   private enqueueManualInput(
@@ -2521,11 +2886,11 @@ export class Workspace {
     );
   }
 
-  private enqueue(msg: Message, envelope: PromptEnvelope, admission?: ManualInputAdmission): void {
+  private enqueue(msg: Message, envelope?: PromptEnvelope, admission?: ManualInputAdmission): void {
     this.assertWritable();
     msg.queuedEnvelope = envelope;
     const panelMessage: Message | undefined =
-      envelope.panelContext === undefined
+      envelope?.panelContext === undefined
         ? undefined
         : {
             id: pairedPanelMessageId(msg.id),
@@ -2560,7 +2925,7 @@ export class Workspace {
     }
     admission?.committed();
     if (msg.timestamp > this.lastActivityAt) this.lastActivityAt = msg.timestamp;
-    if (panelMessage && envelope.reportId)
+    if (panelMessage && envelope?.reportId)
       this.cb?.onReportDeliveryState?.(envelope.reportId, "enqueued");
     for (const message of messages) this.cb?.onNewMessage(this.id, message);
   }
@@ -2572,12 +2937,17 @@ export class Workspace {
     beforeBroadcast?: () => void,
   ): void {
     const reportId = msg.dispatchAttempt?.reportId ?? msg.queuedEnvelope?.reportId;
-    this.touch([msg.id]);
     msg.status = status;
     delete msg.pendingDelivery;
     delete msg.queuedEnvelope;
     delete msg.queuedFor;
     delete msg.steering;
+    if (msg.roomAutomatic) {
+      this.automaticInputs.delete(msg.id);
+      beforeBroadcast?.();
+      return;
+    }
+    const visible = this.touchInput(msg);
     this.cb?.onSaveNow?.();
     if (reportId)
       this.cb?.onReportDeliveryState?.(
@@ -2586,10 +2956,10 @@ export class Workspace {
         status === "done" ? { acceptedByPiAt: Date.now() } : { errorMessage },
       );
     beforeBroadcast?.();
-    this.finished(msg.id, status, msg.content);
+    if (visible) this.finished(visible.id, visible.status, visible.content);
     if (status === "outcome_unknown") {
       this.postSystemMessage(
-        `⚠ Delivery outcome unknown for message ${msg.id}. Verify it before retrying; it will not be resent automatically.`,
+        `⚠ Delivery outcome unknown for message ${visible?.id ?? msg.id}. Verify it before retrying; it will not be resent automatically.`,
       );
       this.cb?.onSaveNow?.();
     }
@@ -2598,6 +2968,8 @@ export class Workspace {
   private acceptDispatch(entry: AgentEntry, inputId?: string, started = false): void {
     const opening = entry.openingPrompt;
     if (!opening || inputId !== opening.envelope.inputId) return;
+    this.advanceRoomCursor(entry, opening.roomThrough);
+    if (opening.input?.roomAutomatic && opening.roomThrough !== undefined) this.cb?.onSaveNow?.();
     const openReply = () => {
       if (started && entry.session.isRunning && !opening.replied) this.ensureAgentMsg(entry);
     };
@@ -2635,6 +3007,7 @@ export class Workspace {
     if (status === "error" && !this.disposed && (!replied || entry.currentMsg))
       entry.handler({ kind: "error", content: `[send failed] ${reason}` });
     else if (!entry.currentMsg) this.settleIdleReply(entry);
+    this.finishRoomTurn(entry);
     setTimeout(() => this.dequeueNext(entry.info.id), 0);
   }
 
@@ -2745,7 +3118,7 @@ export class Workspace {
   }
 
   settleStartingOnRestore(): void {
-    for (const msg of this.messages) {
+    for (const msg of this.inputs()) {
       // Recovery restore settles the batch and its unwritten input together.
       const batch = this.leadOutage?.batch;
       if (msg.status === "starting" && !(batch && msg.queuedEnvelope?.reportId === batch.id))
@@ -2754,7 +3127,7 @@ export class Workspace {
   }
 
   settlePlainDispatchingOnRestore(): void {
-    for (const msg of this.messages) {
+    for (const msg of this.inputs()) {
       if (msg.status === "dispatching" && !msg.dispatchAttempt?.reportId) {
         this.completeDispatch(msg, "outcome_unknown");
       }
@@ -2821,13 +3194,17 @@ export class Workspace {
     }
   }
 
-  private hasQueued(agent: AgentEntry, skipInboxReports = false): boolean {
-    return this.messages.some(
+  hasQueuedFor(agentId: string, skipInboxReports = false): boolean {
+    return this.inputs().some(
       (msg) =>
         msg.status === "queued" &&
-        msg.queuedFor === agent.info.id &&
+        msg.queuedFor === agentId &&
         (!skipInboxReports || !isInboxReport(msg)),
     );
+  }
+
+  private hasQueued(agent: AgentEntry, skipInboxReports = false): boolean {
+    return this.hasQueuedFor(agent.info.id, skipInboxReports);
   }
 
   private dispatchHeld(agent: AgentEntry): boolean {
@@ -2872,7 +3249,8 @@ export class Workspace {
 
   async seal(): Promise<void> {
     this.disposed = true;
-    for (const msg of this.messages) {
+    this.cancelDiscussion();
+    for (const msg of this.inputs()) {
       if (msg.status === "queued" || msg.status === "starting")
         this.completeDispatch(msg, "error", "Project sealed");
       else if (msg.status === "dispatching") this.completeDispatch(msg, "outcome_unknown");
@@ -2939,7 +3317,7 @@ export class Workspace {
       return;
     if (this.held(entry)) return;
     const pending = (m: Message) => m.status === "queued" && m.queuedFor === agentId && !m.steering;
-    const paired = this.messages.find(
+    const paired = this.inputs().find(
       (m) => pending(m) && m.queuedEnvelope?.panelContext !== undefined,
     );
     if (
@@ -2949,7 +3327,7 @@ export class Workspace {
       return;
     let msg: Message | undefined;
     while (true) {
-      const candidate = paired ?? this.messages.find(pending);
+      const candidate = paired ?? this.inputs().find(pending);
       if (!candidate) break;
       if (
         (candidate.from?.role === "lead" || candidate.from?.role === "panel") &&
@@ -2985,6 +3363,8 @@ export class Workspace {
       entry,
       msg.queuedEnvelope ?? { inputId: msg.id, text: msg.content },
       msg,
+      undefined,
+      msg.roomAutomatic ? "auto" : inputTrigger(msg),
     );
   }
 
@@ -3037,7 +3417,7 @@ export class Workspace {
       return true;
     }
     // A message waiting for the agent resumes it as well as a carry-on.
-    if (this.messages.some((m) => m.status === "queued" && m.queuedFor === agentId)) return false;
+    if (this.hasQueuedFor(agentId)) return false;
     this.pushSystemMessage(
       `↻ **${entry.info.name}** was told to carry on where the usage limit cut it off.`,
     );
@@ -3066,6 +3446,21 @@ export class Workspace {
       (m) => m.id === messageId && m.status === "queued" && (evenSteered || !m.steering),
     );
     if (idx < 0) return false;
+    const message = this.messages[idx];
+    if (message.roomInputs) {
+      const queued = message.roomInputs.filter((input) => input.status === "queued");
+      for (const input of queued) this.discussion.settled(input.queuedFor!, input.id);
+      if (queued.length < message.roomInputs.length) {
+        for (const input of queued) {
+          input.status = "error";
+          delete input.queuedFor;
+          delete input.queuedEnvelope;
+        }
+        this.refreshRoomDelivery(message);
+        this.finished(message.id, message.status, message.content);
+        return true;
+      }
+    }
     const [removed] = this.messages.splice(idx, 1);
     if (removed.queuedEnvelope?.panelContext !== undefined) {
       const panelId = pairedPanelMessageId(removed.id);
@@ -3085,8 +3480,9 @@ export class Workspace {
 
   async forwardMessage(messageId: string, targetAgentId: string): Promise<void> {
     this.assertWritable();
-    const original = this.messages.find((m) => m.id === messageId);
+    const original = this.findMessage(messageId);
     if (!original || !original.content) throw new Error("Message not found");
+    this.cancelDiscussion();
 
     const author = this.authorOf(original);
 
@@ -3120,7 +3516,11 @@ export class Workspace {
       forwardRef,
       queuedFor: agent.info.id,
     };
+    if (this.agents.size > 1 && !admission?.panelContext)
+      this.noteRoomInput(userMsg, [agent.info.id]);
     this.enqueueManualInput(userMsg, { inputId: userMsg.id, text: prompt }, admission);
+    if (userMsg.roomSequence)
+      this.discussion.begin(userMsg.id, [{ agentId: agent.info.id, id: userMsg.id }], 0, prompt);
     if (busy) return;
 
     await this.dispatchPrompt(agent, userMsg.queuedEnvelope!, userMsg);
@@ -3146,6 +3546,11 @@ export class Workspace {
   }
 
   abortAgent(agentId: string): void {
+    this.cancelDiscussion();
+    this.abortAgentTurn(agentId);
+  }
+
+  private abortAgentTurn(agentId: string): void {
     const entry = this.agents.get(agentId);
     if (!entry) return;
     this.cb?.onLeadStop?.(this, agentId);
@@ -3158,6 +3563,7 @@ export class Workspace {
   }
 
   abortAll(by: "user" | "restart" | "lead" = "user"): void {
+    this.cancelDiscussion(by !== "restart");
     if (by === "user") this.cb?.onLeadStop?.(this);
     for (const entry of this.agents.values()) {
       const busy = this.hasWork(entry);
@@ -3188,6 +3594,7 @@ export class Workspace {
   // abort: a second one while the first is unanswered (the SDK's request has
   // no timeout), or one while the process is still starting.
   async interruptAgent(agentId: string): Promise<void> {
+    this.cancelDiscussion();
     const entry = this.agents.get(agentId);
     if (!entry) return;
     this.cb?.onLeadStop?.(this, agentId);
@@ -3198,7 +3605,7 @@ export class Workspace {
       session.interruptPending ||
       (entry.openingPrompt && (!session.isRunning || !entry.openingPrompt.writeClaimed))
     ) {
-      this.abortAgent(agentId);
+      this.abortAgentTurn(agentId);
       return;
     }
     this.settleStale(entry);
@@ -3219,11 +3626,12 @@ export class Workspace {
       entry.input === inputBefore &&
       entry.currentMsg?.id === msgBefore
     ) {
-      this.abortAgent(agentId);
+      this.abortAgentTurn(agentId);
     }
   }
 
   async interruptAll(): Promise<void> {
+    this.cancelDiscussion();
     await Promise.all([...this.agents.keys()].map((id) => this.interruptAgent(id)));
   }
 
@@ -3245,6 +3653,7 @@ export class Workspace {
     by: "user" | "restart" | "lead" = "user",
   ): void {
     if (busy && entry.input) entry.input.stopped = by;
+    entry.steeringContext?.clear();
     if (by !== "restart") {
       entry.pendingTurnFailures = undefined;
       this.dropRetry(entry);
@@ -3264,6 +3673,7 @@ export class Workspace {
     if (!entry) return false;
     if (this.dispatchHeld(entry)) return false;
     if (this.hasWork(entry) && entry.input) entry.input.stopped = "user";
+    entry.roomCursor = undefined;
     entry.pendingTurnFailures = undefined;
     this.dropRetry(entry);
     if (entry.session.resetContext) entry.session.resetContext();
@@ -3380,6 +3790,7 @@ export class Workspace {
       cwd: this.cwd,
       normalizedCwd: this.normalizedCwd,
       ...(this.leadOutage && { leadOutage: this.leadOutage }),
+      ...(this.roomClock && { roomClock: this.roomClock }),
       agents: [...this.agents.values()].map((a) => {
         return {
           ...a.info,
@@ -3393,6 +3804,7 @@ export class Workspace {
           }),
           ...(a.pendingTurnFailures?.length && { pendingTurnFailures: a.pendingTurnFailures }),
           ...(a.retryPending && { pausedUntil: a.pausedUntil, lastEnvelope: a.lastEnvelope }),
+          ...(a.roomCursor && { roomCursor: a.roomCursor }),
         };
       }),
       ...(this.messagesLoaded && { messages: this.messages.map(withoutLiveTiming) }),
@@ -3430,6 +3842,7 @@ export class Workspace {
     ws.archivedAt = state.archivedAt ?? null;
     ws.projectLink = state.projectLink;
     ws.leadOutage = state.leadOutage;
+    ws.roomClock = state.roomClock ?? 0;
     // Old unread counts included input, placeholders, and system messages.
     ws.unseen = state.attention?.unread ?? 0;
     ws.lastResult = state.attention?.lastResult;
@@ -3459,6 +3872,17 @@ export class Workspace {
     // An orphaned queued report is still owned by the Lead workspace.
     const agentIds = new Set(state.agents.map((a) => a.id));
     ws.messages = ws.messages.filter((m) => {
+      if (m.roomInputs) {
+        const before = m.roomInputs.length;
+        m.roomInputs = m.roomInputs.filter(
+          (input) => input.status !== "queued" || agentIds.has(input.queuedFor ?? ""),
+        );
+        if (m.roomInputs.length !== before) {
+          ws.refreshRoomDelivery(m);
+          ws.touch([m.id]);
+        }
+        return true;
+      }
       if (m.status !== "queued" || !m.queuedFor || agentIds.has(m.queuedFor)) return true;
       if (!m.queuedEnvelope?.reportId) return false;
       delete m.queuedFor;
@@ -3499,6 +3923,7 @@ export class Workspace {
           (legacyPrompt != null ? { inputId: genId("input"), text: legacyPrompt } : undefined),
         retryPending: agentState.pausedUntil !== undefined,
         pendingTurnFailures: agentState.pendingTurnFailures,
+        roomCursor: agentState.roomCursor,
       });
       if (agentState.delivered) {
         const { since, waiting, ...delivered } = agentState.delivered;
@@ -3593,13 +4018,7 @@ function answered(msg: Message, content = msg.content): boolean {
 
 // A plan or preamble before the last tool call is not the turn's conclusion.
 function concludingText(msg: Message): boolean {
-  let after = 0;
-  for (const e of msg.events ?? []) {
-    if (e.kind === "tool_use" || e.kind === "tool_result" || e.kind === "subagent_start") {
-      after = Math.max(after, e.contentOffset ?? 0);
-    }
-  }
-  return !!msg.content.slice(after).trim();
+  return !!conclusionOf(msg);
 }
 
 function lastThinking(events: StreamEvent[]): StreamEvent | undefined {

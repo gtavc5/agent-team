@@ -18,6 +18,7 @@ import {
   type ExtensionUiSnapshot,
 } from "../../../shared/extension-ui";
 import type { QuotaState } from "../../../shared/quota";
+import type { DiscussionLabel, DiscussionRounds } from "../../../shared/room-targets";
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   MOCK_WORKSPACES,
@@ -280,6 +281,7 @@ export interface Message {
   // The delivery status already revealed by the workspace.
   pendingDelivery?: "starting" | "sending";
   replyTo?: string;
+  discussion?: DiscussionLabel;
   // Handed to the agent's running turn (Codex steer): no taking it back.
   steering?: boolean;
   // Sent by another session, not the user: the project's lead, one of its
@@ -1071,6 +1073,7 @@ export function useServer() {
                     ...(context !== undefined ? { context } : {}),
                     ...(effort ? { effort } : {}),
                     ...(thinking ? { thinking } : {}),
+                    ...(msg.discussion ? { discussion: msg.discussion as DiscussionLabel } : {}),
                   };
                 }),
               };
@@ -1624,9 +1627,18 @@ export function useServer() {
         images?: Array<{ name: string; url: string }>,
         quote?: { messageId: string; agentId: string | null; content: string },
         source?: "composer",
+        discussionRounds?: DiscussionRounds,
       ): Promise<SendOutcome> => {
         if (probeRef.current) await new Promise<void>((r) => probeWaitersRef.current.push(r));
-        const data = { type: "send_message", workspaceId: wsId, content, target, images, quote };
+        const data = {
+          type: "send_message",
+          workspaceId: wsId,
+          content,
+          target,
+          images,
+          quote,
+          discussionRounds,
+        };
         const outcome = !sendReceiptRef.current
           ? send(data, source === "composer")
             ? "unknown"

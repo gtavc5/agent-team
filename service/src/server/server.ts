@@ -49,6 +49,7 @@ import {
   toWireStreamEvent,
 } from "../workspace/summary";
 import { readTracePage } from "../../../shared/subagent-trace";
+import { discussionRounds, type DiscussionRounds } from "../../../shared/room-targets";
 import { ProjectManager, type ProjectHost } from "../project/manager";
 import { Auth } from "./auth";
 import { mergeLocalCommands } from "./commands";
@@ -807,6 +808,7 @@ export class Server {
               images,
               quote,
               sendReceipt,
+              discussionRounds(msg.discussionRounds),
             );
             sendReceipt();
           } catch (error) {
@@ -938,14 +940,17 @@ export class Server {
       case "cancel_queued": {
         const workspace = this.workspaces.get(msg.workspaceId as string);
         if (!workspace || !this.ensureLoaded(workspace)) return;
-        if (workspace.cancelQueued(msg.messageId as string)) {
+        const messageId = msg.messageId as string;
+        if (workspace.cancelQueued(messageId)) {
           this.persistWorkspaceNow(workspace.id);
-          this.broadcastUI({
-            type: "message_removed",
-            workspaceId: workspace.id,
-            messageId: msg.messageId,
-            queued: workspace.hasQueuedInput,
-          });
+          if (!workspace.findMessage(messageId)) {
+            this.broadcastUI({
+              type: "message_removed",
+              workspaceId: workspace.id,
+              messageId,
+              queued: workspace.hasQueuedInput,
+            });
+          }
           this.flushPendingLeadTools(workspace);
         }
         return;
@@ -1316,11 +1321,12 @@ export class Server {
     images?: Array<{ name: string; url: string; path: string }>,
     quote?: { messageId: string; agentId: string | null; content: string },
     onAccepted?: () => void,
+    rounds?: DiscussionRounds,
   ): Promise<void> {
     const workspace = this.workspaces.get(workspaceId);
     if (!workspace) throw new Error("Workspace not found");
     if (!this.unarchiveWorkspace(workspace)) throw new Error("Workspace could not be loaded");
-    await workspace.sendMessage(content, target, images, quote, onAccepted);
+    await workspace.sendMessage(content, target, images, quote, onAccepted, rounds);
     this.persistWorkspace(workspaceId);
   }
 
@@ -1501,9 +1507,7 @@ export class Server {
       for (const [agentId, entry] of workspace.agents) {
         if (entry.retryPending) {
           this.scheduleRetry(workspace.id, agentId, (entry.pausedUntil ?? 0) - Date.now());
-        } else if (
-          workspace.messages.some((m) => m.status === "queued" && m.queuedFor === agentId)
-        ) {
+        } else if (workspace.hasQueuedFor(agentId)) {
           setTimeout(() => workspace.dequeueNext(agentId), this.projects.takeStartSlot(1000));
         }
       }
